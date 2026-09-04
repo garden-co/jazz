@@ -55,6 +55,13 @@ struct Receipt {
     matching_write_us: u64,
     unrelated_write_us: u64,
     below_boundary_write_us: u64,
+    /// Storage-backed root materialization must not retain the ordinary
+    /// source-version witness stream for every bound route.
+    storage_backed_source_witness_free: bool,
+    /// Replacement witnesses deliberately remain resident: a deletion or
+    /// restore can promote a different current winner and its transaction
+    /// still has to be delivered correctly.
+    replacement_witnesses_retained: bool,
     exact_initial: bool,
     exact_matching_delta: bool,
     unrelated_quiet: bool,
@@ -107,22 +114,153 @@ struct RetainedReceipt {
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
-    let routes = env_usize("JAZZ_ROUTE_CURVE_ROUTES", 100);
+    // Keep the original receipt available for focused diagnosis, but make the
+    // normal benchmark entrypoint a Divan suite.  `cargo codspeed` only
+    // records annotated Divan functions; a custom `main` which prints one
+    // receipt is invisible to its wall-clock collector.
+    if std::env::var_os("JAZZ_ROUTE_CURVE_RECEIPT").is_some() {
+        let receipt = run(configured_routes());
+        println!(
+            "{}",
+            serde_json::to_string(&receipt).expect("serialize route curve receipt")
+        );
+        assert!(receipt.ok, "route curve correctness gate failed");
+        return;
+    }
+
+    // The complete receipt remains the semantic canary: it checks the exact
+    // initial windows, matching delta, unrelated/below-boundary quietness, and
+    // storage-backed witness-free retained state before timing the same setup.
     assert!(
-        (1..=MAX_ROUTES).contains(&routes),
-        "JAZZ_ROUTE_CURVE_ROUTES must be between 1 and {MAX_ROUTES}"
+        run(ROUTE_BENCH_BINDINGS).ok,
+        "route curve correctness gate failed"
     );
-    let receipt = run(routes);
-    println!(
-        "{}",
-        serde_json::to_string(&receipt).expect("serialize route curve receipt")
-    );
-    assert!(receipt.ok, "route curve correctness gate failed");
+    divan::main();
 }
 
 #[allow(dead_code)]
 pub(crate) fn correctness_smoke() {
-    assert!(run(1).ok, "route curve correctness gate failed");
+    let receipt = run(1);
+    assert!(
+        receipt.ok,
+        "route curve correctness gate failed: {}",
+        serde_json::to_string(&receipt).expect("serialize route curve failure")
+    );
+}
+
+const ROUTE_BENCH_BINDINGS: usize = 100;
+
+/// Time subscription attachment only. Fixture seeding and `Drop` are setup,
+/// not attachment work; `skip_ext_time` is essential because the CodSpeed
+/// Divan compatibility layer otherwise includes both in wall time.
+#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3, skip_ext_time)]
+fn attach_route_bindings(bencher: divan::Bencher<'_, '_>, routes: usize) {
+    bencher
+        .with_inputs(|| RouteFixture::seeded(routes))
+        .bench_local_values(|fixture| fixture.attach_all().runtime.active_subscriptions);
+}
+
+/// Time the fanout work for one matching write after the same fixed 100-route
+/// binding set has already hydrated. The fixture and streams are consumed so
+/// every sample starts from an identical pre-write state. Setup and teardown
+/// are explicitly outside CodSpeed's wall-time measurement.
+#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3, skip_ext_time)]
+fn matching_write_fanout(bencher: divan::Bencher<'_, '_>, routes: usize) {
+    bencher
+        .with_inputs(|| RouteFixture::seeded(routes).attach_all())
+        .bench_local_values(|attached| attached.matching_write());
+}
+
+struct RouteFixture {
+    db: BenchDb,
+    routes: usize,
+    query: Query,
+}
+
+struct AttachedRoutes {
+    fixture: RouteFixture,
+    streams: Vec<SubscriptionStream>,
+    runtime: RuntimeReceipt,
+    retained: RetainedReceipt,
+}
+
+impl RouteFixture {
+    fn seeded(routes: usize) -> Self {
+        assert!((1..=MAX_ROUTES).contains(&routes));
+        let db = open_db(routes as u64);
+        seed_fixture(&db);
+        Self {
+            db,
+            routes,
+            query: route_query(),
+        }
+    }
+
+    fn attach_all(self) -> AttachedRoutes {
+        let mut streams = Vec::with_capacity(self.routes);
+        let mut shape_id = None;
+        for team in 0..self.routes {
+            let prepared = self
+                .db
+                .prepare_query_bound(
+                    &self.query,
+                    BTreeMap::from([("team".to_owned(), Value::Uuid(team_row(team).0))]),
+                )
+                .expect("prepare route binding");
+            if let Some(expected_shape) = shape_id {
+                assert_eq!(prepared.shape().shape_id(), expected_shape);
+            } else {
+                shape_id = Some(prepared.shape().shape_id());
+            }
+            let mut stream =
+                block_on(self.db.subscribe(&prepared, local_opts())).expect("subscribe route");
+            assert_eq!(take_initial_reset(&mut stream), expected_initial_rows(team));
+            streams.push(stream);
+        }
+        let runtime = runtime_receipt(&self.db);
+        let retained = retained_receipt(&self.db);
+        assert_eq!(runtime.active_subscriptions, self.routes);
+        assert_eq!(retained.subscriptions, self.routes);
+        let (source_witness_free, replacement_witnesses_retained) =
+            storage_backed_witness_contract(&retained);
+        assert!(
+            source_witness_free,
+            "storage-backed routes retain source witnesses"
+        );
+        assert!(
+            replacement_witnesses_retained,
+            "storage-backed routes must retain replacement witnesses"
+        );
+        AttachedRoutes {
+            fixture: self,
+            streams,
+            runtime,
+            retained,
+        }
+    }
+}
+
+impl AttachedRoutes {
+    fn matching_write(mut self) -> Self {
+        let matching_row = document_row(0, HOT_TEAM_DOCUMENTS + 1);
+        insert_document(
+            &self.fixture.db,
+            matching_row,
+            0,
+            HOT_TEAM_DOCUMENTS as u64 + 1,
+        );
+        let matching_events = drain_events(&mut self.streams);
+        assert!(matching_events.first().is_some_and(|delta| {
+            delta.events == 1
+                && delta.added == BTreeSet::from([matching_row])
+                && delta.removed
+                    == BTreeSet::from([document_row(0, HOT_TEAM_DOCUMENTS - PAGE_SIZE)])
+                && delta.updated.is_empty()
+                && !delta.reset
+        }));
+        assert!(matching_events.iter().skip(1).all(Delta::is_quiet));
+        self
+    }
 }
 
 fn run(routes: usize) -> Receipt {
@@ -132,10 +270,7 @@ fn run(routes: usize) -> Receipt {
     let seed_us = micros(seed_started.elapsed());
     let rss_kib_after_seed = proc_status_kib("VmRSS:");
 
-    let query = Query::from(DOCUMENTS)
-        .filter(eq(col("team"), param("team")))
-        .order_by("updated_at", OrderDirection::Desc)
-        .limit(PAGE_SIZE);
+    let query = route_query();
     let mut streams = Vec::with_capacity(routes);
     let mut prepare_samples = Vec::with_capacity(routes);
     let mut subscribe_samples = Vec::with_capacity(routes);
@@ -196,11 +331,21 @@ fn run(routes: usize) -> Receipt {
     insert_document(&db, document_row(0, HOT_TEAM_DOCUMENTS + 2), 0, 0);
     let below_boundary_write_us = micros(below_boundary_started.elapsed());
     let below_boundary_quiet = drain_events(&mut streams).iter().all(Delta::is_quiet);
+    // Storage-backed current materialization removes the source-wide Version
+    // witnesses, not replacement witnesses. The latter were briefly removed
+    // too, which made delete/restore winner delivery fall back to an
+    // incomplete cache. Keep this receipt planted-sensitive to both halves of
+    // that contract: source versions must stay absent while replacement
+    // witnesses remain available for winner changes.
+    let (storage_backed_source_witness_free, replacement_witnesses_retained) =
+        storage_backed_witness_contract(&retained);
 
     let ok = exact_initial
         && exact_matching_delta
         && unrelated_quiet
         && below_boundary_quiet
+        && storage_backed_source_witness_free
+        && replacement_witnesses_retained
         && runtime.active_subscriptions == routes
         && retained.subscriptions == routes;
 
@@ -223,6 +368,8 @@ fn run(routes: usize) -> Receipt {
         matching_write_us,
         unrelated_write_us,
         below_boundary_write_us,
+        storage_backed_source_witness_free,
+        replacement_witnesses_retained,
         exact_initial,
         exact_matching_delta,
         unrelated_quiet,
@@ -407,6 +554,15 @@ fn runtime_receipt(db: &BenchDb) -> RuntimeReceipt {
     }
 }
 
+/// The simple-root storage-backed path omits source-version bodies but retains
+/// replacement candidates for delete/restore winner delivery.
+fn storage_backed_witness_contract(retained: &RetainedReceipt) -> (bool, bool) {
+    (
+        retained.version_identities == 0 && retained.versions_bytes == 0,
+        retained.replacement_entries > 0 && retained.replacements_bytes > 0,
+    )
+}
+
 fn retained_receipt(db: &BenchDb) -> RetainedReceipt {
     let receipts = db.maintained_subscription_size_receipts_for_test();
     RetainedReceipt {
@@ -494,6 +650,22 @@ fn env_usize(name: &str, default: usize) -> usize {
                 .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"))
         })
         .unwrap_or(default)
+}
+
+fn configured_routes() -> usize {
+    let routes = env_usize("JAZZ_ROUTE_CURVE_ROUTES", ROUTE_BENCH_BINDINGS);
+    assert!(
+        (1..=MAX_ROUTES).contains(&routes),
+        "JAZZ_ROUTE_CURVE_ROUTES must be between 1 and {MAX_ROUTES}"
+    );
+    routes
+}
+
+fn route_query() -> Query {
+    Query::from(DOCUMENTS)
+        .filter(eq(col("team"), param("team")))
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(PAGE_SIZE)
 }
 
 fn proc_status_kib(label: &str) -> Option<u64> {

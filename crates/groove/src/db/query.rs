@@ -1,6 +1,172 @@
 use super::*;
 
 impl Database {
+    /// Allocate an opaque mutable input source for graphs maintained by this
+    /// database. The identity is runtime-local and cannot be reused after the
+    /// database closes.
+    pub fn allocate_input_source(&mut self, descriptor: RecordDescriptor) -> InputSourceId {
+        self.ivm_runtime.allocate_input_source(descriptor)
+    }
+
+    /// Atomically replace multiple runtime-owned source record sets and drive
+    /// them through the same IVM graph used by ordinary table changes.
+    pub async fn replace_input_sources(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self
+            .ivm_runtime
+            .replace_input_sources(replacements, &storage)
+            .await
+        {
+            Ok(metrics) => metrics,
+            // These are all preflight failures: record decoding, runtime
+            // ownership, and descriptor compatibility are checked before the
+            // first source refcount changes. They are ordinary recoverable
+            // caller errors, so a following valid replacement may proceed.
+            Err(
+                error @ (IvmRuntimeError::RecordEncoding(_)
+                | IvmRuntimeError::ForeignInputSource
+                | IvmRuntimeError::InputSourceRetired
+                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
+            ) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            // A tick can have touched graph/operator state after inputs were
+            // installed. Database commits use the same fail-closed rule: do
+            // not expose a possibly half-evaluated runtime to later calls.
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
+    /// Atomically apply set-like record additions and removals to
+    /// runtime-owned inputs, then drive one ordinary IVM tick.
+    pub async fn apply_input_source_deltas(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self
+            .ivm_runtime
+            .apply_input_source_deltas(deltas, &storage)
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(
+                error @ (IvmRuntimeError::RecordEncoding(_)
+                | IvmRuntimeError::ForeignInputSource
+                | IvmRuntimeError::InputSourceRetired
+                | IvmRuntimeError::BindingSourceDescriptorMismatch(_)),
+            ) => return Err(Error::IvmRuntime(error)),
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
+    /// Retract and permanently retire runtime-local input identities. A
+    /// retired source stays empty in already-compiled graphs and cannot be
+    /// replaced again.
+    pub async fn retire_input_sources(
+        &mut self,
+        ids: impl IntoIterator<Item = InputSourceId>,
+    ) -> Result<TickMetrics, Error> {
+        self.ensure_not_poisoned()?;
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
+        let metrics = match self.ivm_runtime.retire_input_sources(ids, &storage).await {
+            Ok(metrics) => metrics,
+            Err(
+                error @ (IvmRuntimeError::ForeignInputSource | IvmRuntimeError::InputSourceRetired),
+            ) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        self.last_tick_metrics = Some(metrics.clone());
+        if let Err(error) = self.drive_resident_progress_now() {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(metrics)
+    }
+
+    /// Drain continuation turns which the IVM itself has explicitly scheduled
+    /// for already-resident work. Stop as soon as a storage/chunk request is
+    /// genuinely pending: this direct API has no durable owner waker to retain
+    /// for external readiness, and callers may install one with
+    /// [`Self::drive_ready_progress_with_waker`] or [`Self::poll_subscription`].
+    pub(super) fn drive_resident_progress_now(&mut self) -> Result<(), Error> {
+        loop {
+            // Never use a new direct call as an excuse to poll a cold
+            // evaluation again. Scan the runtime's per-evaluation signals so
+            // an older cold hydration cannot hide later resident work.
+            if !self.ivm_runtime.has_resident_continuation() {
+                return Ok(());
+            }
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match self.poll_resident_progress(&mut cx) {
+                std::task::Poll::Ready(result) => return result,
+                // The runtime records an explicit resident continuation when
+                // a bounded CPU slice yields. Storage may self-wake before it
+                // is ready, so it remains pending even if it woke this no-op
+                // waker.
+                std::task::Poll::Pending if self.ivm_runtime.has_resident_continuation() => {}
+                std::task::Poll::Pending => return Ok(()),
+            }
+        }
+    }
+
+    /// A direct Database API call owns CPU-only continuations that it starts.
+    /// It must publish their terminal output before returning, but it must not
+    /// turn a cold storage request into a blocking call without a runtime
+    /// owner to resume it later.
+    pub(super) fn drain_self_scheduled_resident_progress(&mut self) -> Result<(), Error> {
+        self.drive_resident_progress_now()
+    }
+
     /// Whether a suspended IVM evaluation still needs a future owner turn.
     ///
     /// An external chunk completion can wake an evaluation which then starts a
@@ -26,6 +192,29 @@ impl Database {
             return std::task::Poll::Ready(Err(error));
         }
         let progress = self.ivm_runtime.poll_pending_incremental(cx);
+        self.refresh_resident_writes();
+        match progress {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Ready(Err(error)) => {
+                self.poisoned = true;
+                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    /// Poll only explicitly runnable CPU continuations. This is the direct
+    /// API counterpart to [`Self::poll_progress`]: it must never repoll a
+    /// storage-pending evaluation merely because another direct operation
+    /// started later.
+    fn poll_resident_progress(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if let Err(error) = self.ensure_not_poisoned() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let progress = self.ivm_runtime.poll_resident_incremental(cx);
         self.refresh_resident_writes();
         match progress {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
@@ -255,10 +444,16 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .subscribe_one_sink(graph, &storage)
+        let subscription = self
+            .ivm_runtime
+            .subscribe_one_sink_with_waker(graph, &storage, None)
             .await
-            .map_err(Error::IvmRuntime)
+            .map_err(Error::IvmRuntime)?;
+        // A direct async opening owns the immediately-resident continuation
+        // chain, but it must not await a cold read with no durable owner to
+        // resume it. Drain only self-scheduled cooperative slices here.
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
     }
 
     /// Subscribe to several named IVM graph outputs as one logical stream.
@@ -266,6 +461,24 @@ impl Database {
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
     pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
+        let subscription = self.subscribe_with_waker(sinks, None)?;
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
+    }
+
+    /// Internal owner-loop subscription entrypoint.  A bounded opening poll
+    /// may encounter cold storage; `progress_waker` remains its continuation
+    /// instead of the transient opening task's waker.
+    #[doc(hidden)]
+    pub fn subscribe_with_waker<I, K>(
+        &mut self,
+        sinks: I,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
@@ -280,7 +493,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .subscribe(sinks, &storage)
+            .subscribe_with_waker(sinks, &storage, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 
@@ -463,9 +676,18 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
-            .map_err(Error::IvmRuntime)
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_output_and_waker(
+                prepared.id,
+                &values,
+                prepared.output,
+                &storage,
+                None,
+            )
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
     }
 
     /// Prepare a one-sink parameterized graph shape directly.
@@ -609,9 +831,12 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink(shape, binding_values, &storage)
-            .map_err(Error::IvmRuntime)
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None)
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
     }
 
     /// Bind a prepared one-sink graph shape while projecting subscriber-visible
@@ -636,9 +861,18 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
-            .map_err(Error::IvmRuntime)
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_output_and_waker(
+                shape,
+                binding_values,
+                public_output,
+                &storage,
+                None,
+            )
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
     }
 
     /// Bind a routed multisink shape by positional values.
@@ -646,6 +880,21 @@ impl Database {
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
+    ) -> Result<MultisinkSubscription, Error> {
+        let subscription = self
+            .bind_shape_with_waker(shape, binding_values, None)
+            .await?;
+        self.drive_resident_progress_now()?;
+        Ok(subscription)
+    }
+
+    /// Internal owner-loop binding entrypoint; see [`Self::subscribe_with_waker`].
+    #[doc(hidden)]
+    pub async fn bind_shape_with_waker(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
@@ -657,7 +906,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .bind_shape(shape, binding_values, &storage)
+            .bind_shape_with_waker(shape, binding_values, &storage, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 

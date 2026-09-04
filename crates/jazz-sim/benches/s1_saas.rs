@@ -530,11 +530,16 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
         unreachable!();
     };
+    // This direct edge probe uses the unadmitted SYSTEM peer, whose immutable
+    // request snapshot is the empty claim object.
+    let policy_claims = BTreeMap::new();
     let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
         &mut edge.node,
         tx,
         versions,
         u64::MAX,
+        u64::MAX,
+        policy_claims,
     ))
     .unwrap();
     let updates = settle_outcome(&mut edge.node, outcome).unwrap();
@@ -1296,6 +1301,7 @@ fn register_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     );
     let delivered = ctx.recv("core");
@@ -1328,6 +1334,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
@@ -1635,12 +1642,15 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        result_member_adds, ..
+        program_fact_adds, ..
     }) = update
     {
-        for entry in result_member_adds {
-            if let Some((table, row_uuid, _)) = entry.as_row() {
-                rows.insert((table.to_string(), row_uuid));
+        // The receiver evaluates its result from covered inputs; authorities
+        // no longer send a redundant result-member list. Count the disclosed
+        // input closure, including relation support, when checking its cache.
+        for entry in program_fact_adds {
+            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = entry {
+                rows.insert((input.version_table.to_string(), input.source_row));
             }
         }
     }
@@ -1649,12 +1659,19 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            result_member_adds, ..
-        }) => result_member_adds
+            program_fact_adds, ..
+        }) => program_fact_adds
             .iter()
-            .filter_map(|entry| entry.as_row())
-            .filter(|entry| entry.0.as_str() == table)
-            .count(),
+            .filter_map(|entry| match entry {
+                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                    if input.version_table.as_str() == table =>
+                {
+                    Some(input.source_row)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
         _ => 0,
     }
 }

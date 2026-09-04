@@ -31,7 +31,7 @@ test("accepts pnpm's forwarded argument separator", () => {
   );
 });
 
-test("runs the artifact preflight before Vitest and stops on a red preflight", () => {
+test("routes the focused browser receipt through the common consumer preflight", () => {
   const calls = [];
   const spawn = (command, args) => {
     calls.push({ command, args });
@@ -39,20 +39,36 @@ test("runs the artifact preflight before Vitest and stops on a red preflight", (
   };
   assert.equal(run(["tests/browser/alpha-public-flow-gate.test.ts"], spawn), 17);
   assert.deepEqual(calls, [
-    { command: "node", args: ["../../dev/artifacts/verify-correctness-test-artifacts.mjs"] },
+    {
+      command: "node",
+      args: [
+        "../../dev/gates/run-correctness-consumer.mjs",
+        "--",
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.config.browser.ts",
+        resolve("tests/browser/alpha-public-flow-gate.test.ts"),
+      ],
+    },
   ]);
 });
 
-test("runs Vitest only after the artifact preflight succeeds", () => {
+test("does not retain a direct Vitest bypass after admission", () => {
   const calls = [];
   const spawn = (command, args) => {
     calls.push({ command, args });
     return { status: 0 };
   };
   assert.equal(run(["tests/browser/alpha-public-flow-gate.test.ts"], spawn), 0);
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "node");
-  assert.equal(calls[1].command, "pnpm");
-  assert.deepEqual(calls[1].args.slice(0, 5), [
+  assert.deepEqual(calls[0].args.slice(0, 8), [
+    "../../dev/gates/run-correctness-consumer.mjs",
+    "--",
+    "pnpm",
     "exec",
     "vitest",
     "run",

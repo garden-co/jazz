@@ -3,7 +3,7 @@ import type { WasmSchema } from "../../drivers/types.js";
 import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
 import type { Session } from "../context.js";
 import type { DbConfig } from "../db.js";
-import type { RuntimeSource } from "../runtime-source.js";
+import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
@@ -49,6 +49,13 @@ export interface DbForConnection {
   markUnauthenticated(reason: AuthFailureReason): void;
   clearAuthError(): void;
   onMutationError(event: MutationErrorEvent): void;
+  /** Enables Inspector-local reads after the worker's authenticated receipt. */
+  enableAuthenticatedInspectorLocalReads(physicalDbName: string): void;
+  /**
+   * Revokes an Inspector attachment receipt when its worker connection is no
+   * longer current. A new generation must authenticate itself again.
+   */
+  clearAuthenticatedInspectorLocalReads(): void;
 }
 
 /**
@@ -61,6 +68,9 @@ export abstract class ConnectionManager {
   private client: JazzClient | null = null;
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
+
+  /** Browser managers set this during their asynchronous bootstrap. */
+  protected foregroundNodeLease: ForegroundNodeLease | undefined;
 
   protected constructor(protected readonly host: DbForConnection) {}
 
@@ -94,6 +104,7 @@ export abstract class ConnectionManager {
       config: runtimeConfig,
       schema: runtimeSchema,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      foregroundNodeLease: this.foregroundNodeLease,
     });
     client.onMutationError((event) => this.host.onMutationError(event));
 
@@ -128,6 +139,22 @@ export abstract class ConnectionManager {
 
   /** True only after the application explicitly called Db.disconnect(). */
   abstract isExplicitlyOffline(): boolean;
+  private readonly explicitOfflineListeners = new Set<(offline: boolean) => void>();
+
+  /** Observe confirmed host transitions, never inferred transport failures. */
+  onExplicitOfflineChange(listener: (offline: boolean) => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.explicitOfflineListeners.add(listener);
+    signal.addEventListener("abort", () => this.explicitOfflineListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  protected publishExplicitOfflineState(): void {
+    const offline = this.isExplicitlyOffline();
+    for (const listener of [...this.explicitOfflineListeners]) listener(offline);
+  }
+
   /** Resolves when that explicit offline state is cleared. */
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 

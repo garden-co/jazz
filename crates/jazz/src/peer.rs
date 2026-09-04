@@ -10,9 +10,11 @@ mod delivery;
 use delivery::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
+use groove::records::Value;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
@@ -28,9 +30,10 @@ use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    KnownStateDeclaration, ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
-    RowVersionRef, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, expand_version_carriers,
+    AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -54,8 +57,15 @@ pub use subscription_state::{PeerEvictionPins, PeerRole};
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
 pub struct PeerState {
+    /// Stable process-local identity used to release served-shape ownership.
+    /// It is intentionally not a wire identity: reconnecting a peer state
+    /// retains its publications, while a new peer state cannot release them.
+    publication_owner: u64,
     role: PeerRole,
     permission_identity: Option<AuthorSubject>,
+    /// Server/host-issued link capability.  This deliberately is not derived
+    /// from `PeerRole`, a wire hello, or a semantic sync message.
+    transport_capability: RelayTransportCapability,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical
@@ -80,8 +90,16 @@ pub struct PeerState {
 impl Default for PeerState {
     fn default() -> Self {
         Self {
-            role: PeerRole::Relay,
+            publication_owner: NEXT_PUBLICATION_OWNER.fetch_add(1, Ordering::Relaxed),
+            // The default is a standalone, SYSTEM-scoped peer helper. A real
+            // relay can multiplex admitted sessions and must opt into the
+            // explicit `PeerState::relay()` role, where every served
+            // subscription is required to carry its immutable policy binding.
+            role: PeerRole::ClientLink {
+                identity: AuthorSubject::SYSTEM,
+            },
             permission_identity: None,
+            transport_capability: RelayTransportCapability::OrdinarySession,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),
@@ -95,6 +113,24 @@ impl Default for PeerState {
         }
     }
 }
+
+/// Closed admission capability for a peer transport.
+///
+/// A generic relay may multiplex independently admitted bindings. A
+/// scope-isolated client relay has exactly one server-authenticated binding,
+/// so raw claims and arbitrary delegated request bindings are never accepted.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RelayTransportCapability {
+    OrdinarySession,
+    #[allow(dead_code)] // constructed only by the private serving admission path
+    ScopeIsolatedClientRelay {
+        binding: DelegatedSessionBinding,
+        admission_epoch: u64,
+    },
+    MultiplexedRelay,
+}
+
+static NEXT_PUBLICATION_OWNER: AtomicU64 = AtomicU64::new(1);
 
 include!("peer/publication.rs");
 include!("peer/known_state.rs");
@@ -181,21 +217,6 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
             total_heap_bytes: footprint.total_heap_bytes,
         }
     }
-}
-
-fn flat_tuple_source_tables(shape: &ValidatedQuery) -> Vec<String> {
-    shape
-        .query()
-        .flat_join
-        .as_ref()
-        .map(|flat_join| {
-            flat_join
-                .sources
-                .iter()
-                .map(|source| source.table.clone())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

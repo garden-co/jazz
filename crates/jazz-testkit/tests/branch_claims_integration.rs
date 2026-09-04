@@ -585,6 +585,13 @@ async fn subscription_matches_claims_select_query() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+/// Keeps alice's authorized subscription and receipt-derived view isolated
+/// from mallory's second JWT for the same authenticated author.
+///
+/// ```text
+/// writer ──insert──► server ──authorized view──► alice
+///                              └──denied view────► mallory
+/// ```
 async fn same_identity_sessions_keep_claims_isolated() {
     tokio::task::LocalSet::new()
         .run_until(async {

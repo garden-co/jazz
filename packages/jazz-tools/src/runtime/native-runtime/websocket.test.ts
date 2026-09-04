@@ -1,9 +1,11 @@
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_PAYLOAD_ZSTD,
   FEATURE_SYNC_MESSAGE_PAYLOAD,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
@@ -49,6 +51,55 @@ describe("websocket frame carrier", () => {
     expect(new PostcardReader(suffixed).readVec((reader) => reader.bytes())).toHaveLength(2);
     expect(() => decodeWebSocketFrameBatch(suffixed)).toThrow(
       "websocket frame batch has trailing postcard bytes",
+    );
+  });
+
+  it("bounds and canonicalizes inbound websocket batches before retaining frames", () => {
+    expect(() => encodeWebSocketFrameBatch([])).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() =>
+      encodeWebSocketFrameBatch(Array.from({ length: 4097 }, () => new Uint8Array())),
+    ).toThrow("websocket frame batch exceeds frame-count limit of 4096");
+
+    // The count is intentionally not followed by any elements: this proves
+    // the carrier rejects it before an attacker-declared frame array is made.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0x20))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0, 1, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 2, 0x42))).toThrow(
+      "postcard bytes overflow",
+    );
+
+    // 2 MiB + 1, encoded in postcard's canonical varint form.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0x80, 0x80, 1))).toThrow(
+      "websocket frame exceeds maximum length of 2097152 bytes",
+    );
+
+    const largestSingleton = new Uint8Array(2 * 1024 * 1024 - 4);
+    const exactCarrier = encodeWebSocketFrameBatch([largestSingleton]);
+    expect(exactCarrier.byteLength).toBe(2 * 1024 * 1024);
+    const decoded = decodeWebSocketFrameBatch(exactCarrier);
+    expect(decoded).toHaveLength(1);
+    // Compare every byte without asking the general deep-equality matcher to
+    // walk two million indexed properties under a busy full-suite worker pool.
+    expect(Buffer.from(decoded[0]!).equals(Buffer.from(largestSingleton))).toBe(true);
+
+    const rawLimit = new Uint8Array(2 * 1024 * 1024);
+    expect(() => encodeWebSocketFrameBatch([rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
+    );
+    expect(() => encodeWebSocketFrameBatch([Uint8Array.of(0x11), rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
     );
   });
 
@@ -190,6 +241,35 @@ describe("websocket frame carrier", () => {
     expect(actual).toBe('["https://issuer.example","provider-subject"]');
   });
 
+  it("uses SYSTEM as the wire identity for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client" }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
+  });
+
+  it("ignores an incidental bearer token for a credential-only backend open", () => {
+    const fallback = new TextEncoder().encode('["https://jazz.test","backend-cache"]');
+    const jwt = `header.${btoa(
+      JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }),
+    )}.signature`;
+
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ backend_secret: "not inspected by the client", jwt_token: jwt }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["urn:jazz:system","system"]');
+  });
+
   it("matches the server's backend-session precedence over a simultaneous bearer token", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const jwt = `header.${btoa(
@@ -281,6 +361,18 @@ describe("websocket frame carrier", () => {
     const suffixed = Uint8Array.from([...hello, 0]);
     expect(new PostcardReader(suffixed).u64()).toBe(0);
     expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
+  });
+
+  it("rejects a server codec that this native artifact did not advertise", async () => {
+    const localFeatures = CLIENT_WIRE_FEATURES & ~FEATURE_PAYLOAD_ZSTD;
+    const { carrier, socket } = carrierForTest({ features: localFeatures });
+    socket.emitMessage(
+      encodeWebSocketFrameBatch([
+        encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: CLIENT_WIRE_FEATURES }),
+      ]),
+    );
+    await expect(carrier.ready()).rejects.toThrow("server accepted unsupported wire features 0x10");
+    expect(socket.closed).toBe(true);
   });
 
   it("decodes exact Rust-produced Hello frames and rejects only true suffixes", async () => {
@@ -538,7 +630,7 @@ describe("websocket frame carrier", () => {
     expect(socket!.closed).toBe(true);
   });
 
-  it("rejects non-authentication errors before server hello", async () => {
+  it("surfaces terminal structured errors before server hello", async () => {
     let socket: MessageWebSocket | undefined;
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
@@ -559,8 +651,43 @@ describe("websocket frame carrier", () => {
       encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
     );
 
-    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
-    expect(errors).toEqual([]);
+    await expect(carrier.ready()).rejects.toThrow(
+      "websocket internal before server hello: conflicting commit unit",
+    );
+    expect(errors).toEqual([
+      { code: "internal", retry: "later", message: "conflicting commit unit" },
+    ]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("preserves a typed retryable not-ready error before server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+    );
+
+    await expect(carrier.ready()).rejects.toMatchObject({
+      name: "PreHelloWireError",
+      wireError: { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    });
+    expect(errors).toEqual([
+      { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    ]);
     expect(socket!.closed).toBe(true);
   });
 
@@ -582,6 +709,14 @@ describe("websocket frame carrier", () => {
     const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
     expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+
+    const unknownCode = encodeWireError(7, 3, "future code");
+    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+
+    const unknownRetry = encodeWireError(6, 4, "future retry");
+    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -750,11 +885,15 @@ function encodeServerHello(
   return writer.finish();
 }
 
-function carrierForTest(): { carrier: WebSocketCarrier; socket: MessageWebSocket } {
+function carrierForTest(options: { features?: number } = {}): {
+  carrier: WebSocketCarrier;
+  socket: MessageWebSocket;
+} {
   let socket: MessageWebSocket | undefined;
   const carrier = new WebSocketCarrier({
     endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
     peerIdentity: new Uint8Array(16),
+    features: options.features,
     onFrame: () => {},
     WebSocket: class extends MessageWebSocket {
       constructor(url: string) {

@@ -343,6 +343,47 @@ may materialize inherited values needed by a merge strategy, but the first head
 version has no cross-branch-key causal parent. Source derivation may be retained
 only as typed non-causal provenance.
 
+Every non-root mergeable branch version carries one canonical **branch write
+intent v1**, keyed by its stable physical table identity, authored schema,
+`RowUuid`, and exact head key. The intent is sorted and unique by that exact
+version coordinate. It distinguishes a parentless exact-head insert, an
+exact-head update, and a branch-view copy. Missing, duplicate, malformed, or
+mismatched intent rejects the transaction; a sender cannot relabel a view copy
+as an insert by omitting optional provenance. The authority validates branch
+keys against the authored physical table before storage, so hostile unknown,
+missing, wrongly typed, or reordered components are malformed input rather
+than codec failures.
+
+An exact-head insert describes the author's independent creation, not an
+authority-side absence precondition. Two offline writers may insert the same
+`RowUuid` into the same exact branch; both admissible writes contribute to the
+ordinary merge result, just as they do outside a branch. Arrival order does not
+turn the second insert into an automatic conflict or a compare-and-set failure.
+This does not bypass permissions: when the authority knows existing content at
+that head, the ordinary read-for-write and update policy checks still apply.
+The insert intent must remain parentless and bound to its exact physical
+coordinate. Branch-view copy evidence retains its separate source validation
+requirements below.
+
+For a mergeable update or existing-target upsert that creates that first head
+overlay, its branch-write intent carries **branch-view copy evidence v1**. It names the
+projected target head key, either a live current base key or a frozen
+`SnapshotRef` base, table, `RowUuid`, and the exact selected source content
+`TxId`. It is an authority-verifiable operation descriptor: at admission the
+authority resolves the stated base, requires that exact source to still be its
+selected non-deleted winner, requires no physical content or deletion winner at
+the stated head row, and evaluates the ordinary source-row read policy for the
+write's permission subject. A malformed, detached, stale, or policy-denied
+descriptor rejects the whole transaction without disclosing the source or its
+policy-support rows.
+
+This descriptor is neither a version parent nor a transaction read set, CAS
+condition, history edge, or contribution-merge dependency. It therefore does
+not park on source history, create cross-branch causality, or make the source
+currentness a serializability condition beyond the authority's one-time
+admission check. Root/head-local mutations and exclusive transactions continue
+to use their ordinary existing validation paths.
+
 For example, when `R` is inherited from `Main` and an update is requested in
 `Draft` over `Main`, the new version is addressed by `(T, DraftKey, R)` with
 no `Main` parent. A subsequent `Draft` read projects `Draft` branch-column

@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -65,10 +65,51 @@ newtypes (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
-transaction is identified and tie-broken by both values (`INV-DATA-5`). The
-An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
+transaction is identified and tie-broken by both values (`INV-DATA-5`). Node
+identity is neither an app, account, author, database-name, nor worker-name
+derivation. Two independent durable replicas may share all of those logical
+values but must still use distinct durable-owner nodes, because equal HLC times
+would otherwise name the same transaction. A durable replica loads its node
+before minting and retains it across reopen so recovery and at-least-once
+delivery can recognize its own transactions.
+
+A foreground runtime is a separate live transaction issuer, even when it is
+paired with a durable relay. Its host gives it an exclusive foreground-node
+lease before its first write. The lease starts with either a new CSPRNG node and
+zero high-water or a node returned by a prior _clean_ handoff together with the
+exact HLC high-water reported by that runtime's native core. The runtime must
+seed its HLC at or above that high-water, and the high-water includes every
+minted transaction, including one later rolled back or never submitted. On
+clean shutdown the host first closes mutation admission and drains any
+already-started synchronous, asynchronous, and streaming write work; only then
+may it capture the native/Wasm high-water. It atomically persists
+`max(previous durable floor, captured high-water)` while the lease is still
+active before making the node reusable. A failed readout, failed persistence,
+crash, forced shutdown, or lost peer is an uncertain termination: the node is
+retired permanently. High-waters are canonical packed-HLC `u64`s; hosts reject
+out-of-range receipts rather than allowing a persisted value to poison a later
+native open. There is no lease expiry, central transaction minting, fencing
+generation, or range allocation in this model. The
+`AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
 in-memory intern is never durable or portable. The well-known
 `AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
+
+Hosts mediate this contract rather than making a relay mint transaction ids.
+The browser's durable SharedWorker owns the foreground-lease pool for its
+physical IndexedDB replica and gives each attached tab a separate lease over a
+dedicated port. A persistent Node foreground owner keeps its pool under the
+current working directory, namespaced by app, environment, and auth scope;
+exclusive state as a per-node O_EXCL active claim plus a separate durable
+per-node reusable high-water receipt. A claimant creates its active claim
+before reading a reusable receipt; it never deletes or reclaims an unknown
+active claim. A clean handoff fsyncs the replacement receipt, fsyncs its
+directory, removes only its own active claim, and fsyncs that directory again.
+Thus a crash before claim removal permanently quarantines that node; even a
+random allocation collision with a reusable receipt must inherit that receipt's
+floor. Explicit memory-mode runtimes deliberately
+create no filesystem lease state and receive a fresh in-memory node instead.
+Those are host adapters for the same lease contract, not alternate TxId
+formats or durability semantics.
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
@@ -133,8 +174,20 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
+Column-type encoding is recursive and tag-discriminated. In particular, a
+payload enum contributes its distinct type tag, declared case count and order,
+then each case's name, declared field count and order, and each field's name,
+recursive type, and nullability. Payload-field references, defaults, and merge
+metadata are not part of this inner type encoding. This exact byte layout is
+shared by the Rust and TypeScript structural hashers and is covered by their
+cross-runtime corpus. The corpus has a unique fixture hash for every portable
+column-type tag, top-level nullability, and representative recursively nested
+Array, Row, Enum, and payload-enum shapes; a change to any encoded schema
+component yields a different schema identity.
+
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
-merge strategy changes.
+merge strategy changes. `INV-DATA-8` — every portable column type, including
+payload-enum case and field structure, is part of structural schema identity.
 
 ### 2.5 Rows, versions, and layers
 
@@ -316,7 +369,11 @@ slots do not make their semantics interchangeable:
   serializability if encountered on a mergeable receipt. An authority MUST NOT
   interpret either those values or mergeable parents as compare-and-swap
   evidence. Optional `contribution_merge` is non-causal, field-grained
-  calculated-merge provenance, not a read dependency.
+  calculated-merge provenance, not a read dependency. It may also carry
+  versioned branch-view copy evidence: exact target/base coordinates, source
+  row, and source content version for a first inherited head overlay. That is
+  authority-checked operation provenance, never a parent, history dependency,
+  or serializability read.
 - An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,

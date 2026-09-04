@@ -886,6 +886,14 @@ impl From<ChunkStorageError> for ChunkError {
 pub trait ChunkProvider {
     fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>>;
 
+    /// Whether a request that deliberately yields once can be polled once
+    /// more within the same runtime turn without waiting for external I/O.
+    /// The conservative default keeps network- and host-driven providers
+    /// parked for their durable runtime owner.
+    fn permits_eager_read_retry(&self) -> bool {
+        false
+    }
+
     fn get_with_install_observer(
         &self,
         request: ChunkRequest,
@@ -1287,6 +1295,10 @@ impl OwnedChunkProvider {
         }
     }
 
+    pub(crate) fn permits_eager_read_retry(&self) -> bool {
+        self.provider.permits_eager_read_retry()
+    }
+
     /// Start an exclusive reclamation pass only when no request or verified
     /// lease can still depend on a descendant that has not been fetched yet.
     /// New requests wait until the guard is dropped.
@@ -1541,6 +1553,10 @@ impl TestChunkProvider {
 }
 
 impl ChunkProvider for TestChunkProvider {
+    fn permits_eager_read_retry(&self) -> bool {
+        true
+    }
+
     fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
         let chunks = Rc::clone(&self.chunks);
         let resident = Rc::clone(&self.resident);

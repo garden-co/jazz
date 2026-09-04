@@ -212,6 +212,54 @@ where
         .await
     }
 
+    /// Commit prepared local writes under a transaction identity reserved by
+    /// the host before asynchronous preparation began.
+    pub(crate) async fn commit_mergeable_many_in_schema_at(
+        &mut self,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+        reserved: TxId,
+    ) -> Result<PublishedTransaction, Error> {
+        if reserved.node != self.node_uuid {
+            return Err(Error::InvalidMergeableCommit(
+                "reserved transaction belongs to another node",
+            ));
+        }
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema_version) {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+            if commit.parents.iter().any(|parent| parent.time >= reserved.time) {
+                return Err(Error::InvalidMergeableCommit(
+                    "reserved transaction does not dominate its prepared parents",
+                ));
+            }
+        }
+        self.merge_tx_time(reserved.time);
+        self.commit_mergeable_many_at_with_schema_versions(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            reserved.time,
+        )
+        .await
+    }
+
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
         for commit in commits {
             if !commit.parents.is_empty() {
@@ -269,6 +317,75 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
+        // This is the lowest common local commit construction boundary: direct
+        // inserts, facade update/upsert, open transactions, and batched paths
+        // all pass here before durable/outbox publication. Fill only exact
+        // branch operations not already classified by a higher view-copy path.
+        let mut contribution_merge = contribution_merge.unwrap_or(ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: Vec::new(),
+            branch_write_intents: Vec::new(),
+        });
+        for (schema_version, commit) in &commits {
+            if commit.branch.values.is_empty() {
+                continue;
+            }
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(schema_version)
+                .ok_or(Error::InvalidStoredValue("write schema is missing"))?
+                .schema;
+            let table = self.table_in_schema(&commit.table, *schema_version)?;
+            // Project only through the target table. The schema-wide
+            // branch-view projection would incorrectly demand unrelated
+            // branch dimensions from another table in a heterogeneous schema.
+            let (head, _) = schema
+                .project_branch_selector(&table, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            schema
+                .validate_authored_branch_key(&table, &head)
+                .map_err(Error::InvalidBranchKey)?;
+            let table_id = self.physical_table_id_for_schema(*schema_version, &commit.table)?;
+            if contribution_merge.branch_write_intents.iter().any(|intent| {
+                intent.physical_table_id == table_id
+                    && intent.authored_schema == *schema_version
+                    && intent.row_uuid == commit.row_uuid
+                    && intent.head == head
+            }) {
+                continue;
+            }
+            contribution_merge.branch_write_intents.push(BranchWriteIntent {
+                version: 1,
+                physical_table_id: table_id,
+                authored_schema: *schema_version,
+                row_uuid: commit.row_uuid,
+                head,
+                operation: if commit.parents.is_empty() {
+                    BranchWriteOperation::ExactHeadInsert
+                } else {
+                    BranchWriteOperation::ExactHeadUpdate
+                },
+            });
+        }
+        contribution_merge.branch_write_intents.sort_by(|left, right| {
+            (left.physical_table_id, left.authored_schema, left.row_uuid, &left.head).cmp(&(
+                right.physical_table_id,
+                right.authored_schema,
+                right.row_uuid,
+                &right.head,
+            ))
+        });
+        let contribution_merge = if contribution_merge.substitutions.is_empty()
+            && contribution_merge.branch_view_copies.is_empty()
+            && contribution_merge.branch_write_intents.is_empty()
+        {
+            None
+        } else {
+            Some(contribution_merge)
+        };
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -666,29 +783,21 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let made_by = commit.made_by;
-        let permission_subject = commit.permission_subject;
-        let user_metadata_json = commit.user_metadata_json.clone();
         let published = self.commit_mergeable(commit).await?;
-        let tx_id = published.tx_id;
-        let tx = Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by,
-            permission_subject,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json,
-            contribution_merge: None,
-        };
-        let unit = self.resident_commit_unit(tx)?;
+        let unit = self.resident_commit_unit(published.tx_id).await?;
         Ok((published, unit))
     }
 
-    pub(super) fn resident_commit_unit(&mut self, tx: Transaction) -> Result<SyncMessage, Error> {
+    pub(super) async fn resident_commit_unit(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
+        // Use the transaction actually published by the common commit path.
+        // Reconstructing an envelope here loses generated branch-write intent
+        // and makes immediate transmission differ from durable replay.
+        let tx = self
+            .query_transaction(tx_id)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?
+            .tx
+            .clone();
         let versions = self
             .cached_tx_versions(tx.tx_id)
             .expect("newly published transaction retains its resident versions")
@@ -751,9 +860,9 @@ where
     /// from its stored versions.
     ///
     /// Used by the `Db` sync surface to upload a client's local writes upstream
-    /// on a connection. Unlike [`NodeState::commit_mergeable_unit`] this reads the
-    /// stored versions, so the shipped
-    /// unit matches what the author actually stored.
+    /// on a connection. Both this and [`NodeState::commit_mergeable_unit`] use
+    /// the published transaction envelope; this path also loads its versions
+    /// from storage rather than requiring the newly published resident cache.
     pub async fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
         let tx = self
             .query_transaction(tx_id)
@@ -1341,7 +1450,15 @@ where
             .unwrap_or_default();
         for (column, value) in &commit.cells {
             if value_contains_indirect_descriptor(value) {
-                if inherited.get(column) != Some(value) {
+                // A branch-view write can carry an unchanged descriptor from
+                // a locally read base snapshot while the target branch has no
+                // physical row yet. That exact cell is marked privately by
+                // `verified_inherited_large_cells`; public mutation input can
+                // never create this marker. Every other descriptor still has
+                // to equal the target branch's observed physical cell.
+                if inherited.get(column) != Some(value)
+                    && !commit.prepared_large_columns.contains(column)
+                {
                     return Err(Error::InvalidMergeableCommit(
                         "row update contains an unverified large-value descriptor",
                     ));

@@ -173,7 +173,13 @@ describe("React Todo App E2E", () => {
     await act(async () => checkbox.click());
 
     await waitFor(
-      () => el.querySelector("#todo-list li")!.classList.contains("done"),
+      () => {
+        // A subscription update may replace the list item between polling
+        // iterations. Keep waiting for the asserted state rather than turning
+        // that ordinary transient into a test-process TypeError.
+        const updatedTodo = el.querySelector("#todo-list li");
+        return updatedTodo?.classList.contains("done") ?? false;
+      },
       3000,
       "Todo should be marked done",
     );
@@ -282,6 +288,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("syncs a todo between two app instances through the server", async () => {
+    (globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__ = true;
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     // Mount two independent app instances connected to the same server

@@ -42,6 +42,141 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("marks external peer admission as requiring a distinct peer pass", () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const peerWork: Array<boolean | undefined> = [];
+    const unsubscribe = runtime.onPeerTransportWork((requiresDistinctPass) =>
+      peerWork.push(requiresDistinctPass),
+    );
+
+    runtime.notifyPeerTransportActivity();
+
+    expect(peerWork).toEqual([true]);
+    unsubscribe();
+  });
+
+  it.each([
+    [
+      "transport mentioning a nested rejection",
+      new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+    ],
+    ["not-observed", new Error("NotObserved: transaction is not resident")],
+    ["schema", new Error("Schema: invalid authored branch value")],
+    ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
+    ["unknown", new Error("unknown lifecycle failure")],
+  ])("preserves %s lifecycle errors from native write waits", async (_kind, nativeError) => {
+    const write = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw nativeError;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "lifecycle passthrough" } },
+      null,
+      "00000000-0000-0000-0000-000000000010",
+    );
+
+    await expect(runtime.waitForTransaction(await committedTxId(inserted), "local")).rejects.toBe(
+      nativeError,
+    );
+
+    const admissionRuntime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertEncoded: () => {
+              throw nativeError;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    let admissionError: unknown;
+    try {
+      admissionRuntime.insert(
+        "todos",
+        { title: { type: "Text", value: "admission passthrough" } },
+        null,
+        "00000000-0000-0000-0000-000000000012",
+      );
+    } catch (error) {
+      admissionError = error;
+    }
+    expect(admissionError).toBe(nativeError);
+  });
+
+  it("normalizes a terminal native WriteRejected error", async () => {
+    const write = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw new Error("WriteRejected: queued write was denied");
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "terminal rejection" } },
+      null,
+      "00000000-0000-0000-0000-000000000011",
+    );
+
+    await expect(
+      runtime.waitForTransaction(await committedTxId(inserted), "local"),
+    ).rejects.toMatchObject({
+      kind: "rejected",
+      transactionId: await committedTxId(inserted),
+      code: "write_rejected",
+      reason: "queued write was denied",
+    });
+  });
+
   it("connects the native upstream transport to the scoped websocket endpoint", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -104,6 +239,31 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.disconnect();
 
     expect(sockets[1]!.closed).toBe(true);
+  });
+
+  it("identifies a missing wire mask as a generic native-runtime artifact mismatch", () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+            wireFeatures: undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    expect(() => runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}")).toThrow(
+      "native runtime binding does not expose its wire feature mask; install the matching Jazz native runtime package",
+    );
   });
 
   it("uses the canonical credential author for websocket identity, not the raw runtime host", async () => {
@@ -188,6 +348,48 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).toBe(true);
     runtime.disconnect();
+  });
+
+  it("marks server carrier ingress as requiring a distinct peer pass", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const peerWork: Array<boolean | undefined> = [];
+    const unsubscribe = runtime.onPeerTransportWork((requiresDistinctPass) =>
+      peerWork.push(requiresDistinctPass),
+    );
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    await vi.waitFor(() => expect(transport.received).toHaveLength(1));
+
+    expect(peerWork).toContain(true);
+    unsubscribe();
+    await runtime.close();
   });
 
   it("does not emit the fake server hello before the client prelude and hello", async () => {
@@ -542,6 +744,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () => ({
           connectUpstream: () => transport,
+          wireFeatures: () => CLIENT_WIRE_FEATURES,
           setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
             schedulerCallback = callback;
           },
@@ -662,6 +865,56 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(await admission).toBe(transport);
     expect(accepted).toBe(1);
     await runtime.close();
+  });
+
+  // This is a binding scheduler test: a real storage future cannot reliably
+  // force the one-microtask gap between an idle check and synchronous admission.
+  it("does not yield between an idle check and peer admission when a tick is queued", async () => {
+    let schedule!: (urgency: "immediate" | "deferred") => void;
+    let releaseTick!: () => void;
+    let tickHoldingNode = false;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedule) => {
+              schedule = callback;
+            },
+            tick: () => {
+              tickHoldingNode = true;
+              return new Promise<void>((resolve) => {
+                releaseTick = () => {
+                  tickHoldingNode = false;
+                  resolve();
+                };
+              });
+            },
+            acceptSubscriber: () => {
+              if (tickHoldingNode) throw new Error("admission reentered a suspended tick");
+              return transport;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    schedule("immediate");
+    const admission = runtime.acceptPeerWhenIdle();
+    try {
+      await expect(admission).resolves.toBe(transport);
+      expect(tickHoldingNode).toBe(true);
+    } finally {
+      releaseTick();
+      await runtime.close();
+    }
   });
 
   it("yields to the host event loop when every core tick schedules more work", async () => {
@@ -1036,6 +1289,9 @@ function fakeDb<T extends object>(
   const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
+    // The production binding advertises its compiled capability mask. Keep
+    // this transport fixture honest about the same handshake boundary.
+    wireFeatures: () => CLIENT_WIRE_FEATURES,
     beginTransaction: (
       openTransactionId: string,
       kind: FakeOpenBatch["kind"],

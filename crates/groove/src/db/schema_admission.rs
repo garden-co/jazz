@@ -322,13 +322,19 @@ impl Database {
                 index: index.name,
             });
         }
-        if let Err(error) = self
+        match self
             .ivm_runtime
             .register_table_index(table, index, &self.storage)
             .await
         {
-            self.poisoned = true;
-            return Err(Error::IvmRuntime(error));
+            Ok(()) => {}
+            Err(error @ IvmRuntimeError::UniqueIndexViolation { .. }) => {
+                return Err(Error::IvmRuntime(error));
+            }
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
         }
         Ok(())
     }

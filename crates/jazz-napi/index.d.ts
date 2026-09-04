@@ -12,6 +12,18 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  /**
+   * Exact wire capabilities compiled into this native binding.
+   *
+   * The TypeScript WebSocket carrier uses this for its Hello instead of an
+   * independent feature list, so a package cannot advertise a codec this
+   * native artifact cannot decode.
+   */
+  wireFeatures(): number
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
@@ -88,21 +100,77 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read through an open transaction using the identity bound at begin. */
   allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through an open transaction as its identity bound at begin.
+   *
+   * The core verifies that `author` matches the capability retained by the
+   * transaction; this ABI exists so trusted-serving hosts never fall back
+   * to their ambient/default read identity.
+   */
+  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through an open transaction using the authority of an explicit
+   * backend open. This deliberately has no caller-controlled identity.
+   */
+  allInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Materialize a relation snapshot through an open transaction's snapshot
+   * and staged overlay rather than the owning database's ordinary view.
+   */
+  allRelationSnapshotInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshotInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Materialize a transaction relation snapshot using the authority of an
+   * explicit backend open, without accepting a public author argument.
+   */
+  allRelationSnapshotInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through the authority identity owned by an explicit backend open.
+   *
+   * This deliberately accepts no caller-supplied author. Public NAPI
+   * identity ingress must continue rejecting `SYSTEM`; only
+   * `open*AsBackend` mints this capability.
+   */
+  allForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Materialize a relation snapshot through the authority of an explicit
+   * backend open. The backend capability selects this context; callers do
+   * not provide a synthetic author.
+   */
+  allRelationSnapshotForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /** Execute relation IR through the authority of an explicit backend open. */
+  allRelationQueryForBackend(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
+  /**
+   * Attach remote coverage using the authority identity of an explicit
+   * backend open. This has no public author argument by design.
+   */
+  attachQueryForBackend(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  /**
+   * Subscribe through the authority of an explicit backend open. This
+   * context is selected by the private backend capability, never by a
+   * caller-supplied identity.
+   */
+  subscribeForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  /**
+   * Subscribe to relation IR through the authority of an explicit backend
+   * open, without exposing that authority as a public author parameter.
+   */
+  subscribeRelationQueryForBackend(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
@@ -114,12 +182,22 @@ export declare class NapiDb {
   appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
   spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
-  setRelayAuthoritySessionOwner(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned permission preflight which is waiting for an
+ * authenticated upstream authority.  Like pending reads, this remains on the
+ * owning JavaScript thread: NAPI's worker-pool promises require `Send`, while
+ * the request future deliberately owns thread-affine connection state.
+ */
+export declare class PendingNativePermissionAdvice {
+  poll(): string | null
+  cancel(): void
 }
 
 /**
@@ -274,13 +352,18 @@ export interface SubscriptionDeltaEvent {
 export type SubscriptionEvent =
   SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
 
+export interface SubscriptionInvalidAuthoritySourceClosureReason {
+  type: 'InvalidAuthoritySourceClosure'
+  transition: string
+}
+
 export interface SubscriptionRejectedEvent {
   type: 'rejected'
   reason: SubscriptionRejectionReason
 }
 
 export type SubscriptionRejectionReason =
-  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason
+  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason | SubscriptionInvalidAuthoritySourceClosureReason
 
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
@@ -361,7 +444,8 @@ export interface UpdateOptions {
 
 export interface UpsertOptions {
   author?: Uint8Array
-  branch?: JsonValue
+  head?: JsonValue
+  base?: JsonValue
   updatedAtMs?: number
 }
 

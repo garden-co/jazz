@@ -7,6 +7,7 @@
 //! build executable Groove graphs.
 
 use super::*;
+use crate::node::query_engine::{CoverageScope, InheritedContribution};
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -54,18 +55,29 @@ pub(super) fn current_query_output_request(
             ])
         }
         CurrentQueryProgramOutput::RelationSnapshot => BTreeSet::new(),
+        // A maintained aggregate receiver derives its synthetic groups from
+        // the exact source closure. Aggregate ResultPayload facts are derived
+        // output, not authority input, and retaining them would create a
+        // second result-snapshot path alongside the receiver-local graph.
+        CurrentQueryProgramOutput::MaintainedView if query.aggregate.is_some() => BTreeSet::from([
+            ProgramFactKey::VersionWitnesses,
+            ProgramFactKey::ReplacementWitnesses,
+            ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
+        ]),
         CurrentQueryProgramOutput::MaintainedView if !query.array_subqueries.is_empty() => {
             BTreeSet::from([
                 ProgramFactKey::ResultMembership,
                 ProgramFactKey::VersionWitnesses,
                 ProgramFactKey::ReplacementWitnesses,
                 ProgramFactKey::RelationEdges,
+                ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
             ])
         }
         CurrentQueryProgramOutput::MaintainedView => BTreeSet::from([
             ProgramFactKey::ResultMembership,
             ProgramFactKey::VersionWitnesses,
             ProgramFactKey::ReplacementWitnesses,
+            ProgramFactKey::ProgramSourceCoverage(CoverageScope::Program),
         ]),
     };
     RowSetOutputRequest {
@@ -87,6 +99,43 @@ pub(super) fn current_query_output_request(
         }),
         facts,
     }
+}
+
+/// Whether a maintained current-read can retain only its delivered result
+/// members and re-load their immutable content bodies from storage.
+///
+/// This is intentionally a proof for the small common case, not a heuristic:
+/// one default-view root table without a read-policy proof, relation/recursive
+/// output expansion, or aggregate. A policy-bearing root keeps its complete
+/// source witnesses: membership alone cannot preserve the policy's deletion
+/// and replacement liveness across a seeded maintained view.
+pub(super) fn storage_backed_maintained_view_eligible(
+    query: &JazzQuery,
+    tier: DurabilityTier,
+    read_view: &ReadViewSpec,
+    normalized: &NormalizedRowSetShape,
+) -> bool {
+    tier != DurabilityTier::None
+        && read_view.is_default()
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.policy_branches.is_empty()
+        // `JazzQuery::includes` captures only caller-requested includes.
+        // Normalization also injects the default root-reference closure for
+        // reference-bearing tables, and that auxiliary source needs its
+        // version/replacement witnesses on a separate receiving node.  The
+        // storage-backed subset is consequently a proof over the normalized
+        // program, not a surface-query shortcut.
+        && normalized.closure_paths.is_empty()
+        && normalized.auxiliary_sources.is_empty()
+        && normalized.join_contributions.is_empty()
+        && normalized.inherited_contributions.is_empty()
+        && normalized.reachable_contributions.is_empty()
 }
 
 fn app_row_payload_projection(
@@ -336,7 +385,10 @@ pub(super) fn select_current_access_path(
     let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
-            probes.push((column, vec![Value::Nullable(Some(Box::new(value)))]));
+            probes.push((
+                column.clone(),
+                vec![physical_current_index_value(table, &column, value)],
+            ));
         }
     }
     let (column, prefix) = probes.first()?.clone();
@@ -344,8 +396,38 @@ pub(super) fn select_current_access_path(
         column,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
+        maintained: false,
         source_limit: None,
     })
+}
+
+/// Current storage uses one nullable envelope to represent an un-authored
+/// cell. A logically nullable column has its own, inner envelope as well.
+/// Predicates use logical values, but secondary-index keys are physical
+/// current-row values, so preserve that declared nullable shape before adding
+/// the storage envelope.
+fn physical_current_index_value(table: &TableSchema, column: &str, value: Value) -> Value {
+    let logical_value = match table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+    {
+        Some(candidate) => coerce_literal_preserving_nullable(value, &candidate.column_type),
+        None => value,
+    };
+    Value::Nullable(Some(Box::new(logical_value)))
+}
+
+fn coerce_literal_preserving_nullable(value: Value, column_type: &ColumnType) -> Value {
+    match (value, column_type) {
+        (Value::Nullable(value), ColumnType::Nullable(inner)) => Value::Nullable(
+            value.map(|value| Box::new(coerce_literal_preserving_nullable(*value, inner))),
+        ),
+        (value, ColumnType::Nullable(inner)) => Value::Nullable(Some(Box::new(
+            coerce_literal_preserving_nullable(value, inner),
+        ))),
+        (value, column_type) => coerce_literal_for_column_type(value, column_type),
+    }
 }
 
 pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {
@@ -1115,11 +1197,22 @@ where
         .iter()
         .filter_map(|include| include.path.split('.').next())
         .collect::<BTreeSet<_>>();
-    for (reference_index, (column, target_table)) in root_schema.references.iter().enumerate() {
+    for (column, target_table) in &root_schema.references {
         if explicit_root_segments.contains(column.as_str()) {
             continue;
         }
-        let target = include_auxiliary_source_id(target_table.clone(), usize::MAX, reference_index);
+        // Source identities cross native/WASM peers. A usize::MAX sentinel
+        // names different sources on 64-bit hosts and 32-bit WASM. Give
+        // implicit references their own stable, column-named namespace.
+        let target = SourceId {
+            table: target_table.clone(),
+            path: SourcePath {
+                components: vec![
+                    SourceRole::Root,
+                    SourceRole::Alias(format!("reference:{column}")),
+                ],
+            },
+        };
         sources.insert(target.clone());
         paths.push(ClosurePath::ImplicitRootReference {
             id: format!("reference:{column}"),
@@ -1498,6 +1591,7 @@ fn normalize_reachable(
         ReachableContribution {
             id: reachable_id,
             access_source,
+            edge_source,
             access_input: access_join_node,
             root_ref_field: reachable.access_row_column.clone(),
         },
@@ -2253,6 +2347,7 @@ fn normalize_policy_atom_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     root_source: &SourceId,
@@ -2262,6 +2357,7 @@ fn normalize_policy_atom_chain(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     record_join_contributions: bool,
+    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = normalize_filter_join_chain(
@@ -2283,6 +2379,7 @@ fn normalize_policy_atom_chain(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2291,6 +2388,7 @@ fn normalize_policy_atom_chain(
             &format!("{prefix}:inherits:{index}"),
             binding_source_shape,
             param_types,
+            record_inherited_contributions,
             inheritance_path,
         )?;
     }
@@ -2318,6 +2416,7 @@ fn normalize_inherited_parent_policy(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     child_source: &SourceId,
@@ -2326,6 +2425,7 @@ fn normalize_inherited_parent_policy(
     prefix: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    record_inherited_contributions: bool,
     inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let child_table = table_schema(schema, &child_source.table)?;
@@ -2373,6 +2473,7 @@ fn normalize_inherited_parent_policy(
                 nodes,
                 auxiliary_sources,
                 join_contributions,
+                inherited_contributions,
                 reachable_contributions,
                 schema,
                 &parent_source,
@@ -2388,6 +2489,7 @@ fn normalize_inherited_parent_policy(
                 nodes,
                 auxiliary_sources,
                 join_contributions,
+                inherited_contributions,
                 reachable_contributions,
                 schema,
                 &parent_source,
@@ -2402,25 +2504,35 @@ fn normalize_inherited_parent_policy(
                 binding_source_shape,
                 param_types,
                 false,
+                false,
                 &parent_inheritance_path,
             )?
         };
     }
     let join_node = RowSetNodeId(format!("{prefix}:join"));
+    let membership = NormalizedPredicateExpr::Compare {
+        left: NormalizedValueRef::SourceField {
+            source: child_source.clone(),
+            field: inherits.parent_column.clone(),
+        },
+        op: NormalizedComparisonOp::Eq,
+        right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source.clone())),
+    };
+    if record_inherited_contributions {
+        inherited_contributions.push(InheritedContribution {
+            id: prefix.to_owned(),
+            source: parent_source.clone(),
+            input: parent_current.clone(),
+            membership: membership.clone(),
+        });
+    }
     nodes.insert(
         join_node.clone(),
         RowSetExpr::Join {
             left: child_current,
             right: parent_current,
             mode: NormalizedJoinMode::Semi,
-            on: NormalizedPredicateExpr::Compare {
-                left: NormalizedValueRef::SourceField {
-                    source: child_source.clone(),
-                    field: inherits.parent_column.clone(),
-                },
-                op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source)),
-            },
+            on: membership,
         },
     );
     Ok(join_node)
@@ -2431,6 +2543,7 @@ fn normalize_policy_branch_authorization(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
     reachable_contributions: &mut Vec<ReachableContribution>,
     schema: &RuntimeSchema,
     root_source: &SourceId,
@@ -2455,6 +2568,7 @@ fn normalize_policy_branch_authorization(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2468,6 +2582,7 @@ fn normalize_policy_branch_authorization(
             },
             binding_source_shape,
             param_types,
+            false,
             false,
             inheritance_path,
         )?;
@@ -2500,6 +2615,7 @@ fn normalize_policy_branch_authorization(
             nodes,
             auxiliary_sources,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             schema,
             root_source,
@@ -2513,6 +2629,7 @@ fn normalize_policy_branch_authorization(
             },
             binding_source_shape,
             param_types,
+            false,
             false,
             inheritance_path,
         )?;
@@ -2679,6 +2796,7 @@ where
         )]);
         let mut current = source_node;
         let mut join_contributions = Vec::new();
+        let mut inherited_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
         let inheritance_path = InheritanceExpansionPath::default();
 
@@ -2704,6 +2822,7 @@ where
                     &mut nodes,
                     &mut auxiliary_sources,
                     &mut join_contributions,
+                    &mut inherited_contributions,
                     &mut reachable_contributions,
                     schema,
                     &root_source,
@@ -2718,6 +2837,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    true,
                     &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
@@ -2749,6 +2869,7 @@ where
                     &mut nodes,
                     &mut auxiliary_sources,
                     &mut join_contributions,
+                    &mut inherited_contributions,
                     &mut reachable_contributions,
                     schema,
                     &root_source,
@@ -2762,6 +2883,7 @@ where
                     },
                     &binding_source_shape,
                     shape.params(),
+                    false,
                     false,
                     &inheritance_path,
                 )?;
@@ -2811,6 +2933,7 @@ where
                 &mut nodes,
                 &mut auxiliary_sources,
                 &mut join_contributions,
+                &mut inherited_contributions,
                 &mut reachable_contributions,
                 schema,
                 &root_source,
@@ -2824,6 +2947,7 @@ where
                 },
                 &binding_source_shape,
                 shape.params(),
+                true,
                 true,
                 &inheritance_path,
             )?;
@@ -2917,28 +3041,34 @@ where
                     ))
                 })?;
                 let join_node = RowSetNodeId(format!("flat_join:{index}:join"));
+                let membership = NormalizedPredicateExpr::Compare {
+                    left: value_ref(&join.on.left)?,
+                    op: NormalizedComparisonOp::Eq,
+                    right: if right_column == "_id" {
+                        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+                    } else {
+                        source_column_value(schema, &source, right_column, JoinTarget::Column)
+                    },
+                };
                 nodes.insert(
                     join_node.clone(),
                     RowSetExpr::Join {
                         left: current,
-                        right: right_input,
+                        right: right_input.clone(),
                         mode: NormalizedJoinMode::Inner,
-                        on: NormalizedPredicateExpr::Compare {
-                            left: value_ref(&join.on.left)?,
-                            op: NormalizedComparisonOp::Eq,
-                            right: if right_column == "_id" {
-                                NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
-                            } else {
-                                source_column_value(
-                                    schema,
-                                    &source,
-                                    right_column,
-                                    JoinTarget::Column,
-                                )
-                            },
-                        },
+                        on: membership.clone(),
                     },
                 );
+                // Flat tuple sources must cross as exact receiver inputs,
+                // not as fields of an authority-rendered tuple.  Reuse the
+                // contributor representation used by `join_via` so terminal
+                // lowering derives each source from the post-policy root.
+                join_contributions.push(JoinContribution {
+                    id: format!("flat_join:{index}"),
+                    source: source.clone(),
+                    input: right_input,
+                    membership,
+                });
                 current = join_node;
                 sources.insert(name.clone(), source.clone());
                 output_sources.push((name, source.clone()));
@@ -3098,6 +3228,7 @@ where
             auxiliary_sources,
             closure_paths,
             join_contributions,
+            inherited_contributions,
             reachable_contributions,
             nodes,
         };

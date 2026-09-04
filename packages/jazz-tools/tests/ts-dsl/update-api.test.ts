@@ -182,13 +182,17 @@ describe("TS Update API", () => {
     ).toThrow("update replacements and applyDiffs must not both specify the same column.");
   });
 
-  it("trying to update an already-deleted row fails", async () => {
+  it("reports an update rejection through the write handle", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);
 
-    expect(() => db.update(app.projects, project.id, { name: "Restored Project" })).toThrow(
-      `Update failed: WriteError("row already deleted: ${project.id}")`,
-    );
+    await expect(
+      db.update(app.projects, project.id, { name: "Restored Project" }).wait({ tier: "local" }),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "write_rejected",
+      reason: `row already deleted: ${project.id}`,
+    });
   });
 
   it("enforces constraints on JSON schemas", async () => {

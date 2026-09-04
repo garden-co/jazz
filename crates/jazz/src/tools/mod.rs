@@ -172,6 +172,12 @@ pub enum SubscriptionRejectReason {
         /// Stable, client-safe server failure classification.
         code: SubscriptionServerFailureCode,
     },
+    /// The local receiver rejected an impossible authority source-closure
+    /// transition before publishing it.
+    InvalidAuthoritySourceClosure {
+        /// Client-safe transition diagnosis with no row or policy data.
+        transition: String,
+    },
 }
 
 /// Client-safe server failure classifications for subscriptions.

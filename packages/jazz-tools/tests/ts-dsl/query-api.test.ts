@@ -64,6 +64,129 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     }
   }
 
+  it.skipIf(readMode === "direct")(
+    "includes observe staged roots, relation membership, and children",
+    async () => {
+      const project = insertProject(db, "Committed project");
+      const tx =
+        readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+      try {
+        const user = tx.insert(app.users, {
+          name: "Staged assignee",
+          friendsIds: [],
+        });
+        const todo = tx.insert(app.todos, {
+          title: "Staged todo",
+          done: false,
+          tags: [],
+          projectId: project.id,
+          assigneesIds: [user.id],
+        });
+        const read = await tx.one(
+          app.todos
+            .where({ id: { eq: todo.id } })
+            .include({ assignees: app.users.select("id", "name") }),
+        );
+        assert(read, "staged todo is not defined");
+        expect(read.assignees).toEqual([{ id: user.id, name: "Staged assignee" }]);
+      } finally {
+        tx.rollback();
+      }
+    },
+  );
+
+  it.skipIf(readMode !== "exclusive-tx")(
+    "relation reads participate in exclusive transaction conflict detection",
+    async () => {
+      const user = insertUser(db, "Original assignee");
+      const todo = insertTodo(db, { assigneesIds: [user.id] });
+      const tx = db.beginExclusiveTransaction();
+
+      const read = await tx.one(
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ assignees: app.users.select("id", "name") }),
+      );
+      assert(read, "todo is not defined");
+      expect(read.assignees).toEqual([{ id: user.id, name: "Original assignee" }]);
+
+      db.update(app.users, user.id, { name: "Concurrent assignee" });
+      tx.update(app.todos, todo.id, { title: "Staged title" });
+
+      await expect(tx.commit().wait()).rejects.toThrow("transaction_conflict");
+    },
+  );
+
+  it.skipIf(readMode === "direct")(
+    "relation reads include staged deletions and staged restores",
+    async () => {
+      const user = insertUser(db, "Assignee");
+      const todo = insertTodo(db, { assigneesIds: [user.id] });
+      const begin = () =>
+        readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+
+      const deleting = begin();
+      try {
+        deleting.delete(app.todos, todo.id);
+        const deleted = await deleting.one(
+          app.todos
+            .includeDeleted()
+            .where({ id: { eq: todo.id } })
+            .include({ assignees: app.users.select("id", "name") }),
+        );
+        assert(deleted, "staged deleted todo is not defined");
+        expect(deleted.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+      } finally {
+        deleting.rollback();
+      }
+
+      db.delete(app.todos, todo.id);
+      const restoring = begin();
+      try {
+        restoring.restore(app.todos, todo.id, {
+          title: "Restored todo",
+          done: false,
+          tags: [],
+          projectId: todo.projectId,
+          assigneesIds: [user.id],
+        });
+        const restored = await restoring.one(
+          app.todos
+            .where({ id: { eq: todo.id } })
+            .include({ assignees: app.users.select("id", "name") }),
+        );
+        assert(restored, "staged restored todo is not defined");
+        expect(restored.title).toBe("Restored todo");
+        expect(restored.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+      } finally {
+        restoring.rollback();
+      }
+    },
+  );
+
+  it.skipIf(readMode !== "exclusive-tx")(
+    "includeDeleted relation reads retain exclusive transaction conflict witnesses",
+    async () => {
+      const user = insertUser(db, "Assignee");
+      const todo = insertTodo(db, { assigneesIds: [user.id] });
+      const tx = db.beginExclusiveTransaction();
+
+      const read = await tx.one(
+        app.todos
+          .includeDeleted()
+          .where({ id: { eq: todo.id } })
+          .include({ assignees: app.users.select("id", "name") }),
+      );
+      assert(read, "todo is not defined");
+      expect(read.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+
+      db.delete(app.users, user.id);
+      tx.update(app.todos, todo.id, { title: "Staged title" });
+
+      await expect(tx.commit().wait()).rejects.toThrow("transaction_conflict");
+    },
+  );
+
   describe("default ordering", () => {
     it("orders one-shot roots and pagination by canonical row id, not insertion order", async () => {
       db.upsert(app.projects, orderedIds.high, { name: "High" });

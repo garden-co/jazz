@@ -114,6 +114,8 @@ impl NativeTransportConnector for NativeWebSocketConnector {
 
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
+            let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
+                && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
             let mut transport = WebSocketTransport::connect_with_wake(
                 request.server_url,
                 request.app_id,
@@ -133,6 +135,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 protocol_version,
                 features,
                 session_context,
+                permits_delegated_sessions,
                 terminal,
             })
         })
@@ -270,6 +273,24 @@ impl serde::Serialize for OutboundBatch<'_> {
     }
 }
 
+/// Serialize only a carrier the peer-side bounded decoder can admit. The
+/// physical limit includes postcard's count and byte-string length prefixes.
+fn encode_outbound_batch(batch: &[QueuedOutboundFrame]) -> Result<Vec<u8>, postcard::Error> {
+    if batch.is_empty()
+        || batch.len() > MAX_WIRE_BATCH_FRAMES
+        || batch
+            .iter()
+            .any(|frame| validate_wire_frame_len(frame.bytes.len()).is_err())
+    {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    let encoded = postcard::to_allocvec(&OutboundBatch(batch))?;
+    if validate_wire_frame_len(encoded.len()).is_err() {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(encoded)
+}
+
 impl fmt::Debug for WebSocketTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebSocketTransport")
@@ -373,14 +394,20 @@ impl WebSocketTransport {
         wake: Arc<dyn Fn() + Send + Sync>,
         bootstrap_catalogue: bool,
     ) -> Result<Self, WebSocketClientError> {
+        let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = connect_async_with_config(url, Some(client_websocket_config()), false)
-            .await
-            .map_err(WebSocketClientError::Connect)?;
+        let (mut ws, _) = tokio::time::timeout_at(
+            deadline,
+            connect_async_with_config(url, Some(client_websocket_config()), false),
+        )
+        .await
+        .map_err(|_| WebSocketClientError::HandshakeTimeout)?
+        .map_err(WebSocketClientError::Connect)?;
 
         let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue)?;
-        ws.send(Message::Binary(prelude.into()))
+        tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
+            .map_err(|_| WebSocketClientError::HandshakeTimeout)?
             .map_err(WebSocketClientError::Send)?;
 
         let client_endpoint = WireAuthorityEndpoint {
@@ -400,11 +427,12 @@ impl WebSocketTransport {
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
             .map_err(WebSocketClientError::EncodeHello)?;
-        ws.send(Message::Binary(batch.into()))
+        tokio::time::timeout_at(deadline, ws.send(Message::Binary(batch.into())))
             .await
+            .map_err(|_| WebSocketClientError::HandshakeTimeout)?
             .map_err(WebSocketClientError::Send)?;
 
-        let server_hello = receive_server_hello(&mut ws).await?;
+        let server_hello = receive_server_hello(&mut ws, deadline).await?;
         let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
             .map_err(WebSocketClientError::Negotiation)?;
         // Receipt semantics require an admitted authority endpoint, not merely
@@ -625,18 +653,18 @@ async fn receive_server_hello(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
+    deadline: tokio::time::Instant,
 ) -> Result<WireHello, WebSocketClientError> {
-    let message = tokio::time::timeout(WS_CLIENT_HANDSHAKE_TIMEOUT, ws.next())
+    let message = tokio::time::timeout_at(deadline, ws.next())
         .await
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?
         .map_err(WebSocketClientError::Receive)?;
-
     let Message::Binary(bytes) = message else {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     };
-    let encoded: Vec<Vec<u8>> =
-        postcard::from_bytes(&bytes).map_err(WebSocketClientError::DecodeBatch)?;
+    let encoded = jazz::wire::decode_websocket_frame_batch(&bytes)
+        .map_err(WebSocketClientError::DecodeBatch)?;
     if encoded.len() != 1 {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
@@ -702,7 +730,7 @@ async fn run_ws_pump(
                             || batch_bytes.saturating_add(frame_bytes)
                                 > WS_CLIENT_OUTBOUND_BATCH_BYTES
                         {
-                            let bytes = match postcard::to_allocvec(&OutboundBatch(&batch)) {
+                            let bytes = match encode_outbound_batch(&batch) {
                                 Ok(bytes) => bytes,
                                 Err(error) => {
                                     return NativeTransportTerminal::Failed(NativeTransportError(
@@ -726,7 +754,7 @@ async fn run_ws_pump(
                         batch_bytes = batch_bytes.saturating_add(frame_bytes);
                         batch.push(frame);
                     }
-                    let bytes = match postcard::to_allocvec(&OutboundBatch(&batch)) {
+                    let bytes = match encode_outbound_batch(&batch) {
                         Ok(bytes) => bytes,
                         Err(error) => {
                             return NativeTransportTerminal::Failed(NativeTransportError(format!(
@@ -817,17 +845,9 @@ async fn run_ws_pump(
     terminal
 }
 
-fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
-    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
+fn decode_inbound_batch(bytes: &[u8], _bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
+    let frames = jazz::wire::decode_websocket_frame_batch(bytes)
         .map_err(|_| "websocket peer sent malformed wire batch".to_owned())?;
-    if frames.len() > MAX_WIRE_BATCH_FRAMES {
-        return Err(format!(
-            "websocket inbound batch exceeds frame-count limit of {MAX_WIRE_BATCH_FRAMES}"
-        ));
-    }
-    if bootstrap_catalogue && frames.is_empty() {
-        return Err("bootstrap peer sent an empty wire batch".to_owned());
-    }
     Ok(frames)
 }
 
@@ -899,6 +919,34 @@ mod tests {
         assert_eq!(config.max_frame_size, Some(MAX_WIRE_FRAME_BYTES));
     }
 
+    #[test]
+    fn outbound_batch_never_emits_a_carrier_over_the_physical_cap() {
+        let queued = |bytes| QueuedOutboundFrame {
+            bytes,
+            charge: 0,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let largest_singleton = queued(vec![0x42; MAX_WIRE_FRAME_BYTES - 4]);
+        let encoded = encode_outbound_batch(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(encoded.len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            jazz::wire::decode_websocket_frame_batch(&encoded).expect("decode exact carrier"),
+            vec![largest_singleton.bytes.clone()],
+        );
+
+        let raw_limit = queued(vec![0x42; MAX_WIRE_FRAME_BYTES]);
+        assert!(
+            encode_outbound_batch(std::slice::from_ref(&raw_limit)).is_err(),
+            "raw limit frame alone cannot fit its carrier prefixes"
+        );
+        let small = queued(vec![0x11]);
+        assert!(
+            encode_outbound_batch(&[small, raw_limit]).is_err(),
+            "flushing an earlier frame must not permit an invalid carrier"
+        );
+    }
+
     #[tokio::test]
     async fn fragmented_bootstrap_larger_than_ingress_budget_streams_with_backpressure() {
         let (sender, mut receiver) = mpsc::channel::<InboundFrame>(1);
@@ -944,18 +992,37 @@ mod tests {
     fn bootstrap_count_flood_or_empty_batch_is_rejected_before_ingress_staging() {
         let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
         assert!(
-            decode_inbound_batch(&empty, true)
-                .expect_err("bootstrap must reject empty batches")
-                .contains("empty")
+            decode_inbound_batch(&empty, true).is_err(),
+            "bootstrap must reject empty batches"
         );
 
         let flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
             .expect("encode count flood below physical byte cap");
         assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
         assert!(
-            decode_inbound_batch(&flood, false)
-                .expect_err("count flood must be rejected before channel staging")
-                .contains("frame-count limit")
+            decode_inbound_batch(&flood, false).is_err(),
+            "count flood must be rejected before channel staging"
+        );
+    }
+
+    #[test]
+    fn inbound_batch_decoder_consumes_the_complete_carrier() {
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            postcard::to_allocvec(&vec![vec![0x42_u8]]).expect("encode valid batch"),
+            valid,
+            "frozen WebSocket batch corpus must remain canonical"
+        );
+        assert_eq!(
+            decode_inbound_batch(&valid, false).expect("decode complete valid batch"),
+            vec![vec![0x42]]
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0x00);
+        assert!(
+            decode_inbound_batch(&suffixed, false).is_err(),
+            "a valid batch plus a suffix must not acquire a second interpretation"
         );
     }
 

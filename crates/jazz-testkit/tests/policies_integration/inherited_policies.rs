@@ -536,6 +536,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
 /// alice(writer) ──create doc folder=bogus_id─────────────────► hidden
 /// alice(reader) ──query docs─────────────────────────────────► sees only shared doc
 /// alice(writer) ──delete shared folder───────────────────────► server
+/// alice(reader) ──existing docs query─────────────────────────► sees removal
 /// bob(fresh) ─────query docs─────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
@@ -640,6 +641,19 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     alice_writer
         .delete(folder_id)
         .expect("delete inherited parent folder");
+    let alice_rows_after_delete = wait_for_query(
+        &alice_reader,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice's retained document view removes the deleted-parent document",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(
+        alice_rows_after_delete.is_empty(),
+        "a retained document view must not preserve a row after its inherited parent is deleted: {alice_rows_after_delete:?}"
+    );
     let bob = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
@@ -2066,7 +2080,20 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
         .await
         .expect("subscribe array files");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    // A no-change assertion needs an installed initial view, not a timed
+    // guess: otherwise a slow initial snapshot looks like a reorder delta.
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "array subscription initially contains both referenced files",
+        |entries| {
+            has_added_id(entries, file_a)
+                && has_added_id(entries, file_b)
+                && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(
@@ -2308,7 +2335,18 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
 
     let mut stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    // The stream itself must have observed the row before revocation can
+    // legitimately be required to produce a removal for that stream.
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "bob's active subscription initially contains the shared document",
+        |entries| {
+            has_added_id(entries, doc_id) && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(
@@ -2421,7 +2459,16 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
 
     let mut stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
     let mut log = Vec::new();
-    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "bob's active subscription initially contains the document before retargeting",
+        |entries| {
+            has_added_id(entries, doc_id) && entries.last().is_some_and(|delta| !delta.pending)
+        },
+    )
+    .await;
     log.clear();
 
     update_row(

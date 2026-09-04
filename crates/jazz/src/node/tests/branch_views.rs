@@ -272,6 +272,614 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     assert_eq!(after_delete.rows[0].row_uuid(), inherited);
 }
 
+/// A first branch-head overlay has no legal cross-branch history parent.
+/// This receipt exercises the authority boundary directly because the
+/// observable contract is an accept/reject fate for an incoming commit unit:
+/// the source proof must survive the client's pending storage and relay
+/// transport, yet must not become a causal parent.
+#[test]
+fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .branch_by("branch_id")
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
+    let (_dir, mut authority) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x4a; 16]), schema.clone());
+    let allowed = AuthorSubject::for_test_bytes([0x4b; 16]);
+    let denied = AuthorSubject::for_test_bytes([0x4c; 16]);
+    for subject in [allowed, denied] {
+        authority.set_test_provider_claims(
+            subject,
+            BTreeMap::from([("sub".to_owned(), Value::Uuid(subject.test_uuid()))]),
+        );
+    }
+    let source_row = row(0x4d);
+    let base = branch_selector(0x4e);
+    let head = branch_selector(0x4f);
+    let head_value = uuid::Uuid::from_bytes([0x4f; 16]);
+    let source_tx = authority
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", source_row, 10)
+                .branch(base.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("base")),
+                    ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+                ])),
+        )
+        .unwrap();
+    let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
+    let physical_table_id = authority
+        .physical_table_id_for_schema(schema.version_id(), "todos")
+        .unwrap();
+    // The authority has moved its write pointer through a table rename before
+    // it receives the old-authored branch version below. The intent's stable
+    // physical table id plus authored schema must resolve `todos`, rather than
+    // interpreting the evidence through the current `tasks` spelling.
+    let renamed_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("branch_id", PublicColumnType::Uuid)
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .branch_by("branch_id")
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
+    let renamed = SchemaVersion::new(renamed_schema);
+    publish_schema_lineage(
+        &mut authority,
+        renamed.clone(),
+        MigrationLens::new(
+            schema.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![LensOp::RenameTable {
+                    from: "todos".to_owned(),
+                    to: "tasks".to_owned(),
+                }],
+            }],
+        )
+        .expect("valid table-rename lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: renamed.id,
+            },
+        })
+        .unwrap();
+    let base_key = schema.project_branch_view_selector(table, &base).unwrap().0;
+    let head_key = schema.project_branch_view_selector(table, &head).unwrap().0;
+    let make_unit = |tx_id: TxId,
+                     subject: AuthorSubject,
+                     source_version: TxId,
+                     target_key: BranchKey,
+                     target_value: uuid::Uuid,
+                     copy_base: crate::tx::BranchViewCopyBase| {
+        let version = VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            source_row,
+            Vec::new(),
+            subject,
+            tx_id.time.physical_ms(),
+            subject,
+            tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(target_value)),
+                ("title".to_owned(), v("head patch")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(target_key.clone());
+        let evidence = crate::tx::BranchViewCopyEvidence {
+            version: 1,
+            head: target_key,
+            base: copy_base,
+            table: "todos".to_owned(),
+            row_uuid: source_row,
+            source_version,
+        };
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: subject,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: Some(crate::tx::ContributionMergeProvenance {
+                source: BranchKey::default(),
+                target: BranchKey::default(),
+                substitutions: Vec::new(),
+                branch_view_copies: vec![evidence.clone()],
+                branch_write_intents: vec![crate::tx::BranchWriteIntent {
+                    version: 1,
+                    physical_table_id,
+                    authored_schema: schema.version_id(),
+                    row_uuid: source_row,
+                    head: evidence.head.clone(),
+                    operation: crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence),
+                }],
+            }),
+        };
+        (tx, vec![version])
+    };
+
+    let (allowed_tx, allowed_versions) = make_unit(
+        TxId::new(TxTime::from(20), node(0x50)),
+        allowed,
+        source_tx,
+        head_key.clone(),
+        head_value,
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let allowed_outcome =
+        crate::db::block_on(authority.ingest_commit_unit(allowed_tx.clone(), allowed_versions, 20))
+            .unwrap();
+    settle_outcome(&mut authority, allowed_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(allowed_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    // A public transaction can mix an inherited first-head copy with a plain
+    // first-head insert.  Both operation identities are bound to their exact
+    // versions, so authority admits the whole unit (and can replay it) rather
+    // than treating the copy as a causal dependency or a best-effort sidecar.
+    let batch_head = branch_selector(0x5b);
+    let batch_head_key = schema
+        .project_branch_view_selector(table, &batch_head)
+        .unwrap()
+        .0;
+    let batch_insert_row = row(0x5c);
+    let (mut batch_tx, mut batch_versions) = make_unit(
+        TxId::new(TxTime::from(21), node(0x5d)),
+        allowed,
+        source_tx,
+        batch_head_key.clone(),
+        uuid::Uuid::from_bytes([0x5b; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    batch_tx.n_total_writes = 2;
+    batch_versions.push(
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            batch_insert_row,
+            Vec::new(),
+            allowed,
+            batch_tx.tx_id.time.physical_ms(),
+            allowed,
+            batch_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x5b; 16]))),
+                ("title".to_owned(), v("exact head insert")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(batch_head_key.clone()),
+    );
+    batch_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .branch_write_intents
+        .push(crate::tx::BranchWriteIntent {
+            version: 1,
+            physical_table_id,
+            authored_schema: schema.version_id(),
+            row_uuid: batch_insert_row,
+            head: batch_head_key.clone(),
+            operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
+        });
+    batch_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .branch_write_intents
+        .sort_by(|left, right| {
+            (left.physical_table_id, left.authored_schema, left.row_uuid, &left.head).cmp(&(
+                right.physical_table_id,
+                right.authored_schema,
+                right.row_uuid,
+                &right.head,
+            ))
+        });
+    let batch_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions.clone(),
+        21,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, batch_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+    let batch_versions_for_reopen = batch_versions.clone();
+    let replay_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions,
+        21,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, replay_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+    assert!(authority
+        .visible_current_cells_in_branch("tasks", &batch_head, source_row)
+        .unwrap()
+        .is_some());
+    assert!(authority
+        .visible_current_cells_in_branch("tasks", &batch_head, batch_insert_row)
+        .unwrap()
+        .is_some());
+
+    // Stripping just the exact-head member's descriptor rejects the complete
+    // unit.  Neither the authorized view copy nor the ordinary insert may
+    // become durable on its own.
+    let rejected_head = branch_selector(0x5e);
+    let rejected_head_key = schema
+        .project_branch_view_selector(table, &rejected_head)
+        .unwrap()
+        .0;
+    let rejected_insert_row = row(0x5f);
+    let (mut rejected_tx, mut rejected_versions) = make_unit(
+        TxId::new(TxTime::from(24), node(0x60)),
+        allowed,
+        source_tx,
+        rejected_head_key.clone(),
+        uuid::Uuid::from_bytes([0x5e; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    rejected_tx.n_total_writes = 2;
+    rejected_versions.push(
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            rejected_insert_row,
+            Vec::new(),
+            allowed,
+            rejected_tx.tx_id.time.physical_ms(),
+            allowed,
+            rejected_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x5e; 16]))),
+                ("title".to_owned(), v("must reject atomically")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(rejected_head_key.clone()),
+    );
+    let provenance = rejected_tx.contribution_merge.as_mut().unwrap();
+    provenance.branch_write_intents[0].head = rejected_head_key.clone();
+    // The raw payload has two branch versions but only the view-copy proof.
+    // This is deliberately malformed canonical metadata, not a policy denial.
+    let rejected_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        rejected_tx.clone(),
+        rejected_versions,
+        24,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, rejected_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(rejected_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+    for rejected_row in [source_row, rejected_insert_row] {
+        assert!(authority
+            .visible_current_cells_in_branch("tasks", &rejected_head, rejected_row)
+            .unwrap()
+            .is_none());
+    }
+
+    // The frozen variant proves the exact source at its declared frontier,
+    // rather than silently falling back to the authority's current schema or
+    // current base winner.
+    let snapshot_head = branch_selector(0x58);
+    let snapshot_head_key = schema
+        .project_branch_view_selector(table, &snapshot_head)
+        .unwrap()
+        .0;
+    let (snapshot_tx, snapshot_versions) = make_unit(
+        TxId::new(TxTime::from(22), node(0x59)),
+        allowed,
+        source_tx,
+        snapshot_head_key,
+        uuid::Uuid::from_bytes([0x58; 16]),
+        crate::tx::BranchViewCopyBase::Snapshot {
+            branch: base_key.clone(),
+            snapshot: crate::protocol::SnapshotRef {
+                owner: NodeUuid::from_bytes([0x4a; 16]),
+                global_base: GlobalTime(0),
+                local_base: source_tx.time,
+                dots: Vec::new(),
+            },
+        },
+    );
+    let snapshot_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        snapshot_tx.clone(),
+        snapshot_versions,
+        22,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, snapshot_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(snapshot_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    // Simulate a competing first-head materialization winning before this
+    // unit reaches authority. The descriptor is otherwise valid, but its
+    // promised absent head is no longer true and must not be reclassified as
+    // a safe view copy.
+    let (race_tx, race_versions) = make_unit(
+        TxId::new(TxTime::from(23), node(0x5a)),
+        allowed,
+        source_tx,
+        head_key.clone(),
+        head_value,
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let race_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        race_tx.clone(),
+        race_versions,
+        23,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, race_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(race_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    // Planted sensitive negative: a raw sender cannot erase the operation
+    // intent and have this first-head inherited copy reclassified as an
+    // ordinary insert. If the mandatory-intent check is removed, this becomes
+    // accepted under the write policy without proving source read access.
+    let omitted_head = branch_selector(0x56);
+    let omitted_head_key = schema
+        .project_branch_view_selector(table, &omitted_head)
+        .unwrap()
+        .0;
+    let (mut omitted_tx, omitted_versions) = make_unit(
+        TxId::new(TxTime::from(25), node(0x57)),
+        denied,
+        source_tx,
+        omitted_head_key,
+        uuid::Uuid::from_bytes([0x56; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    omitted_tx.contribution_merge = None;
+    let omitted_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        omitted_tx.clone(),
+        omitted_versions,
+        25,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, omitted_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(omitted_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    // A distinct target keeps the denial independent of the accepted head
+    // overlay above. The same source is physically present, but its private
+    // read policy is false for this subject.
+    let denied_head = branch_selector(0x51);
+    let denied_head_key = schema.project_branch_view_selector(table, &denied_head).unwrap().0;
+    let (denied_tx, denied_versions) = make_unit(
+        TxId::new(TxTime::from(30), node(0x52)),
+        denied,
+        source_tx,
+        denied_head_key,
+        uuid::Uuid::from_bytes([0x51; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let denied_outcome =
+        crate::db::block_on(authority.ingest_commit_unit(denied_tx.clone(), denied_versions, 30))
+            .unwrap();
+    settle_outcome(&mut authority, denied_outcome).unwrap();
+    let denied_state = authority.transaction_state_settled(denied_tx.tx_id);
+    assert!(matches!(
+        denied_state,
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ), "denied inherited source must reject, got {denied_state:?}");
+
+    // Planted descriptor corruption: the target is otherwise a valid fresh
+    // overlay for an allowed writer, but the claimed base witness is not the
+    // exact winner. Admission must fail closed rather than treating evidence
+    // as decorative metadata.
+    let tampered_head = branch_selector(0x53);
+    let tampered_head_key = schema
+        .project_branch_view_selector(table, &tampered_head)
+        .unwrap()
+        .0;
+    let (mut tampered_tx, tampered_versions) = make_unit(
+        TxId::new(TxTime::from(40), node(0x54)),
+        allowed,
+        source_tx,
+        tampered_head_key,
+        uuid::Uuid::from_bytes([0x53; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    tampered_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .branch_write_intents[0]
+        .operation = crate::tx::BranchWriteOperation::ViewUpdateCopy(
+        crate::tx::BranchViewCopyEvidence {
+            source_version: TxId::new(TxTime::from(999), node(0x55)),
+            ..tampered_tx
+                .contribution_merge
+                .as_ref()
+                .unwrap()
+                .branch_view_copies[0]
+                .clone()
+        },
+    );
+    let tampered_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        tampered_tx.clone(),
+        tampered_versions,
+        40,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, tampered_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(tampered_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, DurabilityTier::Local))
+    ));
+
+    // A raw transaction cannot smuggle noncanonical calculated provenance
+    // alongside otherwise valid branch-copy metadata. This is structural
+    // malformed input, distinct from the earlier canonical-but-unreadable
+    // `denied_tx` receipt, which remains AuthorizationDenied.
+    let malformed_head = branch_selector(0x61);
+    let malformed_head_key = schema
+        .project_branch_view_selector(table, &malformed_head)
+        .unwrap()
+        .0;
+    let (mut malformed_tx, _malformed_versions) = make_unit(
+        TxId::new(TxTime::from(42), node(0x62)),
+        allowed,
+        source_tx,
+        malformed_head_key,
+        uuid::Uuid::from_bytes([0x61; 16]),
+        crate::tx::BranchViewCopyBase::Current(base_key.clone()),
+    );
+    let duplicate_dot = crate::tx::ContributionDot {
+        tx_id: source_tx,
+        coordinate: crate::tx::ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: source_row,
+            layer: crate::tx::MergeAspect::Content,
+            component: crate::tx::ContributionComponent::Column("title".to_owned()),
+        },
+    };
+    malformed_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .substitutions = vec![crate::tx::ContributionSubstitution {
+        target: duplicate_dot.coordinate.clone(),
+        sources: vec![duplicate_dot.clone(), duplicate_dot],
+    }];
+    malformed_tx
+        .contribution_merge
+        .as_mut()
+        .unwrap()
+        .source = BranchKey {
+        values: vec![
+            ("z".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+            ("a".to_owned(), crate::protocol::BranchColumnValue(vec![1, u8::MAX])),
+        ],
+    };
+    // Pair the malformed metadata with an otherwise ordinary missing parent.
+    // Provenance validation must happen before orphan parking, so the unit
+    // settles immediately and leaves no parked residue.
+    let missing_parent = TxId::new(TxTime::from(41), node(0x63));
+    let malformed_versions = vec![
+        VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            source_row,
+            vec![missing_parent],
+            allowed,
+            malformed_tx.tx_id.time.physical_ms(),
+            allowed,
+            malformed_tx.tx_id.time.physical_ms(),
+            &BTreeMap::from([
+                ("branch_id".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([0x61; 16]))),
+                ("title".to_owned(), v("head patch")),
+                ("owner".to_owned(), Value::Uuid(allowed.test_uuid())),
+            ]),
+            None,
+        )
+        .unwrap()
+        .with_branch_key(
+            schema
+                .project_branch_view_selector(table, &malformed_head)
+                .unwrap()
+                .0,
+        ),
+    ];
+    let malformed_outcome = crate::db::block_on(authority.ingest_commit_unit(
+        malformed_tx.clone(),
+        malformed_versions,
+        42,
+    ))
+    .unwrap();
+    settle_outcome(&mut authority, malformed_outcome).unwrap();
+    assert!(matches!(
+        authority.transaction_state_settled(malformed_tx.tx_id),
+        Some((Fate::Rejected(RejectionReason::MalformedCommit(_)), None, DurabilityTier::Local))
+    ));
+    assert!(
+        !authority.parking.parked_commit_units.contains_key(&malformed_tx.tx_id),
+        "malformed provenance must not leave an orphan parked behind its terminal fate"
+    );
+    assert!(
+        authority
+            .transaction_record(malformed_tx.tx_id)
+            .unwrap()
+            .contribution_merge
+            .is_none(),
+        "the terminal malformed receipt must not persist unencodable provenance"
+    );
+
+    // Durable authority state retains the exact descriptor. A reopened
+    // authority therefore keeps the accepted outcome and treats a relayed
+    // retry of the same unit as idempotent rather than losing its source proof.
+    drop(authority);
+    let mut reopened = reopen_history_complete_node_at(
+        &_dir,
+        NodeUuid::from_bytes([0x4a; 16]),
+        schema.clone(),
+    );
+    assert_eq!(
+        reopened.transaction_record(batch_tx.tx_id).unwrap().contribution_merge,
+        batch_tx.contribution_merge
+    );
+    let reopened_outcome = crate::db::block_on(reopened.ingest_commit_unit(
+        batch_tx.clone(),
+        batch_versions_for_reopen,
+        41,
+    ))
+    .unwrap();
+    settle_outcome(&mut reopened, reopened_outcome).unwrap();
+    assert!(matches!(
+        reopened.transaction_state_settled(batch_tx.tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
 #[test]
 /// Frozen-base lowering keeps the base content and deletion registers separate.
 /// This internal test is needed because it verifies the maintained graph's
@@ -368,13 +976,33 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("restoration must publish the frozen base row");
-
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish branch restoration");
     };
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].1.row_uuid(), row_uuid);
-    assert!(removed.is_empty());
+    let inserted = terminal_operations
+        .iter()
+        .filter_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inserted.len(), 1);
+    assert_eq!(
+        inserted[0].get("row_uuid"),
+        Ok(Value::Uuid(row_uuid.0)),
+        "the terminal collector must restore the frozen root row"
+    );
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })),
+        "restoring an empty frozen relation must not remove another root"
+    );
 }
 
 #[test]
@@ -466,12 +1094,29 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("head rejection must restore the frozen base payload");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish branch restoration");
     };
-    assert_eq!(removed.len(), 1);
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].1.cell(table, "title"), Some(v("frozen base")));
+    let restored = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .expect("head rejection must replace the root terminal payload");
+    assert_eq!(restored.get("row_uuid"), Ok(Value::Uuid(row_uuid.0)));
+    let title = restored.get("user_title").expect("decode restored title");
+    assert!(
+        title == Value::String("frozen base".to_owned())
+            || title == Value::Nullable(Some(Box::new(Value::String("frozen base".to_owned())))),
+        "the root terminal must carry the frozen-base title"
+    );
 
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
@@ -503,14 +1148,28 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("replacement head content must remain live");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = replacement else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = replacement
+    else {
+        panic!("the compiler-owned root collector must publish replacement-head content");
     };
-    assert_eq!(removed.len(), 1);
-    assert_eq!(added.len(), 1);
-    assert_eq!(
-        added[0].1.cell(table, "title"),
-        Some(v("replacement head"))
+    let replacement = terminal_operations
+        .iter()
+        .find_map(|operation| match &operation.edit {
+            groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } => {
+                Some(OwnedRecord::new(value.clone(), operation.root_descriptor.clone()))
+            }
+            _ => None,
+        })
+        .expect("replacement head must replace the root terminal payload");
+    let title = replacement.get("user_title").expect("decode replacement title");
+    assert!(
+        title == Value::String("replacement head".to_owned())
+            || title
+                == Value::Nullable(Some(Box::new(Value::String("replacement head".to_owned())))),
+        "the root terminal must carry replacement-head content"
     );
 }
 
@@ -792,6 +1451,98 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
         "preflight failure must leave no valid sibling residue"
     );
     assert!(node.query_table_versions("todos").unwrap().is_empty());
+}
+
+/// Internal maintained-view witness receipt: a branched writer's large
+/// immutable history record must reload from that exact branch, never from an
+/// implicit default coordinate. This targets the pre-serialization storage
+/// identity boundary that public queries cannot directly expose.
+#[test]
+fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
+    // `canonical_history_version_for_maintained_witness` is used before a
+    // maintained result is serialized. A physical row can have both default
+    // and non-default branch versions in one transaction, so table/row/tx
+    // coordinates alone are insufficient: falling back to the default branch
+    // silently ships a different immutable VersionRecord.
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x70; 16]), schema.clone());
+    let row_uuid = row(0x71);
+    let branch = branch_selector(0x72);
+    let owner = AuthorSubject::for_test_bytes([0x73; 16]);
+    let cells = |title: String| {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+    // Keep this below the large-value promotion threshold: the regression is
+    // about reloading a large *VersionRecord* from history, not about a query
+    // evaluator materializing an application large value first.
+    let branch_title = "non-default branch canonical body".repeat(1_500);
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(branch.clone())
+                .cells(cells(branch_title.clone())),
+        )
+        .unwrap();
+    let versions = futures::executor::block_on(node.query_versions_for_tx(tx_id)).unwrap();
+    let branched = versions
+        .iter()
+        .find(|version| version.branch_key().is_canonical() && *version.branch_key() != BranchKey::default())
+        .expect("non-default branch row is persisted")
+        .clone();
+    let storage_table = node
+        .version_storage_sources_for_layer(branched.table(), branched.layer())
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("content versions have history storage");
+    assert!(futures::executor::block_on(node.query_version_by_alias_with_storage_in_schema(
+        schema.version_id(),
+        branched.table(),
+        &storage_table,
+        &BranchKey::default(),
+        branched.row_uuid(),
+        branched.tx_time(),
+        branched.tx_node_alias(),
+    ))
+    .unwrap()
+    .is_none(), "a missing branch coordinate must never silently use a default branch");
+    // Model the maintained graph's real projection boundary: its history
+    // descriptor is unchanged, but a selected-out authored cell is represented
+    // by typed null. Falling through to this in-memory witness is forbidden;
+    // recovery must find the complete immutable row under the exact branch.
+    let mut partial_witness = branched.clone();
+    let descriptor = partial_witness.record.descriptor().clone();
+    let mut values = partial_witness.record.to_values().unwrap();
+    let title_position = node.catalogue.schema.tables[0]
+        .columns
+        .iter()
+        .position(|column| column.name == "title")
+        .unwrap();
+    values[crate::node::codec::HistoryRowRecord::USER_CELLS + title_position] =
+        Value::Nullable(None);
+    partial_witness.record = groove::records::OwnedRecord::new(
+        descriptor.create(&values).unwrap(),
+        descriptor,
+    );
+    assert_eq!(
+        partial_witness
+            .cell(&node.catalogue.schema.tables[0], "title")
+            .unwrap(),
+        None,
+        "the planted maintained witness must be observably partial"
+    );
+    let canonical = futures::executor::block_on(
+        node.canonical_history_version_for_maintained_witness(&partial_witness),
+    )
+    .unwrap();
+    let canonical_wire = node.version_record_from_row(&canonical).unwrap();
+    assert_eq!(canonical.branch_key(), branched.branch_key());
+    assert_eq!(canonical_wire.branch_key(), branched.branch_key());
+    assert_eq!(canonical_wire.cell_at(1), Some(Value::String(branch_title)));
 }
 
 #[test]
@@ -1272,9 +2023,9 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
         layer: MergeAspect::Content,
         component: ContributionComponent::Column("title".to_owned()),
     };
-    let provenance = ContributionMergeProvenance::canonical(
+    let mut provenance = ContributionMergeProvenance::canonical(
         source_key,
-        target_key,
+        target_key.clone(),
         vec![ContributionSubstitution {
             target: target_coordinate,
             sources: vec![ContributionDot {
@@ -1296,6 +2047,16 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
         )
         .unwrap();
     let tx_id = node.persist_and_settle_transaction(published).unwrap();
+    // The common commit path adds the exact authored branch operation without
+    // changing the calculated source substitutions or adding other coordinates.
+    provenance.branch_write_intents = vec![crate::tx::BranchWriteIntent {
+        version: 1,
+        physical_table_id: node.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id,
+        authored_schema: schema.version_id(),
+        row_uuid,
+        head: target_key,
+        operation: crate::tx::BranchWriteOperation::ExactHeadInsert,
+    }];
     assert_eq!(
         node.transaction_record(tx_id).unwrap().contribution_merge,
         Some(provenance)
@@ -1723,11 +2484,21 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("live-base write must emit a maintained delta");
-    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
-        panic!("flat branch query produced a structured maintained update");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("the compiler-owned root collector must publish the live-base edit");
     };
-    assert_eq!(added.len(), 1);
-    assert_eq!(removed.len(), 1);
+    assert!(
+        terminal_operations.iter().any(|operation| {
+            matches!(
+                operation.edit,
+                groove::ivm::TerminalEdit::Insert { .. } | groove::ivm::TerminalEdit::Update { .. }
+            )
+        }),
+        "the live-base edit must replace the root terminal payload"
+    );
 }
 
 #[test]

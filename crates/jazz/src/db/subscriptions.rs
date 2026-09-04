@@ -1,6 +1,7 @@
 //! Subscription opening, query attachment, coverage, and cleanup.
 
 use super::*;
+use crate::protocol::AuthorityResultKey;
 
 impl<S> Db<S>
 where
@@ -122,6 +123,7 @@ where
             &prepared.binding,
             upstream_opts,
             self.identity.author,
+            effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
     }
 
@@ -145,7 +147,13 @@ where
                 upstream_opts.tier,
                 author,
             ))?;
-        self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
+        self.attach_or_refresh_query_coverage(
+            &shape,
+            &binding,
+            upstream_opts,
+            author,
+            effective_read_tier(&opts) >= DurabilityTier::Edge,
+        )
     }
 
     fn attach_or_refresh_query_coverage(
@@ -154,23 +162,28 @@ where
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
         identity: AuthorSubject,
+        requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
-        let requires_current_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
+        let requires_delivery_receipt = requires_current_authority_receipt
+            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
             upstream_opts.read_view_key(),
         );
+        // Opening a new upstream coverage has no scoped receipt yet.  It must
+        // not inherit a generation from an arbitrary policy that happens to
+        // share this physical binding view.  The explicit unscoped key is the
+        // only compatibility baseline; a scoped stream records its own exact
+        // generation once it is registered below.
         let required_after = self
             .node
             .node
             .borrow()
-            .applied_view_update_generation(binding_view);
+            .applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
-        // Edge/Global one-shots may borrow a still-live maintained stream:
-        // refreshing that exact wire subscription cannot be confused with a
-        // detached predecessor. Otherwise they own a fresh subscription key.
-        // Local-only usage retains the existing coverage-reuse semantics.
+        // All live usages pin one stream. One-shot freshness is a newer
+        // receipt on that stream, not another stream with the same inputs.
         if self
             .node
             .upstream_coverage_refcounts
@@ -182,18 +195,6 @@ where
                 .borrow()
                 .get(&coverage)
                 .copied()
-            && !self
-                .node
-                .query_coverage_registrations
-                .borrow()
-                .contains_key(&subscription)
-            && (!requires_current_authority_receipt
-                || self
-                    .node
-                    .upstream_subscription_owners
-                    .borrow()
-                    .get(&subscription)
-                    .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0)))
         {
             *self
                 .node
@@ -207,8 +208,9 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts.clone(),
                 identity,
+                policy_binding: None,
             };
-            self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
+            self.register_query_coverage(coverage.clone(), pending_subscription.clone());
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
             if refreshes.get(&coverage).copied() != Some(required_after) {
                 refreshes.insert(coverage.clone(), required_after);
@@ -221,6 +223,7 @@ where
             return Ok(QueryAttachment {
                 subscriptions: vec![subscription],
                 required_after: vec![(binding_view, required_after)],
+                requires_delivery_receipt,
                 requires_current_authority_receipt,
                 registrations: vec![subscription],
                 refreshes: vec![(coverage, required_after)],
@@ -246,12 +249,13 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts,
                 identity,
+                policy_binding: None,
             },
-            true,
         );
         Ok(QueryAttachment {
             subscriptions: vec![subscription],
             required_after: vec![(binding_view, required_after)],
+            requires_delivery_receipt,
             requires_current_authority_receipt,
             registrations: vec![subscription],
             refreshes: Vec::new(),
@@ -262,7 +266,6 @@ where
         &self,
         coverage: CoverageKey,
         subscription: PendingUpstreamSubscription,
-        owns_subscription: bool,
     ) {
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         registrations
@@ -271,7 +274,6 @@ where
             .or_insert(QueryCoverageRegistration {
                 coverage,
                 subscription,
-                owns_subscription,
                 ref_count: 1,
             });
     }
@@ -294,6 +296,7 @@ where
                     binding: binding.clone(),
                     opts: opts.clone(),
                     identity,
+                    policy_binding: None,
                 },
             ));
         self.node
@@ -309,9 +312,15 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Return whether each usage-site attachment has observed a newer logical
-    /// server receipt than the one it captured during registration.
+    /// Durable local reads are immediately ready. Memory-only foregrounds
+    /// first receive their owner's local query answer; remote reads additionally
+    /// require a current authority receipt. Neither local case waits on an edge.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        // Local propagation does not gate a durable node's local knowledge.
+        // A foreground's empty memory is not yet its durable owner's answer.
+        if !attachment.requires_delivery_receipt {
+            return true;
+        }
         let node = self.node.node.borrow();
         let active_receipts = self.node.active_authority_view_receipts.borrow();
         let has_current_authority_receipt = active_receipts.as_ref().is_some_and(|receipts| {
@@ -328,8 +337,20 @@ where
             .required_after
             .iter()
             .all(|(binding_view, required_after)| {
-                node.applied_view_update_generation(*binding_view) > *required_after
-                    && !node.opening_pending_for_binding_view(*binding_view)
+                let mut receipts = attachment
+                    .subscriptions
+                    .iter()
+                    .filter_map(|subscription| {
+                        node.authority_result_key_for_subscription(*subscription)
+                            .ok()
+                    })
+                    .filter(|key| key.binding_view == *binding_view);
+                let Some(receipt) = receipts.next() else {
+                    return false;
+                };
+                receipts.all(|candidate| candidate == receipt)
+                    && node.applied_authority_result_generation(&receipt) > *required_after
+                    && !node.opening_pending_for_authority_result(&receipt)
             })
             && (!attachment.requires_current_authority_receipt || has_current_authority_receipt);
         drop(node);
@@ -364,18 +385,18 @@ where
             .settled_authoritative_receipt_counts_for_test()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Hold the async node owner until this future is cancelled.
+    ///
+    /// This is a test-only suspension point for cancellation and contention
+    /// contracts that cannot be reproduced by borrowing the private node.
+    pub async fn hold_node_owner_for_test(&self) {
+        let _node = self.node.node.lock().await;
+        std::future::pending::<()>().await;
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        if let Some(receipts) = self
-            .node
-            .active_authority_view_receipts
-            .borrow_mut()
-            .as_mut()
-        {
-            for subscription in &attachment.registrations {
-                receipts.subscriptions.remove(subscription);
-            }
-        }
         let mut removed_subscriptions = Vec::new();
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         for subscription in attachment.registrations {
@@ -383,7 +404,6 @@ where
                 continue;
             };
             let coverage = registration.coverage.clone();
-            let owns_subscription = registration.owns_subscription;
             registration.ref_count = registration.ref_count.saturating_sub(1);
             let last_registration = registration.ref_count == 0;
             if last_registration {
@@ -402,35 +422,28 @@ where
                     .borrow_mut()
                     .remove(&coverage);
             }
-            let has_live_stream_owner = self
-                .node
-                .upstream_subscription_owners
-                .borrow()
-                .get(&subscription)
-                .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0));
-            if (owns_subscription && last_registration && !has_live_stream_owner)
-                || last_coverage_pin
-            {
+            if last_coverage_pin {
                 removed_subscriptions.push((subscription, coverage));
             }
         }
         drop(registrations);
         for (subscription, coverage) in removed_subscriptions {
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
-            let replacement = self
+            if let Some(receipts) = self
                 .node
-                .query_coverage_registrations
-                .borrow()
-                .values()
-                .find(|registration| registration.coverage == coverage)
-                .map(|registration| registration.subscription.subscription);
+                .active_authority_view_receipts
+                .borrow_mut()
+                .as_mut()
+            {
+                receipts.subscriptions.remove(&subscription);
+            }
+            self.node
+                .coverage_refresh_generations
+                .borrow_mut()
+                .remove(&coverage);
+            self.node.node.borrow_mut().apply_unsubscribe(subscription);
             let mut latest = self.node.latest_coverage_subscriptions.borrow_mut();
             if latest.get(&coverage) == Some(&subscription) {
-                if let Some(replacement) = replacement {
-                    latest.insert(coverage.clone(), replacement);
-                } else {
-                    latest.remove(&coverage);
-                }
+                latest.remove(&coverage);
             }
             drop(latest);
             self.node
@@ -452,16 +465,10 @@ where
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
         let requested_read_tier = effective_read_tier(&opts);
-        let authored_commit_durability = self.node.node.lock().await.authored_commit_durability();
-        let read_tier = if opts.local_updates == LocalUpdates::Immediate
-            && opts.propagation == Propagation::Full
-            && supports_pending_overlay_reconciliation(prepared.shape.query())
-            && authored_commit_durability == DurabilityTier::None
-        {
-            DurabilityTier::Local
-        } else {
-            requested_read_tier
-        };
+        let read_tier = requested_read_tier;
+        let pending_overlay = authorization_mode == QueryAuthorizationMode::ClientLocal
+            && requested_read_tier >= DurabilityTier::Edge
+            && opts.local_updates == LocalUpdates::Immediate;
         self.node
             .node
             .lock()
@@ -488,12 +495,16 @@ where
                 authorization_mode,
             )
             .await?;
-        let (subscription, snapshot) = self
+        // The subscription opener performs one bounded IVM poll. Keep the
+        // current host scheduler as the cold-storage continuation owner,
+        // rather than the short-lived foreground future opening this stream.
+        let progress_waker = self.node.query_runtime_waker();
+        let (mut subscription, mut snapshot) = self
             .node
             .node
             .lock()
             .await
-            .open_maintained_view_subscription_in_authorization_mode(
+            .open_maintained_view_subscription_in_authorization_mode_with_waker(
                 &local_shape,
                 &local_binding,
                 author,
@@ -501,9 +512,10 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
+                pending_overlay,
+                progress_waker.as_ref(),
             )
             .await?;
-        let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
         let local_runtime_token = local_node.lock().await.groove_runtime_token();
@@ -522,13 +534,14 @@ where
                 acknowledgement: None,
             });
         }));
-        // A projected ordered root needs terminal patches even without nested
-        // arrays: an unprojected sort-key mutation can move a visible row
-        // without changing the projected payload. Unprojected roots retain
-        // ordinary row deltas, including scope re-entry membership changes.
-        let terminal_rows = !local_shape.query().array_subqueries.is_empty()
-            || (local_shape.query().select.is_some() && !local_shape.query().order_by.is_empty());
-        let mut maintained_subscription = Some(subscription);
+        // This opener may have been waiting for the node mutex while a close
+        // attempt closed finalization admission. Its local maintained view
+        // was absent from that close's snapshot, so reject it and let this
+        // guard transfer cleanup to the still-live node owner.
+        self.node.ensure_subscription_finalization_open()?;
+        // Compiler-owned root collectors, not surface query syntax, own the
+        // terminal snapshot and positional edits.
+        let terminal_rows = subscription.has_root_collector();
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -587,10 +600,7 @@ where
                 && snapshot.edges.is_empty();
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
-        if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && remote_read_tier.is_some()
-            && state_shape.query().aggregate.is_none()
-        {
+        let settled_authority_result = if remote_read_tier.is_some() {
             let binding_view_key = BindingViewKey {
                 shape_id: state_shape.shape_id(),
                 binding_id: state_binding.binding_id(),
@@ -602,14 +612,69 @@ where
                 }
                 .read_view_key(),
             };
-            if let Some(maintained) = maintained_subscription.as_mut() {
-                self.node
-                    .node
-                    .lock()
-                    .await
-                    .seed_local_maintained_authoritative_generation(maintained, binding_view_key);
+            let node = self.node.node.lock().await;
+            let mut keys = upstream_subscription_handles
+                .iter()
+                .filter_map(|handle| {
+                    node.authority_result_key_for_subscription(handle.subscription)
+                        .ok()
+                })
+                .filter(|key| key.binding_view == binding_view_key);
+            let key = keys.next();
+            key.filter(|key| keys.all(|candidate| candidate == *key))
+        } else {
+            None
+        };
+        // `open_maintained...` creates a receiver-local graph but deliberately
+        // does not install a previously received authority closure: that
+        // installation must be folded into the public stream owner's snapshot
+        // with the same terminal reducer used for every later update.  In
+        // particular, do not materialize the authority result set here.
+        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
+        snapshot_index.roots = subscription
+            .root_occurrence_ids()
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, occurrence)| (occurrence, index))
+            .collect();
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && let Some(authority_result_key) = settled_authority_result.as_ref()
+        {
+            let (update, _) = self
+                .node
+                .node
+                .lock()
+                .await
+                .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                    &mut subscription,
+                    Some(authority_result_key.clone()),
+                    &BTreeSet::new(),
+                    progress_waker.as_ref(),
+                )
+                .await?;
+            if let Some(update) = update {
+                let terminal_layout = subscription.terminal_root_layout();
+                let _ = apply_maintained_update_to_snapshot(
+                    &mut snapshot,
+                    &mut snapshot_index,
+                    update,
+                    prepared.shape.query().table.as_str(),
+                    read_tier,
+                    false,
+                    terminal_layout,
+                )?;
             }
         }
+        let covered_closure_installed = {
+            let node = self.node.node.lock().await;
+            settled_authority_result.as_ref().is_none_or(|key| {
+                subscription.has_installed_covered_closure(
+                    key,
+                    node.applied_authority_result_generation(key),
+                )
+            })
+        };
         let settled = {
             let node = self.node.node.lock().await;
             subscription_is_settled(
@@ -621,7 +686,8 @@ where
                 opts.read_view.clone(),
                 remote_propagate_upstream,
                 requires_authority_receipt,
-            )
+                settled_authority_result.as_ref(),
+            ) && (!subscription.has_covered_input_sources() || covered_closure_installed)
         };
         // An empty local opening carries no observable result information at
         // an Edge/Global request.  Until the authority replies, publishing it
@@ -636,16 +702,30 @@ where
             && snapshot.root_count == 0
             && snapshot.edges.is_empty();
         let (sender, receiver) = unbounded();
-        let initial_outputs =
-            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
+        let mut root_occurrence_ids = snapshot_index
+            .roots
+            .iter()
+            .map(|(occurrence, index)| (*index, occurrence.clone()))
+            .collect::<Vec<_>>();
+        root_occurrence_ids.sort_by_key(|(index, _)| *index);
+        let root_occurrence_ids = root_occurrence_ids
+            .into_iter()
+            .map(|(_, occurrence)| occurrence)
+            .collect::<Vec<_>>();
+        let initial_outputs = {
+            materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
+            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?
+        };
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
-        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         snapshot_index.roots = root_occurrence_ids
             .iter()
             .cloned()
             .enumerate()
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
+        snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
+        let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(SubscriptionState {
             closed: Rc::clone(&closed),
@@ -662,6 +742,7 @@ where
             author,
             authorization_mode,
             read_tier,
+            pending_overlay,
             remote_read_tier,
             requires_authority_receipt,
             remote_propagate_upstream,
@@ -694,7 +775,7 @@ where
         // exists. On success, replace it with one command carrying local and
         // upstream cleanup so Drop never touches the async node mutex.
         drop(local_cleanup.take());
-        let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
+        let cleanup: SubscriptionCleanup = {
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
                 &state.borrow().upstream_subscription_handles,
@@ -704,17 +785,25 @@ where
             let state = Rc::clone(&state);
             Box::new(move |acknowledgement| {
                 closed.set(true);
+                let finalization_node = acknowledgement.as_ref().map(|_| Rc::clone(&node));
                 node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
                     state: Some(state),
                     opening_local: None,
                     acknowledgement,
                 });
+                finalization_node.map(|node| {
+                    Box::pin(async move {
+                        node.drain_subscription_finalizations().await?;
+                        Ok(())
+                    }) as SubscriptionFinalizationFuture
+                })
             })
         };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup: Some(cleanup),
+            finalization: None,
             terminated: false,
         })
     }

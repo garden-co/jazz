@@ -5,7 +5,11 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
 } from "./client-session.js";
-import { createBrowserAuthSessionKey } from "./browser-worker-config.js";
+import {
+  assertBrowserStorageOwnerUnchanged,
+  createBrowserAuthSessionKey,
+  createBrowserStorageOwner,
+} from "./browser-worker-config.js";
 import { setTrustedReservedSession } from "./db-internal-session.js";
 
 function toBase64Url(value: unknown): string {
@@ -21,6 +25,55 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("resolveDefaultPersistentDbName", () => {
+  it("rejects a live persistent principal switch before forwarding it to storage", () => {
+    const alice: DbConfig = {
+      appId: "chat-app",
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
+    };
+    const refreshedAlice: DbConfig = {
+      ...alice,
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", exp: 2 }),
+    };
+    const bob: DbConfig = {
+      ...alice,
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "bob" }),
+    };
+
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, refreshedAlice)).not.toThrow();
+    // Planted positive: removing the guard would let Bob inherit Alice's
+    // durable root before an upstream auth response could correct it.
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, bob)).toThrow(
+      "Cannot change the authenticated user of a live persistent browser Db",
+    );
+  });
+
+  it("uses the canonical public issuer/subject identity as the non-secret browser owner scope", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      env: "production",
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice@example.com" }),
+    };
+
+    // The durable marker and worker routing identity must preserve the exact
+    // public session identity. A short hash could collide and silently let
+    // two principals share an explicitly named physical root.
+    expect(createBrowserAuthSessionKey(config)).toBe(
+      '{"version":1,"appId":"chat-app","env":"production","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice@example.com\\"]"}}',
+    );
+    expect(createBrowserStorageOwner(config)).toBe(
+      '{"version":1,"appId":"chat-app","env":"production","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice@example.com\\"]"}}',
+    );
+  });
+
+  it("uses intentional anonymous and system auth-scope tags without credentials", () => {
+    expect(createBrowserStorageOwner({ appId: "chat-app" })).toBe(
+      '{"version":1,"appId":"chat-app","env":"dev","auth":{"kind":"anonymous"}}',
+    );
+    expect(createBrowserStorageOwner({ appId: "chat-app", adminSecret: "private" })).toBe(
+      '{"version":1,"appId":"chat-app","env":"dev","auth":{"kind":"system"}}',
+    );
+  });
+
   it("keeps verified local-first principals distinct in browser worker auth metadata", () => {
     const configFor = (subject: string): DbConfig => {
       const config: DbConfig = {
@@ -40,16 +93,23 @@ describe("resolveDefaultPersistentDbName", () => {
     expect(createBrowserAuthSessionKey(configFor("alice"))).not.toBe(
       createBrowserAuthSessionKey(configFor("bob")),
     );
+    expect(createBrowserStorageOwner(configFor("alice"))).not.toBe(
+      createBrowserStorageOwner(configFor("bob")),
+    );
   });
 
-  it("keeps an explicit driver dbName unchanged", () => {
+  it("treats an explicit driver dbName as a scoped logical base", () => {
     const config: DbConfig = {
       appId: "chat-app",
       driver: { type: "persistent", dbName: "custom-db" },
       jwtToken: makeJwt({ sub: "alice" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("custom-db");
+    const physicalName = resolveDefaultPersistentDbName(config);
+    expect(physicalName).toMatch(/^custom-db::jazz-browser-v1::/);
+    expect(physicalName).toContain("%22appId%22%3A%22chat-app%22");
+    expect(physicalName).toContain("%22env%22%3A%22dev%22");
+    expect(physicalName).not.toContain(config.jwtToken!);
   });
 
   it("scopes the default namespace by user_id when a session is present", () => {
@@ -59,9 +119,7 @@ describe("resolveDefaultPersistentDbName", () => {
       jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice@example.com" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe(
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
-    );
+    expect(resolveDefaultPersistentDbName(config)).toMatch(/^chat-app::jazz-browser-v1::/);
   });
 
   it("url-encodes the sub when scoping the namespace", () => {
@@ -71,8 +129,8 @@ describe("resolveDefaultPersistentDbName", () => {
       jwtToken: makeJwt({ iss: "https://issuer.example", sub: "principal/456" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe(
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22principal%2F456%22%5D",
+    expect(resolveDefaultPersistentDbName(config)).toContain(
+      "%5B%5C%22https%3A%2F%2Fissuer.example%5C%22%2C%5C%22principal%2F456%5C%22%5D",
     );
   });
 
@@ -88,9 +146,7 @@ describe("resolveDefaultPersistentDbName", () => {
       },
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe(
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
-    );
+    expect(resolveDefaultPersistentDbName(config)).toContain("alice%40example.com");
   });
 
   it("does not scope by user_id for anonymous cookie sessions", () => {
@@ -105,7 +161,7 @@ describe("resolveDefaultPersistentDbName", () => {
       },
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+    expect(resolveDefaultPersistentDbName(config)).toMatch(/^chat-app::jazz-browser-v1::/);
   });
 
   it("falls back to appId when no session can be resolved", () => {
@@ -114,7 +170,7 @@ describe("resolveDefaultPersistentDbName", () => {
       driver: { type: "persistent" },
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+    expect(resolveDefaultPersistentDbName(config)).toMatch(/^chat-app::jazz-browser-v1::/);
   });
 
   it("does not scope by user_id for anonymous sessions", () => {
@@ -124,7 +180,7 @@ describe("resolveDefaultPersistentDbName", () => {
       jwtToken: makeJwt({ sub: "ephemeral-pubkey", iss: ANONYMOUS_JWT_ISSUER }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+    expect(resolveDefaultPersistentDbName(config)).toMatch(/^chat-app::jazz-browser-v1::/);
   });
 
   it("scopes by user_id for external sessions", () => {
@@ -134,9 +190,7 @@ describe("resolveDefaultPersistentDbName", () => {
       jwtToken: makeJwt({ sub: "stable-pubkey", iss: "https://issuer.example" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe(
-      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22stable-pubkey%22%5D",
-    );
+    expect(resolveDefaultPersistentDbName(config)).toContain("stable-pubkey");
   });
 
   it("separates the same subject issued by different authorities", () => {
@@ -149,5 +203,42 @@ describe("resolveDefaultPersistentDbName", () => {
     expect(resolveDefaultPersistentDbName(from("https://issuer-a.example"))).not.toBe(
       resolveDefaultPersistentDbName(from("https://issuer-b.example")),
     );
+  });
+
+  it("separates app, environment, anonymous, external, and local-first scopes without credentials", () => {
+    const base = "shared-device-cache";
+    const external = (appId: string, env: string, subject: string): DbConfig => ({
+      appId,
+      env,
+      driver: { type: "persistent", dbName: base },
+      jwtToken: makeJwt({ iss: "https://issuer.example/\u00e5", sub: subject }),
+    });
+    const alice = external("chat", "production", "alice/\ud83d\ude80");
+    const bob = external("chat", "production", "bob/\ud83d\ude80");
+    const localFirst: DbConfig = {
+      appId: "chat",
+      env: "production",
+      secret: "local-only-secret",
+      driver: { type: "persistent", dbName: base },
+    };
+    const anonymous: DbConfig = {
+      appId: "chat",
+      env: "production",
+      driver: { type: "persistent", dbName: base },
+    };
+
+    const aliceName = resolveDefaultPersistentDbName(alice);
+    expect(aliceName).toMatch(new RegExp(`^${base}::jazz-browser-v1::`));
+    expect(aliceName).not.toBe(resolveDefaultPersistentDbName(bob));
+    expect(aliceName).not.toBe(
+      resolveDefaultPersistentDbName(external("other-app", "production", "alice/\ud83d\ude80")),
+    );
+    expect(aliceName).not.toBe(
+      resolveDefaultPersistentDbName(external("chat", "staging", "alice/\ud83d\ude80")),
+    );
+    expect(aliceName).not.toBe(resolveDefaultPersistentDbName(localFirst));
+    expect(aliceName).not.toBe(resolveDefaultPersistentDbName(anonymous));
+    expect(resolveDefaultPersistentDbName(localFirst)).not.toContain("local-only-secret");
+    expect(aliceName).not.toContain(alice.jwtToken!);
   });
 });

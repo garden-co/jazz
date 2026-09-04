@@ -37,7 +37,7 @@ Invariant digest:
 - `INV-STORAGE-20`: Directly exposed record stores MUST be typed record stores with record-encoded values and order-preserving typed primary keys, while bypassing table batches, primary-key table scans, durable index maintenance, query planning, and IVM ticks. A single trailing variable-width `Bytes` value column MUST encode as exactly the stored bytes.
 - `INV-STORAGE-21`: `DatabaseSchema::column_families()` MUST include the `"indices"` column family whenever any table declares an `IndexSchema`, and MUST omit it when no schema index exists.
 - `INV-STORAGE-22`: Non-unique durable index logical keys MUST append a `0xff` separator and encoded primary-key bytes; unique index keys MUST omit that suffix.
-- `INV-STORAGE-23`: Durable unique indices MUST reject writing a positive delta for an index key already associated with a different record.
+- `INV-STORAGE-23`: Durable unique-index ownership MUST be resolved from the consolidated final deltas of one storage-atomic batch. A different record may replace the durable owner only when that batch fully retracts the old owner and leaves at most one positive owner; competing positive owners MUST be rejected.
 - `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
@@ -401,7 +401,8 @@ receipt against the production page store; it does not substitute
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
 database name; `pages`, `metadata`, and `storage-manifest` object-store names;
-and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+and the `current`, `epoch`, and `replica-node-v1` keys are fixed within storage
+epoch 1. Before a
 caller receives a handle, `storage-manifest`/`epoch` must be the exact
 structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
 `1`, the mandatory Groove base plus the complete caller-composed Jazz codec
@@ -417,6 +418,17 @@ new incompatible layout uses a new epoch instead of guessing at these bytes.
 The browser's IndexedDB schema generation is separately `3`: that number only
 selects the object-store layout containing `storage-manifest`, and is not a
 Jazz adapter, metadata, or page-codec version.
+
+`storage-manifest`/`replica-node-v1` is a separate exact 16-byte random
+`NodeUuid`, generated in the same initial IndexedDB versionchange transaction
+as the epoch manifest. It is durable physical-replica metadata, not a
+decode-profile field: reopening the same IndexedDB database preserves it, while
+two independent browser storage replicas with the same app, author, and
+database name receive different values. It is read and validated before a
+browser worker opens Jazz and can mint a `TxId`; missing or malformed values
+fail closed before any page mutation. The value is deliberately not derived
+from an author, app id, or logical database name, since such derivation could
+alias transaction identities at equal HLC times across independent replicas.
 Browser page ids are JavaScript safe integers, so root, child, and next ids are
 bounded to `0..=2^53-1`; exhaustion fails instead of rounding an identity. The
 stored page size is validated before page write or decode.
@@ -554,10 +566,13 @@ corresponding base record.
 
 _Further invariants._ `INV-STORAGE-22` — a non-unique index key appends a `0xff`
 separator + the encoded primary key; a unique index omits that suffix.
-`INV-STORAGE-23` — a unique index rejects a positive delta for a key already
-bound to a different record. `INV-STORAGE-24` — an index scan resolves the
-entry's `"value"` as primary-key bytes and fetches the base record; a missing
-base record for a primary-keyed table means the persisted index is invalid.
+`INV-STORAGE-23` — unique-index ownership is resolved from the consolidated
+final deltas of one storage-atomic batch. A different record may replace the
+durable owner only when that batch fully retracts the old owner and leaves at
+most one positive owner; competing positive owners are rejected.
+`INV-STORAGE-24` — an index scan resolves the entry's `"value"` as primary-key
+bytes and fetches the base record; a missing base record for a primary-keyed
+table means the persisted index is invalid.
 
 **Target design (unified arrangement model, ch. 4 §4.6).** Indices are
 redefined as a degenerate case of the unified arrangement model: a declared

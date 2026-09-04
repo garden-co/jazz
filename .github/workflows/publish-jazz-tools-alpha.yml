@@ -537,7 +537,7 @@ jobs:
           test -f packages/jazz-tools/dist/permissions/index.js
 
       - name: Verify staged jazz-rn relay artifacts
-        env:
+        env: &release-artifact-source-revision-env
           # `resolve-preview-artifacts` only permits reuse after proving the
           # release source and preview source have equivalent trees. Preserve
           # the latter's commit SHA here: it is the value sealed into its
@@ -641,12 +641,13 @@ jobs:
           tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\((["\x27])((?!\.\/)jazz-napi-[^"\x27)]+)\1\)/g)].map((m)=>m[2]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
 
       - name: Verify packed jazz-rn relay payload
+        env: *release-artifact-source-revision-env
         run: |
           TEMPORARY_DIRECTORY=$(mktemp -d)
           pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
           TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
           tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
               --package-root "${TEMPORARY_DIRECTORY}/package" android ios

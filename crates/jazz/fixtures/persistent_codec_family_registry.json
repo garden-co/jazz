@@ -363,7 +363,7 @@
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "fast_known_state_fact_survives_storage_reopen"
+          "anchor": "storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement"
         }
       ]
     },
@@ -499,6 +499,32 @@
         {
           "path": "packages/jazz-tools/tests/browser/indexeddb-physical-epoch.test.ts",
           "anchor": "opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens"
+        }
+      ]
+    },
+    {
+      "id": "jazz.native-root-corpus.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/4_history_merging.md",
+        "anchor": "The native whole-root compatibility receipt is"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "anchor": "committed_native_jazz_physical_corpus_rejects_corruption_before_materialization"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+          "anchor": "committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
+        },
+        {
+          "path": "crates/jazz/fixtures/native_storage_corpus.md",
+          "anchor": "# Native Jazz epoch-1 compatibility corpus"
         }
       ]
     },

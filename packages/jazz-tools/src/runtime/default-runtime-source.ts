@@ -19,7 +19,10 @@ import {
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
-import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
+import {
+  SharedBrowserForegroundNodeLease,
+  SharedBrowserWorkerConnection,
+} from "./native-runtime/browser-shared-worker-connection.js";
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
@@ -35,6 +38,7 @@ import { httpUrlToWs } from "./url.js";
 import { authorBytesForSession, canonicalAuthorSubject } from "./author-id.js";
 import {
   createBrowserAuthSessionKey,
+  createBrowserStorageOwner,
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
@@ -146,17 +150,6 @@ export function selfSignedClientProofFromConfig(
   };
 }
 
-function persistentIdentitySeed(
-  config: DbConfig,
-  session: ReturnType<typeof sessionFromConfig>,
-): string {
-  const author = canonicalAuthorSubject(
-    session?.issuer ?? ANONYMOUS_JWT_ISSUER,
-    session?.user_id ?? `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
-  );
-  return `${config.appId}:${config.env ?? "dev"}:${author}`;
-}
-
 function initialSyncFlushEvery(config: DbConfig): number {
   const value = config.initialSyncFlushEvery ?? 512;
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -198,6 +191,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
+    foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
@@ -208,14 +202,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const backendMode = isBackendRuntime(config);
-    const identitySeed = persistentIdentitySeed(config, session);
-    // A persistent worker may replay a main-thread-authored transaction after
-    // the page has reopened. Keep that logical client's node identity stable
-    // for the persistence namespace so the fresh in-memory runtime still owns
-    // the transaction's eventual rejection/settlement notifications.
-    const node = isPersistentBrowserConfig(config)
-      ? deterministicBytes(`${identitySeed}:${resolveDefaultPersistentDbName(config)}:main-node`)
-      : randomBytes();
+    // The persistent worker owns durable recovery. A foreground runtime owns
+    // only its live optimistic writes, so every new runtime needs a fresh node
+    // identity. Reusing a deterministic node across independently opened tabs
+    // would let their fresh HLC registers mint the same TxId before either has
+    // observed the other's first commit.
+    const node = foregroundNodeLease?.node.slice() ?? randomBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
@@ -228,8 +220,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       selfSignedClientProof,
       backendMode,
     );
+    if (foregroundNodeLease) {
+      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
+    }
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
+      if (!foregroundNodeLease) {
+        throw new Error("Persistent browser runtime requires a foreground node lease");
+      }
     }
 
     const context: AppContext = {
@@ -245,6 +243,34 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
     return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
+  }
+
+  override async acquireBrowserForegroundNodeLease(config: DbConfig) {
+    if (!isPersistentBrowserConfig(config)) {
+      throw new Error("Browser foreground node leases require persistent browser storage");
+    }
+    const dbName = resolveDefaultPersistentDbName(config);
+    return await SharedBrowserForegroundNodeLease.acquire({
+      runtimeSources: browserWorkerRuntimeSources(config),
+      dbName,
+      storageOwner: createBrowserStorageOwner(config),
+    });
+  }
+
+  override async acquireForegroundNodeLease(config: DbConfig) {
+    if (!isNodeRuntime() || (config.driver?.type ?? "persistent") !== "persistent") {
+      return undefined;
+    }
+    // This guarded dynamic import keeps Node filesystem code out of the path
+    // executed by browser/RN bundles while remaining visible to Node test and
+    // package tooling.
+    const { acquireNodeForegroundNodeLease } =
+      await import("./native-runtime/node-foreground-node-lease.js");
+    return await acquireNodeForegroundNodeLease({
+      appId: config.appId,
+      env: config.env ?? "dev",
+      authScope: createBrowserAuthSessionKey(config),
+    });
   }
 
   override createBrowserWorkerConnection({
@@ -270,7 +296,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         "Persistent browser workers require a verified client session, not backend credentials",
       );
     }
-    const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
@@ -295,14 +320,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         runtimeSources: browserWorkerRuntimeSources(config),
         schema,
         dbName,
-        node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
+        storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
-        authJson: JSON.stringify(runtimeAuth(config)),
+        authJson: JSON.stringify(browserWorkerTransportAuth(config)),
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
@@ -345,7 +370,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onFailure,
       },
     );
-    connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);
+    connection.updateAuth(JSON.stringify(browserWorkerTransportAuth(config)), sessionClaims);
     return connection;
   }
 
@@ -411,14 +436,21 @@ function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
 }
 
+function isNodeRuntime(): boolean {
+  return typeof process !== "undefined" && Boolean(process.versions?.node);
+}
+
 function isPersistentBrowserConfig(config: DbConfig): boolean {
   return isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent";
 }
 
-function runtimeAuth(config: DbConfig): Record<string, unknown> {
+/** @internal A client relay never acquires the application's admin capability. */
+export function browserWorkerTransportAuth(config: DbConfig): Record<string, unknown> {
   return {
     jwt_token: config.jwtToken ?? null,
-    ...(config.adminSecret ? { admin_secret: config.adminSecret } : {}),
+    // Dev/deployment credentials may coexist with a user session in DbConfig.
+    // Sending them here would override JWT admission at the server and remove
+    // this connection's scope-isolated client-relay capability.
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
   };
 }

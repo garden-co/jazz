@@ -1,3 +1,32 @@
+/// A cancellation-safe temporary claim scope for one node-locked operation.
+///
+/// The scope owns the mutable node borrow, so its [`Drop`] implementation runs
+/// before the node lock is released if an awaited query is cancelled.
+pub(crate) struct ActiveSessionClaimsScope<'a, S> {
+    node: &'a mut NodeState<S>,
+    previous: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+}
+
+impl<S> std::ops::Deref for ActiveSessionClaimsScope<'_, S> {
+    type Target = NodeState<S>;
+
+    fn deref(&self) -> &Self::Target {
+        self.node
+    }
+}
+
+impl<S> std::ops::DerefMut for ActiveSessionClaimsScope<'_, S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.node
+    }
+}
+
+impl<S> Drop for ActiveSessionClaimsScope<'_, S> {
+    fn drop(&mut self) {
+        self.node.active_session_claims = self.previous.take();
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -541,6 +570,7 @@ where
             catalogue_bootstrap_marker,
             clock: Clock {
                 tx_time: TxTime::default(),
+                reservation_high_water: Rc::new(Cell::new(TxTime::default())),
                 global_time_register: GlobalTime::default(),
                 locally_minted_global_times: BTreeSet::new(),
                 committed_global_time: GlobalTime(0),
@@ -558,10 +588,16 @@ where
                 tx_version_tables_cache_order_set: BTreeSet::new(),
                 version_storage_sources_cache: BTreeMap::new(),
                 registered_shapes: BTreeMap::new(),
+                registered_shape_options: BTreeMap::new(),
+                peer_shape_owners: BTreeMap::new(),
+                locally_registered_shapes: BTreeSet::new(),
+                outbound_shape_owners: BTreeMap::new(),
+                outbound_binding_owners: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
+                authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
-                local_materialized_window_binding_views: BTreeSet::new(),
+                retained_root_window_sources: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
@@ -571,7 +607,6 @@ where
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
                 pending_opening_binding_views: BTreeSet::new(),
-                pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
@@ -589,7 +624,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
-            relay_authority_session_owner: false,
+            relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: FxHashSet::default(),
@@ -599,6 +634,7 @@ where
             merge_head_reachability_walks: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
+            active_session_claims: None,
             permissions_ready: true,
             catalogue_activation_failed: false,
             #[cfg(any(test, feature = "testing"))]
@@ -701,6 +737,27 @@ where
         self.node_uuid
     }
 
+    /// Highest HLC value this runtime has observed or minted.
+    ///
+    /// A foreground lease owner persists this value before returning a node
+    /// identity to its pool.  It intentionally includes identities allocated
+    /// for transactions that were later rolled back or never submitted.
+    pub(crate) fn tx_time_high_water(&self) -> TxTime {
+        self.clock
+            .tx_time
+            .max(self.clock.reservation_high_water.get())
+    }
+
+    pub(crate) fn tx_time_reservation_clock(&self) -> Rc<Cell<TxTime>> {
+        Rc::clone(&self.clock.reservation_high_water)
+    }
+
+    /// Establish a durable-owner supplied lower bound before this runtime can
+    /// mint its first transaction identity.
+    pub(crate) fn seed_tx_time_high_water(&mut self, high_water: TxTime) {
+        self.merge_tx_time(high_water);
+    }
+
     pub(crate) fn authored_commit_durability(&self) -> DurabilityTier {
         self.authored_commit_durability
     }
@@ -712,12 +769,35 @@ where
     /// Mark this process as the durable half of a browser client/worker relay.
     /// The marker only selects an internal upstream binding identity for Edge
     /// coverage; it is neither persisted nor an authorization policy input.
-    pub(crate) fn set_relay_authority_session_owner(&mut self) {
-        self.relay_authority_session_owner = true;
+    pub(crate) fn configure_scope_isolated_client_relay(
+        &mut self,
+        scope: crate::db::ClientRelayScope,
+    ) -> Result<(), Error> {
+        if let Some(current) = &self.relay_authority_session_owner
+            && !current.same_owner(&scope)
+        {
+            return Err(Error::InvalidBranchKey(
+                "a relay cannot be rebound to a different storage ownership scope".into(),
+            ));
+        }
+        self.relay_authority_session_owner = Some(scope);
+        Ok(())
     }
 
-    pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
-        self.relay_authority_session_owner
+    /// The immutable host-admitted scope carried by this relay. Downstream
+    /// relay/repair setup may observe its presence, but never manufacture one.
+    pub(crate) fn client_relay_scope(&self) -> Option<&crate::db::ClientRelayScope> {
+        self.relay_authority_session_owner.as_ref()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn set_relay_authority_session_owner_for_test(&mut self) {
+        // SAFETY: direct node tests model the host-admitted scope with a fixed
+        // synthetic owner; production code has no toggle-shaped API.
+        let scope = crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        self.configure_scope_isolated_client_relay(scope)
+            .expect("test scope is stable");
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -736,6 +816,36 @@ where
             .expect("session claim revision overflow must stop authorization delivery");
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+    }
+
+    /// Scope one node-locked operation to this subscriber's admitted claims.
+    /// Dropping the returned guard restores the prior scope even if an awaited
+    /// operation is cancelled before it returns.
+    pub(crate) fn scoped_active_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = self.active_session_claims.replace((identity, claims));
+        ActiveSessionClaimsScope {
+            node: self,
+            previous,
+        }
+    }
+
+    /// Return an opaque, domain-separated identity for the active session
+    /// scope. It is runtime-only and deliberately never formats raw claims.
+    pub(crate) fn active_session_claim_scope_key(&self, identity: AuthorSubject) -> Option<String> {
+        let (_, claims) = self
+            .active_session_claims
+            .as_ref()
+            .filter(|(active_identity, _)| *active_identity == identity)?;
+        let encoded = postcard::to_allocvec(&(identity, claims))
+            .expect("author identity and claim values are postcard encodable");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"jazz/active-session-claim-scope/v1\\0");
+        hasher.update(&encoded);
+        Some(hasher.finalize().to_hex().to_string())
     }
 
     /// Admit application/provider claims for a synthetic test topology.
@@ -806,6 +916,17 @@ where
                 )
             })
             .collect()
+    }
+
+    /// Return the admitted claims for one directly terminated session.
+    ///
+    /// This is intentionally for non-multiplexed local helpers only. Relayed
+    /// serving carries an immutable snapshot with each request instead.
+    pub(crate) fn session_claims_for(&self, identity: AuthorSubject) -> BTreeMap<String, Value> {
+        self.session_claims
+            .get(&identity)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Gate session-scoped serving until an authority has installed its
@@ -1440,8 +1561,9 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
+        self.query.authority_results.clear();
         self.query.settled_result_sets.clear();
-        self.query.local_materialized_window_binding_views.clear();
+        self.query.retained_root_window_sources.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -1459,75 +1581,96 @@ where
 
     fn insert_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: ResultMemberEntry,
     ) {
+        let state = self
+            .query
+            .authority_results
+            .entry(authority_result_key)
+            .or_default();
         if let Some(row_key) = Self::result_member_row_key(&member) {
-            self.query
-                .settled_result_row_index
-                .entry(binding_view_key)
-                .or_default()
-                .insert(row_key, member.clone());
+            state.settled_result_row_index.insert(row_key, member.clone());
         }
-        self.query
-            .settled_result_sets
-            .entry(binding_view_key)
-            .or_default()
-            .insert(member);
+        state.settled_result_set.insert(member);
     }
 
     fn remove_settled_result_member_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         member: &ResultMemberEntry,
     ) -> bool {
         let removed = self
             .query
-            .settled_result_sets
-            .get_mut(&binding_view_key)
-            .is_some_and(|members| members.remove(member));
+            .authority_results
+            .get_mut(&authority_result_key)
+            .is_some_and(|state| state.settled_result_set.remove(member));
         if removed
             && let Some(row_key) = Self::result_member_row_key(member)
             && self
                 .query
-                .settled_result_row_index
-                .get(&binding_view_key)
-                .and_then(|index| index.get(&row_key))
+                .authority_results
+                .get(&authority_result_key)
+                .and_then(|state| state.settled_result_row_index.get(&row_key))
                 == Some(member)
-            && let Some(index) = self
+            && let Some(state) = self
                 .query
-                .settled_result_row_index
-                .get_mut(&binding_view_key)
+                .authority_results
+                .get_mut(&authority_result_key)
         {
-            index.remove(&row_key);
+            state.settled_result_row_index.remove(&row_key);
         }
         removed
     }
 
     fn remove_settled_result_member_for_occurrence_indexed(
         &mut self,
-        binding_view_key: BindingViewKey,
+        authority_result_key: AuthorityResultKey,
         occurrence_id: ResultRowMembershipKey,
     ) -> Option<ResultMemberEntry> {
         let previous = self
             .query
-            .settled_result_row_index
-            .get_mut(&binding_view_key)
-            .and_then(|index| index.remove(&occurrence_id))?;
-        if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
-            members.remove(&previous);
+            .authority_results
+            .get_mut(&authority_result_key)
+            .and_then(|state| state.settled_result_row_index.remove(&occurrence_id))?;
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.remove(&previous);
         }
         Some(previous)
     }
 
-    fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
-        self.query.settled_result_sets.remove(&binding_view_key);
+    fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        // A reset replaces receipt contents, not the receipt itself. In
+        // particular, the exact policy-scoped lifecycle generation, opening
+        // marker, deferred-publication bit, and terminal queue must survive
+        // while new membership is installed. Removing the whole state made a
+        // second reset restart its generation at one and let one scoped reset
+        // erase another stream's progress through the binding-only facade.
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.settled_result_set.clear();
+            state.settled_result_row_index.clear();
+            state.settled_program_facts.clear();
+            state.covered_input_sources.clear();
+            state.covered_input_versions.clear();
+            state.source_closure = crate::node::AuthoritySourceClosure::Pending;
+            state.source_incrementals.clear();
+        }
         self.query
-            .local_materialized_window_binding_views
-            .remove(&binding_view_key);
+            .retained_root_window_sources
+            .remove(&authority_result_key);
+    }
+
+    /// Retire a receipt whose exact usage-site ownership has ended.
+    ///
+    /// This is deliberately distinct from [`Self::clear_settled_result_view`]:
+    /// an authority reset replaces membership while preserving its lifecycle
+    /// generation, whereas an unsubscribe or ownerless-recovery invalidation
+    /// must not leave a settled stamp that could satisfy the next usage site.
+    fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        self.query.authority_results.remove(&authority_result_key);
         self.query
-            .settled_result_row_index
-            .remove(&binding_view_key);
+            .retained_root_window_sources
+            .remove(&authority_result_key);
     }
 
     async fn open_catalogue_stage<T>(
@@ -1932,6 +2075,12 @@ where
             genesis_schema,
             catalogue_bootstrap_state,
         )?;
+        // Descriptor rebuilding sorts payload cases by their durable
+        // introduction provenance.  Validate that each stored provenance
+        // triple resolves through the authority's physical manifest before a
+        // recovered mapping can reach that rebuild boundary.
+        validate_scalar_enum_case_provenance(&physical_mappings, &schema_version_aliases)?;
+        validate_payload_enum_case_provenance(&physical_mappings, &schema_version_aliases)?;
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
             schema: current_schema_version_id,

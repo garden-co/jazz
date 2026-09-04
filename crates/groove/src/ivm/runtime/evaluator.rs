@@ -24,7 +24,7 @@ use std::rc::Rc;
 pub(super) enum OperatorState {
     Stateless,
     Join(JoinState),
-    SemiJoin(AntiJoinState),
+    SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
     TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
@@ -54,6 +54,13 @@ pub(super) struct CollectByIncrementalState {
 pub(super) struct CollectByIncrementalPayload {
     pub(super) groups: CollectByGroups,
     pub(super) roots: BTreeMap<CollectByOrderKey, i64>,
+    /// Ordered public root-collector occurrence index. Unlike `groups`, whose
+    /// key is the opaque output identity, this follows the compiled TopBy key
+    /// and excludes maintenance-only groups that never reached a terminal.
+    pub(super) emitted_root_order: BTreeMap<CollectByOrderKey, Vec<u8>>,
+    /// Root terminal groups that have actually been emitted to a subscriber.
+    /// Some join-maintenance rows share a sort key but are not facade roots.
+    pub(super) emitted_root_keys: BTreeSet<Vec<u8>>,
 }
 
 impl Deref for CollectByIncrementalState {
@@ -116,8 +123,8 @@ impl TopByIncrementalState {
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
-        OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
-        OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
+        OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
+        OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState::default()),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
@@ -193,7 +200,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -201,7 +208,7 @@ pub(super) struct TickEvaluator<'a> {
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
-    pub(super) binding_frontiers: &'a HashMap<String, u64>,
+    pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: Option<&'a dyn OrderedKvStorage>,
@@ -223,7 +230,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
-    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     pub(super) current_tick: u64,
     pub(super) operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     pub(super) arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -231,7 +238,7 @@ pub(super) struct GraphRuntimeView<'a> {
     pub(super) eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     pub(super) eval_memo_bytes: &'a mut usize,
     pub(super) table_frontiers: &'a HashMap<String, u64>,
-    pub(super) binding_frontiers: &'a HashMap<String, u64>,
+    pub(super) binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     pub(super) memo_use_clock: &'a mut u64,
     pub(super) node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     pub(super) storage: &'a dyn OrderedKvStorage,
@@ -247,7 +254,7 @@ fn graph_runtime_view<'a>(
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
-    binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
     current_tick: u64,
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -255,7 +262,7 @@ fn graph_runtime_view<'a>(
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
     eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
-    binding_frontiers: &'a HashMap<String, u64>,
+    binding_frontiers: &'a HashMap<BindingSourceKey, u64>,
     memo_use_clock: &'a mut u64,
     node_meta: &'a mut HashMap<NodeId, NodeRuntimeMeta>,
     storage: &'a dyn OrderedKvStorage,
@@ -451,19 +458,24 @@ impl TickEvaluator<'_> {
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             pending.push((node, true));
-            pending.extend(
-                graph_node
-                    .descriptor
-                    .inputs
-                    .iter()
-                    .rev()
-                    .map(|input| (*input, false)),
-            );
+            // Recursive seed and step graphs run under a frontier-scoped
+            // evaluator in `update_recursive`; evaluating them here would
+            // incorrectly populate root-scoped memo and operator state.
+            if !matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
+                pending.extend(
+                    graph_node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .rev()
+                        .map(|input| (*input, false)),
+                );
+            }
         }
 
         let mut result = None;
         for node in order {
-            let records = self.update_node(node).await?;
+            let records = self.update_one_node(node).await?;
             if node == root {
                 result = Some(records);
             }
@@ -651,6 +663,13 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        Box::pin(self.update_subgraph(node))
+    }
+
+    fn update_one_node(
+        &mut self,
+        node: NodeId,
+    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         Box::pin(async move {
             let graph_node = self
                 .graph
@@ -790,10 +809,12 @@ impl TickEvaluator<'_> {
                         let mut deltas = Vec::new();
                         for delta in &input.deltas {
                             let record = delta.borrowed(&input.descriptor);
-                            let matches = match filter
+                            inputs.set_chunk_scope(Some(node));
+                            let result = filter
                                 .predicate
-                                .matches_indirect_literal_attempt(record, inputs)?
-                            {
+                                .matches_indirect_literal_attempt(record, inputs);
+                            inputs.set_chunk_scope(None);
+                            let matches = match result? {
                                 Some(matches) => matches,
                                 None => filter.predicate.matches(record, filter.comparison)?,
                             };
@@ -855,14 +876,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_max_by.primary_key_field_indices,
+                        &arg_max_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_max_by.group_fields,
                             group_field_indices: &arg_max_by.group_field_indices,
-                            primary_key_field_indices: &arg_max_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_max_by.comparison_field_indices,
                             direction: ArgByDirection::Max,
                         },
                         output_desc,
@@ -873,14 +894,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_min_by.primary_key_field_indices,
+                        &arg_min_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_min_by.group_fields,
                             group_field_indices: &arg_min_by.group_field_indices,
-                            primary_key_field_indices: &arg_min_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_min_by.comparison_field_indices,
                             direction: ArgByDirection::Min,
                         },
                         output_desc,
@@ -1052,11 +1073,25 @@ impl TickEvaluator<'_> {
                     )
                 }
                 OpType::Recursive(recursive) => {
-                    let [seed, step] = graph_node.descriptor.inputs.as_slice() else {
+                    let (seed, step, step_witness) = match graph_node.descriptor.inputs.as_slice() {
+                        [seed, step] => (*seed, *step, None),
+                        [seed, step, witness] => (*seed, *step, Some(*witness)),
+                        _ => {
+                            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                        }
+                    };
+                    self.update_recursive(node, recursive, output_desc, seed, step, step_witness)
+                        .await
+                }
+                OpType::RecursiveStepWitness(_) => {
+                    let [recursive] = graph_node.descriptor.inputs.as_slice() else {
                         return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                     };
-                    self.update_recursive(node, recursive, output_desc, *seed, *step)
-                        .await
+                    // Drive the owner first. Its generic side state is then
+                    // the only source of this output; never re-evaluate a
+                    // recursive step independently.
+                    self.update_node(*recursive).await?;
+                    self.update_recursive_step_witness(*recursive, output_desc)
                 }
                 // Durable writes are an async preparation boundary driven outside
                 // this borrowed evaluator frame by `tick_durable_nodes`.
@@ -1199,7 +1234,7 @@ impl TickEvaluator<'_> {
                 tables.insert(input.table);
             }
             OpType::BindingSource(input) => {
-                bindings.insert(input.shape);
+                bindings.insert(input.key);
             }
             OpType::FrontierSource(input) => {
                 frontier_bindings.insert(input.binding);
@@ -1426,14 +1461,98 @@ impl TickEvaluator<'_> {
         right_delta: &[RecordDelta],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let operator_key = self.operator_key(node)?;
+        let (left_on, right_on) = self.join_field_names(node, join);
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            &right_on,
+            join.comparison,
+        )?;
+        // Anti-join publication is operator-local state. Take it while the
+        // evaluator mutates arrangements, then restore it even if evaluation
+        // rejects a malformed delta. Cloning would copy every published row
+        // for each small incremental update.
+        let mut join_state = match self.operator_states.remove(&operator_key) {
+            None => AntiJoinState::default(),
+            Some(OperatorState::AntiJoin(state)) => state,
+            Some(operator) => {
+                self.operator_states.insert(operator_key, operator);
+                return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+            }
+        };
+        let mut left_arrangement = self
+            .arrangement_states
+            .remove(&left_key)
+            .unwrap_or_default();
+        let mut right_arrangement = if left_key == right_key {
+            left_arrangement.clone()
+        } else {
+            self.arrangement_states
+                .remove(&right_key)
+                .unwrap_or_default()
+        };
+        let result = (|| {
+            let deltas = join_state.apply(
+                &mut left_arrangement,
+                &mut right_arrangement,
+                &join.left_descriptor,
+                &join.right_descriptor,
+                &output_desc,
+                left_on.as_ref(),
+                right_on.as_ref(),
+                join.comparison,
+                left_delta,
+                right_delta,
+                self.arrangement_sub_tick(&left_key),
+                self.arrangement_sub_tick(&right_key),
+                self.context.arrangement_update_mode,
+            )?;
+            if left_key == right_key {
+                left_arrangement = right_arrangement;
+            } else {
+                self.insert_arrangement(right_key, right_arrangement);
+            }
+            self.insert_arrangement(left_key, left_arrangement);
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::record_join(
+                self.context.eval_mode == EvalMode::Hydrate,
+                self.depends_on_dominant_child(node)?,
+                left_delta.len(),
+                right_delta.len(),
+                deltas.len(),
+            );
+            Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            })
+        })();
+        self.operator_states
+            .insert(operator_key, OperatorState::AntiJoin(join_state));
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_semi_join(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+        output_desc: RecordDescriptor,
+        left_input: NodeId,
+        right_input: NodeId,
+        left_delta: &[RecordDelta],
+        right_delta: &[RecordDelta],
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let operator_key = self.operator_key(node)?;
         let operator = self
             .operator_states
-            .entry(operator_key)
-            .or_insert_with(|| operator_state_for(&OpType::AntiJoin(join.clone())));
-        let OperatorState::AntiJoin(join_state) = operator else {
+            .entry(operator_key.clone())
+            .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
+        let OperatorState::SemiJoin(join_state) = operator else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let join_state = join_state.clone();
+        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -1457,81 +1576,6 @@ impl TickEvaluator<'_> {
         let deltas = join_state.apply(
             &mut left_arrangement,
             &mut right_arrangement,
-            &join.left_descriptor,
-            &join.right_descriptor,
-            &output_desc,
-            left_on.as_ref(),
-            right_on.as_ref(),
-            join.comparison,
-            left_delta,
-            right_delta,
-            self.arrangement_sub_tick(&left_key),
-            self.arrangement_sub_tick(&right_key),
-            self.context.arrangement_update_mode,
-        )?;
-        if left_key == right_key {
-            left_arrangement = right_arrangement;
-        } else {
-            self.insert_arrangement(right_key, right_arrangement);
-        }
-        self.insert_arrangement(left_key, left_arrangement);
-        #[cfg(feature = "cold-settle-attribution")]
-        crate::cold_settle_attribution::record_join(
-            self.context.eval_mode == EvalMode::Hydrate,
-            self.depends_on_dominant_child(node)?,
-            left_delta.len(),
-            right_delta.len(),
-            deltas.len(),
-        );
-        Ok(RecordDeltas {
-            descriptor: output_desc,
-            deltas,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn update_semi_join(
-        &mut self,
-        node: NodeId,
-        join: &JoinOp,
-        output_desc: RecordDescriptor,
-        left_input: NodeId,
-        right_input: NodeId,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
-    ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let operator_key = self.operator_key(node)?;
-        let operator = self
-            .operator_states
-            .entry(operator_key)
-            .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
-        let OperatorState::SemiJoin(join_state) = operator else {
-            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
-        };
-        let join_state = join_state.clone();
-        let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key =
-            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
-        let right_key = self.arrangement_key(
-            right_input,
-            join.right_descriptor,
-            &right_on,
-            join.comparison,
-        )?;
-        let mut left_arrangement = self
-            .arrangement_states
-            .remove(&left_key)
-            .unwrap_or_default();
-        let mut right_arrangement = if left_key == right_key {
-            left_arrangement.clone()
-        } else {
-            self.arrangement_states
-                .remove(&right_key)
-                .unwrap_or_default()
-        };
-        let deltas = join_state.apply_semi(
-            &mut left_arrangement,
-            &mut right_arrangement,
             join.left_descriptor,
             join.right_descriptor,
             &output_desc,
@@ -1550,6 +1594,8 @@ impl TickEvaluator<'_> {
             self.insert_arrangement(right_key, right_arrangement);
         }
         self.insert_arrangement(left_key, left_arrangement);
+        self.operator_states
+            .insert(operator_key, OperatorState::SemiJoin(join_state));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1641,13 +1687,13 @@ impl TickEvaluator<'_> {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let after = arg_by_winner_from_records(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records.clone(),
                 spec.direction,
             )?;
             let before = arg_by_winner_before_from_deltas(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records,
                 group_deltas,
                 spec.direction,
@@ -1786,6 +1832,14 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if self.context.eval_mode == EvalMode::Hydrate {
+            // Hydration supplies a complete snapshot, including when another
+            // subscription already owns this shared collector. Rebuild its
+            // state instead of applying that snapshot as incremental inserts;
+            // otherwise a later retraction leaves a phantom duplicate behind.
+            let operator_key = self.operator_key(node)?;
+            self.operator_states.remove(&operator_key);
+        }
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
@@ -1814,14 +1868,20 @@ impl TickEvaluator<'_> {
                 direct_tree_slot,
                 state,
                 &input.deltas,
-                self.context.eval_mode == EvalMode::Tick,
+                matches!(self.context.eval_mode, EvalMode::Tick | EvalMode::Hydrate),
             )?;
             self.operator_states.insert(operator_key, operator);
+            // A subscription hydration is the first transition of the same
+            // collector. Retain its operations so the opening/reset consumer
+            // can seed its terminal tree from the exact same root keys used
+            // by all later incremental updates. Hydration still returns the
+            // relational snapshot below; only a Tick suppresses that output
+            // after publishing terminal edits.
+            if !operations.is_empty() {
+                self.terminal_deltas
+                    .insert(node, TerminalDeltas { operations });
+            }
             if self.context.eval_mode == EvalMode::Tick {
-                if !operations.is_empty() {
-                    self.terminal_deltas
-                        .insert(node, TerminalDeltas { operations });
-                }
                 return Ok(RecordDeltas::empty(output_desc));
             }
         }
@@ -1991,18 +2051,6 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
-            if self.context.eval_mode == EvalMode::Hydrate && aggregate.group_key.is_empty() {
-                let record =
-                    aggregate_row_from_records(input.descriptor, output_desc, aggregate, &[])?
-                        .ok_or(IvmRuntimeError::UnsupportedOperator)?;
-                return Ok(RecordDeltas {
-                    descriptor: output_desc,
-                    deltas: vec![RecordDelta { record, weight: 1 }],
-                });
-            }
-            return Ok(RecordDeltas::empty(output_desc));
-        }
         let [input_node] = self
             .graph
             .node(node)
@@ -2015,6 +2063,35 @@ impl TickEvaluator<'_> {
         };
         let input_desc = input.descriptor;
         let group_fields = self.aggregate_group_fields(node, aggregate);
+        let arrangement_key = self.arrangement_key(
+            *input_node,
+            input_desc,
+            &group_fields,
+            ValueComparison::Exact,
+        )?;
+        if input.deltas.is_empty() {
+            // An ungrouped aggregate has one logical empty group. Its
+            // identity is emitted by Groove itself on the first complete
+            // empty frontier; grouped aggregates have no empty group. The
+            // empty arrangement records that this identity has been seeded.
+            let should_seed_empty_group = aggregate.group_key.is_empty()
+                && (self.context.eval_mode == EvalMode::Hydrate
+                    || !self.arrangement_states.contains_key(&arrangement_key));
+            if should_seed_empty_group {
+                let record = aggregate_row_from_records(input_desc, output_desc, aggregate, &[])?
+                    .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                if !self.arrangement_states.contains_key(&arrangement_key) {
+                    let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
+                    arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
+                    self.insert_arrangement(arrangement_key, arrangement);
+                }
+                return Ok(RecordDeltas {
+                    descriptor: output_desc,
+                    deltas: vec![RecordDelta { record, weight: 1 }],
+                });
+            }
+            return Ok(RecordDeltas::empty(output_desc));
+        }
         if self.context.eval_mode == EvalMode::Hydrate {
             let mut groups = BTreeMap::<Vec<u8>, Vec<(Bytes, i64)>>::new();
             for delta in &input.deltas {
@@ -2029,12 +2106,6 @@ impl TickEvaluator<'_> {
                     .push((delta.record.clone(), delta.weight));
             }
             if self.context.hydrate_arrangements {
-                let arrangement_key = self.arrangement_key(
-                    *input_node,
-                    input_desc,
-                    &group_fields,
-                    ValueComparison::Exact,
-                )?;
                 let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
                 arrangement.value_mut().apply_record_deltas(
                     input_desc,
@@ -2058,12 +2129,6 @@ impl TickEvaluator<'_> {
                 deltas: output,
             });
         }
-        let arrangement_key = self.arrangement_key(
-            *input_node,
-            input_desc,
-            &group_fields,
-            ValueComparison::Exact,
-        )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
@@ -2311,10 +2376,16 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         seed: NodeId,
         step: NodeId,
+        step_witness: Option<NodeId>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
         let operator_key = self.operator_key(node)?;
         let input_generation = self.input_generation(node);
+        let nodes = RecursiveNodes {
+            seed,
+            step,
+            step_witness,
+        };
         if self.context.eval_mode == EvalMode::Tick {
             let state = match self.operator_states.get(&operator_key) {
                 Some(OperatorState::Recursive(state)) => Some(state.value()),
@@ -2323,8 +2394,7 @@ impl TickEvaluator<'_> {
             if let Some(root) = snapshot_requirement(
                 self.graph,
                 node,
-                seed,
-                step,
+                nodes,
                 self.table_deltas,
                 self.binding_deltas,
                 state,
@@ -2343,7 +2413,8 @@ impl TickEvaluator<'_> {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
         if self.context.eval_mode == EvalMode::Hydrate {
-            if recursive_as_of.value().step_arrangements_hydrated()
+            if !recursive_as_of.value().has_pending_hydration()
+                && recursive_as_of.value().step_arrangements_hydrated()
                 && recursive_as_of.as_of() == Some(Tick(self.current_tick))
                 && recursive_as_of.value().hydrated_input_generation() == Some(input_generation)
             {
@@ -2357,26 +2428,40 @@ impl TickEvaluator<'_> {
                 });
             }
             let scope = self.context.scope.child(node);
-            let next = recompute_recursive(
-                self.schema,
-                self.graph,
-                self.variant_projections,
-                Some(self.table_deltas),
-                self.evaluation_inputs.as_deref_mut(),
+            let progress = super::recursion::resume_inputs_hydration_recompute(
+                recursive_as_of.value_mut(),
+                super::recursion::HydrationRecomputeContext {
+                    schema: self.schema,
+                    graph: self.graph,
+                    variant_projections: self.variant_projections,
+                    inputs: self.evaluation_inputs.as_deref_mut(),
+                    table_deltas: Some(self.table_deltas),
+                    storage,
+                    binding_snapshots: self.binding_snapshots,
+                    scope,
+                    input_generation,
+                },
                 node,
                 recursive,
                 output_desc,
-                step,
-                storage,
-                self.binding_snapshots,
-                self.current_tick,
-                scope,
+                nodes,
             )
-            .await?;
-            recursive_as_of.value_mut().replace_with(next);
-            let accumulated = RecordDeltas {
-                descriptor: output_desc,
-                deltas: recursive_as_of.value().accumulated_deltas(),
+            .await;
+            let accumulated = match progress {
+                Ok(super::recursion::HydrationRecomputeProgress::Yield) => {
+                    self.operator_states.insert(operator_key, operator);
+                    cooperative_operator_yield().await;
+                    unreachable!("retained recursive hydration yields through operator state")
+                }
+                Ok(super::recursion::HydrationRecomputeProgress::ReadyForArrangementHydration) => {
+                    recursive_as_of
+                        .value()
+                        .pending_hydration_accumulated_deltas(output_desc)
+                }
+                Err(error) => {
+                    self.operator_states.insert(operator_key, operator);
+                    return Err(error);
+                }
             };
             let mut runtime = graph_runtime_view(
                 self.schema,
@@ -2402,6 +2487,25 @@ impl TickEvaluator<'_> {
             );
             hydrate_recursive_arrangements(&mut runtime, recursive, step, accumulated.clone())
                 .await?;
+            if let Some(witness) = step_witness {
+                hydrate_recursive_arrangements(
+                    &mut runtime,
+                    recursive,
+                    witness,
+                    RecordDeltas {
+                        descriptor: output_desc,
+                        deltas: recursive_as_of.value().accumulated_deltas(),
+                    },
+                )
+                .await?;
+            }
+            if recursive_as_of.value().has_pending_hydration() {
+                let (next, step_witness) = recursive_as_of.value_mut().finish_hydration_recompute();
+                recursive_as_of.value_mut().replace_with(next);
+                recursive_as_of
+                    .value_mut()
+                    .replace_step_witness_with(step_witness);
+            }
             recursive_as_of
                 .value_mut()
                 .mark_step_arrangements_hydrated();
@@ -2439,12 +2543,16 @@ impl TickEvaluator<'_> {
             node,
             recursive,
             output_desc,
-            seed,
-            step,
+            nodes,
         )
         .await;
         let deltas = match deltas {
-            Ok(deltas) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Ready(deltas)) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Yield) => {
+                self.operator_states.insert(operator_key, operator);
+                cooperative_operator_yield().await;
+                unreachable!("retained recursive tick yields through operator state")
+            }
             Err(error) => {
                 self.operator_states.insert(operator_key, operator);
                 return Err(error);
@@ -2455,6 +2563,26 @@ impl TickEvaluator<'_> {
             .value_mut()
             .mark_hydrated_input_generation(input_generation);
         self.operator_states.insert(operator_key, operator);
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    fn update_recursive_step_witness(
+        &mut self,
+        recursive_node: NodeId,
+        output_desc: RecordDescriptor,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let key = self.operator_key(recursive_node)?;
+        let Some(OperatorState::Recursive(state)) = self.operator_states.get(&key) else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(recursive_node));
+        };
+        let deltas = if self.context.eval_mode == EvalMode::Hydrate {
+            state.value().step_witness_accumulated_deltas()
+        } else {
+            state.value().step_witness_deltas()
+        };
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -2531,11 +2659,14 @@ impl TickEvaluator<'_> {
                             .evaluation_inputs
                             .as_deref_mut()
                             .ok_or(IvmRuntimeError::EvaluationBlocked)?;
-                        let bytes = match crate::large_values::byte_range_attempt(
+                        inputs.set_chunk_scope(Some(node));
+                        let result = crate::large_values::byte_range_attempt(
                             streaming.cursor().value(),
                             range,
                             inputs,
-                        ) {
+                        );
+                        inputs.set_chunk_scope(None);
+                        let bytes = match result {
                             Ok(bytes) => bytes,
                             Err(IvmRuntimeError::EvaluationBlocked) => {
                                 self.operator_states
@@ -2545,7 +2676,7 @@ impl TickEvaluator<'_> {
                             Err(error) => return Err(error),
                         };
                         let should_yield = streaming.consume_window(&bytes)?;
-                        inputs.release_chunks();
+                        inputs.release_chunks_owned_by(node);
                         if should_yield {
                             streaming.record_yield()?;
                             self.operator_states

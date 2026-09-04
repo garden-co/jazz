@@ -151,13 +151,17 @@ describe("TS Upsert API", () => {
     });
   });
 
-  it("keeps deleted row ids reserved", async () => {
+  it("reports deleted-row reservation through the write handle", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);
 
-    expect(() => db.upsert(app.projects, project.id, { name: "Restored Project" })).toThrow(
-      `Upsert failed: WriteError("row already deleted: ${project.id}")`,
-    );
+    await expect(
+      db.upsert(app.projects, project.id, { name: "Restored Project" }).wait({ tier: "local" }),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "write_rejected",
+      reason: `row already deleted: ${project.id}`,
+    });
   });
 
   it("can use caller-supplied updatedAt on new-row upsert", async () => {

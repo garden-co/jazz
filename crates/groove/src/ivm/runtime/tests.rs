@@ -822,6 +822,121 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     );
 }
 
+/// Alice, Bob, and Carol share a collector after its disposable output memo
+/// is evicted. Rehydrating Bob/Carol must not multiply Alice's resident rows.
+/// Alice opens -> evict memo -> Bob opens -> evict -> Carol opens -> update/delete.
+/// Internal coverage is intentional: forcing this pure-cache eviction is not
+/// a public database operation; the canvas scenario covers the public Db path.
+#[futures_test::test]
+async fn shared_root_collector_rehydration_does_not_multiply_rows() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    write_two_album_rows(&storage, &albums).await;
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [
+            crate::ivm::CollectByField::named("id"),
+            crate::ivm::CollectByField::named("title"),
+        ],
+        Vec::<crate::ivm::TopByOrder>::new(),
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut subscriptions = Vec::new();
+    for _ in 0..3 {
+        runtime.evict_eval_memo_for_tests(0, 0);
+        let subscription = runtime
+            .subscribe([("rows", graph.clone())], &storage)
+            .unwrap();
+        runtime.drive_pending_incremental().await.unwrap();
+        let initial = subscription.try_recv().unwrap();
+        let operations = &initial.terminal_sinks["rows"].operations;
+        assert_eq!(operations.len(), 2);
+        assert!(
+            operations
+                .iter()
+                .all(|op| matches!(op.edit, TerminalEdit::Insert { .. }))
+        );
+        subscriptions.push(subscription);
+    }
+    let old = albums
+        .create(&[Value::U64(1), Value::String("one".into())])
+        .unwrap();
+    let new = albums
+        .create(&[Value::U64(1), Value::String("updated".into())])
+        .unwrap();
+    runtime
+        .tick(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "albums".into(),
+                descriptor: albums,
+                deltas: vec![
+                    RecordDelta {
+                        record: old.into(),
+                        weight: -1,
+                    },
+                    RecordDelta {
+                        record: new.clone().into(),
+                        weight: 1,
+                    },
+                ],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    for subscription in &subscriptions {
+        let update = subscription.try_recv().unwrap();
+        let operations = &update.terminal_sinks["rows"].operations;
+        assert_eq!(operations.len(), 1);
+        let TerminalEdit::Update { value, .. } = &operations[0].edit else {
+            panic!("expected one update: {operations:?}");
+        };
+        assert_eq!(
+            OwnedRecord::new(value.clone(), operations[0].root_descriptor)
+                .to_values()
+                .unwrap(),
+            vec![Value::U64(1), Value::String("updated".into())]
+        );
+    }
+    runtime
+        .tick(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "albums".into(),
+                descriptor: albums,
+                deltas: vec![RecordDelta {
+                    record: new.into(),
+                    weight: -1,
+                }],
+            }],
+            &storage,
+        )
+        .await
+        .unwrap();
+    for subscription in &subscriptions {
+        let update = subscription.try_recv().unwrap();
+        assert!(matches!(
+            update.terminal_sinks["rows"].operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+    }
+    runtime.tick(Vec::new(), &storage).await.unwrap();
+    assert!(
+        subscriptions
+            .iter()
+            .all(|subscription| subscription.try_recv().is_err())
+    );
+}
+
 #[futures_test::test]
 async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
     let schema = albums_schema();
@@ -1635,6 +1750,72 @@ fn deeply_nested_recursive_graph_compiles_on_a_server_sized_stack() {
     assert!(
         compiled.is_ok(),
         "deep recursive graph compilation and source discovery must complete"
+    );
+}
+
+#[test]
+fn deeply_nested_retained_graph_ticks_on_a_server_sized_stack() {
+    // The server shell polls retained graphs directly. This receipt keeps that
+    // evaluator path separate from compilation: a valid, deeply nested policy
+    // carrier must not recursively poll one future per graph node.
+    let completed = std::thread::Builder::new()
+        .name("ivm-deep-tick-receipt".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            futures::executor::block_on(async {
+                let schema = albums_schema();
+                let albums = schema
+                    .table("albums")
+                    .expect("albums table")
+                    .record_schema();
+                let mut runtime = IvmRuntime::new(schema).expect("build runtime");
+                let storage =
+                    MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+                let mut seed = GraphBuilder::table("albums");
+                for _ in 0..1_024 {
+                    seed = seed.filter(PredicateExpr::gt("id", Value::U64(0)));
+                }
+                let graph = GraphBuilder::recursive(
+                    seed,
+                    GraphBuilder::frontier_source("frontier", albums.clone()),
+                    "frontier",
+                    1,
+                );
+                let output = runtime
+                    .add_dedup_graph(&graph)
+                    .expect("compile deeply nested graph")
+                    .node;
+                runtime.add_retainer(output, Retainer::PreparedShape("deep-tick".to_owned()));
+                let row = albums
+                    .create(&[Value::U64(1), Value::String("Blue Train".to_owned())])
+                    .expect("create album row");
+                runtime
+                    .tick(
+                        vec![TableDelta {
+                            variant_tag: 0,
+                            table: "albums".to_owned(),
+                            descriptor: albums,
+                            deltas: vec![RecordDelta {
+                                record: row.into(),
+                                weight: 1,
+                            }],
+                        }],
+                        &storage,
+                    )
+                    .await
+                    .expect("evaluate deeply nested graph");
+                assert!(runtime.retained_node_ids().contains(&output));
+                // This receipt exercises evaluation; derived GraphBuilder
+                // destruction is an unrelated recursive path.
+                std::mem::forget(graph);
+            });
+        })
+        .expect("spawn server-sized stack receipt")
+        .join();
+
+    assert!(
+        completed.is_ok(),
+        "retained deep graph evaluation must not recurse through the owner stack"
     );
 }
 

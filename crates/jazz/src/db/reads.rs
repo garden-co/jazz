@@ -237,6 +237,20 @@ where
             .map_err(Into::into)
     }
 
+    /// Resolve provenance after a storage-suspended node turn releases its
+    /// owner mutex.
+    pub async fn row_provenance_async(
+        &self,
+        row: &CurrentRow,
+    ) -> Result<Option<RowProvenance>, Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .row_provenance(row)
+            .map_err(Into::into)
+    }
+
     /// Read local settled history at an exact global timestamp cut.
     ///
     /// History-incomplete facades return `HistoricalReadRequiresServer` from
@@ -332,6 +346,15 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
+        // Follow the same host-selected authority route as subscription
+        // registration. Storage durability alone cannot identify that route:
+        // a direct core connection may raise Edge to Global, while a relay
+        // connection retains Edge. Local knowledge stays local in either case.
+        let tier = if authorization_mode == QueryAuthorizationMode::ClientLocal {
+            self.client_authority_read_tier(tier)
+        } else {
+            tier
+        };
         let mut node = self.node.node.lock().await;
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
@@ -494,6 +517,16 @@ where
         self.hydrate_rows_for_binding(&mut snapshot.rows).await
     }
 
+    /// Use the host-selected authority tier, matching subscription registration.
+    /// Local reads remain local regardless of the upstream durability floor.
+    fn client_authority_read_tier(&self, tier: DurabilityTier) -> DurabilityTier {
+        if tier >= DurabilityTier::Edge {
+            remote_subscription_tier(tier, self.node.upstream_durability_floor.get())
+        } else {
+            tier
+        }
+    }
+
     /// Tier-gated one-shot relation read evaluated as the database identity.
     pub async fn all_relation_snapshot(
         &self,
@@ -507,7 +540,7 @@ where
                 "relation snapshots do not support include_deleted yet",
             ));
         }
-        let tier = effective_read_tier(&opts);
+        let tier = self.client_authority_read_tier(effective_read_tier(&opts));
         self.node
             .node
             .lock()

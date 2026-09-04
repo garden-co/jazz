@@ -58,6 +58,93 @@ where
     settle_outcome(node, outcome)
 }
 
+/// Ordinary whole-table query used by direct-node benchmark links. The fixture
+/// owns one immutable admitted identity per link, and explicitly registers both
+/// ends before delivering any view; incoming payloads never imply registration.
+pub fn table_subscription(
+    schema: &jazz::schema::JazzSchema,
+    table: &str,
+    identity: jazz::ids::AuthorSubject,
+) -> (
+    jazz::query::ValidatedQuery,
+    jazz::query::Binding,
+    jazz::protocol::SubscriptionKey,
+) {
+    let shape = jazz::query::Query::from(table)
+        .validate(schema)
+        .expect("table query");
+    let binding = shape.bind(BTreeMap::new()).expect("table binding");
+    let subscription = jazz::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: jazz::query::BindingId(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            identity.canonical().as_bytes(),
+        )),
+        read_view: Default::default(),
+    };
+    (shape, binding, subscription)
+}
+
+pub fn register_table_receiver<S>(
+    node: &mut NodeState<S>,
+    schema: &jazz::schema::JazzSchema,
+    table: &str,
+    identity: jazz::ids::AuthorSubject,
+) where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    use jazz::protocol::{DelegatedSessionBinding, RegisterShapeOptions, ShapeAst, Subscribe};
+    let (shape, _, subscription) = table_subscription(schema, table, identity);
+    for message in [
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        },
+        SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: Some(DelegatedSessionBinding {
+                identity,
+                claims: BTreeMap::new(),
+            }),
+        }),
+    ] {
+        apply_and_settle(node, message);
+    }
+}
+
+pub fn table_subscription_update<S>(
+    node: &mut NodeState<S>,
+    peer: &mut jazz::peer::PeerState,
+    schema: &jazz::schema::JazzSchema,
+    table: &str,
+) -> SyncMessage
+where
+    S: OrderedKvStorage,
+{
+    let (shape, binding, subscription) = table_subscription(schema, table, peer.identity());
+    let initial = peer.subscription_result_sets(subscription).is_none();
+    peer.set_subscription_policy_binding(subscription, (peer.identity(), BTreeMap::new()));
+    if initial
+        && let Some(update) = peer
+            .rehydrate_query_for_subscription_with_opts(
+                node,
+                subscription,
+                &shape,
+                &binding,
+                Default::default(),
+            )
+            .expect("open table subscription")
+    {
+        return update;
+    }
+    peer.query_update_for_subscription(node, subscription, &shape, &binding)
+        .expect("table subscription update")
+}
+
 pub fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()

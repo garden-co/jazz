@@ -415,6 +415,33 @@ impl Database {
         Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
     }
 
+    /// Return the durable ordered key/value bytes of Groove's engine-owned
+    /// large-value metadata class for a compatibility receipt.
+    ///
+    /// This deliberately does not decode or expose an application table: the
+    /// The metadata plane has several canonical record shapes selected by its
+    /// key namespace and cannot be represented by one public direct-record-
+    /// store descriptor. Ordinary application code must continue to use
+    /// schema-aware table and direct-store APIs.
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub async fn large_value_metadata_entries_for_compatibility(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                Vec::new(),
+            ))
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(batch) = cursor.next_batch().await? {
+            entries.extend(batch);
+        }
+        Ok(entries)
+    }
+
     pub fn into_storage(self) -> BoxedStorage {
         Rc::try_unwrap(self.storage)
             .unwrap_or_else(|_| panic!("database storage still has an outstanding operation"))
@@ -1301,13 +1328,34 @@ impl Database {
 
     /// Idempotently evict one unaccepted staging root. Jazz uses this mechanism
     /// to enforce its own expiry/admission policy; Groove owns the persisted
-    /// count transition and eventual orphan reclamation.
+    /// count transition and eventual orphan reclamation. Returns `false`
+    /// without mutation when the receipt is absent or a resident large-value
+    /// publication still owns lifecycle serialization; callers may retry after
+    /// that publication becomes durable.
     pub async fn evict_staged_large_value(
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
         let staged_key = staged_large_value_key(id);
+        // This database owns the lifecycle lock on behalf of one or more
+        // publications which the caller must still persist. Waiting for that
+        // same lock would prevent the caller from reaching persistence,
+        // including when this receipt and the resident publication have
+        // different keys or roots. Eviction is idempotent maintenance, so
+        // defer without changing durable state and let the caller retry after
+        // the resident frontier releases the guard.
+        if self.large_value_lifecycle_held.get() {
+            return Ok(false);
+        }
+        if self
+            .resident_storage()
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         let Some(encoded) = self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
@@ -1360,11 +1408,15 @@ impl Database {
         Ok(true)
     }
 
-    /// Drain persisted orphan work without walking row history. Each entry was
-    /// produced by an atomic reference-count transition; deletion is exact and
-    /// idempotent, so a crash leaves the queue entry available for retry.
+    /// Drain work authorized by durable reference counts. Resident metadata is
+    /// a veto only: unpublished activation protects bytes immediately, while
+    /// unpublished deactivation cannot authorize physical deletion.
     pub async fn reclaim_orphaned_large_value_chunks(&self, limit: usize) -> Result<usize, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
+        let _lifecycle = if self.large_value_lifecycle_held.get() {
+            None
+        } else {
+            Some(self.large_value_lifecycle.lock().await)
+        };
         // A request may have authenticated a branch but not yet fetched all of
         // its descendants. Treat the whole provider request/lease population
         // as one coarse ephemeral retainer: reclamation is maintenance work,
@@ -1375,6 +1427,7 @@ impl Database {
         else {
             return Ok(0);
         };
+        let resident = self.resident_storage();
         let mut scan = self
             .storage
             .scan(crate::storage::ScanRequest::prefix(
@@ -1403,22 +1456,33 @@ impl Database {
                 }
                 let node_ref = node_ref_from_key;
                 let node_key = large_value_node_key(&node_ref)?;
-                let Some(encoded_metadata) = self
+                let resident_override =
+                    match resident.staged_point_value(LARGE_VALUE_METADATA_CF, &node_key) {
+                        StagedPointValue::Miss => None,
+                        StagedPointValue::Set(encoded) => {
+                            Some(decode_large_value_node_references(&encoded)?)
+                        }
+                        StagedPointValue::Delete => continue,
+                    };
+                let Some(durable_metadata) = self
                     .storage
                     .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
                     .await?
                 else {
-                    self.storage
-                        .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
-                        .await?;
                     continue;
                 };
-                let metadata = decode_large_value_node_references(&encoded_metadata)?;
-                if metadata.references != 0 || metadata.upload_references != 0 {
-                    self.storage
-                        .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
-                        .await?;
-                    continue;
+                let durable_metadata = decode_large_value_node_references(&durable_metadata)?;
+                let resident_metadata = resident_override.as_ref().unwrap_or(&durable_metadata);
+                match large_value_reclaim_decision(&durable_metadata, resident_metadata) {
+                    LargeValueReclaimDecision::ClearStaleQueue => {
+                        self.storage
+                            .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
+                            .await?;
+                        continue;
+                    }
+                    LargeValueReclaimDecision::WaitForDurableZero
+                    | LargeValueReclaimDecision::ResidentVeto => continue,
+                    LargeValueReclaimDecision::Delete => {}
                 }
                 self.chunk_storage
                     .delete(node_ref.locator, node_ref.object_hash)

@@ -49,8 +49,12 @@ impl Future for YieldOnce {
     }
 }
 
+/// Direct writes own resident recursive continuation turns.  The bounded
+/// evaluator may yield repeatedly, but `commit_batch` must publish its output
+/// before it returns; only genuinely cold storage is allowed to remain pending
+/// for a runtime owner.
 #[futures_test::test]
-async fn deep_recursive_step_evaluates_with_constant_stack() {
+async fn direct_recursive_write_drains_resident_continuations() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let seed = GraphBuilder::table("edges").project(["src", "dst"]);
@@ -73,14 +77,418 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
         .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
         .await
         .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     database.commit_batch(batch).await.unwrap();
 
+    assert!(
+        !database.has_pending_progress(),
+        "a direct resident write drains its self-scheduled recursive slices before returning"
+    );
+
     assert_eq!(
-        expect_recv_vals(&subscription),
+        subscription.recv().unwrap().to_values().unwrap(),
         vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+}
+
+/// Direct work scans every pending evaluation for an explicitly runnable CPU
+/// continuation. Older cold subscriptions stay parked, including more than
+/// one cold queue head, but they must not prevent a later independent
+/// recursive write from publishing its resident result.
+#[futures_test::test]
+async fn direct_recursive_write_drains_behind_multiple_cold_hydrations() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let schema = DatabaseSchema::new([
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("team", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("team", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]);
+    let (storage, control) = TestStorage::controlled(&["edges", "docs", "notes"]);
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    let mut seed = database.open_batch();
+    insert_edge(&mut seed, 1, 1, 2);
+    seed.insert("docs", vec![Value::U64(1), Value::U64(7)]);
+    seed.insert("notes", vec![Value::U64(1), Value::U64(8)]);
+    database.commit_batch(seed).await.unwrap();
+
+    let deep_recursive_graph = || {
+        let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+        let frontier = GraphBuilder::frontier_source(
+            "frontier",
+            RecordDescriptor::new([
+                ("src", ColumnType::U64.clone()),
+                ("dst", ColumnType::U64.clone()),
+            ]),
+        );
+        let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+        let mut step = GraphBuilder::join(frontier, edge_pairs, ["dst"], ["src"]).project_fields([
+            ProjectField::renamed("left.src", "src"),
+            ProjectField::renamed("right.dst", "dst"),
+        ]);
+        for _ in 0..48 {
+            step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
+        }
+        GraphBuilder::recursive(seed, step, "frontier", 16)
+    };
+    let edges = database
+        .subscribe_one_sink(deep_recursive_graph())
+        .await
+        .unwrap();
+    for _ in 0..32 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_recv_vals(&edges),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    control.take_observed();
+    let first_docs = database
+        .subscribe_one_sink(GraphBuilder::table("docs"))
+        .await
+        .unwrap();
+    let second_notes = database
+        .subscribe_one_sink(GraphBuilder::table("notes"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the older docs hydration owns the first cold turn; the later notes hydration remains queued behind it"
+    );
+    assert!(first_docs.try_recv().is_err());
+    assert!(second_notes.try_recv().is_err());
+
+    // The edges scan is already resident. Its no-owner direct opening is
+    // queued behind the older cold requests, so this receipt fails if direct
+    // progress looks only at the queue head instead of every evaluation.
+    let resident_tail = database
+        .subscribe_one_sink(deep_recursive_graph())
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&resident_tail),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)],
+        "a resident direct opening drains behind older cold queue entries"
+    );
+
+    let mut write = database.open_batch();
+    insert_edge(&mut write, 2, 2, 3);
+    let applied = database.apply_batch(write).await.unwrap();
+    assert_eq!(
+        edges.recv().unwrap().to_values().unwrap(),
+        vec![
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ],
+        "the later resident recursive write publishes despite older cold queue entries"
+    );
+    assert_eq!(
+        resident_tail.recv().unwrap().to_values().unwrap(),
+        vec![
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ]
+    );
+    assert!(database.has_pending_progress());
+    assert!(first_docs.try_recv().is_err());
+    assert!(second_notes.try_recv().is_err());
+
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    let mut wakes_before_paused_poll = wakes.0.load(Ordering::Acquire);
+    let mut paused = false;
+    for _ in 0..8 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        let wakes_now = wakes.0.load(Ordering::Acquire);
+        if wakes_now == wakes_before_paused_poll {
+            paused = true;
+            break;
+        }
+        wakes_before_paused_poll = wakes_now;
+    }
+    assert!(
+        paused,
+        "each queued cold opening may self-wake once, but the owner eventually retains the paused request"
+    );
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(
+        wakes.0.load(Ordering::Acquire) > wakes_before_paused_poll,
+        "the owner that observed the cold request receives its later readiness wake"
+    );
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_recv_vals(&first_docs),
+        vec![(vec![Value::U64(1), Value::U64(7)], 1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&second_notes),
+        vec![(vec![Value::U64(1), Value::U64(8)], 1)]
+    );
+    drop(applied);
+}
+
+/// A resident recursive subscription can contain a much deeper graph than the
+/// outer IVM work queue sees: the recursive snapshot walks its seed/step graph
+/// privately. That walk must yield through the runtime owner while retaining
+/// its postorder continuation, so it neither blocks unrelated runtime work nor
+/// replays already-evaluated shared children on every turn.
+#[futures_test::test]
+async fn deep_recursive_hydration_yields_and_preserves_its_snapshot() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).await.unwrap();
+
+    let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
+        ]),
+    );
+    let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let mut step = GraphBuilder::join(frontier, edge_pairs, ["dst"], ["src"]).project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    for _ in 0..48 {
+        step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
+    }
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let subscription = database
+        .subscribe_with_waker(
+            [(
+                "result",
+                GraphBuilder::recursive(seed, step, "frontier", 16),
+            )],
+            Some(&owner_waker),
+        )
+        .unwrap();
+    let mut previous_wakes = 0;
+    let mut yielded = false;
+    for _ in 0..128 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+        yielded = true;
+        let wakes_now = wakes.0.load(Ordering::Acquire);
+        assert!(
+            wakes_now > previous_wakes,
+            "each bounded recursive owner turn schedules exactly one continuation"
+        );
+        previous_wakes = wakes_now;
+    }
+
+    assert!(
+        yielded,
+        "the deep private recursion must not complete in one turn"
+    );
+    assert!(
+        !database.has_pending_progress(),
+        "the retained traversal converges without a hot-loop"
+    );
+    assert_eq!(
+        subscription
+            .recv()
+            .unwrap()
+            .get("result")
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn recursive_hydration_retains_frontiers_until_the_full_closure_is_ready() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    database.commit_batch(batch).await.unwrap();
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let subscription = database
+        .subscribe_with_waker([("result", reachability_graph(16))], Some(&owner_waker))
+        .unwrap();
+    for _ in 0..128 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(
+        !database.has_pending_progress(),
+        "all retained recursive frontiers eventually settle"
+    );
+    assert!(
+        wakes.0.load(Ordering::Acquire) > 0,
+        "frontier phases hand their continuation back to the runtime owner"
+    );
+
+    let mut values = subscription
+        .recv()
+        .unwrap()
+        .get("result")
+        .unwrap()
+        .to_values()
+        .unwrap();
+    sort_pairs_by_value(&mut values);
+    assert_eq!(
+        values,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(1), Value::U64(4)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ]
+    );
+}
+
+/// Retractions force a full recursive snapshot during a live tick. That path
+/// shares the same bounded postorder continuation as initial hydration: a
+/// delete must not trade a correct retraction for an owner-turn monopoly.
+#[futures_test::test]
+async fn recursive_live_recompute_retains_traversal_through_retraction() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+    for _ in 0..128 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    database.commit_batch(batch).await.unwrap();
+    let _initial = expect_recv_vals(&subscription);
+
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    database.commit_batch(batch).await.unwrap();
+    let mut values = expect_recv_vals(&subscription);
+    sort_pairs_by_value(&mut values);
+    assert_eq!(
+        values,
+        [
+            (vec![Value::U64(1), Value::U64(3)], -1),
+            (vec![Value::U64(1), Value::U64(4)], -1),
+            (vec![Value::U64(2), Value::U64(3)], -1),
+            (vec![Value::U64(2), Value::U64(4)], -1),
+        ]
     );
 }
 
@@ -256,6 +664,10 @@ async fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() 
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     database.commit_batch(batch).await.unwrap();
+    assert!(
+        !database.has_pending_progress(),
+        "prepared recursive direct writes drain their resident continuation turns"
+    );
     let mut initial = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut initial);
     assert_eq!(
@@ -588,6 +1000,104 @@ async fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
     assert!(values.contains(&(vec![Value::U64(1), Value::U64(4)], 1)));
 }
 
+/// A recursion-owned side stream observes exactly the physical rows evaluated
+/// by each step.  It is intentionally a bag: two paths may derive one public
+/// reachability tuple, while the public recursive result remains set-like.
+/// The side stream is owned by the same recursive state, so an edge retraction
+/// recomputes both streams together instead of leaving stale provenance.
+#[futures_test::test]
+async fn recursive_step_witness_tracks_bounded_paths_and_retractions() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let reach = RecordDescriptor::new([
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
+    ]);
+    let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source("frontier", reach);
+    let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let step_input = GraphBuilder::join(frontier.clone(), edge_pairs.clone(), ["dst"], ["src"]);
+    let step = step_input.clone().project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    // Keep the raw evaluated edge identity in the generic side output.  The
+    // public recursion is depth-bounded at one step round; an edge from the
+    // final frontier must not appear as a witness because it was never run.
+    let recursive =
+        GraphBuilder::recursive_with_step_witness(seed, step, step_input, "frontier", 1, true);
+    let subscription = database
+        .subscribe([
+            ("reach", recursive.clone()),
+            (
+                "witness",
+                GraphBuilder::recursive_step_witness(recursive.clone()),
+            ),
+        ])
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    // Duplicate outgoing rows derive the same public `(1, 3)` tuple but are
+    // distinct physical evaluated step witnesses.
+    insert_edge(&mut batch, 4, 2, 3);
+    // A cycle is safe because the public recursive frontier remains set-like.
+    // The witness still records the bounded step that actually traversed it.
+    insert_edge(&mut batch, 5, 3, 2);
+    database.commit_batch(batch).await.unwrap();
+    let initial = subscription.recv().unwrap();
+    let mut public = initial.get("reach").unwrap().to_values().unwrap();
+    sort_pairs_by_value(&mut public);
+    assert_eq!(
+        public,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(2)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(2)], 1),
+            (vec![Value::U64(3), Value::U64(3)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ],
+        "max depth one excludes the unevaluated 1→4 second-step path",
+    );
+    let witness = initial.get("witness").unwrap().to_values().unwrap();
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight > 0 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "the first evaluated physical step is retained"
+    );
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight == 2 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "duplicate path witnesses retain their bag semantics"
+    );
+    assert!(
+        witness.iter().any(|(row, weight)| {
+            *weight > 0 && row == &vec![Value::U64(3), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "the witness records the cycle step evaluated within the configured depth bound"
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    database.commit_batch(batch).await.unwrap();
+    let retracted = subscription.recv().unwrap();
+    let witness_retractions = retracted.get("witness").unwrap().to_values().unwrap();
+    assert!(
+        witness_retractions.iter().any(|(row, weight)| {
+            *weight < 0 && row == &vec![Value::U64(1), Value::U64(2), Value::U64(2), Value::U64(3)]
+        }),
+        "edge deletion retracts the recursion-owned witness rather than retaining stale provenance"
+    );
+}
+
 #[futures_test::test]
 async fn recursive_graph_subscriptions_recompute_after_edge_update() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
@@ -710,6 +1220,27 @@ async fn recursive_graph_subscriptions_converge_on_self_cycles() {
     let values = subscription.recv().unwrap().to_values().unwrap();
 
     assert_eq!(values, [(vec![Value::U64(1), Value::U64(1)], 1)]);
+}
+
+/// The direct async Database API is itself the runtime owner. A resident
+/// recursive snapshot may use several cooperative IVM turns, but callers must
+/// not need to provide an external wake loop before they can consume it.
+#[futures_test::test]
+async fn direct_recursive_subscription_open_drives_resident_snapshot() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .expect("direct subscription opening drives the recursive snapshot");
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
 }
 
 #[futures_test::test]

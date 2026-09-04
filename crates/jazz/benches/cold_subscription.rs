@@ -102,8 +102,9 @@ fn current_state_history_depth_contract() {
         // lookup behind the current-index witness, not a history scan.
         reset_phase_counters(&mut [bench.core_mut()]);
         let mut peer = PeerState::new();
-        let update = block_on(peer.current_rows_update(bench.core_mut(), TABLE))
-            .expect("serve current rows to fresh peer");
+        let schema = bench.schema.clone();
+        let update =
+            support::table_subscription_update(bench.core_mut(), &mut peer, &schema, TABLE);
         let metrics = bench.core().storage_read_metrics();
         let query_metrics = bench.core().query_engine_read_metrics().clone();
         let tick_metrics = normalized_tick_metrics(bench.core().last_tick_metrics());
@@ -132,10 +133,20 @@ fn current_state_history_depth_contract() {
         let winner_wire_bytes = postcard::to_allocvec(&bundles[0].versions[0])
             .expect("encode delivered winner body")
             .len();
+        // Authorities send exact inputs, not a second terminal result. The
+        // receiver's ordinary IVM query must materialize the one current row.
+        assert!(payload.result_member_adds.is_empty());
+        let (_receiver_dir, mut receiver) = open_node(node(3), schema.clone());
+        support::register_table_receiver(&mut receiver, &schema, TABLE, peer.identity());
+        support::apply_and_settle(&mut receiver, update.clone());
+        let (shape, binding, _) = support::table_subscription(&schema, TABLE, peer.identity());
+        let received = block_on(receiver.query_rows(&shape, &binding, DurabilityTier::Global))
+            .expect("receiver materializes current row");
+        assert_eq!(received.len(), 1, "depth {depth}: one receiver result");
         assert_eq!(
-            payload.result_member_adds.len(),
-            1,
-            "depth {depth}: IVM materializes one logical current row"
+            received[0].row_uuid(),
+            row(),
+            "depth {depth}: exact logical row"
         );
         assert!(
             metrics.history_rows.reads <= 2
@@ -313,8 +324,9 @@ impl ColdSubscriptionBench {
         let start = Instant::now();
         match tier {
             DurabilityTier::Global => {
-                let _ = block_on(peer.current_rows_update(self.core_mut(), TABLE))
-                    .expect("cold global current rows update");
+                let schema = self.schema.clone();
+                let _ =
+                    support::table_subscription_update(self.core_mut(), &mut peer, &schema, TABLE);
             }
             DurabilityTier::Local => {
                 let _ = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Local))

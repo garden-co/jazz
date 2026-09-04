@@ -3,6 +3,8 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
+import { resolve } from "node:path";
+import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   blockJazzServerNetwork,
   jazzServerInfo,
@@ -10,6 +12,10 @@ import {
   stopJazzServerByUrl,
   unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
+
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its admitted WASM package");
 
 function jazzBrowserTopologyLog(
   _context: unknown,
@@ -21,6 +27,13 @@ function jazzBrowserTopologyLog(
 }
 
 export default defineConfig({
+  // The workspace browser partition runs this project while the package's unit
+  // and provider projects run in the Node partition. They must not concurrently
+  // replace Vite's optimized-dependency cache while Chromium imports a test.
+  cacheDir: "node_modules/.vite-record-player-topology",
+  resolve: {
+    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+  },
   optimizeDeps: {
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },
@@ -34,10 +47,14 @@ export default defineConfig({
     // This project owns the Jazz server lifecycle. Keep the mocked provider
     // receipt in vitest.config.provider.ts so `test:browser` remains a true
     // topology-only gate.
-    include: ["tests/browser/topology.e2e.test.ts"],
+    include: [topologyReceipt],
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
+      // Other parallel Vitest projects can reach any port in the default
+      // range. Let Vite retry EADDRINUSE instead of treating a source-code
+      // port convention as an operating-system reservation.
+      api: { port: 63318, strictPort: false },
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
