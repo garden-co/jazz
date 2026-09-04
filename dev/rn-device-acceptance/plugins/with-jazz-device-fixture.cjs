@@ -1,6 +1,6 @@
 /* Expo prebuild hook: injects the test-only trusted fixture source into the
  * generated host. It intentionally does not expose configuration to JS. */
-const { withDangerousMod } = require("@expo/config-plugins");
+const { withAndroidManifest, withDangerousMod } = require("@expo/config-plugins");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -35,6 +35,13 @@ function injectAndroidBuildConfig(root) {
 }
 
 module.exports = function withJazzDeviceFixture(config) {
+  config = withAndroidManifest(config, (mod) => {
+    const application = mod.modResults.manifest.application?.[0];
+    if (!application) throw new Error("Expo Android manifest has no application");
+    application.$["android:networkSecurityConfig"] = "@xml/jazz_device_network_security";
+    return mod;
+  });
+  config = copyTemplate(config, "android", "android/jazz_device_network_security.xml", "app/src/main/res/xml/jazz_device_network_security.xml");
   const androidSource = "app/src/main/java/dev/jazz/rndeviceacceptance/";
   config = copyTemplate(
     config,

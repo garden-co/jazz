@@ -10,6 +10,7 @@ import android.util.Base64
 import android.os.Build
 import android.system.Os
 import android.util.Log
+import android.security.NetworkSecurityPolicy
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -50,6 +51,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "public-client-read-failed",
     "public-client-publish-failed",
     "public-client-core-observation-failed",
+    "core-observation-cleartext-denied",
     "public-client-shutdown-failed",
     "public-client-relay-readback-failed",
     "scope-isolation-failed",
@@ -151,6 +153,12 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         ?: error("acceptance activity is unavailable")
       val endpoint = activity.intent.getStringExtra("jazzDeviceCoreObservationEndpoint")
         ?: error("missing Core observation endpoint")
+      val url = URL(endpoint)
+      if (url.protocol == "http" && !NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(url.host)) {
+        Log.e("JazzDeviceAcceptance", "core-observation-cleartext-denied")
+        promise.reject("E_JAZZ_DEVICE_CORE", "Core observation fixture host denied by network policy")
+        return
+      }
       val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
         ?: error("missing acceptance run nonce")
       val identity = JSONObject().apply {
@@ -162,7 +170,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
       Thread({
         var connection: HttpURLConnection? = null
         try {
-          val request = URL(endpoint).openConnection() as HttpURLConnection
+          val request = url.openConnection() as HttpURLConnection
           connection = request
           request.requestMethod = "POST"
           request.connectTimeout = 5_000

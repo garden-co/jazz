@@ -1,3 +1,4 @@
+import { verifyAndroidReleaseNetworkPolicy } from "./android-network-policy.mjs";
 import { startCoreObservationControl } from "./core-observation-control.mjs";
 import { startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
 import { randomUUID } from "node:crypto";
@@ -17,6 +18,7 @@ verifyAndroidRelayStage({
   packageRoot: relayRoot,
   sourceRevision: process.env.JAZZ_DEVICE_RELAY_SOURCE_REVISION,
 });
+verifyAndroidReleaseNetworkPolicy(resolve(import.meta.dirname, "../android"));
 const androidAdb = (args) => adb(args, { serial });
 
 // The unfiltered emulator buffer is noisy enough to make `adb logcat -d`
