@@ -3084,6 +3084,9 @@ impl NativeRelayClient {
                 }
                 !foregrounds.is_empty()
             };
+            // No scheduler is the core's explicit manual-driving mode. An
+            // installed scheduler with no recipient suppresses that mode's
+            // second serve pass without arranging a replacement owner turn.
             worker
                 .persistent
                 .set_tick_scheduler(has_foreground_scheduler.then(|| {
@@ -7174,6 +7177,99 @@ mod tests {
         let old_first_foreground = NodeUuid::from_bytes(deterministic);
         assert_ne!(before_restart.node, old_first_foreground);
         assert_ne!(after_restart.node, old_first_foreground);
+    }
+
+    #[test]
+    fn retained_pump_waker_reaches_live_siblings_and_retires_closed_callbacks() {
+        // A suspended future's actual Context waker and the raw platform
+        // callback lifetime are host mechanics, so exercise them at this
+        // internal owner boundary rather than substituting a Db test executor.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("wake.sqlite"),
+            "wake",
+            &permissive_schema(),
+            0x61,
+        );
+        let a = fixture.open_foreground(&capability);
+        let b = fixture.open_foreground(&capability);
+        let a_wake = Arc::new(QueuedNativeWake::active());
+        let b_wake = Arc::new(QueuedNativeWake::active());
+        for (foreground, wake) in [(a, &a_wake), (b, &b_wake)] {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        fixture.lease,
+                        foreground,
+                        Some(queue_native_wake),
+                        Arc::as_ptr(wake) as *mut c_void,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+        }
+        let client = unsafe {
+            (*fixture.host)
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(a)
+                .unwrap()
+                .clone()
+        };
+        let captured = Arc::new(Mutex::new(None::<Waker>));
+        let captured_by_future = Arc::clone(&captured);
+        let id = client.id;
+        client
+            .relay
+            .run(move |worker| {
+                worker.clients.get_mut(&id).unwrap().tick =
+                    Some(Box::pin(std::future::poll_fn(move |context| {
+                        *captured_by_future.lock().unwrap() = Some(context.waker().clone());
+                        Poll::Pending
+                    })));
+                Ok(())
+            })
+            .unwrap();
+        fixture.tick(a);
+        let waker = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("pump polls the retained future");
+        a_wake.queued.lock().unwrap().clear();
+        b_wake.queued.lock().unwrap().clear();
+        waker.wake_by_ref();
+        assert_eq!(
+            a_wake.queued(),
+            1,
+            "future readiness schedules its foreground"
+        );
+        assert_eq!(
+            b_wake.queued(),
+            1,
+            "future readiness also reaches a live sibling"
+        );
+        assert_eq!(
+            fixture.execute(a, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        b_wake.queued.lock().unwrap().clear();
+        waker.wake_by_ref();
+        assert_eq!(
+            b_wake.queued(),
+            1,
+            "the shared future can outlive its original foreground"
+        );
+        assert_eq!(a_wake.callbacks_after_cancel.load(Ordering::Acquire), 0);
+        assert_eq!(
+            fixture.execute(b, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        waker.wake_by_ref();
+        assert_eq!(a_wake.callbacks_after_cancel.load(Ordering::Acquire), 0);
+        assert_eq!(b_wake.callbacks_after_cancel.load(Ordering::Acquire), 0);
     }
 
     #[test]
