@@ -69,10 +69,11 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
   client.
 </Callout>
 
-Jazz requires both JWT `iss` and `sub`. It keeps their admitted values available as
-`session.claims.iss` and `session.claims.sub`, then derives the separate logical `session.user`
-from their canonical pair for every write. Two providers may issue the same
-`sub` without becoming the same Jazz author; `$createdBy` distinguishes them by `iss`.
+Jazz requires both JWT `iss` and `sub`. It derives the logical `session.user` from their canonical
+pair for every write. The complete verified JWT payload, including those registered fields, is
+inspectable through public `session.claims`, but it never creates a second authorship identity.
+Two providers may issue the same `sub` without becoming the same Jazz author; `$createdBy`
+distinguishes them by `iss`.
 Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
 
 - In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
@@ -84,9 +85,10 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`; provider claims retain
-  their raw admitted values under `session.claims`. Authorship identity is the exact `[iss, sub]`
-  pair. Changing either component creates a different author.
+  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`. The complete verified JWT
+  payload, including registered fields such as `iss` and `sub`, remains inspectable under
+  `session.claims`; none of those fields is a second authorship path. Authorship identity is the
+  exact `[iss, sub]` pair, so changing either component creates a different author.
 </Callout>
 
 ### Managing JWT changes on a live client

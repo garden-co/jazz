@@ -21,7 +21,7 @@ describe("auth-state", () => {
       jwtToken: makeJwt({
         iss: "https://issuer.example",
         sub: "alice",
-        claims: { role: "reader" },
+        role: "reader",
       }),
     });
 
@@ -32,7 +32,7 @@ describe("auth-state", () => {
       error: "expired",
       session: {
         user: canonicalAuthorSubject("https://issuer.example", "alice"),
-        claims: { iss: "https://issuer.example", sub: "alice", role: "reader" },
+        claims: { role: "reader" },
         authMode: "external",
       },
     });

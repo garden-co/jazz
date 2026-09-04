@@ -1,5 +1,11 @@
 import { expect, it, vi } from "vitest";
-import { PostcardWriter, createRecord, writeDescriptor } from "./native-codec.js";
+import {
+  PostcardWriter,
+  createRecord,
+  writeNativeRowDescriptor,
+  type DescriptorField,
+  type NativeRowDescriptorField,
+} from "./native-codec.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import {
@@ -28,6 +34,15 @@ const testSchema = {
 } satisfies WasmSchema;
 const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
 
+function physicalNativeDescriptor(
+  descriptor: readonly DescriptorField[],
+): NativeRowDescriptorField[] {
+  return descriptor.map((field) => {
+    if (field.name === undefined) throw new Error("test native descriptor field requires a name");
+    return { name: field.name, valueType: field.valueType, kind: "physical-column" };
+  });
+}
+
 type EncodedTestRow = {
   table: string;
   rowId: Uint8Array;
@@ -46,7 +61,7 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
     const [table, tableRows] = Array.from(byTable.entries())[batchIndex]!;
     const descriptor = [{ name: "title", valueType: { tag: 8 } }];
     batch.string(table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);

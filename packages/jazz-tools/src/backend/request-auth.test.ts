@@ -152,7 +152,7 @@ describe("backend request auth", () => {
     const token = signHs256Jwt({
       sub: "user-subject",
       iss: "https://issuer.example",
-      claims: { role: "editor" },
+      role: "editor",
     });
 
     await expect(
@@ -229,7 +229,7 @@ describe("backend request auth", () => {
     const token = signHs256Jwt({
       sub: "user-subject",
       iss: "https://issuer.example",
-      claims: { role: "editor" },
+      role: "editor",
     });
 
     await expect(
@@ -503,7 +503,7 @@ describe("backend request auth", () => {
     const token = signHs256Jwt({
       sub: "user-subject",
       iss: "https://issuer.example",
-      claims: { role: "editor" },
+      role: "editor",
     });
 
     await expect(
@@ -593,7 +593,7 @@ describe("backend request auth", () => {
     const token = signHs256Jwt({
       sub: " user-subject ",
       iss: " https://issuer.example ",
-      claims: { role: "editor" },
+      role: "editor",
     });
 
     await expect(
