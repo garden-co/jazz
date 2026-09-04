@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -368,6 +368,94 @@ test("native fingerprints agree across clean worktree locations", () => {
   assert.equal(nativeArtifactFingerprint(first, "wasm"), nativeArtifactFingerprint(second, "wasm"));
   assert.equal(nativeArtifactFingerprint(first, "napi"), nativeArtifactFingerprint(second, "napi"));
 });
+
+test("clean CRLF checkout retains the committed NAPI ABI identity", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+    const baseline = nativeArtifactFingerprint(root, "napi", "release");
+
+    git(root, ["config", "core.autocrlf", "true"]);
+    const source = join(root, "crates/jazz-napi/src/lib.rs");
+    rmSync(source);
+    git(root, ["checkout", "--", "crates/jazz-napi/src/lib.rs"]);
+    assert.match(readFileSync(source, "utf8"), /\r\n/);
+    assert.equal(nativeArtifactFingerprint(root, "napi", "release"), baseline);
+
+    writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// planted dirty source\r\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), baseline);
+    rmSync(root, { recursive: true, force: true });
+  }));
+
+test("NAPI provenance batches real-size CRLF inputs without masking staged or dirty sources", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const source = join(root, "crates/jazz-napi/src/lib.rs");
+    writeFileSync(source, "// real-size provenance π input\n".repeat(60_000));
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+    const baseline = nativeArtifactFingerprint(root, "napi", "release");
+
+    git(root, ["config", "core.autocrlf", "true"]);
+    rmSync(source);
+    git(root, ["checkout", "--", "crates/jazz-napi/src/lib.rs"]);
+    assert.match(readFileSync(source, "utf8"), /\r\n/);
+    assert.equal(nativeArtifactFingerprint(root, "napi", "release"), baseline);
+
+    const original = readFileSync(source);
+    writeFileSync(source, "// staged replacement\r\n");
+    git(root, ["add", "crates/jazz-napi/src/lib.rs"]);
+    const staged = nativeArtifactFingerprint(root, "napi", "release");
+    writeFileSync(source, original);
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), staged);
+    rmSync(root, { recursive: true, force: true });
+  }));
+
+test("NAPI provenance reads compiler-visible symlink and clean-filter source bytes", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const source = join(root, "crates/jazz-napi/src/lib.rs");
+    const target = join(root, "shared-source.rs");
+    writeFileSync(target, "// source A\n");
+    rmSync(source);
+    symlinkSync("../../../shared-source.rs", source);
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "symlink fixture"]);
+    const symlinkBaseline = nativeArtifactFingerprint(root, "napi", "release");
+    writeFileSync(target, "// source B\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), symlinkBaseline);
+    rmSync(root, { recursive: true, force: true });
+
+    const filtered = fixture();
+    const filteredSource = join(filtered, "crates/jazz-napi/src/lib.rs");
+    writeFileSync(filteredSource, "pub const FLAG: bool = true;\n");
+    writeFileSync(join(filtered, ".gitattributes"), "crates/jazz-napi/src/lib.rs filter=review\n");
+    git(filtered, ["init", "--quiet"]);
+    git(filtered, ["config", "user.email", "tests@example.invalid"]);
+    git(filtered, ["config", "user.name", "Jazz tests"]);
+    git(filtered, ["config", "filter.review.clean", "sed s/false/true/g"]);
+    git(filtered, ["config", "filter.review.smudge", "cat"]);
+    git(filtered, ["add", "."]);
+    git(filtered, ["commit", "--quiet", "-m", "filtered fixture"]);
+    const filterBaseline = nativeArtifactFingerprint(filtered, "napi", "release");
+    writeFileSync(filteredSource, "pub const FLAG: bool = false;\n");
+    assert.equal(
+      execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: filtered, encoding: "utf8" }),
+      "",
+    );
+    assert.notEqual(nativeArtifactFingerprint(filtered, "napi", "release"), filterBaseline);
+    rmSync(filtered, { recursive: true, force: true });
+  }));
 
 test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {
   const root = fixture();
