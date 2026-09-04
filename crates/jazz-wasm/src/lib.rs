@@ -5325,7 +5325,8 @@ mod dynamic_schema_view_tests {
         );
     }
 
-    #[test]
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn wasm_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
         let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = claims_from_js(
