@@ -175,8 +175,8 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
 
 /// Alice prepares a second query while her first cold read owns the async node
 /// turn. This isolates #2497 below NAPI and the TypeScript adapter: query
-/// preparation is still a synchronous entry point, so it must not re-enter a
-/// node operation suspended on storage.
+/// runtime preparation must wait without re-entering a node operation
+/// suspended on storage, then make progress when that owner is released.
 ///
 /// alice/read A ──cold scan──► node mutex
 /// alice/prepare B ──────────► same database
@@ -224,7 +224,28 @@ fn reproduces_sync_query_preparation_reentering_a_cold_read() {
         "the first query must own a cold storage operation"
     );
 
-    let _ = db.prepare_query(&table);
+    let mut preparation = Box::pin(db.prepare_query_async(&table));
+    assert!(matches!(
+        preparation.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    control.resume();
+    assert_eq!(block_on(first).expect("first read completes").len(), 1);
+    let second = block_on(preparation).expect("waiting preparation completes");
+    assert_eq!(
+        block_on(db.all(
+            &second,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            }
+        ))
+        .expect("second read completes")
+        .len(),
+        1
+    );
 }
 
 /// Transaction relation reads use the same async owner/query path as ordinary

@@ -97,6 +97,8 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
+  prepareQueryAsync(query: Uint8Array, author?: Uint8Array | null, claims?: unknown): PendingNativePreparation
+  subscribeAsync(query: PreparedQuery, opts?: unknown, author?: Uint8Array | null): PendingNativeSubscription
   /**
    * Execute an ordinary prepared read. The optional transaction id selects
    * that transaction's snapshot and staged overlay; an explicit author
@@ -424,4 +426,13 @@ export interface VerifyTokenResult {
   ok: boolean
   id: string
   error?: string
+}
+
+export declare class PendingNativePreparation {
+  poll(): PreparedQuery | null
+  cancel(): void
+}
+export declare class PendingNativeSubscription {
+  poll(): Subscription | null
+  cancel(): void
 }

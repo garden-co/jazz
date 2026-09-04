@@ -245,9 +245,95 @@ pub struct WasmPreparedQuery {
     inner: PreparedQuery,
 }
 
+type PendingWasmOperation<T> = RefCell<Option<Pin<Box<dyn Future<Output = Result<T, JsValue>>>>>>;
+
+#[wasm_bindgen]
+pub struct WasmPendingPreparation {
+    future: PendingWasmOperation<WasmPreparedQuery>,
+}
+
+#[wasm_bindgen]
+impl WasmPendingPreparation {
+    pub fn poll(&self) -> Result<Option<WasmPreparedQuery>, JsValue> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(to_js_error("native operation is complete or cancelled"));
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmPendingSubscription {
+    future: PendingWasmOperation<JsValue>,
+}
+
+#[wasm_bindgen]
+impl WasmPendingSubscription {
+    pub fn poll(&self) -> Result<Option<JsValue>, JsValue> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(to_js_error("native operation is complete or cancelled"));
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+    }
+}
+
 #[wasm_bindgen(js_name = QueryAttachment)]
 pub struct WasmQueryAttachment {
-    inner: QueryAttachment,
+    state: RefCell<WasmQueryAttachmentState>,
+}
+
+enum WasmQueryAttachmentState {
+    Pending(Pin<Box<dyn Future<Output = Result<QueryAttachment, JsValue>>>>),
+    Ready(QueryAttachment),
+    Detached,
+}
+
+impl WasmQueryAttachment {
+    fn ready(&self) -> Result<Option<QueryAttachment>, JsValue> {
+        let state = self.state.replace(WasmQueryAttachmentState::Detached);
+        let WasmQueryAttachmentState::Pending(mut future) = state else {
+            let result = match &state {
+                WasmQueryAttachmentState::Ready(inner) => Some(inner.clone()),
+                _ => None,
+            };
+            self.state.replace(state);
+            return Ok(result);
+        };
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => {
+                let inner = result?;
+                self.state
+                    .replace(WasmQueryAttachmentState::Ready(inner.clone()));
+                Ok(Some(inner))
+            }
+            Poll::Pending => {
+                self.state
+                    .replace(WasmQueryAttachmentState::Pending(future));
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -1058,24 +1144,6 @@ impl WasmDbInner {
         ))
     }
 
-    fn attach_query(
-        &self,
-        query: &PreparedQuery,
-        opts: ReadOpts,
-        open_tx: Option<OpenTransactionId>,
-        author: Option<AuthorSubject>,
-    ) -> Result<QueryAttachment, jazz::db::Error> {
-        with_wasm_db!(self, |db| match (open_tx, author) {
-            (Some(open_tx), Some(author)) =>
-                db.attach_query_in_transaction_with_opts_for_identity(query, open_tx, opts, author,),
-            (Some(open_tx), None) => {
-                db.attach_query_in_transaction_with_opts(query, open_tx, opts)
-            }
-            (None, Some(author)) => db.attach_query_with_opts_for_identity(query, opts, author),
-            (None, None) => db.attach_query_with_opts(query, opts),
-        })
-    }
-
     fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         with_wasm_db!(self, |db| db.query_attachment_is_covered(attachment))
     }
@@ -1849,6 +1917,35 @@ impl WasmDb {
         })
     }
 
+    #[wasm_bindgen(js_name = prepareQueryAsync)]
+    pub fn prepare_query_async(
+        &self,
+        query: Vec<u8>,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<WasmPendingPreparation, JsValue> {
+        let admission = author
+            .map(|author| {
+                let author = author_id_from_bytes(&author)?;
+                Ok::<_, JsValue>((author, claims_from_js(author, claims)?))
+            })
+            .transpose()?;
+        let query: Query = postcard::from_bytes(&query)
+            .map_err(|err| to_js_error(format!("decode query: {err}")))?;
+        let db = self.open_inner()?;
+        Ok(WasmPendingPreparation {
+            future: RefCell::new(Some(Box::pin(async move {
+                let inner = with_wasm_db!(&db, |db| db.prepare_query_async(&query).await)
+                    .map_err(to_js_error)?;
+                let inner = match admission {
+                    Some((author, claims)) => inner.with_identity_claims(author, claims),
+                    None => inner,
+                };
+                Ok(WasmPreparedQuery { inner })
+            }))),
+        })
+    }
+
     #[wasm_bindgen(js_name = all)]
     pub fn all(
         &self,
@@ -2104,6 +2201,33 @@ impl WasmDb {
         subscription_stream_to_js(inner, stream)
     }
 
+    #[wasm_bindgen(js_name = subscribeAsync)]
+    pub fn subscribe_async(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+        author: Option<Vec<u8>>,
+    ) -> Result<WasmPendingSubscription, JsValue> {
+        let opts = read_opts_from_js(opts)?;
+        let author = match author {
+            Some(author) => Some(author_id_from_bytes(&author)?),
+            None if self.trusted_backend => Some(AuthorSubject::SYSTEM),
+            None => None,
+        };
+        let db = self.open_inner()?;
+        let query = query.inner.clone();
+        Ok(WasmPendingSubscription {
+            future: RefCell::new(Some(Box::pin(async move {
+                let stream = with_wasm_db!(&db, |db| match author {
+                    Some(author) => db.subscribe_for_identity(&query, opts, author).await,
+                    None => db.subscribe(&query, opts).await,
+                })
+                .map_err(to_js_error)?;
+                subscription_stream_to_js(db, stream)
+            }))),
+        })
+    }
+
     /// Attach query coverage using one native entry point. An optional open
     /// transaction selects its frozen snapshot; an explicit author selects
     /// trusted-serving authorization. With no author, an explicit backend
@@ -2126,25 +2250,40 @@ impl WasmDb {
             None if self.trusted_backend => Some(AuthorSubject::SYSTEM),
             None => None,
         };
+        let db = self.open_inner()?;
+        let query = query.inner.clone();
         Ok(WasmQueryAttachment {
-            inner: self
-                .open_inner()?
-                .attach_query(&query.inner, opts, open_tx, author)
-                .map_err(to_js_error)?,
+            state: RefCell::new(WasmQueryAttachmentState::Pending(Box::pin(async move {
+                let inner = with_wasm_db!(&db, |db| db
+                    .attach_query_with_opts_async(&query, opts, open_tx, author)
+                    .await)
+                .map_err(to_js_error)?;
+                Ok(inner)
+            }))),
         })
     }
 
     #[wasm_bindgen(js_name = queryAttachmentIsCovered)]
-    pub fn query_attachment_is_covered(&self, attachment: &WasmQueryAttachment) -> bool {
-        self.open_inner()
-            .map(|inner| inner.query_attachment_is_covered(&attachment.inner))
-            .unwrap_or(false)
+    pub fn query_attachment_is_covered(
+        &self,
+        attachment: &WasmQueryAttachment,
+    ) -> Result<bool, JsValue> {
+        let Some(attachment) = attachment.ready()? else {
+            return Ok(false);
+        };
+        Ok(self
+            .open_inner()
+            .map(|inner| inner.query_attachment_is_covered(&attachment))
+            .unwrap_or(false))
     }
 
     #[wasm_bindgen(js_name = detachQuery)]
     pub fn detach_query(&self, attachment: &WasmQueryAttachment) {
-        if let Ok(inner) = self.open_inner() {
-            inner.detach_query(attachment.inner.clone());
+        let state = attachment.state.replace(WasmQueryAttachmentState::Detached);
+        if let WasmQueryAttachmentState::Ready(attachment) = state {
+            if let Ok(inner) = self.open_inner() {
+                inner.detach_query(attachment);
+            }
         }
     }
 

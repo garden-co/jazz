@@ -226,6 +226,17 @@ type NativeDb = {
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
+  prepareQueryAsync?(
+    query: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): PendingNativeOperation<PreparedQuery>;
+  subscribeAsync?(
+    query: PreparedQuery,
+    opts: unknown,
+    author?: Uint8Array,
+  ): PendingNativeOperation<ReadableStream<unknown> | Subscription>;
+
   subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
     query: PreparedQuery,
@@ -550,6 +561,8 @@ type RuntimeSession = {
   /** Module-owned marker selecting backend authority, never a public subject. */
   backendAuthority: boolean;
 };
+
+type PendingNativeOperation<T> = { poll(): T | null; cancel(): void };
 
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
@@ -1970,7 +1983,6 @@ export class NativeRuntimeAdapter implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
@@ -1988,12 +2000,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
+      this.applySessionClaims(session);
       await this.waitForStrictRemoteQueryTransport(tier);
       if (this.closed) return [];
       const payload = await this.readRelationQueryForContext(coreQueryJson, opts, readContext);
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
-    const query = this.prepareQuery(coreQueryJson);
+    const query = await this.prepareQueryForRead(coreQueryJson, session);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
     if (!pendingTx) {
@@ -2047,33 +2060,16 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    let nativeSubscription: ReadableStream<unknown> | Subscription;
-    let preparedQuery: PreparedQuery | null = null;
-    try {
-      if (usesNativeRelationApi) {
-        nativeSubscription = this.subscribeRelationForContext(queryJson, opts, readContext);
-      } else {
-        const query = this.prepareQuery(queryJson);
-        preparedQuery = query;
-        nativeSubscription = this.subscribeForContext(query, opts, readContext);
-      }
-    } catch (error) {
-      const nativeStack = error instanceof Error ? error.stack : undefined;
-      throw new Error(
-        `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
-      );
-    }
     this.subscriptions.set(handle, {
-      sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
+      sources: [],
       queryJson,
-      query: preparedQuery,
+      query: null,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -2092,6 +2088,37 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredPlaceholderRows: 0,
       deferredPlaceholderBytes: 0,
       cancelled: false,
+    });
+    const subscription = this.subscriptions.get(handle)!;
+    void (async () => {
+      let native: ReadableStream<unknown> | Subscription;
+      if (usesNativeRelationApi) {
+        this.applySessionClaims(session);
+        native = this.subscribeRelationForContext(queryJson, opts, readContext);
+      } else {
+        const query = await this.prepareQueryForRead(
+          queryJson,
+          session,
+          () => subscription.cancelled,
+        );
+        if (subscription.cancelled || this.closed) return;
+        subscription.query = query;
+        native = this.db.subscribeAsync
+          ? await this.awaitNativeOperation(
+              this.db.subscribeAsync(query, opts, this.nativeReadAuthor(readContext)),
+              () => subscription.cancelled,
+            )
+          : this.subscribeForContext(query, opts, readContext);
+      }
+      subscription.sources = [{ source: subscriptionSource(native), reading: false }];
+      if (subscription.cancelled || this.closed) {
+        closeSubscriptionSourceState(subscription);
+        return;
+      }
+      if (subscription.callback) this.startSubscriptionReader(handle, subscription);
+    })().catch((error) => {
+      if (!subscription.cancelled && !this.closed)
+        subscription.callback?.(error instanceof Error ? error : new Error(String(error)));
     });
     return handle;
   }
@@ -2776,6 +2803,48 @@ export class NativeRuntimeAdapter implements Runtime {
     // delivered versions; a nested exact-id request creates a second scope
     // and can circularly await its own authority receipt.
     await this.readRowsForContextAsync(query, opts, this.nativeReadContext(session));
+  }
+
+  private async awaitNativeOperation<T>(
+    pending: PendingNativeOperation<T>,
+    cancelled: () => boolean = () => false,
+  ): Promise<T> {
+    try {
+      for (;;) {
+        if (this.closed || cancelled()) throw new Error("native operation was cancelled");
+        const result = pending.poll();
+        if (result !== null) return result;
+        await this.pumpServerTransport();
+        await sleep(0);
+      }
+    } finally {
+      pending.cancel();
+    }
+  }
+
+  private async prepareQueryForRead(
+    queryJson: string,
+    session: RuntimeSession | null,
+    cancelled?: () => boolean,
+  ): Promise<PreparedQuery> {
+    if (!this.db.prepareQueryAsync) {
+      this.applySessionClaims(session);
+      return this.prepareQuery(queryJson);
+    }
+    const contextual =
+      session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
+    const queryBytes = encodeQueryJson(queryJson, this.schema);
+    const key = bytesKey(queryBytes);
+    const cached = contextual ? undefined : this.preparedQueries.get(key);
+    if (cached) return cached;
+    const pending = this.db.prepareQueryAsync(
+      queryBytes,
+      contextual ? session.identity : undefined,
+      contextual ? session.claims : undefined,
+    );
+    const query = await this.awaitNativeOperation(pending, cancelled);
+    if (!contextual) this.preparedQueries.set(key, query);
+    return query;
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
