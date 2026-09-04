@@ -67,13 +67,37 @@ pub(crate) fn aggregate_output_logical_name(column: &str) -> Option<&str> {
     column.strip_prefix(AGGREGATE_OUTPUT_PREFIX)
 }
 
+/// A typed application identity may use the spelling of an engine field.
+/// Only unchanged engine carriers are private; an explicit different identity
+/// must retain its application name.
 pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
-    field.logical_name().or_else(|| {
-        field
-            .name
-            .as_deref()
-            .and_then(aggregate_output_logical_name)
-    })
+    let name = field.logical_name()?;
+    if field.name.as_deref() != Some(name) {
+        return Some(name);
+    }
+    if matches!(
+        name,
+        "$createdBy"
+            | "$createdAt"
+            | "$updatedBy"
+            | "$updatedAt"
+            | "created_by"
+            | "created_at"
+            | "updated_by"
+            | "updated_at"
+            | "branch_key"
+            | "row_uuid"
+            | "tx_time"
+            | "tx_node_id"
+            | "schema_version"
+            | "parents"
+            | "authored_columns"
+            | "global_time"
+            | "settle_position"
+    ) {
+        return None;
+    }
+    aggregate_output_logical_name(name).or_else(|| (!name.starts_with("__jazz_")).then_some(name))
 }
 
 pub(crate) fn join_field(prefix: &str, field: &str) -> String {

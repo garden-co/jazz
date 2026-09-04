@@ -1477,7 +1477,13 @@ impl CurrentRow {
             .descriptor()
             .fields()
             .iter()
-            .map(|field| field.logical_name().map(str::to_owned))
+            .zip(&binding_fields)
+            .map(|(field, binding)| match binding {
+                CurrentRowBindingField::PhysicalColumn => None,
+                CurrentRowBindingField::LogicalField => {
+                    self::query_engine::descriptor_public_name(field).map(str::to_owned)
+                }
+            })
             .collect();
         Self::new_with_explicit_binding_fields_and_names(
             table,
@@ -1597,15 +1603,46 @@ impl CurrentRow {
     }
 
     fn application_column_index_by_name(&self, column: &str) -> Option<usize> {
-        self.binding_fields
-            .iter()
-            .zip(self.binding_field_names.iter())
-            .position(|(binding, public_name)| {
-                matches!(
-                    binding,
-                    CurrentRowBindingField::PhysicalColumn | CurrentRowBindingField::LogicalField
-                ) && public_name.as_deref() == Some(column)
-            })
+        // Explicit physical provenance wins over a colliding logical carrier.
+        for wanted in [
+            CurrentRowBindingField::PhysicalColumn,
+            CurrentRowBindingField::LogicalField,
+        ] {
+            if let Some(index) =
+                self.binding_fields
+                    .iter()
+                    .enumerate()
+                    .position(|(index, binding)| {
+                        if *binding != wanted {
+                            return false;
+                        }
+                        let field = &self.record.descriptor().fields()[index];
+                        let name = match binding {
+                            CurrentRowBindingField::PhysicalColumn => {
+                                Self::physical_application_name(field)
+                            }
+                            CurrentRowBindingField::LogicalField => {
+                                self.binding_field_names[index].as_deref()
+                            }
+                        };
+                        name == Some(column)
+                    })
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn physical_application_name(field: &records::DescriptorField) -> Option<&str> {
+        let name = self::query_engine::descriptor_public_name(field)?;
+        if field.name.as_deref() == Some(name) {
+            // This conversion is confined to the explicitly tagged physical
+            // CurrentRow boundary, never used to resolve a graph field.
+            name.strip_prefix(self::query_engine::USER_COLUMN_PREFIX)
+        } else {
+            Some(name)
+        }
     }
 
     /// Encoded groove record backing this projected current row.
@@ -1876,36 +1913,11 @@ impl CurrentRow {
             )
             .enumerate()
             .filter_map(move |(idx, (field, (binding, public_name)))| {
-                let raw_name = field.name.as_ref()?.as_str();
-                let name = if let Some(name) = public_name.as_deref() {
-                    name
-                } else if let Some(name) = self::query_engine::descriptor_public_name(field) {
-                    name
-                } else if matches!(
-                    raw_name,
-                    "$createdBy"
-                        | "$createdAt"
-                        | "$updatedBy"
-                        | "$updatedAt"
-                        | "branch_key"
-                        | "row_uuid"
-                        | "tx_time"
-                        | "tx_node_id"
-                        | "schema_version"
-                        | "parents"
-                        | "authored_columns"
-                        | "global_time"
-                        | "settle_position"
-                ) || raw_name.starts_with("__jazz_")
-                    || (*binding == CurrentRowBindingField::PhysicalColumn
-                        && matches!(
-                            raw_name,
-                            "created_by" | "created_at" | "updated_by" | "updated_at"
-                        ))
-                {
-                    return None;
-                } else {
-                    raw_name
+                let name = match binding {
+                    CurrentRowBindingField::PhysicalColumn => {
+                        Self::physical_application_name(field)?
+                    }
+                    CurrentRowBindingField::LogicalField => public_name.as_deref()?,
                 };
                 let value = match borrowed.get_idx(idx).ok()? {
                     Value::Nullable(value) => value.map(|value| *value),
