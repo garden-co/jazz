@@ -1651,6 +1651,160 @@ fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
 }
 
 #[test]
+fn parked_subscription_unsubscribe_matches_usage_and_cleans_bucket() {
+    let (_temp_dir, mut node) = open_node();
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("wanted")))
+        .validate(&schema())
+        .unwrap();
+    let values = vec![Value::String("match".to_owned())];
+    // These usage-site handles share one canonical binding (the same values)
+    // but must remain independently cancellable while the shape is parked.
+    let first_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
+        read_view: Default::default(),
+    };
+    let second_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x88; 16])),
+        read_view: Default::default(),
+    };
+    let subscribe = |subscription| crate::protocol::Subscribe {
+        shape_id: shape.shape_id(),
+        subscription,
+        values: values.clone(),
+        known_state: None,
+        delegated_session: None,
+    };
+
+    // This internal sync-state seam is needed because the public facade always
+    // registers a shape before it can create a subscription.
+    node.apply_sync_message_settled(SyncMessage::Subscribe(subscribe(first_subscription)))
+        .unwrap();
+    node.apply_sync_message_settled(SyncMessage::Subscribe(subscribe(second_subscription)))
+        .unwrap();
+    assert_eq!(
+        node.parking
+            .parked_binding_deltas
+            .get(&shape.shape_id())
+            .unwrap()
+            .len(),
+        2
+    );
+
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
+        subscription: first_subscription,
+    })
+    .unwrap();
+    let parked = node
+        .parking
+        .parked_binding_deltas
+        .get(&shape.shape_id())
+        .unwrap();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].subscribe.subscription, second_subscription);
+
+    node.apply_sync_message_settled(SyncMessage::Unsubscribe {
+        subscription: second_subscription,
+    })
+    .unwrap();
+    assert!(!node
+        .parking
+        .parked_binding_deltas
+        .contains_key(&shape.shape_id()));
+
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(&shape),
+        opts: crate::protocol::RegisterShapeOptions::default(),
+    })
+    .unwrap();
+    assert!(!node
+        .query
+        .registered_bindings
+        .contains_key(&shape.shape_id()));
+}
+
+#[test]
+fn parked_subscription_unsubscribe_preserves_other_policy_scopes() {
+    let (_temp_dir, mut node) = open_node();
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("wanted")))
+        .validate(&schema())
+        .unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x77; 16])),
+        read_view: Default::default(),
+    };
+    let first_session = crate::protocol::DelegatedSessionBinding {
+        identity: user(0xa1),
+        claims: BTreeMap::from([("role".to_owned(), Value::String("first".to_owned()))]),
+    };
+    let second_session = crate::protocol::DelegatedSessionBinding {
+        identity: first_session.identity.clone(),
+        claims: BTreeMap::from([("role".to_owned(), Value::String("second".to_owned()))]),
+    };
+    let subscribe = |delegated_session| crate::protocol::Subscribe {
+        shape_id: shape.shape_id(),
+        subscription,
+        values: vec![Value::String("match".to_owned())],
+        known_state: None,
+        delegated_session: Some(delegated_session),
+    };
+
+    node.apply_sync_message_settled(SyncMessage::Subscribe(subscribe(first_session.clone())))
+        .unwrap();
+    node.apply_sync_message_settled(SyncMessage::Subscribe(subscribe(second_session.clone())))
+        .unwrap();
+
+    // As above, only the internal protocol seam can deliver Subscribe before
+    // RegisterShape. Same-subject sessions must still isolate different claims.
+    node.apply_unsubscribe(subscription);
+    assert_eq!(
+        node.parking
+            .parked_binding_deltas
+            .get(&shape.shape_id())
+            .unwrap()
+            .len(),
+        2,
+        "a bare handle must fail closed across policy scopes"
+    );
+
+    let first_policy =
+        crate::protocol::PolicyBindingKey::from_delegated_session(&first_session);
+    node.apply_unsubscribe_with_admitted_policy_binding(subscription, first_policy);
+    let parked = node
+        .parking
+        .parked_binding_deltas
+        .get(&shape.shape_id())
+        .unwrap();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(
+        parked[0].subscribe.delegated_session.as_ref().unwrap().identity,
+        second_session.identity
+    );
+
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: crate::protocol::ShapeAst::from_validated(&shape),
+        opts: crate::protocol::RegisterShapeOptions::default(),
+    })
+    .unwrap();
+    assert_eq!(node.registered_query_binding_count_for_test(), 1);
+    let survivor = node.query.registered_bindings[&shape.shape_id()]
+        .values()
+        .next()
+        .expect("the uncancelled policy scope must activate");
+    assert_eq!(
+        survivor.authority_result_key.policy_binding,
+        Some(crate::protocol::PolicyBindingKey::from_delegated_session(&second_session)),
+        "shape installation must preserve the surviving immutable claims"
+    );
+}
+
+#[test]
 fn binding_delta_cleanup_distinguishes_canonical_read_view() {
     let schema = branch_view_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x44), schema.clone());
