@@ -91,8 +91,8 @@ function assertArmv7RocksDbBuildConfiguration(builder) {
   );
   assert.match(
     branch.groups.armv7,
-    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION[\s\S]*cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release/,
-    "the armv7 cargo invocation must undefine RocksDB's unsupported uint128 extension",
+    /CXXFLAGS_armv7_linux_androideabi=.*-UHAVE_UINT128_EXTENSION.*-DPOSIX_MADV_NORMAL=MADV_NORMAL.*-DPOSIX_MADV_RANDOM=MADV_RANDOM.*-DPOSIX_MADV_SEQUENTIAL=MADV_SEQUENTIAL.*-DPOSIX_MADV_WILLNEED=MADV_WILLNEED.*-DPOSIX_MADV_DONTNEED=MADV_DONTNEED[\s\S]*cargo ndk -t "\$android_abi" build --manifest-path "\$relay_manifest" --release/,
+    "the armv7 cargo invocation must carry the NDK API 21 RocksDB compatibility flags",
   );
   assert.equal(
     (builder.match(/CXXFLAGS_armv7_linux_androideabi=/g) ?? []).length,
@@ -181,8 +181,16 @@ test("Android relay artifact contract retires 32-bit x86 consistently", () => {
   );
   assert.throws(
     () => assertArmv7RocksDbBuildConfiguration(builder.replace("-UHAVE_UINT128_EXTENSION", "")),
-    /unsupported uint128 extension/,
+    /NDK API 21 RocksDB compatibility flags/,
     "the contract must reject removing the armv7 uint128 override",
+  );
+  assert.throws(
+    () =>
+      assertArmv7RocksDbBuildConfiguration(
+        builder.replace("-DPOSIX_MADV_DONTNEED=MADV_DONTNEED", ""),
+      ),
+    /NDK API 21 RocksDB compatibility flags/,
+    "the contract must reject removing an API 21 POSIX_MADV alias",
   );
 });
 
