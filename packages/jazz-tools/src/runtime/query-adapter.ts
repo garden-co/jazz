@@ -919,7 +919,11 @@ function toFlatConditions(
  * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+  const raw = JSON.parse(builderJson);
+  if (raw.union !== undefined) {
+    throw new Error("Public union queries are not supported by canonical query lowering yet.");
+  }
+  const builder = normalizeBuiltQuery(raw);
   const relations = analyzeRelations(schema);
   const selectColumns =
     builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
