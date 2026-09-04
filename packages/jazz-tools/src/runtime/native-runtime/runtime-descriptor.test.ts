@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { col } from "../../dsl.js";
+import { defineApp } from "../../typed-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
 import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
@@ -16,15 +18,24 @@ describe("formatUuid", () => {
 });
 
 describe("native row descriptor cache keys", () => {
-  it("uses explicit field provenance for hybrid physical and logical user_ fields", () => {
+  it("uses explicit field provenance for hybrid stored and result _app_ fields", () => {
     const schema = {
       notes: {
         columns: [{ name: "check", column_type: { type: "Text" }, nullable: false }],
       },
     } satisfies WasmSchema;
+    const rawDescriptor = [
+      { name: "_app_check", valueType: { tag: 8 } as const },
+      { name: "_app_check", valueType: { tag: 8 } as const },
+    ];
     const descriptor = [
-      { kind: "physical-column" as const, name: "user_check", valueType: { tag: 8 } as const },
-      { kind: "logical-field" as const, name: "user_check", valueType: { tag: 8 } as const },
+      {
+        kind: "stored-column" as const,
+        id: 1,
+        outputName: "check",
+        valueType: { tag: 8 } as const,
+      },
+      { kind: "result-field" as const, name: "_app_check", valueType: { tag: 8 } as const },
     ];
     const hybridBatch = {
       table: "notes",
@@ -33,7 +44,7 @@ describe("native row descriptor cache keys", () => {
         {
           rowId: uuidBytes("00000000-0000-0000-0000-0000000000a0"),
           deleted: false,
-          raw: createRecord(descriptor, [
+          raw: createRecord(rawDescriptor, [
             Uint8Array.from([2, ...new TextEncoder().encode("included")]),
             Uint8Array.from([2, ...new TextEncoder().encode("collector")]),
           ]),
@@ -44,16 +55,19 @@ describe("native row descriptor cache keys", () => {
       valuesByColumn?: Map<string, unknown>;
     };
     expect(hybrid?.valuesByColumn?.get("check")).toMatchObject({ type: "Text" });
-    expect(hybrid?.valuesByColumn?.get("user_check")).toMatchObject({ type: "Bytea" });
+    expect(hybrid?.valuesByColumn?.get("_app_check")).toMatchObject({ type: "Bytea" });
     expect(nativeRowFieldPlanCacheKey(hybridBatch)).not.toBe(
       nativeRowFieldPlanCacheKey({
         ...hybridBatch,
-        descriptor: [{ ...descriptor[0]!, kind: "logical-field" as const }, descriptor[1]!],
+        descriptor: [
+          { ...descriptor[0]!, kind: "result-field" as const, name: "check" },
+          descriptor[1]!,
+        ],
       }),
     );
   });
 
-  it("normalizes physical grouped and aggregate fields without rewriting a logical aggregate collision", () => {
+  it("distinguishes stored grouped fields from result aggregate collisions", () => {
     const schema = {
       totals: {
         columns: [
@@ -62,16 +76,26 @@ describe("native row descriptor cache keys", () => {
         ],
       },
     } satisfies WasmSchema;
+    const rawDescriptor = [
+      { name: "_app_category", valueType: { tag: 8 } as const },
+      { name: "_app___jazz_aggregate_total", valueType: { tag: 4 } as const },
+      { name: "_app___jazz_aggregate_total", valueType: { tag: 8 } as const },
+    ];
     const descriptor = [
-      { kind: "physical-column" as const, name: "user_category", valueType: { tag: 8 } as const },
       {
-        kind: "physical-column" as const,
-        name: "user___jazz_aggregate_total",
+        kind: "stored-column" as const,
+        id: 1,
+        outputName: "category",
+        valueType: { tag: 8 } as const,
+      },
+      {
+        kind: "result-field" as const,
+        name: "total",
         valueType: { tag: 4 } as const,
       },
       {
-        kind: "logical-field" as const,
-        name: "user___jazz_aggregate_total",
+        kind: "result-field" as const,
+        name: "_app___jazz_aggregate_total",
         valueType: { tag: 8 } as const,
       },
     ];
@@ -82,7 +106,7 @@ describe("native row descriptor cache keys", () => {
         {
           rowId: uuidBytes("00000000-0000-0000-0000-0000000000a1"),
           deleted: false,
-          raw: createRecord(descriptor, [
+          raw: createRecord(rawDescriptor, [
             Uint8Array.from([2, ...new TextEncoder().encode("books")]),
             i32Bytes(42),
             Uint8Array.from([2, ...new TextEncoder().encode("logical collision")]),
@@ -96,20 +120,29 @@ describe("native row descriptor cache keys", () => {
     };
     expect(decoded?.valuesByColumn?.get("category")).toEqual({ type: "Text", value: "books" });
     expect(decoded?.valuesByColumn?.get("total")).toEqual({ type: "Integer", value: 42 });
-    expect(decoded?.valuesByColumn?.get("user___jazz_aggregate_total")).toMatchObject({
+    expect(decoded?.valuesByColumn?.get("_app___jazz_aggregate_total")).toMatchObject({
       type: "Bytea",
     });
   });
 
-  it("normalizes physical user_total while preserving a logical user_total field", () => {
+  it("normalizes stored total while preserving a result _app_total field", () => {
     const schema = {
       totals: {
         columns: [{ name: "total", column_type: { type: "Integer" }, nullable: false }],
       },
     } satisfies WasmSchema;
+    const rawDescriptor = [
+      { name: "_app_total", valueType: { tag: 4 } as const },
+      { name: "_app_total", valueType: { tag: 8 } as const },
+    ];
     const descriptor = [
-      { kind: "physical-column" as const, name: "user_total", valueType: { tag: 4 } as const },
-      { kind: "logical-field" as const, name: "user_total", valueType: { tag: 8 } as const },
+      {
+        kind: "stored-column" as const,
+        id: 1,
+        outputName: "total",
+        valueType: { tag: 4 } as const,
+      },
+      { kind: "result-field" as const, name: "_app_total", valueType: { tag: 8 } as const },
     ];
     const batch = {
       table: "totals",
@@ -118,7 +151,7 @@ describe("native row descriptor cache keys", () => {
         {
           rowId: uuidBytes("00000000-0000-0000-0000-0000000000a2"),
           deleted: false,
-          raw: createRecord(descriptor, [
+          raw: createRecord(rawDescriptor, [
             i32Bytes(7),
             Uint8Array.from([2, ...new TextEncoder().encode("collector total")]),
           ]),
@@ -130,11 +163,13 @@ describe("native row descriptor cache keys", () => {
       valuesByColumn?: Map<string, unknown>;
     };
     expect(decoded?.valuesByColumn?.get("total")).toEqual({ type: "Integer", value: 7 });
-    expect(decoded?.valuesByColumn?.get("user_total")).toMatchObject({ type: "Bytea" });
+    expect(decoded?.valuesByColumn?.get("_app_total")).toMatchObject({ type: "Bytea" });
   });
 
   it("includes the table identity", () => {
-    const descriptor = [{ kind: "physical-column" as const, name: "value", valueType: { tag: 8 } }];
+    const descriptor = [
+      { kind: "stored-column" as const, id: 1, outputName: "value", valueType: { tag: 8 } },
+    ];
 
     expect(nativeRowFieldPlanCacheKey({ table: "first", descriptor })).not.toBe(
       nativeRowFieldPlanCacheKey({ table: "second", descriptor }),
@@ -225,12 +260,14 @@ describe("native row descriptor cache keys", () => {
     expect(
       nativeRowFieldPlanCacheKey({
         table: "events",
-        descriptor: [{ kind: "physical-column", name: "event", valueType: payloadEnum }],
+        descriptor: [{ kind: "stored-column", id: 1, outputName: "event", valueType: payloadEnum }],
       }),
     ).not.toBe(
       nativeRowFieldPlanCacheKey({
         table: "events",
-        descriptor: [{ kind: "physical-column", name: "event", valueType: changedPayloadEnum }],
+        descriptor: [
+          { kind: "stored-column", id: 1, outputName: "event", valueType: changedPayloadEnum },
+        ],
       }),
     );
   });
@@ -259,17 +296,25 @@ describe("native row descriptor cache keys", () => {
       { name: "title", valueType: { tag: 8 } },
       { name: "ignored_fixed_field", valueType: { tag: 4 } },
     ];
+    const firstRawDescriptor = [
+      { name: "child", valueType: { tag: 16, record: firstChildDescriptor } },
+    ];
     const firstDescriptor = [
       {
-        kind: "physical-column" as const,
-        name: "child",
+        kind: "stored-column" as const,
+        id: 1,
+        outputName: "child",
         valueType: { tag: 16, record: firstChildDescriptor },
       },
     ];
+    const secondRawDescriptor = [
+      { name: "child", valueType: { tag: 16, record: secondChildDescriptor } },
+    ];
     const secondDescriptor = [
       {
-        kind: "physical-column" as const,
-        name: "child",
+        kind: "stored-column" as const,
+        id: 1,
+        outputName: "child",
         valueType: { tag: 16, record: secondChildDescriptor },
       },
     ];
@@ -281,7 +326,7 @@ describe("native row descriptor cache keys", () => {
         {
           rowId: uuidBytes("00000000-0000-0000-0000-0000000000a1"),
           deleted: false,
-          raw: createRecord(firstDescriptor, [
+          raw: createRecord(firstRawDescriptor, [
             createRecord(firstChildDescriptor, [
               uuidBytes(childId),
               Uint8Array.from([2, ...new TextEncoder().encode("first")]),
@@ -297,7 +342,7 @@ describe("native row descriptor cache keys", () => {
         {
           rowId: uuidBytes("00000000-0000-0000-0000-0000000000a2"),
           deleted: false,
-          raw: createRecord(secondDescriptor, [
+          raw: createRecord(secondRawDescriptor, [
             createRecord(secondChildDescriptor, [
               uuidBytes(childId),
               Uint8Array.from([2, ...new TextEncoder().encode("second")]),
@@ -445,3 +490,35 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+it("preserves stored application columns named like internal metadata", () => {
+  const app = defineApp({
+    notes: { parents: col.string(), schema_version: col.string(), authored_columns: col.string() },
+  });
+  const names = ["parents", "schema_version", "authored_columns"];
+  const rows = rowsFromBatches(
+    [
+      {
+        table: "notes",
+        descriptor: names.map((outputName, id) => ({
+          kind: "stored-column" as const,
+          id,
+          outputName,
+          valueType: { tag: 8 } as const,
+        })),
+        rows: [
+          {
+            rowId: new Uint8Array(16),
+            deleted: false,
+            raw: createRecord(
+              names.map((name) => ({ name: `_app_${name}`, valueType: { tag: 8 } as const })),
+              names.map(() => Uint8Array.from([2, ...new TextEncoder().encode("kept")])),
+            ),
+          },
+        ],
+      },
+    ],
+    app.wasmSchema,
+  );
+  expect([...rows[0]!.valuesByColumn!.keys()]).toEqual(names);
+});

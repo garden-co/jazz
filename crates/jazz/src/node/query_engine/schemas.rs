@@ -19,6 +19,8 @@ pub(crate) enum OutputTerminalSchema {
 /// App-facing row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppRowSchema {
+    /// Single source-owned publication binding for each named terminal field.
+    pub(crate) publication_fields: BTreeMap<String, crate::node::CurrentRowPublicationField>,
     /// Descriptor for app-visible row records.
     pub(crate) descriptor: RecordDescriptor,
     /// Hidden fields retained by the graph and stripped before app delivery.

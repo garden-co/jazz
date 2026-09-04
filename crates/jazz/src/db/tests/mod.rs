@@ -99,12 +99,20 @@ fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
         root_key_field_name: "row_uuid".to_owned(),
         public_fields: vec![
             TerminalRootPublicField {
+                publication: crate::node::CurrentRowPublicationField::ResultField {
+                    name: "user_check".to_owned(),
+                    visible: true,
+                },
                 name: "user_check".to_owned(),
                 descriptor_field_name: "user_check".to_owned(),
                 slot: 1,
                 carrier: TerminalRootCarrier::Logical,
             },
             TerminalRootPublicField {
+                publication: crate::node::CurrentRowPublicationField::StoredColumn {
+                    id: crate::ids::PhysicalColumnId(7),
+                    output_name: "check".to_owned(),
+                },
                 name: "check".to_owned(),
                 descriptor_field_name: "user_check".to_owned(),
                 slot: 2,
@@ -117,9 +125,9 @@ fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
     assert_eq!(
         terminal_root_binding_fields(&layout),
         vec![
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
         ]
     );
 }

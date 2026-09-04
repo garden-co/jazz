@@ -2401,7 +2401,7 @@ where
         };
         let snapshots = snapshots_result?;
         retire_result?;
-        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
+        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots, &program)
             .await
     }
 
@@ -3010,6 +3010,7 @@ where
                 shape,
                 &ReadViewSpec::default(),
                 &snapshots,
+                &program,
             )
             .await?;
         let predicate_read = PredicateRead {
@@ -3996,12 +3997,25 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new_with_fields(fields);
     let raw = descriptor.create(&values)?;
-    // This synthetic descriptor deliberately uses `user_{column}` names for
-    // the grouped source column and aggregate outputs.  Those are physical
-    // CurrentRow slots, not public logical fields named `user_{column}`.
-    Ok(CurrentRow::new(
+    let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
+        name: "row_uuid".to_owned(),
+        visible: false,
+    }];
+    if let Some(group_by) = &aggregate.group_by {
+        publication_fields.push(CurrentRowPublicationField::UnresolvedSourceCell {
+            output_name: group_by.clone(),
+        });
+    }
+    publication_fields.extend(aggregate.aggregates.iter().map(|output| {
+        CurrentRowPublicationField::ResultField {
+            name: output.alias.clone(),
+            visible: true,
+        }
+    }));
+    Ok(CurrentRow::new_with_publication_fields(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),
+        publication_fields,
     ))
 }
 

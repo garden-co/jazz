@@ -37,9 +37,14 @@ const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"
 function physicalNativeDescriptor(
   descriptor: readonly DescriptorField[],
 ): NativeRowDescriptorField[] {
-  return descriptor.map((field) => {
+  return descriptor.map((field, index) => {
     if (field.name === undefined) throw new Error("test native descriptor field requires a name");
-    return { name: field.name, valueType: field.valueType, kind: "physical-column" };
+    return {
+      id: index + 1,
+      outputName: field.name.startsWith("_app_") ? field.name.slice("_app_".length) : field.name,
+      valueType: field.valueType,
+      kind: "stored-column",
+    };
   });
 }
 

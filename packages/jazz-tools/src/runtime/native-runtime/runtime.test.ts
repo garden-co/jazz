@@ -66,9 +66,14 @@ const RESERVED_TEST_ISSUERS = [
 function physicalNativeDescriptor(
   descriptor: readonly DescriptorField[],
 ): NativeRowDescriptorField[] {
-  return descriptor.map((field) => {
+  return descriptor.map((field, index) => {
     if (field.name === undefined) throw new Error("test native descriptor field requires a name");
-    return { name: field.name, valueType: field.valueType, kind: "physical-column" };
+    return {
+      id: index + 1,
+      outputName: field.name.startsWith("_app_") ? field.name.slice("_app_".length) : field.name,
+      valueType: field.valueType,
+      kind: "stored-column",
+    };
   });
 }
 
@@ -7489,7 +7494,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
 function writeRowBatches(
   writer: PostcardWriter,
   rows: EncodedTestRow[],
-  fieldKind: "physical-column" | "logical-field" = "physical-column",
+  fieldKind: "stored-column" | "result-field" = "stored-column",
 ): void {
   const rowsByTable = new Map<string, EncodedTestRow[]>();
   for (const row of rows) {
@@ -7516,7 +7521,20 @@ function writeRowBatches(
     batch.string(table);
     writeNativeRowDescriptor(
       batch,
-      descriptor.map((field) => ({ ...field, kind: fieldKind })),
+      descriptor.map((field, index) =>
+        fieldKind === "stored-column"
+          ? {
+              id: index + 1,
+              outputName: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            }
+          : {
+              name: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            },
+      ),
     );
     batch.vec((row, index) => {
       const source = tableRows[index]!;

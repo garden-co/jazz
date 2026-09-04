@@ -6054,44 +6054,25 @@ function nativeRowFieldPlans(
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const field = batch.descriptor[index];
-    const fieldName = field?.name;
-    if (
-      !fieldName ||
-      isInternalField(fieldName) ||
-      (field?.kind === "physical-column" && isCurrentRowPhysicalField(fieldName))
-    ) {
+    const fieldName = field?.kind === "stored-column" ? field.outputName : field?.name;
+    if (!fieldName || (field?.kind === "result-field" && isInternalField(fieldName))) {
       continue;
     }
 
-    // `user_` belongs to a private physical CurrentRow field only. A logical
-    // query/collector field preserves its public name even if it begins with
-    // `user_`. The tagged descriptor is authoritative; never infer from
-    // schema membership, since a hybrid collector can contain physical `check`
-    // and logical `user_check` in one record.
-    const name = field?.kind === "physical-column" ? publicPhysicalFieldName(fieldName) : fieldName;
-    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
+    const type = magicColumnType(fieldName) ?? columnsByName.get(fieldName)?.column_type;
     plans.push({
-      name,
+      name: fieldName,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
       includeInValues:
-        !isHiddenIncludeColumn(name) &&
-        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
+        !isHiddenIncludeColumn(fieldName) &&
+        (!isProvenanceMagicColumn(fieldName) || projectedNames?.has(fieldName) === true),
     });
   }
 
   if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
-}
-
-// These fields are provenance retained by settled/materializer read paths.
-// They are never Jazz application columns (user columns use the `user_`
-// descriptor namespace) and must not cross the public native row boundary.
-function isCurrentRowPhysicalField(fieldName: string): boolean {
-  return (
-    fieldName === "schema_version" || fieldName === "parents" || fieldName === "authored_columns"
-  );
 }
 
 function rowsFromRelationSnapshot(
@@ -7079,19 +7060,6 @@ function canonicalJson(value: unknown): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-/**
- * Decode the private CurrentRow physical-field namespace exactly once at the
- * native binding boundary. Logical descriptor fields are never normalized:
- * a collector may intentionally expose a name that happens to use either
- * private-looking prefix.
- */
-function publicPhysicalFieldName(name: string): string {
-  const withoutUserPrefix = name.startsWith("_app_") ? name.slice("_app_".length) : name;
-  return withoutUserPrefix.startsWith("__jazz_aggregate_")
-    ? withoutUserPrefix.slice("__jazz_aggregate_".length)
-    : withoutUserPrefix;
 }
 
 function isInternalField(name?: string): boolean {

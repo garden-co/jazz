@@ -4,11 +4,13 @@
 //! envelope here makes row batching, relation snapshots, and occurrence-key
 //! sidecars one production contract rather than two lookalike serializers.
 
+mod publication_type;
+
 use serde::Serialize;
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
-use crate::ids::RowUuid;
-use crate::node::{CurrentRow, CurrentRowBindingField, RelationSnapshot};
+use crate::ids::{PhysicalColumnId, RowUuid};
+use crate::node::{CurrentRow, CurrentRowPublicationField, RelationSnapshot};
 use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
 
@@ -21,15 +23,22 @@ pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
 /// The explicit binding provenance of one record-descriptor field.
 ///
 /// This is deliberately part of the native-host descriptor, rather than
-/// inferred from a field name. A collector descriptor may mix Jazz's physical
-/// `user_{column}` fields with logical fields that legitimately use the same
-/// spelling.
+/// inferred from a field name. A collector descriptor may mix stored
+/// application columns with derived fields whose names equal private carriers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum RowDescriptorFieldName<'a> {
-    /// A persisted CurrentRow field using Jazz's private physical name.
-    PhysicalColumn(&'a str),
-    /// A query, relation, or collector field using its public logical name.
-    LogicalField(&'a str),
+    /// A stored application column with catalogue identity and exact output name.
+    StoredColumn {
+        /// Authoritative physical catalogue identity.
+        id: PhysicalColumnId,
+        /// Exact application output name.
+        output_name: &'a str,
+    },
+    /// A derived or metadata result field with its exact name.
+    ResultField {
+        /// Exact result name.
+        name: &'a str,
+    },
 }
 
 /// One native binding descriptor entry.
@@ -38,6 +47,7 @@ pub struct RowDescriptorField<'a> {
     /// Explicit field provenance and exact descriptor name.
     pub name: RowDescriptorFieldName<'a>,
     /// Exact Groove type used to decode this record slot.
+    #[serde(serialize_with = "publication_type::serialize")]
     pub value_type: groove::records::ValueType,
 }
 
@@ -108,14 +118,14 @@ pub struct RemovedRowPayload {
 
 /// Encode a flat row sequence, preserving contiguous batch boundaries.
 pub fn encode_rows(rows: &[CurrentRow]) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&row_batches(rows))
+    postcard::to_allocvec(&row_batches(rows)?)
 }
 
 /// Encode a relation snapshot.
 pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&RelationSnapshotPayload {
         root_count: snapshot.root_count as u64,
-        rows: row_batches(&snapshot.rows),
+        rows: row_batches(&snapshot.rows)?,
     })
 }
 
@@ -131,8 +141,8 @@ pub fn encode_subscription_delta(
         .map(|row| row.row.clone())
         .collect::<Vec<_>>();
     postcard::to_allocvec(&SubscriptionDeltaPayload {
-        added: row_batches(&added_rows),
-        updated: row_batches(&updated_rows),
+        added: row_batches(&added_rows)?,
+        updated: row_batches(&updated_rows)?,
         removed: removed
             .iter()
             .map(|row| RemovedRowPayload {
@@ -163,38 +173,35 @@ pub fn encode_subscription_delta(
 }
 
 /// Group only adjacent rows with equal table and tagged descriptor.
-pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
+pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
         let (descriptor, raw) = row.encoded_record();
         let binding_descriptor = descriptor
             .fields()
             .iter()
-            .zip(row.binding_fields())
-            .zip(row.binding_field_names())
-            .map(|((field, binding), public_name)| {
-                let name = field
-                    .name
-                    .as_deref()
-                    .expect("native row descriptor fields must be named");
+            .zip(row.publication_fields())
+            .map(|(field, binding)| {
                 let name = match binding {
-                    CurrentRowBindingField::PhysicalColumn => {
-                        assert!(
-                            public_name.is_none(),
-                            "physical native binding fields cannot override their private name"
-                        );
-                        RowDescriptorFieldName::PhysicalColumn(name)
+                    CurrentRowPublicationField::StoredColumn { id, output_name } => {
+                        RowDescriptorFieldName::StoredColumn {
+                            id: *id,
+                            output_name,
+                        }
                     }
-                    CurrentRowBindingField::LogicalField => {
-                        RowDescriptorFieldName::LogicalField(public_name.as_deref().unwrap_or(name))
+                    CurrentRowPublicationField::ResultField { name, .. } => {
+                        RowDescriptorFieldName::ResultField { name }
+                    }
+                    CurrentRowPublicationField::UnresolvedSourceCell { .. } => {
+                        return Err(postcard::Error::SerdeSerCustom);
                     }
                 };
-                RowDescriptorField {
+                Ok(RowDescriptorField {
                     name,
                     value_type: field.value_type.clone(),
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, postcard::Error>>()?;
         match batches.last_mut() {
             Some(batch) if batch.table == row.table() && batch.descriptor == binding_descriptor => {
                 batch.rows.push(Row {
@@ -214,7 +221,7 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
             }),
         }
     }
-    batches
+    Ok(batches)
 }
 
 /// Encode terminal operations in the JavaScript-native object shape.
@@ -240,7 +247,7 @@ pub fn terminal_operations_to_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::CurrentRowBindingField;
+    use crate::node::CurrentRowBindingRole;
     use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
     /// The contained 4c6eafaef5 binding enum, independently declared to pin
@@ -274,8 +281,12 @@ mod tests {
             result
         );
 
+        #[derive(Serialize)]
+        enum ExecutionPhysicalName<'a> {
+            PhysicalColumn(&'a str),
+        }
         let execution_bytes =
-            postcard::to_allocvec(&RowDescriptorFieldName::PhysicalColumn("_app_score")).unwrap();
+            postcard::to_allocvec(&ExecutionPhysicalName::PhysicalColumn("_app_score")).unwrap();
         assert_ne!(execution_bytes, stored_bytes);
         assert!(postcard::from_bytes::<FrozenPublicationField>(&execution_bytes).is_err());
 
@@ -284,8 +295,186 @@ mod tests {
         let contained_nested = b"\x10\x01\x01\x05score\x03";
         let descriptor = RecordDescriptor::new([("score".to_owned(), ValueType::U64)]);
         let nested = ValueType::Record(Box::new(descriptor));
+        assert_eq!(
+            postcard::to_allocvec(&publication_type::NativeValueType(&nested)).unwrap(),
+            contained_nested
+        );
         assert_ne!(postcard::to_allocvec(&nested).unwrap(), contained_nested);
         assert!(postcard::from_bytes::<ValueType>(contained_nested).is_err());
+    }
+
+    #[test]
+    fn publication_writer_matches_frozen_relation_snapshot_and_rejects_unresolved_cells() {
+        use crate::node::CurrentRowPublicationField as Binding;
+        let stored = |id: u8, title: Option<&str>| {
+            let descriptor = RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                (
+                    "_app_title",
+                    ValueType::Nullable(Box::new(ValueType::String)),
+                ),
+            ]);
+            let raw = descriptor
+                .create(&[
+                    Value::Uuid(uuid::Uuid::from_bytes([id; 16])),
+                    Value::Nullable(title.map(|title| Box::new(Value::String(title.to_owned())))),
+                ])
+                .unwrap();
+            CurrentRow::new_with_publication_fields(
+                "todos",
+                OwnedRecord::new(raw, descriptor),
+                vec![
+                    Binding::ResultField {
+                        name: "row_uuid".to_owned(),
+                        visible: false,
+                    },
+                    Binding::StoredColumn {
+                        id: PhysicalColumnId(1),
+                        output_name: "title".to_owned(),
+                    },
+                ],
+            )
+        };
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([0x21; 16])),
+                Value::String("note".to_owned()),
+            ])
+            .unwrap();
+        let note = CurrentRow::new_with_publication_fields(
+            "notes",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                Binding::ResultField {
+                    name: "row_uuid".to_owned(),
+                    visible: false,
+                },
+                Binding::ResultField {
+                    name: "title".to_owned(),
+                    visible: true,
+                },
+            ],
+        );
+        let snapshot = RelationSnapshot {
+            root_count: 4,
+            rows: vec![
+                stored(0x11, Some("first")),
+                stored(0x12, Some("second")),
+                note,
+                stored(0x13, None).into_deleted(),
+            ],
+            edges: vec![],
+        };
+        let actual = encode_relation_snapshot(&snapshot).unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(BINDING_CODEC_GOLDEN_FIXTURE).unwrap();
+        let expected_hex = fixture["relation_snapshots"][1]["payload_hex"]
+            .as_str()
+            .unwrap();
+        let actual_hex = actual
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual_hex, expected_hex,
+            "the original contained golden bytes are frozen"
+        );
+
+        #[derive(Serialize, serde::Deserialize)]
+        struct FrozenField {
+            name: FrozenPublicationField,
+            value_type: ValueType,
+        }
+        #[derive(Serialize, serde::Deserialize)]
+        struct FrozenRow {
+            row_id: RowUuid,
+            deleted: bool,
+            raw: Vec<u8>,
+        }
+        #[derive(Serialize, serde::Deserialize)]
+        struct FrozenBatch {
+            table: String,
+            descriptor: Vec<FrozenField>,
+            rows: Vec<FrozenRow>,
+        }
+        #[derive(Serialize, serde::Deserialize)]
+        struct FrozenSnapshot {
+            root_count: u64,
+            rows: Vec<FrozenBatch>,
+        }
+        let read: FrozenSnapshot = postcard::from_bytes(&actual).unwrap();
+        assert_eq!(postcard::to_allocvec(&read).unwrap(), actual);
+        assert!(matches!(
+            read.rows[0].descriptor[1].name,
+            FrozenPublicationField::StoredColumn { id: 1, .. }
+        ));
+
+        let mut unresolved = stored(0x11, Some("first"));
+        unresolved = CurrentRow::new_with_publication_fields(
+            "todos",
+            OwnedRecord::new(
+                unresolved.encoded_record().1.to_vec(),
+                unresolved.encoded_record().0.clone(),
+            ),
+            vec![
+                Binding::ResultField {
+                    name: "row_uuid".to_owned(),
+                    visible: false,
+                },
+                Binding::UnresolvedSourceCell {
+                    output_name: "title".to_owned(),
+                },
+            ],
+        );
+        assert!(
+            encode_rows(&[unresolved]).is_err(),
+            "native codec must not invent a catalogue ID"
+        );
+    }
+
+    #[test]
+    fn frozen_result_field_bytes_cannot_distinguish_public_alias_from_hidden_metadata() {
+        use crate::node::CurrentRowPublicationField as Binding;
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("schema_version", ValueType::U64),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(uuid::Uuid::from_bytes([0x63; 16])),
+                Value::U64(1),
+            ])
+            .unwrap();
+        let record = OwnedRecord::new(raw, descriptor);
+        let row = |visible| {
+            CurrentRow::new_with_publication_fields(
+                "items",
+                record.clone(),
+                vec![
+                    Binding::ResultField {
+                        name: "row_uuid".to_owned(),
+                        visible: false,
+                    },
+                    Binding::ResultField {
+                        name: "schema_version".to_owned(),
+                        visible,
+                    },
+                ],
+            )
+        };
+        let public_alias = row(true);
+        let hidden_metadata = row(false);
+        assert_ne!(
+            public_alias.publication_fields(),
+            hidden_metadata.publication_fields()
+        );
+        assert_eq!(
+            encode_rows(&[public_alias]).unwrap(),
+            encode_rows(&[hidden_metadata]).unwrap(),
+            "the exact contained ResultField ABI has no visibility discriminator"
+        );
     }
 
     #[test]
@@ -305,26 +494,38 @@ mod tests {
                 Value::Bytes(b"logical".to_vec()),
             ])
             .expect("encode hybrid record");
-        let row = CurrentRow::new_with_explicit_binding_fields(
+        let row = CurrentRow::new_with_publication_fields(
             "notes",
             OwnedRecord::new(raw, descriptor),
             vec![
-                CurrentRowBindingField::PhysicalColumn,
-                CurrentRowBindingField::PhysicalColumn,
-                CurrentRowBindingField::LogicalField,
+                CurrentRowPublicationField::ResultField {
+                    name: "row_uuid".to_owned(),
+                    visible: false,
+                },
+                CurrentRowPublicationField::StoredColumn {
+                    id: PhysicalColumnId(7),
+                    output_name: "check".to_owned(),
+                },
+                CurrentRowPublicationField::ResultField {
+                    name: "user_check".to_owned(),
+                    visible: true,
+                },
             ],
         );
 
         let rows = [row];
-        let batches = row_batches(&rows);
+        let batches = row_batches(&rows).unwrap();
         assert_eq!(batches.len(), 1);
         assert!(matches!(
             batches[0].descriptor[1].name,
-            RowDescriptorFieldName::PhysicalColumn("user_check")
+            RowDescriptorFieldName::StoredColumn {
+                id: PhysicalColumnId(7),
+                output_name: "check"
+            }
         ));
         assert!(matches!(
             batches[0].descriptor[2].name,
-            RowDescriptorFieldName::LogicalField("user_check")
+            RowDescriptorFieldName::ResultField { name: "user_check" }
         ));
     }
 
@@ -347,17 +548,17 @@ mod tests {
             "todos",
             OwnedRecord::new(raw, descriptor),
             vec![
-                CurrentRowBindingField::LogicalField,
-                CurrentRowBindingField::LogicalField,
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::LogicalField,
             ],
             vec![None, Some("title".to_owned())],
         );
 
         let rows = [row];
-        let batches = row_batches(&rows);
+        let batches = row_batches(&rows).unwrap();
         assert!(matches!(
             batches[0].descriptor[1].name,
-            RowDescriptorFieldName::LogicalField("title")
+            RowDescriptorFieldName::ResultField { name: "title" }
         ));
     }
 }

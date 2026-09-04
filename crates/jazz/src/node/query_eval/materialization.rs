@@ -291,6 +291,20 @@ where
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
     ) -> Result<Option<CurrentRow>, Error> {
+        let mut row = self
+            .materialize_local_maintained_view_result_member_unbound(local, member)
+            .await?;
+        if let Some(row) = &mut row {
+            self.bind_current_row_columns_in_schema(local.result_schema_version, row)?;
+        }
+        Ok(row)
+    }
+
+    async fn materialize_local_maintained_view_result_member_unbound(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<CurrentRow>, Error> {
         if is_public_aggregate_result_member(
             member,
             local.result_table.as_str(),
@@ -633,7 +647,9 @@ where
             return Ok(None);
         };
         let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
-        current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
+        let mut row = current_row_from_materialized_cells(&read_table, version, &cells)?;
+        self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
+        Ok(Some(row))
     }
 
     fn current_row_from_aggregate_result_payload(
@@ -711,8 +727,9 @@ where
         shape: &ValidatedQuery,
         read_view: &ReadViewSpec,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<RelationSnapshot, Error> {
-        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
+        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots, program)?;
         let root_count = root_rows.len();
         // Groove's app-rows terminal is the sole structured-output owner.
         // Jazz transports its recursive roots; relation facts are not a second
@@ -990,6 +1007,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
             return Err(Error::QueryLowering(
@@ -1008,8 +1026,90 @@ where
         }
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
+        for row in &mut rows {
+            if shape.query().array_subqueries.is_empty() {
+                self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
+            } else {
+                Self::bind_compiled_app_row_fields(row, program)?;
+            }
+        }
         self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
+    }
+
+    fn bind_compiled_app_row_fields(
+        row: &mut CurrentRow,
+        program: &QueryProgram,
+    ) -> Result<(), Error> {
+        let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+        let schema = outputs
+            .iter()
+            .find_map(|output| match output {
+                OutputTerminalSchema::AppRows(schema) => Some(schema),
+                _ => None,
+            })
+            .ok_or(Error::InvalidStoredValue(
+                "compiled query has no application row schema",
+            ))?;
+        row.publication_fields = std::sync::Arc::new(
+            row.record
+                .descriptor()
+                .fields()
+                .iter()
+                .map(|field| {
+                    let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                        "application row field is unnamed",
+                    ))?;
+                    Ok(schema
+                        .publication_fields
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| CurrentRowPublicationField::ResultField {
+                            name: name.to_owned(),
+                            visible: false,
+                        }))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        );
+        Ok(())
+    }
+
+    pub(in crate::node) fn bind_current_row_columns_in_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        row: &mut CurrentRow,
+    ) -> Result<(), Error> {
+        if !row.publication_fields.iter().any(|field| {
+            matches!(
+                field,
+                CurrentRowPublicationField::UnresolvedSourceCell { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(row.table()))
+            .ok_or(Error::InvalidStoredValue(
+                "native row has no read-schema physical mapping",
+            ))?;
+        for field in std::sync::Arc::make_mut(&mut row.publication_fields) {
+            if let CurrentRowPublicationField::UnresolvedSourceCell { output_name } = field {
+                let id = *mapping
+                    .columns
+                    .get(output_name)
+                    .ok_or(Error::InvalidStoredValue(
+                        "source application cell has no catalogue column identity",
+                    ))?;
+                *field = CurrentRowPublicationField::StoredColumn {
+                    id,
+                    output_name: output_name.clone(),
+                };
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish_engine_query_rows_in_schema(
@@ -1018,6 +1118,9 @@ where
         schema_version: SchemaVersionId,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        for row in rows.iter_mut() {
+            self.bind_current_row_columns_in_schema(schema_version, row)?;
+        }
         if query.aggregate.is_some() {
             self.apply_query_order_in_schema(query, schema_version, rows)?;
             apply_query_window(query, rows);
@@ -1225,17 +1328,10 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new_with_explicit_binding_fields_and_names(
+                        CurrentRow::new_with_publication_fields(
                             local.result_table.clone(),
                             record,
-                            crate::db::terminal_root_binding_fields(
-                                local
-                                    .terminal_root_layout()
-                                    .ok_or(Error::InvalidStoredValue(
-                                        "collector terminal has no root layout",
-                                    ))?,
-                            ),
-                            crate::db::terminal_root_binding_field_names(
+                            crate::db::terminal_root_publication_fields(
                                 local
                                     .terminal_root_layout()
                                     .ok_or(Error::InvalidStoredValue(

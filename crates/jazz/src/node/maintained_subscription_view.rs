@@ -1811,48 +1811,58 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
     // arrays/records. A collector root may contain both physical `user_*`
     // source cells and logical nested fields, so the presence of one family
     // must not hide the other.
-    let public_fields = rows
-        .descriptor
-        .fields()
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, field)| {
-            let name = field.name.as_deref()?;
-            (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
-                let carrier = rows
-                    .field_carriers
-                    .get(name)
-                    .copied()
-                    .unwrap_or(rows.carrier);
-                TerminalRootPublicField {
-                    // The compiler binds this identity before terminal
-                    // publication. Carrier describes encoding, not naming:
-                    // a logical include may legitimately begin with `user_`.
-                    name: rows
-                        .public_field_names
+    let public_fields =
+        rows.descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, field)| {
+                let name = field.name.as_deref()?;
+                (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
+                    let carrier = rows
+                        .field_carriers
                         .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            rows.descriptor
-                                .fields()
-                                .get(slot)
-                                .and_then(crate::node::query_engine::descriptor_public_name)
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| match carrier {
-                                    AppRowCarrier::CurrentRow => name.to_owned(),
-                                    AppRowCarrier::Logical => name.to_owned(),
-                                })
-                        }),
-                    descriptor_field_name: name.to_owned(),
-                    slot,
-                    carrier: match carrier {
-                        AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
-                        AppRowCarrier::Logical => TerminalRootCarrier::Logical,
-                    },
-                }
+                        .copied()
+                        .unwrap_or(rows.carrier);
+                    TerminalRootPublicField {
+                        publication: rows.publication_fields.get(name).cloned().unwrap_or_else(
+                            || crate::node::CurrentRowPublicationField::ResultField {
+                                name: rows
+                                    .public_field_names
+                                    .get(name)
+                                    .cloned()
+                                    .unwrap_or_else(|| name.to_owned()),
+                                visible: true,
+                            },
+                        ),
+                        // The compiler binds this identity before terminal
+                        // publication. Carrier describes encoding, not naming:
+                        // a logical include may legitimately begin with `user_`.
+                        name: rows
+                            .public_field_names
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                rows.descriptor
+                                    .fields()
+                                    .get(slot)
+                                    .and_then(crate::node::query_engine::descriptor_public_name)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| match carrier {
+                                        AppRowCarrier::CurrentRow => name.to_owned(),
+                                        AppRowCarrier::Logical => name.to_owned(),
+                                    })
+                            }),
+                        descriptor_field_name: name.to_owned(),
+                        slot,
+                        carrier: match carrier {
+                            AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+                            AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+                        },
+                    }
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
     for field in &public_fields {
         if let Some(descriptor_field) = descriptor_fields.get_mut(field.slot) {
             descriptor_field.identity =
@@ -3361,6 +3371,29 @@ mod tests {
             ("__route_org", ValueType::Uuid),
         ]);
         let rows = AppRowSchema {
+            publication_fields: BTreeMap::from([
+                (
+                    "user_title".to_owned(),
+                    crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(1),
+                        output_name: "title".to_owned(),
+                    },
+                ),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(2),
+                        output_name: "__jazz_include_project".to_owned(),
+                    },
+                ),
+                (
+                    "__jazz_include_project".to_owned(),
+                    crate::node::CurrentRowPublicationField::ResultField {
+                        name: "project".to_owned(),
+                        visible: true,
+                    },
+                ),
+            ]),
             descriptor: descriptor.clone(),
             hidden_fields: BTreeSet::from(["__route_org".to_owned()]),
             carrier: AppRowCarrier::Logical,
@@ -3387,18 +3420,30 @@ mod tests {
             layout.public_fields,
             vec![
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(1),
+                        output_name: "title".to_owned()
+                    },
                     name: "title".to_owned(),
                     descriptor_field_name: "user_title".to_owned(),
                     slot: 1,
                     carrier: TerminalRootCarrier::CurrentRow,
                 },
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(2),
+                        output_name: "__jazz_include_project".to_owned()
+                    },
                     name: "__jazz_include_project".to_owned(),
                     descriptor_field_name: "user___jazz_include_project".to_owned(),
                     slot: 2,
                     carrier: TerminalRootCarrier::CurrentRow,
                 },
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::ResultField {
+                        name: "project".to_owned(),
+                        visible: true
+                    },
                     name: "project".to_owned(),
                     descriptor_field_name: "__jazz_include_project".to_owned(),
                     slot: 3,

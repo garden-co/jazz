@@ -28,13 +28,21 @@ export type EnumSchema = {
   cases?: { name: string; payload: DescriptorField[] }[];
 };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
-/** Explicit Rust-to-JavaScript provenance for one descriptor field. */
-export type NativeRowDescriptorField = {
-  /** Exact producer-side field identity; unlike generic record fields it is required. */
+export type NativeStoredColumnDescriptorField = {
+  id: number;
+  outputName: string;
+  valueType: ValueType;
+  kind: "stored-column";
+};
+export type NativeResultFieldDescriptorField = {
   name: string;
   valueType: ValueType;
-  kind: "physical-column" | "logical-field";
+  kind: "result-field";
 };
+/** Explicit Rust-to-JavaScript provenance for one descriptor field. */
+export type NativeRowDescriptorField =
+  | NativeStoredColumnDescriptorField
+  | NativeResultFieldDescriptorField;
 export type NativeRowBatch = {
   table: string;
   descriptor: NativeRowDescriptorField[];
@@ -97,8 +105,13 @@ export function writeNativeRowDescriptor(
 ): void {
   writer.vec((fieldWriter, index) => {
     const field = descriptor[index]!;
-    fieldWriter.u64(field.kind === "logical-field" ? 1 : 0);
-    fieldWriter.string(field.name);
+    fieldWriter.u64(field.kind === "result-field" ? 1 : 0);
+    if (field.kind === "stored-column") {
+      fieldWriter.u64(field.id);
+      fieldWriter.string(field.outputName);
+    } else {
+      fieldWriter.string(field.name);
+    }
     writeValueType(fieldWriter, field.valueType);
   }, descriptor.length);
 }
@@ -106,13 +119,22 @@ export function writeNativeRowDescriptor(
 export function readNativeRowDescriptor(reader: PostcardReaderLike): NativeRowDescriptorField[] {
   return reader.readVec((fieldReader) => {
     const kindTag = fieldReader.u64();
-    const kind =
-      kindTag === 0
-        ? "physical-column"
-        : kindTag === 1
-          ? "logical-field"
-          : invalidNativeRowDescriptorFieldKind(kindTag);
-    return { kind, name: fieldReader.string(), valueType: readValueType(fieldReader) };
+    if (kindTag === 0) {
+      return {
+        kind: "stored-column",
+        id: fieldReader.u64(),
+        outputName: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    if (kindTag === 1) {
+      return {
+        kind: "result-field",
+        name: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    return invalidNativeRowDescriptorFieldKind(kindTag);
   });
 }
 

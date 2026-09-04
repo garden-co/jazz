@@ -671,6 +671,10 @@ impl SourceGraphPreparer for FakeSourceResolver {
                 descriptor_fields.push(("branch_id", ValueType::Uuid));
             }
             Ok(ResolvedSource {
+                stored_column_ids: BTreeMap::from([
+                    ("title".to_owned(), crate::ids::PhysicalColumnId(1)),
+                    ("todo".to_owned(), crate::ids::PhysicalColumnId(2)),
+                ]),
                 table_schema: TableSchema::new(
                     request.source.table.clone(),
                     [ColumnSchema::new("title", ColumnType::String)],
@@ -910,6 +914,10 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                 other => panic!("unexpected inline collector source {other}"),
             };
             Ok(ResolvedSource {
+                stored_column_ids: BTreeMap::from([
+                    ("title".to_owned(), crate::ids::PhysicalColumnId(1)),
+                    ("todo".to_owned(), crate::ids::PhysicalColumnId(2)),
+                ]),
                 table_schema: TableSchema::new(
                     request.source.table.clone(),
                     [

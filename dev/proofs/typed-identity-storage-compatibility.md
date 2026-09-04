@@ -190,3 +190,56 @@ nested includes or enum payload compatibility. A role-specific recursive native
 wire type must omit execution bindings while preserving exact durable names,
 ordered field types, and enum metadata. Generic execution-descriptor serde must
 retain its compiler bindings; changing it globally is not this migration.
+
+## Unified native publication trial
+
+A CurrentRow now has one per-slot publication metadata owner:
+`StoredColumn { PhysicalColumnId, output_name }`, `ResultField { name, visible }`,
+or construction-only `UnresolvedSourceCell { output_name }`. Constructor roles
+and compatibility name accessors do not store additional copies. Query
+`FieldIdentity` remains independent: a compiler Slot is not assumed to be a
+catalogue column ID. Schema-aware materialization resolves source cells using
+the selected read schema's physical catalogue. Resolved query sources supply
+that same catalogue mapping to collector and aggregate lowering; projection,
+root layouts and cached record replacement carry the resulting bindings.
+The root layout asserts that its public slot name agrees with its binding.
+
+The native codec serializes only finalized bindings. Variant0 is exactly
+`StoredColumn { id: u64, output_name: string }`; variant1 is exactly
+`ResultField { name: string }`. Unresolved cells fail serialization rather than
+acquiring a fabricated ID. Hidden metadata uses an explicit ResultField name,
+while visibility remains an internal application-cell classification.
+
+The native type envelope recursively writes the contained serde shape: a record
+is an ordered vector of `{ name: Option<string>, value_type }`, without runtime
+identity; arrays, nullable values, tuples and enum case payloads recurse through
+that representation. Scalar type variant numbers and enum registry metadata
+remain unchanged. This is a native publication DTO, not a blanket change to
+execution descriptor serde or VersionRecord peer-wire serialization.
+
+The original contained relation snapshot golden is restored verbatim. An actual
+typed writer now reproduces it, including adjacent/nonadjacent batches and a
+deleted row; an independently declared frozen publication reader decodes and
+re-encodes the same bytes. The nested scalar-record type proof pins the old
+bytes as well. These are component receipts, not a cross-database guarantee.
+Grouped one-shot publication retains the source column's catalogue ID; grouped
+subscription reset remains blocked by the existing aggregate group-identity
+failures and is a separately scoped compiler repair.
+
+### Unresolved visibility ambiguity in the contained ABI
+
+The frozen native ResultField encoding has no visibility discriminator.
+`frozen_result_field_bytes_cannot_distinguish_public_alias_from_hidden_metadata`
+constructs visible and hidden `schema_version: U64` fields and demonstrates
+identical publication bytes. Query validation permits `COUNT(*) AS schema_version`
+(it rejects the `__jazz_aggregate_` alias namespace, not this name), whereas the
+contained native adapter suppresses a ResultField with that name as metadata.
+The same ambiguity exists for names such as `tx_time`. StoredColumn fields with
+these public names remain distinguishable by their explicit variant.
+
+No wire-format change or new alias rejection resolves this in this trial. A
+producer contract that keeps internal metadata out of public publication, or
+another explicitly reviewed source/context rule, needs proof before claiming
+lossless shared semantics. VersionRecord peer-wire descriptors, durable
+ResultCurrent payloads, root-layout hashes, grouped reset, and both directions
+of database reopen/recovery still prevent a shared-format-complete claim.

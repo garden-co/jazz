@@ -69,6 +69,35 @@ impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn stored_column_ids_for_read_table(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<BTreeMap<String, PhysicalColumnId>, SourceResolutionError> {
+        let mapping = self
+            .node
+            .catalogue
+            .physical_mappings
+            .get(&self.read_view.read_schema)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let table_mapping = mapping
+            .tables
+            .get(&table.name)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        table
+            .columns
+            .iter()
+            .map(|column| {
+                table_mapping
+                    .columns
+                    .get(&column.name)
+                    .copied()
+                    .map(|id| (column.name.clone(), id))
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))
+            })
+            .collect()
+    }
+
     /// The complete source-family dispatcher. Keep uncommon historical and
     /// branch paths out of the ordinary inline policy-evaluation frame.
     async fn prepare_source_graph_dispatch(
@@ -154,6 +183,7 @@ where
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph: GraphBuilder::input_source(input_source, descriptor.clone()),
                 row_shape: SourceRowShape {
@@ -289,6 +319,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph,
                 row_shape: SourceRowShape {
@@ -415,6 +446,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -568,6 +600,7 @@ where
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -785,6 +818,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -1513,6 +1547,7 @@ where
             graph
         };
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1612,6 +1647,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1771,6 +1807,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1850,6 +1887,7 @@ where
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {

@@ -5,6 +5,7 @@
 //! schemas used to decode those outputs.
 
 use super::*;
+use crate::node::CurrentRowPublicationField;
 use crate::node::query_eval::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
@@ -17,6 +18,52 @@ fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<S
         .find(|candidate| candidate.name.as_deref() == Some(field))
         .and_then(crate::node::query_engine::descriptor_public_name)
         .map(str::to_owned)
+}
+
+fn source_publication_field(source: &ResolvedSource, name: String) -> CurrentRowPublicationField {
+    match source.stored_column_ids.get(&name) {
+        Some(id) => CurrentRowPublicationField::StoredColumn {
+            id: *id,
+            output_name: name,
+        },
+        None => CurrentRowPublicationField::ResultField {
+            name,
+            visible: true,
+        },
+    }
+}
+
+fn collect_publication_fields(
+    source: &ResolvedSource,
+    layout: &CollectLayout,
+) -> BTreeMap<String, CurrentRowPublicationField> {
+    let mut fields = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output)
+        .map(|field| {
+            let binding = match (&field.origin, &field.source_public_name) {
+                (CollectFieldOrigin::SourceRow, Some(name)) if !field.is_row_id => {
+                    source_publication_field(source, name.clone())
+                }
+                _ => CurrentRowPublicationField::ResultField {
+                    name: field.output.clone(),
+                    visible: !field.is_row_id,
+                },
+            };
+            (field.output.clone(), binding)
+        })
+        .collect::<BTreeMap<_, _>>();
+    fields.extend(layout.slots.iter().map(|slot| {
+        (
+            slot.collection_field.clone(),
+            CurrentRowPublicationField::ResultField {
+                name: slot.collection_field.clone(),
+                visible: true,
+            },
+        )
+    }));
+    fields
 }
 
 pub(super) fn lowered_terminals(
@@ -358,6 +405,7 @@ pub(super) fn lowered_terminals(
             carrier,
             field_carriers,
             public_field_names,
+            publication_fields,
             terminal,
         ) = match app_rows.projection.clone() {
             _ if !app_rows.public_terminal => (
@@ -367,6 +415,22 @@ pub(super) fn lowered_terminals(
                 AppRowCarrier::CurrentRow,
                 BTreeMap::new(),
                 BTreeMap::new(),
+                source
+                    .row_shape
+                    .descriptor
+                    .fields()
+                    .iter()
+                    .filter_map(|field| {
+                        Some((
+                            field.name.clone()?,
+                            source_publication_field(
+                                source,
+                                crate::node::query_engine::descriptor_public_name(field)?
+                                    .to_owned(),
+                            ),
+                        ))
+                    })
+                    .collect(),
                 AppRowTerminal::Direct,
             ),
             PayloadProjection::Tree(tree) => {
@@ -387,6 +451,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.publication_fields,
                     collected.terminal,
                 )
             }
@@ -436,6 +501,17 @@ pub(super) fn lowered_terminals(
                         )
                     })
                     .collect();
+                let publication_fields = public_fields
+                    .iter()
+                    .map(|field| {
+                        let name = resolved_source_public_name(output_source, &field.name)
+                            .unwrap_or_else(|| field.name.clone());
+                        (
+                            field.name.clone(),
+                            source_publication_field(output_source, name),
+                        )
+                    })
+                    .collect();
                 (
                     graph,
                     descriptor,
@@ -443,6 +519,7 @@ pub(super) fn lowered_terminals(
                     AppRowCarrier::Logical,
                     BTreeMap::new(),
                     public_field_names,
+                    publication_fields,
                     AppRowTerminal::Direct,
                 )
             }
@@ -467,6 +544,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.publication_fields,
                     collected.terminal,
                 )
             }
@@ -485,6 +563,7 @@ pub(super) fn lowered_terminals(
                 carrier,
                 field_carriers,
                 public_field_names,
+                publication_fields,
                 terminal,
             }),
         });
@@ -967,6 +1046,7 @@ pub(super) struct CollectLayout {
 
 #[derive(Clone, Debug)]
 struct LoweredCollectByAppRows {
+    pub(super) publication_fields: BTreeMap<String, CurrentRowPublicationField>,
     pub(super) graph: GraphBuilder,
     pub(super) descriptor: RecordDescriptor,
     pub(super) hidden_fields: BTreeSet<String>,
@@ -1000,6 +1080,7 @@ fn lower_collect_by_app_rows(
     )?;
     align_collect_root_window(&mut layout, plan, root_source)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
+    let publication_fields = collect_publication_fields(root_source, &layout);
     if layout.slots.is_empty() {
         // A collect-all root preserves the source CurrentRow application-cell
         // wrappers. Explicit projections unwrap those cells to their declared
@@ -1085,6 +1166,7 @@ fn lower_collect_by_app_rows(
         );
         let descriptor = collect_output_descriptor(&layout)?;
         return Ok(LoweredCollectByAppRows {
+            publication_fields,
             graph,
             descriptor,
             // Route parameters are retained in the collector record so the
@@ -1194,6 +1276,7 @@ fn lower_collect_by_app_rows(
     let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
     hidden_fields.extend(route_fields.iter().cloned());
     Ok(LoweredCollectByAppRows {
+        publication_fields,
         graph,
         descriptor,
         hidden_fields,
@@ -1721,6 +1804,34 @@ fn lowered_aggregate_terminals(
             sink: "app_rows".to_owned(),
             graph: aggregate_graph.clone(),
             output: OutputTerminalSchema::AppRows(AppRowSchema {
+                publication_fields: {
+                    let (groups, outputs) = root_aggregate_step(plan).expect("aggregate plan");
+                    let mut fields = BTreeMap::new();
+                    for value in groups {
+                        let carrier = aggregate_source_field_name(value, source)?;
+                        let name = if matches!(value, NormalizedValueRef::RowId(_)) {
+                            "id".to_owned()
+                        } else {
+                            resolved_source_public_name(source, &carrier).ok_or_else(|| {
+                                single_gap_report(UnsupportedReason::Runtime(
+                                    "aggregate source field has no explicit application name"
+                                        .to_owned(),
+                                ))
+                            })?
+                        };
+                        fields.insert(carrier, source_publication_field(source, name));
+                    }
+                    for output in outputs {
+                        fields.insert(
+                            aggregate_output_field(&output.output.name),
+                            CurrentRowPublicationField::ResultField {
+                                name: output.output.name.clone(),
+                                visible: true,
+                            },
+                        );
+                    }
+                    fields
+                },
                 descriptor: aggregate_app_row_descriptor(plan, source)?,
                 hidden_fields: root_route_fields.clone(),
                 carrier: AppRowCarrier::Logical,

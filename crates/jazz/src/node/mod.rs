@@ -1382,25 +1382,67 @@ pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
-    binding_fields: std::sync::Arc<Vec<CurrentRowBindingField>>,
-    /// Public logical names for descriptor slots whose internal carrier name
-    /// is not itself the query-visible field name.  A projected terminal can
-    /// carry a logical `user_title` slot while exposing it as `title`; this
-    /// mapping belongs to the producer boundary, not host-side inference.
-    binding_field_names: std::sync::Arc<Vec<Option<String>>>,
+    publication_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
 }
 
-/// The native-host interpretation of one materialized record-descriptor field.
+/// Constructor-time source or logical role before publication is finalized.
 ///
-/// A descriptor may mix physical application columns with collector-owned
-/// logical fields. This stays internal to Jazz's native binding codec; it is
-/// neither storage nor sync-wire state.
+/// This role is never serialized. The single publication metadata owner below
+/// carries authoritative catalogue IDs, names and application-cell visibility.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CurrentRowBindingField {
+pub enum CurrentRowBindingRole {
     /// A persisted CurrentRow field using Jazz's private physical name.
     PhysicalColumn,
     /// A query, relation, or collector field using its public logical name.
     LogicalField,
+}
+
+/// One producer-owned publication binding. Runtime query slots are separate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CurrentRowPublicationField {
+    /// A source application cell with its authoritative catalogue identity.
+    StoredColumn {
+        /// Exact catalogue column identity.
+        id: PhysicalColumnId,
+        /// Application output name, including explicit aliases.
+        output_name: String,
+    },
+    /// A derived or metadata field with an explicit name and visibility.
+    ResultField {
+        /// Exact name sent to the host.
+        name: String,
+        /// Whether this is an application cell rather than hidden metadata.
+        visible: bool,
+    },
+    /// Construction-only source cell, resolved before publication.
+    UnresolvedSourceCell {
+        /// Source application name in the selected read schema.
+        output_name: String,
+    },
+}
+
+impl CurrentRowPublicationField {
+    pub(crate) fn application_name(&self) -> Option<&str> {
+        match self {
+            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
+                Some(output_name)
+            }
+            Self::ResultField {
+                name,
+                visible: true,
+            } => Some(name),
+            Self::ResultField { visible: false, .. } => None,
+        }
+    }
+
+    fn role(&self) -> CurrentRowBindingRole {
+        match self {
+            Self::StoredColumn { .. } | Self::UnresolvedSourceCell { .. } => {
+                CurrentRowBindingRole::PhysicalColumn
+            }
+            Self::ResultField { .. } => CurrentRowBindingRole::LogicalField,
+        }
+    }
 }
 
 /// Work performed by the durable local-write replay lookup.
@@ -1456,13 +1498,13 @@ pub struct RelationSnapshot {
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
-        Self::new_with_binding_fields(table, record, CurrentRowBindingField::PhysicalColumn)
+        Self::new_with_binding_fields(table, record, CurrentRowBindingRole::PhysicalColumn)
     }
 
     pub(crate) fn new_with_binding_fields(
         table: impl Into<String>,
         record: OwnedRecord,
-        default_field: CurrentRowBindingField,
+        default_field: CurrentRowBindingRole,
     ) -> Self {
         let binding_fields = vec![default_field; record.descriptor().fields().len()];
         Self::new_with_explicit_binding_fields(table, record, binding_fields)
@@ -1471,7 +1513,7 @@ impl CurrentRow {
     pub(crate) fn new_with_explicit_binding_fields(
         table: impl Into<String>,
         record: OwnedRecord,
-        binding_fields: Vec<CurrentRowBindingField>,
+        binding_fields: Vec<CurrentRowBindingRole>,
     ) -> Self {
         let binding_field_names = record
             .descriptor()
@@ -1479,8 +1521,8 @@ impl CurrentRow {
             .iter()
             .zip(&binding_fields)
             .map(|(field, binding)| match binding {
-                CurrentRowBindingField::PhysicalColumn => None,
-                CurrentRowBindingField::LogicalField => {
+                CurrentRowBindingRole::PhysicalColumn => None,
+                CurrentRowBindingRole::LogicalField => {
                     self::query_engine::descriptor_public_name(field).map(str::to_owned)
                 }
             })
@@ -1498,7 +1540,7 @@ impl CurrentRow {
     pub(crate) fn new_with_explicit_binding_fields_and_names(
         table: impl Into<String>,
         record: OwnedRecord,
-        binding_fields: Vec<CurrentRowBindingField>,
+        binding_fields: Vec<CurrentRowBindingRole>,
         binding_field_names: Vec<Option<String>>,
     ) -> Self {
         assert_eq!(
@@ -1511,12 +1553,55 @@ impl CurrentRow {
             binding_fields.len(),
             "native binding field names must align with their record descriptor"
         );
+        let publication_fields = record
+            .descriptor()
+            .fields()
+            .iter()
+            .zip(binding_fields)
+            .zip(binding_field_names)
+            .map(|((field, role), public_name)| {
+                let name = field.name.as_deref().expect("current row fields are named");
+                match role {
+                    CurrentRowBindingRole::PhysicalColumn => {
+                        match public_name
+                            .or_else(|| Self::physical_application_name(field).map(str::to_owned))
+                        {
+                            Some(output_name) => {
+                                CurrentRowPublicationField::UnresolvedSourceCell { output_name }
+                            }
+                            None => CurrentRowPublicationField::ResultField {
+                                name: name.to_owned(),
+                                visible: false,
+                            },
+                        }
+                    }
+                    CurrentRowBindingRole::LogicalField => {
+                        CurrentRowPublicationField::ResultField {
+                            visible: public_name.is_some(),
+                            name: public_name.unwrap_or_else(|| name.to_owned()),
+                        }
+                    }
+                }
+            })
+            .collect();
+        Self::new_with_publication_fields(table, record, publication_fields)
+    }
+
+    pub(crate) fn new_with_publication_fields(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        publication_fields: Vec<CurrentRowPublicationField>,
+    ) -> Self {
+        assert_eq!(
+            publication_fields.len(),
+            record.descriptor().fields().len(),
+            "publication fields must align with record slots"
+        );
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
-            binding_fields: std::sync::Arc::new(binding_fields),
-            binding_field_names: std::sync::Arc::new(binding_field_names),
+            publication_fields: std::sync::Arc::new(publication_fields),
         }
     }
 
@@ -1532,14 +1617,29 @@ impl CurrentRow {
 
     /// The explicit native-binding provenance of every encoded descriptor field.
     #[doc(hidden)]
-    pub fn binding_fields(&self) -> &[CurrentRowBindingField] {
-        &self.binding_fields
+    pub fn binding_fields(&self) -> Vec<CurrentRowBindingRole> {
+        self.publication_fields
+            .iter()
+            .map(CurrentRowPublicationField::role)
+            .collect()
     }
 
-    /// Producer-supplied public logical names, aligned with [`Self::binding_fields`].
+    /// Producer-owned publication metadata, aligned with descriptor slots.
     #[doc(hidden)]
-    pub fn binding_field_names(&self) -> &[Option<String>] {
-        &self.binding_field_names
+    pub fn publication_fields(&self) -> &[CurrentRowPublicationField] {
+        &self.publication_fields
+    }
+
+    /// Logical public names derived from the single publication metadata owner.
+    #[doc(hidden)]
+    pub fn binding_field_names(&self) -> Vec<Option<&str>> {
+        self.publication_fields
+            .iter()
+            .map(|field| match field {
+                CurrentRowPublicationField::ResultField { .. } => field.application_name(),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Logical table name.
@@ -1603,30 +1703,14 @@ impl CurrentRow {
     }
 
     fn application_column_index_by_name(&self, column: &str) -> Option<usize> {
-        // Explicit physical provenance wins over a colliding logical carrier.
-        for wanted in [
-            CurrentRowBindingField::PhysicalColumn,
-            CurrentRowBindingField::LogicalField,
+        for role in [
+            CurrentRowBindingRole::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
         ] {
-            if let Some(index) =
-                self.binding_fields
-                    .iter()
-                    .enumerate()
-                    .position(|(index, binding)| {
-                        if *binding != wanted {
-                            return false;
-                        }
-                        let field = &self.record.descriptor().fields()[index];
-                        let name = match binding {
-                            CurrentRowBindingField::PhysicalColumn => {
-                                Self::physical_application_name(field)
-                            }
-                            CurrentRowBindingField::LogicalField => {
-                                self.binding_field_names[index].as_deref()
-                            }
-                        };
-                        name == Some(column)
-                    })
+            if let Some(index) = self
+                .publication_fields
+                .iter()
+                .position(|field| field.role() == role && field.application_name() == Some(column))
             {
                 return Some(index);
             }
@@ -1769,8 +1853,12 @@ impl CurrentRow {
             .record
             .descriptor()
             .field_index("row_uuid")
-            .and_then(|index| self.binding_fields.get(index).copied())
-            .unwrap_or(CurrentRowBindingField::LogicalField);
+            .and_then(|index| {
+                self.publication_fields
+                    .get(index)
+                    .map(CurrentRowPublicationField::role)
+            })
+            .unwrap_or(CurrentRowBindingRole::LogicalField);
         let mut binding_fields = vec![row_uuid_field];
         let mut binding_field_names = vec![None];
         for column in projected_columns {
@@ -1797,8 +1885,12 @@ impl CurrentRow {
             values.push(projected);
             let binding = self
                 .application_column_index_by_name(&public_name)
-                .and_then(|index| self.binding_fields.get(index).copied())
-                .unwrap_or(CurrentRowBindingField::LogicalField);
+                .and_then(|index| {
+                    self.publication_fields
+                        .get(index)
+                        .map(CurrentRowPublicationField::role)
+                })
+                .unwrap_or(CurrentRowBindingRole::LogicalField);
             binding_fields.push(binding);
             binding_field_names.push(Some(public_name));
         }
@@ -1812,8 +1904,12 @@ impl CurrentRow {
                     .into_iter()
                     .map(|column| {
                         self.provenance_field_index(column)
-                            .and_then(|index| self.binding_fields.get(index).copied())
-                            .unwrap_or(CurrentRowBindingField::LogicalField)
+                            .and_then(|index| {
+                                self.publication_fields
+                                    .get(index)
+                                    .map(CurrentRowPublicationField::role)
+                            })
+                            .unwrap_or(CurrentRowBindingRole::LogicalField)
                     }),
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
@@ -1822,7 +1918,7 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            binding_fields.extend([CurrentRowBindingField::LogicalField; 4]);
+            binding_fields.extend([CurrentRowBindingRole::LogicalField; 4]);
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
@@ -1832,15 +1928,25 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::U64(0));
         }
-        binding_fields.extend([CurrentRowBindingField::LogicalField; 2]);
+        binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
         binding_field_names.extend(std::iter::repeat_n(None, 2));
         let raw = descriptor.create(&values)?;
-        Ok(Self::new_with_explicit_binding_fields_and_names(
+        let mut projected = Self::new_with_explicit_binding_fields_and_names(
             table.name.clone(),
             OwnedRecord::new(raw, descriptor),
             binding_fields,
             binding_field_names,
-        ))
+        );
+        let fields = std::sync::Arc::make_mut(&mut projected.publication_fields);
+        for field in fields {
+            let Some(name) = field.application_name() else {
+                continue;
+            };
+            if let Some(index) = self.application_column_index_by_name(name) {
+                *field = self.publication_fields[index].clone();
+            }
+        }
+        Ok(projected)
     }
 
     pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {
@@ -1910,24 +2016,12 @@ impl CurrentRow {
     }
 
     fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
-        let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        descriptor
-            .fields()
+        self.publication_fields
             .iter()
-            .zip(
-                self.binding_fields
-                    .iter()
-                    .zip(self.binding_field_names.iter()),
-            )
             .enumerate()
-            .filter_map(move |(idx, (field, (binding, public_name)))| {
-                let name = match binding {
-                    CurrentRowBindingField::PhysicalColumn => {
-                        Self::physical_application_name(field)?
-                    }
-                    CurrentRowBindingField::LogicalField => public_name.as_deref()?,
-                };
+            .filter_map(move |(idx, field)| {
+                let name = field.application_name()?;
                 let value = match borrowed.get_idx(idx).ok()? {
                     Value::Nullable(value) => value.map(|value| *value),
                     value => Some(value),

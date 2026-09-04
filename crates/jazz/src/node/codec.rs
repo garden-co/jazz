@@ -6036,7 +6036,7 @@ pub(super) fn current_row_from_positional_cells(
     Ok(CurrentRow::new_with_binding_fields(
         table.name.clone(),
         OwnedRecord::new(raw, descriptor),
-        CurrentRowBindingField::LogicalField,
+        CurrentRowBindingRole::LogicalField,
     ))
 }
 

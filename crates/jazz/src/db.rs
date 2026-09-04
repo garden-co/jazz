@@ -35,14 +35,16 @@ use crate::authorization_scope::{
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
+#[cfg(test)]
+use crate::node::CurrentRowBindingRole;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, CurrentRowBindingField, EdgeCacheBudget,
-    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, PreparedQueryPlanHandle, PublicationOutcome, PublishedTransaction, QueryReadProfile,
-    RelationEdge, RelationSnapshot, RowProvenance, TransactionBranchRowState, ViewUpdateParts,
+    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
+    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
+    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -4285,6 +4287,8 @@ pub struct TerminalRootLayout {
 /// One public root field's immutable physical slot identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalRootPublicField {
+    /// Authoritative publication binding supplied by the compiler.
+    pub publication: crate::node::CurrentRowPublicationField,
     /// Public column name.
     pub name: String,
     /// Physical descriptor field name at `slot`.
@@ -5476,14 +5480,9 @@ fn materialize_subscription_terminal_record(
             )
         })?;
         let table = root.table().to_owned();
-        let binding_fields = root.binding_fields().to_vec();
-        let binding_field_names = root.binding_field_names().to_vec();
-        *root = CurrentRow::new_with_explicit_binding_fields_and_names(
-            table,
-            record.record()?,
-            binding_fields,
-            binding_field_names,
-        );
+        let publication_fields = root.publication_fields().to_vec();
+        *root =
+            CurrentRow::new_with_publication_fields(table, record.record()?, publication_fields);
     }
     Ok(())
 }
@@ -5583,11 +5582,10 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new_with_explicit_binding_fields_and_names(
+        row: CurrentRow::new_with_publication_fields(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
-            terminal_root_binding_fields(layout),
-            terminal_root_binding_field_names(layout),
+            terminal_root_publication_fields(layout),
         ),
         previous_index,
         index,
@@ -5600,12 +5598,37 @@ fn terminal_subscription_output_row(
 /// this exact mapping; treating a hybrid collector record as wholly logical
 /// loses the distinction between a physical `user_{column}` and a logical
 /// field with that same name.
+pub(crate) fn terminal_root_publication_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<crate::node::CurrentRowPublicationField> {
+    use crate::node::CurrentRowPublicationField;
+    let mut fields = layout
+        .root_descriptor
+        .fields()
+        .iter()
+        .map(|field| CurrentRowPublicationField::ResultField {
+            name: field.name.clone().expect("terminal fields are named"),
+            visible: false,
+        })
+        .collect::<Vec<_>>();
+    for field in &layout.public_fields {
+        assert_eq!(
+            field.publication.application_name(),
+            Some(field.name.as_str()),
+            "terminal publication name must match its public slot mapping"
+        );
+        fields[field.slot] = field.publication.clone();
+    }
+    fields
+}
+
+#[cfg(test)]
 pub(crate) fn terminal_root_binding_fields(
     layout: &TerminalRootLayout,
-) -> Vec<CurrentRowBindingField> {
+) -> Vec<CurrentRowBindingRole> {
     let binding_for_carrier = |carrier| match carrier {
-        TerminalRootCarrier::CurrentRow => CurrentRowBindingField::PhysicalColumn,
-        TerminalRootCarrier::Logical => CurrentRowBindingField::LogicalField,
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingRole::PhysicalColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingRole::LogicalField,
     };
     let mut fields =
         vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
@@ -5620,6 +5643,7 @@ pub(crate) fn terminal_root_binding_fields(
 /// public output is simply `{column}`.  Native hosts must receive the latter
 /// without guessing from a prefix, while truly logical `user_*` fields remain
 /// untouched.
+#[cfg(test)]
 pub(crate) fn terminal_root_binding_field_names(
     layout: &TerminalRootLayout,
 ) -> Vec<Option<String>> {

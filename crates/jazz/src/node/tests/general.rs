@@ -25,14 +25,14 @@ fn project_preserves_logical_binding_fields() {
     let projected = CurrentRow::new_with_binding_fields(
         "items",
         OwnedRecord::new(raw, descriptor),
-        CurrentRowBindingField::LogicalField,
+        CurrentRowBindingRole::LogicalField,
     )
     .project(&table, &["check".to_owned()])
     .expect("project logical result");
 
     assert_eq!(
         projected.binding_fields()[1],
-        CurrentRowBindingField::LogicalField
+        CurrentRowBindingRole::LogicalField
     );
 }
 
@@ -69,7 +69,7 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
     let projected = CurrentRow::new_with_binding_fields(
         "items",
         OwnedRecord::new(raw, descriptor),
-        CurrentRowBindingField::PhysicalColumn,
+        CurrentRowBindingRole::PhysicalColumn,
     )
     .project(&table, &["__jazz_aggregate_foo".to_owned()])
     .expect("project aggregate-shaped literal column");
@@ -119,9 +119,9 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
         "items",
         OwnedRecord::new(raw, descriptor),
         vec![
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
         ],
         vec![None, Some("title".to_owned()), None],
     );
@@ -153,9 +153,9 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
         "items",
         OwnedRecord::new(physical_raw, physical_descriptor),
         vec![
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::PhysicalColumn,
-            CurrentRowBindingField::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
         ],
         vec![None, Some("title".to_owned()), None],
     );
@@ -188,9 +188,9 @@ fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collisio
         "items",
         OwnedRecord::new(raw, descriptor),
         vec![
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::LogicalField,
-            CurrentRowBindingField::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
         ],
     );
 
@@ -201,7 +201,7 @@ fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collisio
     assert_eq!(projected.cell(&table, "check"), Some(Value::Bool(true)));
     assert_eq!(
         projected.binding_fields()[1],
-        CurrentRowBindingField::PhysicalColumn
+        CurrentRowBindingRole::PhysicalColumn
     );
 }
 
@@ -227,9 +227,9 @@ fn subscription_equivalence_keeps_hybrid_physical_and_logical_user_names_distinc
             "items",
             OwnedRecord::new(raw, descriptor),
             vec![
-                CurrentRowBindingField::LogicalField,
-                CurrentRowBindingField::LogicalField,
-                CurrentRowBindingField::PhysicalColumn,
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::PhysicalColumn,
             ],
         )
     }

@@ -8,7 +8,7 @@ use jazz::binding_codec::{
 };
 use jazz::ids::{
     AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
-    RowUuid, SchemaVersionId,
+    PhysicalColumnId, RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
@@ -1526,31 +1526,35 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let current_descriptor = RecordDescriptor::new([
         ("row_uuid", ValueType::Uuid),
         (
-            "user_title",
+            "_app_title",
             ValueType::Nullable(Box::new(ValueType::String)),
         ),
     ]);
     let logical_descriptor =
         RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
-    fn binding_descriptor<'a>(
-        descriptor: &'a RecordDescriptor,
-        logical: bool,
-    ) -> Vec<RowDescriptorField<'a>> {
-        descriptor
-            .fields()
-            .iter()
-            .map(|field| RowDescriptorField {
-                name: if logical {
-                    RowDescriptorFieldName::LogicalField(field.name.as_deref().expect("named"))
-                } else {
-                    RowDescriptorFieldName::PhysicalColumn(field.name.as_deref().expect("named"))
-                },
-                value_type: field.value_type.clone(),
-            })
-            .collect::<Vec<_>>()
-    }
-    let current_binding_descriptor = binding_descriptor(&current_descriptor, false);
-    let logical_binding_descriptor = binding_descriptor(&logical_descriptor, true);
+    let current_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::StoredColumn {
+                id: PhysicalColumnId(1),
+                output_name: "title",
+            },
+            value_type: ValueType::Nullable(Box::new(ValueType::String)),
+        },
+    ];
+    let logical_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "title" },
+            value_type: ValueType::String,
+        },
+    ];
     let todo_one_id = RowUuid::from_bytes([0x11; 16]);
     let todo_two_id = RowUuid::from_bytes([0x12; 16]);
     let note_id = RowUuid::from_bytes([0x21; 16]);
