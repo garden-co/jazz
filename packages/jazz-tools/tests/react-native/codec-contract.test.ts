@@ -67,6 +67,7 @@ const cases: [string, unknown, unknown][] = [
   ["disconnect", { type: "disconnectNativeUpstream" }, "DisconnectNativeUpstream"],
   ["reconnect", { type: "reconnectNativeUpstream" }, "ReconnectNativeUpstream"],
   ["status", { type: "nativeConnectionStatus" }, "NativeConnectionStatus"],
+  ["metadata", { type: "nativeSessionMetadata" }, "NativeSessionMetadata"],
 ];
 
 describe("RN Rust/TypeScript foreground codec contract", () => {
@@ -88,6 +89,7 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         explicitlyOffline: false,
         connected: true,
       },
+      { type: "nativeSessionMetadata", issuer: "fixture-issuer", userId: "fixture-user" },
     ]);
     for (const response of responses) {
       expect(() =>

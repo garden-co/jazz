@@ -334,6 +334,10 @@ pub fn foreground_response_corpus() -> Result<String> {
             explicitly_offline: false,
             connected: true,
         },
+        ForegroundDbCommandResponse::NativeSessionMetadata {
+            issuer: "fixture-issuer".into(),
+            user_id: "fixture-user".into(),
+        },
     ];
     let bytes = responses
         .iter()
