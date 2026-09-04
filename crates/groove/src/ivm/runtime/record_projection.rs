@@ -1044,10 +1044,18 @@ pub(super) fn field_ref_name(
         FieldRef::Name(name) => Ok(name.clone()),
         FieldRef::StoredName(_) => {
             let index = resolve_field_ref(descriptor, field)?;
-            Ok(descriptor.fields()[index]
-                .logical_name()
-                .expect("stored field references have a name")
-                .to_owned())
+            let resolved = &descriptor.fields()[index];
+            // PlanExpr still carries names. Only emit a spelling that its
+            // resolver binds back to this exact field; logical labels alone
+            // cannot distinguish fields with different NamedSlot identities.
+            resolved
+                .name
+                .as_deref()
+                .into_iter()
+                .chain(resolved.logical_name())
+                .find(|name| resolve_field_name(descriptor, name) == Some(index))
+                .map(str::to_owned)
+                .ok_or_else(|| IvmRuntimeError::AmbiguousGraphFieldReference(field.display_name()))
         }
         FieldRef::Resolved(index) => field_name_at(descriptor, *index),
     }

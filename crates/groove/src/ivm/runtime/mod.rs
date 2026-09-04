@@ -413,6 +413,8 @@ pub enum IvmRuntimeError {
     AggregateOverflow,
     #[error("graph field not found: {0}")]
     GraphFieldNotFound(String),
+    #[error("exact graph field reference cannot be represented unambiguously by name: {0}")]
+    AmbiguousGraphFieldReference(String),
     #[error("graph field index out of bounds: {0}")]
     GraphFieldIndexOutOfBounds(usize),
     #[error("graph node has unexpected input arity: {0:?}")]

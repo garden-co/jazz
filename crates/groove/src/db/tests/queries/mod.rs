@@ -813,3 +813,119 @@ mod aggregates;
 mod composition;
 mod structured;
 mod windows;
+
+#[futures_test::test]
+async fn stored_name_projection_keeps_exact_carrier_with_duplicate_logical_names() {
+    use crate::ivm::{FieldRef, ProjectExpr};
+    use crate::records::{DescriptorField, FieldIdentity};
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField::new("left_carrier", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 1,
+            },
+        ),
+        DescriptorField::new("right_carrier", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 2,
+            },
+        ),
+    ]);
+    let storage = MemoryStorage::new(&[]).unwrap();
+    let mut database = Database::new(DatabaseSchema::new([]), storage)
+        .await
+        .unwrap();
+    for field in [
+        FieldRef::name("right_carrier"),
+        FieldRef::stored_name("right_carrier"),
+    ] {
+        let graph = GraphBuilder::values(descriptor, [vec![Value::U64(11), Value::U64(22)]])
+            .unwrap()
+            .project_fields([ProjectField {
+                expression: ProjectExpr::Field(field.clone()),
+                output_name: "selected".into(),
+                output_identity: FieldIdentity::Name("selected".into()),
+            }]);
+        let actual = database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(actual, [(vec![Value::U64(22)], 1)], "reference {field:?}");
+    }
+}
+
+#[futures_test::test]
+async fn stored_name_projection_uses_unambiguous_logical_name_when_carrier_is_shadowed() {
+    use crate::ivm::{FieldRef, ProjectExpr};
+    use crate::records::{DescriptorField, FieldIdentity};
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField::new("user_title", ValueType::U64)
+            .with_identity(FieldIdentity::Name("title".into())),
+        DescriptorField::new("user_user_title", ValueType::U64)
+            .with_identity(FieldIdentity::Name("user_title".into())),
+    ]);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    for (carrier, expected) in [("user_title", 11), ("user_user_title", 22)] {
+        let graph = GraphBuilder::values(descriptor, [vec![Value::U64(11), Value::U64(22)]])
+            .unwrap()
+            .project_fields([ProjectField {
+                expression: ProjectExpr::Field(FieldRef::stored_name(carrier)),
+                output_name: "selected".into(),
+                output_identity: FieldIdentity::Name("selected".into()),
+            }]);
+        assert_eq!(
+            database
+                .query_graph(graph)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(vec![Value::U64(expected)], 1)]
+        );
+    }
+}
+
+#[futures_test::test]
+async fn stored_name_projection_rejects_irreducible_name_ambiguity() {
+    use crate::ivm::{FieldRef, ProjectExpr};
+    use crate::records::{DescriptorField, FieldIdentity};
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField::new("first", ValueType::U64)
+            .with_identity(FieldIdentity::Name("right_carrier".into())),
+        DescriptorField::new("second", ValueType::U64).with_identity(FieldIdentity::NamedSlot {
+            name: "shared".into(),
+            slot: 1,
+        }),
+        DescriptorField::new("right_carrier", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 2,
+            },
+        ),
+    ]);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    let graph = GraphBuilder::values(
+        descriptor,
+        [vec![Value::U64(11), Value::U64(22), Value::U64(33)]],
+    )
+    .unwrap()
+    .project_fields([ProjectField {
+        expression: ProjectExpr::Field(FieldRef::stored_name("right_carrier")),
+        output_name: "selected".into(),
+        output_identity: FieldIdentity::Name("selected".into()),
+    }]);
+    let error = database.query_graph(graph).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot be represented unambiguously"),
+        "{error}"
+    );
+}
