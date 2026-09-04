@@ -182,12 +182,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
-      - name: Grant the runner user access to KVM
-        shell: bash
-        run: |
-          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a KVM-capable runner" >&2; exit 1; }
-          sudo setfacl -m "u:${USER}:rw" /dev/kvm
-          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance could not grant the runner user KVM access" >&2; exit 1; }
       - name: Bootstrap pinned lane-local Android toolchain
         run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
       - name: Stage and verify all relay ABI artifacts
@@ -201,6 +195,12 @@ jobs:
           export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
           pnpm --filter jazz-rn build:relay:android
           node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - name: Grant the runner user access to KVM
+        shell: bash
+        run: |
+          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a KVM-capable runner" >&2; exit 1; }
+          sudo setfacl -m "u:${USER}:rw" /dev/kvm
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance could not grant the runner user KVM access" >&2; exit 1; }
       - name: Assemble, launch, and require the run-bound receipt
         shell: bash
         run: |
