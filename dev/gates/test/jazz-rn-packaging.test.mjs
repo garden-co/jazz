@@ -307,6 +307,51 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     "ios-arm64/libjazz_native_relay.a",
     "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
   ];
+  const archive = (members) => {
+    const parts = [Buffer.from("!<arch>\n")];
+    for (const [name, bytes] of members) {
+      const header = Buffer.alloc(60, " ");
+      Buffer.from(`${name}/`).copy(header);
+      Buffer.from("0").copy(header, 16);
+      Buffer.from("0").copy(header, 28);
+      Buffer.from("0").copy(header, 34);
+      Buffer.from("100644").copy(header, 40);
+      Buffer.from(String(bytes.length)).copy(header, 48);
+      Buffer.from("`\n").copy(header, 58);
+      parts.push(header, bytes);
+      if (bytes.length % 2) parts.push(Buffer.from("\n"));
+    }
+    return Buffer.concat(parts);
+  };
+  const elfObject = (machine) => {
+    const bytes = Buffer.alloc(20);
+    Buffer.from("\x7fELF").copy(bytes);
+    bytes.writeUInt16LE(machine, 18);
+    return bytes;
+  };
+  const machObject = (cpu) => {
+    const bytes = Buffer.alloc(8);
+    bytes.writeUInt32LE(0xfeedfacf, 0);
+    bytes.writeUInt32LE(cpu, 4);
+    return bytes;
+  };
+  const artifactBytes = (file) => {
+    const androidMachine = {
+      "arm64-v8a/libjazz_native_relay.a": 183,
+      "armeabi-v7a/libjazz_native_relay.a": 40,
+      "x86/libjazz_native_relay.a": 3,
+      "x86_64/libjazz_native_relay.a": 62,
+    }[file];
+    if (androidMachine !== undefined) return archive([["object.o", elfObject(androidMachine)]]);
+    if (file === "ios-arm64/libjazz_native_relay.a")
+      return archive([["device.o", machObject(0x0100000c)]]);
+    if (file === "ios-arm64_x86_64-simulator/libjazz_native_relay.a")
+      return archive([
+        ["arm64.o", machObject(0x0100000c)],
+        ["x86_64.o", machObject(0x01000007)],
+      ]);
+    return `fixture:${file}\n`;
+  };
   const info = (
     includeDevice,
     simulatorLibrary = "libjazz_native_relay.a",
@@ -324,7 +369,7 @@ ${
     for (const file of files) {
       const destination = join(root, file);
       await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, file === "Info.plist" ? info(true) : `fixture:${file}\n`);
+      await writeFile(destination, file === "Info.plist" ? info(true) : artifactBytes(file));
     }
   };
   const writeManifest = async (root, destination, extra = {}) => {
@@ -405,7 +450,10 @@ ${
     );
 
     await rm(join(simulatorDirectory, "libjazz_native_relay_simulator.a"));
-    await writeFile(join(simulatorDirectory, "libjazz_native_relay.a"), "fixture\n");
+    await writeFile(
+      join(simulatorDirectory, "libjazz_native_relay.a"),
+      artifactBytes("ios-arm64_x86_64-simulator/libjazz_native_relay.a"),
+    );
 
     await writeFile(join(iosRoot, "Info.plist"), info(false));
     await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));

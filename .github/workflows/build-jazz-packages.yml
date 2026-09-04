@@ -515,3 +515,70 @@ jobs:
             !crates/jazz-rn/node_modules
           include-hidden-files: true
           if-no-files-found: error
+
+  verify-jazz-rn-android-consumer:
+    name: Verify packaged jazz-rn Android consumer
+    needs: assemble-jazz-rn
+    if: inputs.include_rn && needs.assemble-jazz-rn.result == 'success'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      # Replace the workspace source directory with the assembled package that
+      # will be published. The preceding pack verification proves this tree's
+      # native payload survives npm packing; this job proves Gradle can consume
+      # that payload through the normal Expo/autolinking route.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+
+      - name: Generate Android host from the assembled package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:android
+
+      - name: Link the assembled relay through an Android application
+        run: ./gradlew :app:assembleDebug --no-daemon
+        working-directory: examples/todo-client-localfirst-expo/android
+
+  verify-jazz-rn-ios-consumer:
+    name: Verify packaged jazz-rn iOS consumer
+    needs: assemble-jazz-rn
+    if: inputs.include_rn && needs.assemble-jazz-rn.result == 'success'
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+
+      - name: Generate iOS host from the assembled package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
+
+      - name: Install the assembled native pod
+        run: pod install
+        working-directory: examples/todo-client-localfirst-expo/ios
+
+      - name: Link the assembled relay through an iOS simulator application
+        run: |
+          xcodebuild \
+            -workspace todoclientlocalfirstexpo.xcworkspace \
+            -scheme todoclientlocalfirstexpo \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            build
+        working-directory: examples/todo-client-localfirst-expo/ios
