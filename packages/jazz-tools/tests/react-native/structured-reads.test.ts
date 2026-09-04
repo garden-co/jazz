@@ -16,6 +16,21 @@ const query = app.groups
 // Browser donor: db.include-subscriptions.server.test.ts selected nested
 // includes. This fixture replaces browser transport with the real native owner.
 describe("React Native structured reads", () => {
+  it("executes a public union through canonical async relation preparation", async () => {
+    await withNativeRelayFixture(app, async (fixture) => {
+      const db = await fixture.createDb();
+      const first = db.insert(app.groups, { name: "first" }).value;
+      const second = db.insert(app.groups, { name: "second" }).value;
+      db.insert(app.groups, { name: "excluded" });
+      const union = app
+        .union([app.groups.where({ name: "first" }), app.groups.where({ name: "second" })])
+        .orderBy("name");
+      expect(await db.all(union)).toEqual([first, second]);
+      db.update(app.groups, first.id, { name: "now excluded" });
+      expect(await db.all(union)).toEqual([second]);
+    });
+  });
+
   it("hydrates selected nested includes and isolates transaction overlays", async () => {
     await withNativeRelayFixture(app, async (fixture) => {
       const db = await fixture.createDb();

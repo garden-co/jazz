@@ -426,6 +426,13 @@ snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
 event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 
+`AllRelationQuery` accepts the existing native `relation_ir` JSON wrapper and
+uses the core relation resolver plus asynchronous canonical query preparation.
+It shares the same coverage, row hydration, pending-operation, and cleanup path
+as ordinary option-bearing reads. As on the other native bindings, raw
+relation-IR one-shot reads require the default read view; transaction-local
+array includes continue to use the transaction-aware snapshot command.
+
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,

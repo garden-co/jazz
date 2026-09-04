@@ -2619,6 +2619,22 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
+        ForegroundDbCommandRequest::AllRelationQuery {
+            query_json,
+            options_json,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.start_foreground_relation_read(query_json, options_json) {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::LocalCurrentRow { table, row_id } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -2889,7 +2905,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         | ForegroundDbCommandRequest::PushStreamingMutation { .. }
         | ForegroundDbCommandRequest::FinishStreamingMutation { .. }
         | ForegroundDbCommandRequest::AbortStreamingMutation { .. }
-        | ForegroundDbCommandRequest::AllRelationQuery { .. }
         | ForegroundDbCommandRequest::UpdateLargeValues { .. } => {
             ForegroundDbCommandResponse::OperationError {
                 reason: "foreground command handler is unavailable".to_owned(),
@@ -3191,6 +3206,16 @@ impl NativeRelayClient {
                 structured,
             )
         })
+    }
+
+    fn start_foreground_relation_read(
+        &self,
+        query_json: String,
+        options_json: String,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.start_foreground_relation_read(id, query_json, options_json))
     }
 
     fn local_current_foreground_row(
@@ -4567,60 +4592,51 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
+        let future = foreground_read_future(db, prepared, opts, open_tx, structured, cleanups);
+        self.start_foreground_operation(client, None, future)
+    }
+
+    fn start_foreground_relation_read(
+        &mut self,
+        client: u64,
+        query_json: String,
+        options_json: String,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let opts = foreground_read_opts_from_json(&options_json)?;
+        if !opts.read_view.is_default() {
+            return Err(RelayError::ForegroundCommand(
+                "relation reads require the current/default read_view".to_owned(),
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_str(&query_json).map_err(|error| {
+            RelayError::ForegroundCommand(format!("decode query json: {error}"))
+        })?;
+        let rel = value.get("relation_ir").ok_or_else(|| {
+            RelayError::ForegroundCommand("relation query json is missing relation_ir".to_owned())
+        })?;
+        let relation = jazz::query::RelationQuery {
+            rel: serde_json::from_value(rel.clone()).map_err(|error| {
+                RelayError::ForegroundCommand(format!("decode relation_ir: {error}"))
+            })?,
+        };
+        let state = self.foreground_client(client)?;
+        if state.read_cleanups.borrow().len()
+            + usize::from(state.read_cleanup.is_some())
+            + state.pending_operations.len()
+            >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
+        {
+            return Err(RelayError::ForegroundCommand(
+                "foreground read cleanup capacity exceeded".to_owned(),
+            ));
+        }
+        let db = Rc::clone(&state.db);
+        let cleanups = Rc::clone(&state.read_cleanups);
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let attachment = db
-                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, None)
+            let prepared = db
+                .prepare_relation_query_async(&relation)
                 .await
                 .map_err(RelayError::Db)?;
-            let coverage = ForegroundReadCoverage {
-                db: Rc::clone(&db),
-                cleanups,
-                attachment: Some(attachment),
-            };
-            std::future::poll_fn(|_| {
-                if db.query_attachment_is_covered(
-                    coverage.attachment.as_ref().expect("live coverage"),
-                ) {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
-            // Retain and detach coverage even when the pending read is cancelled.
-            let _coverage = coverage;
-            if structured {
-                let mut snapshot = match open_tx {
-                    Some(tx) => {
-                        db.relation_snapshot_in_open_transaction(tx, &prepared, opts, None)
-                            .await
-                    }
-                    None => db.all_relation_snapshot(&prepared, opts).await,
-                }
-                .map_err(RelayError::Db)?;
-                if open_tx.is_none() {
-                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
-                        .await
-                        .map_err(RelayError::Db)?;
-                }
-                let bytes =
-                    jazz::binding_codec::encode_relation_snapshot(&snapshot).map_err(|error| {
-                        RelayError::ForegroundCommand(format!("encode relation snapshot: {error}"))
-                    })?;
-                return Ok(ForegroundOperationResult::Rows(bytes));
-            }
-            let mut rows = match open_tx {
-                Some(tx) => db.all_in_open_transaction(tx, &prepared, opts, None).await,
-                None => db.all(&prepared, opts).await,
-            }
-            .map_err(RelayError::Db)?;
-            db.hydrate_rows_for_binding(&mut rows)
-                .await
-                .map_err(RelayError::Db)?;
-            let rows = jazz::binding_codec::encode_rows(&rows).map_err(|error| {
-                RelayError::ForegroundCommand(format!("encode row payload: {error}"))
-            })?;
-            Ok(ForegroundOperationResult::Rows(rows))
+            foreground_read_future(db, prepared, opts, None, false, cleanups).await
         });
         self.start_foreground_operation(client, None, future)
     }
@@ -5175,6 +5191,70 @@ impl RelayWorker {
 /// Decode the established NAPI/WASM encoded-cell record envelope. The
 /// foreground ABI deliberately shares this compact descriptor-plus-bytes
 /// representation; it does not invent a React-Native row/value object shape.
+fn foreground_read_future(
+    db: Rc<Db<MemoryStorage>>,
+    prepared: PreparedQuery,
+    opts: ReadOpts,
+    open_tx: Option<OpenTransactionId>,
+    structured: bool,
+    cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
+) -> ForegroundOperationFuture {
+    Box::pin(async move {
+        let attachment = db
+            .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, None)
+            .await
+            .map_err(RelayError::Db)?;
+        let coverage = ForegroundReadCoverage {
+            db: Rc::clone(&db),
+            cleanups,
+            attachment: Some(attachment),
+        };
+        std::future::poll_fn(|_| {
+            if db.query_attachment_is_covered(coverage.attachment.as_ref().expect("live coverage"))
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        // Retain and detach coverage even when the pending read is cancelled.
+        let _coverage = coverage;
+        if structured {
+            let mut snapshot = match open_tx {
+                Some(tx) => {
+                    db.relation_snapshot_in_open_transaction(tx, &prepared, opts, None)
+                        .await
+                }
+                None => db.all_relation_snapshot(&prepared, opts).await,
+            }
+            .map_err(RelayError::Db)?;
+            if open_tx.is_none() {
+                db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                    .await
+                    .map_err(RelayError::Db)?;
+            }
+            let bytes =
+                jazz::binding_codec::encode_relation_snapshot(&snapshot).map_err(|error| {
+                    RelayError::ForegroundCommand(format!("encode relation snapshot: {error}"))
+                })?;
+            return Ok(ForegroundOperationResult::Rows(bytes));
+        }
+        let mut rows = match open_tx {
+            Some(tx) => db.all_in_open_transaction(tx, &prepared, opts, None).await,
+            None => db.all(&prepared, opts).await,
+        }
+        .map_err(RelayError::Db)?;
+        db.hydrate_rows_for_binding(&mut rows)
+            .await
+            .map_err(RelayError::Db)?;
+        let rows = jazz::binding_codec::encode_rows(&rows).map_err(|error| {
+            RelayError::ForegroundCommand(format!("encode row payload: {error}"))
+        })?;
+        Ok(ForegroundOperationResult::Rows(rows))
+    })
+}
+
 struct ForegroundReadCoverage {
     db: Rc<Db<MemoryStorage>>,
     cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,

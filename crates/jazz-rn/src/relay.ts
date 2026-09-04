@@ -74,6 +74,7 @@ export type NativeForegroundCommand =
   | { type: 'prepareQuery'; query: Uint8Array }
   | { type: 'all'; query: number }
   | { type: 'localCurrentRow'; table: string; rowId: Uint8Array }
+  | { type: 'allRelationQuery'; queryJson: string; optionsJson: string }
   | { type: 'allWithOptions' | 'allRelationSnapshotWithOptions'; query: number; optionsJson: string; transaction?: number }
   | { type: 'subscribe'; query: number }
   | { type: 'drainSubscription'; subscription: number }
@@ -291,6 +292,8 @@ export function encodeNativeForegroundCommand(
       encodeForegroundString(command.optionsJson),
       command.transaction === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.transaction))
     );
+  if (command.type === 'allRelationQuery')
+    return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.queryJson), encodeForegroundString(command.optionsJson));
   if (command.type === 'localCurrentRow')
     return concatForegroundBytes(Uint8Array.of(34), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'));
   if (command.type === 'subscribe')

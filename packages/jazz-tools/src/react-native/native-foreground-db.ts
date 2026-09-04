@@ -18,6 +18,7 @@ type ForegroundCommand =
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "allRelationQuery"; queryJson: string; optionsJson: string }
   | {
       type: "allWithOptions" | "allRelationSnapshotWithOptions";
       query: number;
@@ -245,8 +246,17 @@ export class NativeForegroundDb {
     return unsupported("trusted-serving reads");
   }
 
-  allRelationQuery(): never {
-    return unsupported("relation terminal reads");
+  allRelationQuery(queryJson: string, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
+    this.tick();
+    const response = this.execute({
+      type: "allRelationQuery",
+      queryJson,
+      optionsJson: JSON.stringify(opts ?? {}),
+    });
+    if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("allRelationQuery", response.type);
   }
 
   allRelationQueryForIdentity(): never {
