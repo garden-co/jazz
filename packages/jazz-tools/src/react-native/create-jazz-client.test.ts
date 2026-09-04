@@ -264,10 +264,16 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     // generic TurboModule frame executor or WASM.
     expect(relay.commands).toEqual([]);
 
+    const closedBeforeShutdown = nativeForegroundTest.close.mock.calls.length;
     await client.shutdown();
     client = undefined;
     expect(commandTags).toContain(7);
-    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(1);
+    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(closedBeforeShutdown + 1);
+    // Native metadata/status preflights own temporary foregrounds too. Every
+    // opened facade must be released exactly once, including the actual Db.
+    expect(nativeForegroundTest.close.mock.calls).toHaveLength(
+      nativeForegroundTest.openAttached.mock.calls.length,
+    );
   });
 
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
@@ -303,6 +309,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     await expect(client.db.all(app.notes)).resolves.toMatchObject([
       { title: "old admitted scope" },
     ]);
+    const closedBeforeAuthRefresh = nativeForegroundTest.close.mock.calls.length;
     expect(() =>
       client!.db.updateCookieSession({
         issuer: "https://issuer.example",
@@ -310,12 +317,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
         claims: { role: "changed-by-auth-refresh" },
         authMode: "external",
       }),
-    ).toThrow(/cannot rotate authentication in place/);
+    ).toThrow(/native-admission bound; revoke the old native scope/);
     expect(client.db.getAuthState().session?.claims.role).toBeUndefined();
     await expect(client.db.all(app.notes)).resolves.toMatchObject([
       { title: "old admitted scope" },
     ]);
-    expect(nativeForegroundTest.close).not.toHaveBeenCalled();
+    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(closedBeforeAuthRefresh);
   });
 
   it("rejects an opaque relay capability when memory mode would ignore it", async () => {

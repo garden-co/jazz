@@ -3132,7 +3132,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 }
 
 /** Keep server-only admission credentials out of every client runtime factory. */
-function assertNoClientBackendSecret(config: object): void {
+export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
       "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
