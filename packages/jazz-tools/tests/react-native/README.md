@@ -33,3 +33,10 @@ its cookie-session mirror and opaque native capability. Tests own real local
 Edge/Core topology setup. Trusted fixture controls are `nativeHost.revoke`,
 `beginPrivateSession`, and `attachCanonicalSchema`; there is no simulated
 transport or row engine.
+
+The local query and subscription matrix imports scenarios from `tests/shared`.
+Browser tests run the same operator, BYTEA, UUID, pagination, tie-break, no-op,
+null, and moving-window assertions. These cases retain the browser suite's
+explicit query fixtures; public schema-builder coverage is provided separately.
+RN subscription cases observe public `Db.subscribe` snapshots. Browser tests
+retain their internal delta/reset checks alongside the shared snapshot scenarios.
