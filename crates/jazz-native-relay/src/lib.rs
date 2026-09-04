@@ -4595,12 +4595,15 @@ impl RelayWorker {
         let waker = Waker::from(Arc::clone(&self.wake));
         let client = self.foreground_client_mut(client)?;
         let db = Rc::clone(&client.db);
-        let mut prepared = async move { db.prepare_query_async(&query).await }
+        let prepared = async move { db.prepare_query_async(&query).await }
             .boxed_local()
             .shared();
         // Retain preparation behind the existing synchronous query handle.
         // An available owner still reports validation failures immediately.
-        if let Poll::Ready(result) = prepared.poll_unpin(&mut Context::from_waker(&waker)) {
+        if let Poll::Ready(result) = prepared
+            .clone()
+            .poll_unpin(&mut Context::from_waker(&waker))
+        {
             result.map_err(RelayError::Db)?;
         }
         let handle = Self::next_foreground_handle(client)?;
