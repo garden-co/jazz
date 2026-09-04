@@ -29,7 +29,22 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
       policy.chatMembers.exists.where({ chatId: member.chatId, userId: session.user }),
     ]),
   );
-  policy.chatMembers.allowInsert.where({ userId: session.user });
+  policy.chatMembers.allowInsert.where((member) =>
+    anyOf([
+      allOf([
+        { userId: session.user },
+        policy.chats.exists.where({ id: member.chatId, isPublic: true }),
+      ]),
+      allOf([
+        { userId: session.user },
+        policy.chats.exists.where({
+          id: member.chatId,
+          isPublic: false,
+          joinCode: member.joinCode,
+        }),
+      ]),
+    ]),
+  );
   policy.chatMembers.allowDelete.where({ userId: session.user });
 
   policy.messages.allowRead.where((message) =>
