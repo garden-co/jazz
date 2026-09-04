@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 import { stageNapiLoader } from "./stage-napi-loader.mjs";
 import { stageNativeFingerprints } from "./stage-native-fingerprints.mjs";
 
@@ -352,17 +353,32 @@ test("release publishing rebuilds when workflow changes invalidate preview artif
 });
 
 test("alpha release preview can call the publisher without elevating nested permissions", () => {
-  const previewWorkflow = readFileSync(
+  const previewWorkflowText = readFileSync(
     new URL("../../.github/workflows/preview-jazz-tools-alpha-release.yml", import.meta.url),
     "utf8",
   );
+  const previewWorkflow = parse(previewWorkflowText);
   const publisherWorkflow = readFileSync(
     new URL("../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
     "utf8",
   );
 
-  assert.match(previewWorkflow, /permissions:[\s\S]*?contents: write/);
-  assert.match(previewWorkflow, /mode: dry-run/);
+  assert.deepEqual(previewWorkflow.permissions, { contents: "read" });
+  assert.deepEqual(previewWorkflow.jobs.preview.permissions, {
+    actions: "read",
+    contents: "write",
+    "id-token": "write",
+    "pull-requests": "read",
+  });
+  assert.deepEqual(previewWorkflow.jobs["mark-preview-pending"].permissions, {
+    contents: "read",
+    statuses: "write",
+  });
+  assert.deepEqual(previewWorkflow.jobs["mark-preview-final"].permissions, {
+    contents: "read",
+    statuses: "write",
+  });
+  assert.equal(previewWorkflow.jobs.preview.with.mode, "dry-run");
   assert.match(publisherWorkflow, /permissions:[\s\S]*?contents: write/);
   assert.match(publisherWorkflow, /if: env\.RELEASE_MODE == 'publish'/);
 });
