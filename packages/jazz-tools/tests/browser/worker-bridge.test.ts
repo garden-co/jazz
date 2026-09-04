@@ -1834,6 +1834,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(settledSnapshots[0]).toHaveLength(2);
     expect(settledSnapshots[0]?.map((row) => row.id).sort()).toEqual(expectedSeededIds);
     expect(settledSnapshots[0]?.every((row) => row.title === seededTitle && !row.done)).toBe(true);
+    // Keep the opening live long enough to catch a duplicated, partial, or
+    // stale settled snapshot before retiring this subscription.
+    await sleep(500);
+    expect(settledSnapshots).toHaveLength(1);
     stopSettled();
 
     const emptyTitle = `indexed-empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
