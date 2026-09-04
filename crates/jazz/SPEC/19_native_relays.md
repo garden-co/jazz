@@ -459,6 +459,12 @@ sibling foreground cannot alias a same-number local resource. JavaScript handle
 responses require one complete, minimally encoded postcard u64 and reject
 trailing bytes or values above `Number.MAX_SAFE_INTEGER`; they never round or
 truncate an opaque native handle.
+`PrepareQuery` retains asynchronous canonical preparation behind its ordinary
+query handle when a retained tick already owns the node. Reads await that same
+preparation; subscription opening is likewise retained behind its ordinary
+subscription handle, and drain polls it with the live relay wake. Cancelling an
+unopened subscription retires its opener before it can publish events. Neither
+preparation nor subscription admission may block or reenter the node owner.
 `All` and `DrainSubscription` first poll their foreground-owned operation and
 return its ordinary rows/events only when ready. If physical large-value
 hydration needs chunk or peer I/O, they instead return an opaque pending

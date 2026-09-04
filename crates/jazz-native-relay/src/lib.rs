@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
+use futures::FutureExt;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, ExclusiveTxOps, MergeableTxOps, PeerConnection,
@@ -4113,13 +4114,20 @@ fn duplex(
     )
 }
 
+type ForegroundPreparedQuery = futures::future::Shared<
+    futures::future::LocalBoxFuture<'static, Result<PreparedQuery, jazz::db::Error>>,
+>;
+type ForegroundSubscriptionOpen =
+    Pin<Box<dyn Future<Output = Result<SubscriptionStream, RelayError>>>>;
+
 struct ConnectedClient {
     db: Rc<Db<MemoryStorage>>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     served_io: RelayPeerIo,
     wire: NativeRelayWire,
-    prepared_queries: BTreeMap<u64, PreparedQuery>,
+    prepared_queries: BTreeMap<u64, ForegroundPreparedQuery>,
+    pending_subscriptions: BTreeMap<u64, ForegroundSubscriptionOpen>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
     pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
@@ -4163,6 +4171,7 @@ impl ConnectedClient {
     fn cancel_pending_work(&mut self) {
         self.tick = None;
         self.pending_operations.clear();
+        self.pending_subscriptions.clear();
         self.read_cleanup = None;
         self.read_cleanups.borrow_mut().clear();
         self.upstream_io.incoming = None;
@@ -4501,6 +4510,7 @@ impl RelayWorker {
                 served_io,
                 wire,
                 prepared_queries: BTreeMap::new(),
+                pending_subscriptions: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
                 pending_operations: BTreeMap::new(),
                 read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
@@ -4570,8 +4580,17 @@ impl RelayWorker {
         let query = postcard::from_bytes::<Query>(&query).map_err(|error| {
             RelayError::ForegroundCommand(format!("decode canonical query: {error}"))
         })?;
+        let waker = Waker::from(Arc::clone(&self.wake));
         let client = self.foreground_client_mut(client)?;
-        let prepared = client.db.prepare_query(&query).map_err(RelayError::Db)?;
+        let db = Rc::clone(&client.db);
+        let mut prepared = async move { db.prepare_query_async(&query).await }
+            .boxed_local()
+            .shared();
+        // Retain preparation behind the existing synchronous query handle.
+        // An available owner still reports validation failures immediately.
+        if let Poll::Ready(result) = prepared.poll_unpin(&mut Context::from_waker(&waker)) {
+            result.map_err(RelayError::Db)?;
+        }
         let handle = Self::next_foreground_handle(client)?;
         client.prepared_queries.insert(handle, prepared);
         Ok(handle)
@@ -4592,6 +4611,7 @@ impl RelayWorker {
             (Rc::clone(&client.db), prepared.clone())
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
+            let prepared = prepared.await.map_err(RelayError::Db)?;
             let mut rows = db
                 .all(&prepared, ReadOpts::default())
                 .await
@@ -4642,7 +4662,10 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
-        let future = foreground_read_future(db, prepared, opts, open_tx, structured, cleanups);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let prepared = prepared.await.map_err(RelayError::Db)?;
+            foreground_read_future(db, prepared, opts, open_tx, structured, cleanups).await
+        });
         self.start_foreground_operation(client, None, future)
     }
 
@@ -4701,6 +4724,7 @@ impl RelayWorker {
         query: u64,
         opts: ReadOpts,
     ) -> Result<u64, RelayError> {
+        let client_id = client;
         let client = self.foreground_client_mut(client)?;
         let prepared = client
             .prepared_queries
@@ -4709,10 +4733,35 @@ impl RelayWorker {
                 RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
             })?
             .clone();
-        let subscription =
-            block_on(client.db.subscribe(&prepared, opts)).map_err(RelayError::Db)?;
+        let db = Rc::clone(&client.db);
+        let opener: ForegroundSubscriptionOpen = Box::pin(async move {
+            let prepared = prepared.await.map_err(RelayError::Db)?;
+            db.subscribe(&prepared, opts).await.map_err(RelayError::Db)
+        });
+        self.start_foreground_subscription(client_id, opener)
+    }
+
+    fn start_foreground_subscription(
+        &mut self,
+        client: u64,
+        mut opener: ForegroundSubscriptionOpen,
+    ) -> Result<u64, RelayError> {
+        let waker = Waker::from(Arc::clone(&self.wake));
+        let client = self.foreground_client_mut(client)?;
+        if client.pending_subscriptions.len() >= NATIVE_RELAY_FOREGROUND_PENDING_MAX {
+            return Err(RelayError::ForegroundCommand(
+                "foreground subscription opening capacity exceeded".to_owned(),
+            ));
+        }
         let handle = Self::next_foreground_handle(client)?;
-        client.subscriptions.insert(handle, subscription);
+        match opener.as_mut().poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(result) => {
+                client.subscriptions.insert(handle, result?);
+            }
+            Poll::Pending => {
+                client.pending_subscriptions.insert(handle, opener);
+            }
+        }
         Ok(handle)
     }
 
@@ -4721,6 +4770,21 @@ impl RelayWorker {
         client: u64,
         subscription: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        let waker = Waker::from(Arc::clone(&self.wake));
+        let state = self.foreground_client_mut(client)?;
+        if let Some(mut opener) = state.pending_subscriptions.remove(&subscription) {
+            match opener.as_mut().poll(&mut Context::from_waker(&waker)) {
+                Poll::Ready(result) => {
+                    state.subscriptions.insert(subscription, result?);
+                }
+                Poll::Pending => {
+                    state.pending_subscriptions.insert(subscription, opener);
+                    return Ok(ForegroundOperationPoll::Ready(
+                        ForegroundOperationResult::SubscriptionEvents(Vec::new()),
+                    ));
+                }
+            }
+        }
         let existing = self
             .foreground_client(client)?
             .pending_operations
@@ -4851,6 +4915,9 @@ impl RelayWorker {
         client
             .pending_operations
             .retain(|_, pending| pending.subscription != Some(subscription));
+        if client.pending_subscriptions.remove(&subscription).is_some() {
+            return Ok(true);
+        }
         let Some(subscription) = client.subscriptions.remove(&subscription) else {
             return Ok(false);
         };
@@ -8178,6 +8245,87 @@ mod tests {
                 "{function} must return pending work rather than spin the owner thread"
             );
         }
+    }
+
+    // Deterministic owner contention is a native scheduling boundary that the
+    // public TS API cannot hold on demand. The read and subscription still use
+    // the real canonical query and native foreground handlers.
+    #[test]
+    fn preparation_and_subscription_wait_for_contended_foreground_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("prepare-held.sqlite"),
+            Some("prepare-held"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x44; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        relay
+            .run(move |worker| {
+                let client = worker.foreground_client_mut(id)?;
+                let db = Rc::clone(&client.db);
+                client.tick = Some(Box::pin(async move {
+                    db.hold_node_owner_for_test().await;
+                    unreachable!()
+                }));
+                Ok(())
+            })
+            .unwrap();
+        relay.pump().unwrap();
+        let query = client
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .expect("preparation returns a handle without reentering the owner");
+        let operation = relay.run(move |worker| {
+            let read = worker.start_foreground_read_with_options(id, query, "{}".into(), None, false)?;
+            let ForegroundOperationPoll::Pending { operation } = read else {
+                panic!("read must await held owner");
+            };
+            let cancelled = worker.subscribe_foreground_query(id, query)?;
+            assert!(worker.close_foreground_subscription(id, cancelled)?);
+            assert!(!worker.foreground_client(id)?.pending_subscriptions.contains_key(&cancelled));
+            let live = worker.subscribe_foreground_query(id, query)?;
+            assert!(matches!(worker.drain_foreground_subscription(id, live)?,
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) if events.is_empty()));
+            worker.foreground_client_mut(id)?.tick = None;
+            Ok((operation, live))
+        }).unwrap();
+        let (operation, subscription) = operation;
+        let mut read_ready = false;
+        let mut subscription_ready = false;
+        for _ in 0..32 {
+            relay.pump().unwrap();
+            let (read, subscribed) = relay
+                .run(move |worker| {
+                    let read = if read_ready {
+                        true
+                    } else {
+                        matches!(
+                            worker.poll_foreground_operation(id, operation)?,
+                            ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(_))
+                        )
+                    };
+                    let _ = worker.drain_foreground_subscription(id, subscription)?;
+                    let subscribed = worker
+                        .foreground_client(id)?
+                        .subscriptions
+                        .contains_key(&subscription);
+                    Ok((read, subscribed))
+                })
+                .unwrap();
+            read_ready = read;
+            subscription_ready = subscribed;
+            if read_ready && subscription_ready {
+                break;
+            }
+        }
+        assert!(read_ready, "read resumes after owner release");
+        assert!(subscription_ready, "subscription opens after owner release");
+        client.close().unwrap();
     }
 
     #[test]
