@@ -2721,6 +2721,36 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
+        ForegroundDbCommandRequest::StageMutation {
+            transaction,
+            mutation,
+            table,
+            row_id,
+            cells,
+            options_json,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.stage_foreground_mutation(
+                transaction,
+                mutation,
+                table,
+                row_id,
+                cells,
+                options_json,
+            ) {
+                Ok(Some(row_id)) => ForegroundDbCommandResponse::Inserted {
+                    row_id: *row_id.as_bytes(),
+                },
+                Ok(None) => ForegroundDbCommandResponse::MutationStaged,
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::CommitTransaction { transaction } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -2762,13 +2792,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                     Ok(response) => response,
                     Err(status) => return status,
                 },
-            }
-        }
-        // Each extension fails closed until its handler is installed. Keep this
-        // list explicit so future vocabulary additions require dispatch review.
-        ForegroundDbCommandRequest::StageMutation { .. } => {
-            ForegroundDbCommandResponse::OperationError {
-                reason: "foreground command handler is unavailable".to_owned(),
             }
         }
     };
@@ -3096,6 +3119,29 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.begin_foreground_transaction(id, kind))
+    }
+
+    fn stage_foreground_mutation(
+        &self,
+        transaction: u64,
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: Option<[u8; 16]>,
+        cells: Vec<u8>,
+        options_json: String,
+    ) -> Result<Option<RowUuid>, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.stage_foreground_mutation(
+                id,
+                transaction,
+                mutation,
+                table,
+                row_id,
+                cells,
+                options_json,
+            )
+        })
     }
 
     fn insert_foreground_transaction(
@@ -3873,6 +3919,11 @@ fn foreground_command_error(
             Err(JazzNativeRelayStatus::LifecycleFailure)
         }
         RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
+        // Preserve the core Error prefix consumed by the shared TS adapter's
+        // rejection normalizer, exactly as NAPI and WASM do.
+        RelayError::Db(error) => Ok(ForegroundDbCommandResponse::OperationError {
+            reason: error.to_string(),
+        }),
         error => Ok(ForegroundDbCommandResponse::OperationError {
             reason: error.to_string(),
         }),
@@ -4365,6 +4416,131 @@ impl RelayWorker {
         Ok((Rc::clone(&client.db), transaction))
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the flat, versioned command envelope.
+    fn stage_foreground_mutation(
+        &mut self,
+        client: u64,
+        transaction: u64,
+        mutation: ForegroundMutationKind,
+        table: String,
+        row_id: Option<[u8; 16]>,
+        cells: Vec<u8>,
+        options_json: String,
+    ) -> Result<Option<RowUuid>, RelayError> {
+        let options: ForegroundMutationOptions =
+            serde_json::from_str(&options_json).map_err(|error| {
+                RelayError::ForegroundCommand(format!("invalid mutation options: {error}"))
+            })?;
+        let (db, transaction) = self.foreground_transaction(client, transaction)?;
+        let cells = if matches!(mutation, ForegroundMutationKind::Delete) {
+            Default::default()
+        } else {
+            decode_foreground_cells(&cells)?
+        };
+        let row_id = row_id.map(RowUuid::from_bytes);
+        let exact_target = options
+            .branch
+            .clone()
+            .map(jazz::db::ExactWriteTarget::Branch)
+            .unwrap_or_default();
+        let target = match options.head {
+            Some(head) => jazz::db::WriteTarget::BranchView {
+                head,
+                base: options.base,
+            },
+            None if options.base.is_none() => Default::default(),
+            None => {
+                return Err(RelayError::ForegroundCommand(
+                    "branch view base requires a head selector".into(),
+                ));
+            }
+        };
+        let updated_at_ms = options.updated_at_ms;
+        macro_rules! stage {
+            ($tx:expr) => {{
+                let tx = $tx;
+                match mutation {
+                    ForegroundMutationKind::Insert => block_on(tx.insert(
+                        &table,
+                        cells,
+                        jazz::db::InsertOptions {
+                            row_id,
+                            target: exact_target,
+                            updated_at_ms,
+                            ..Default::default()
+                        },
+                    ))
+                    .map(Some),
+                    mutation => {
+                        let row_id = row_id.ok_or_else(|| {
+                            RelayError::ForegroundCommand("mutation requires row id".into())
+                        })?;
+                        match mutation {
+                            ForegroundMutationKind::Update => block_on(tx.update(
+                                &table,
+                                row_id,
+                                cells,
+                                UpdateOptions {
+                                    target,
+                                    updated_at_ms,
+                                    ..Default::default()
+                                },
+                            )),
+                            ForegroundMutationKind::Upsert => {
+                                if options.branch.is_some() {
+                                    return Err(RelayError::ForegroundCommand(
+                                        "upsert option `branch` is not supported; use `head`"
+                                            .into(),
+                                    ));
+                                }
+                                block_on(tx.upsert(
+                                    &table,
+                                    row_id,
+                                    cells,
+                                    UpsertOptions {
+                                        target,
+                                        updated_at_ms,
+                                        ..Default::default()
+                                    },
+                                ))
+                            }
+                            ForegroundMutationKind::Delete => block_on(tx.delete(
+                                &table,
+                                row_id,
+                                DeleteOptions {
+                                    target,
+                                    updated_at_ms,
+                                    ..Default::default()
+                                },
+                            )),
+                            ForegroundMutationKind::Restore => block_on(tx.restore(
+                                &table,
+                                row_id,
+                                Some(cells),
+                                jazz::db::RestoreOptions {
+                                    target: exact_target,
+                                    updated_at_ms,
+                                    ..Default::default()
+                                },
+                            )),
+                            ForegroundMutationKind::Insert => unreachable!(),
+                        }
+                        .map(|()| None)
+                    }
+                }
+            }};
+        }
+        match transaction.kind {
+            ForegroundTransactionKind::Mergeable => {
+                stage!(db.mergeable_tx_ref(transaction.open_tx_id))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                stage!(db.exclusive_tx_ref(transaction.open_tx_id))
+            }
+        }
+        .map_err(RelayError::Db)
+    }
+
     fn insert_foreground_transaction(
         &mut self,
         client: u64,
@@ -4631,6 +4807,15 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
             .unwrap_or_else(|| item.clone());
     }
     serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForegroundMutationOptions {
+    branch: Option<jazz::protocol::BranchSelector>,
+    head: Option<jazz::protocol::BranchSelector>,
+    base: Option<jazz::protocol::BranchViewBase>,
+    updated_at_ms: Option<u64>,
 }
 
 fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {

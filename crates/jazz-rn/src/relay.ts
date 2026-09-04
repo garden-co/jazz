@@ -107,7 +107,10 @@ export type NativeForegroundCommand =
   | { type: 'waitForTransaction'; txId: Uint8Array; tier: string }
   | { type: 'disconnectNativeUpstream' }
   | { type: 'reconnectNativeUpstream' }
-  | { type: 'nativeConnectionStatus' };
+  | { type: 'nativeConnectionStatus' }
+  | { type: 'stageMutation'; transaction: number; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
+      table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string };
+
 
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
@@ -306,6 +309,22 @@ export function encodeNativeForegroundCommand(
       Uint8Array.of(9),
       encodeForegroundU64(command.operation)
     );
+  if (command.type === 'stageMutation') {
+    const kinds = ['insert', 'update', 'upsert', 'delete', 'restore'];
+    const kind = kinds.indexOf(command.mutation);
+    if (kind < 0) throw new Error('Invalid foreground mutation kind');
+    return concatForegroundBytes(
+      Uint8Array.of(22),
+      encodeForegroundU64(command.transaction),
+      Uint8Array.of(kind),
+      encodeForegroundString(command.table),
+      command.rowId === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundId(command.rowId, 'row id')),
+      encodeForegroundBytes(command.cells),
+      encodeForegroundString(command.optionsJson),
+    );
+  }
   if (command.type === 'beginTransaction') {
     if (command.kind !== 'mergeable' && command.kind !== 'exclusive') {
       throw new Error(

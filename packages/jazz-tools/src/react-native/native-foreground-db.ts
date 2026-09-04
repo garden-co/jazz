@@ -1,3 +1,13 @@
+type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
+type ForegroundMutationOptions = {
+  rowId?: Uint8Array;
+  branch?: unknown;
+  head?: unknown;
+  base?: unknown;
+  updatedAtMs?: number;
+  author?: Uint8Array;
+};
+
 type ForegroundCommand =
   | "tick"
   | "close"
@@ -43,7 +53,16 @@ type ForegroundCommand =
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
   | { type: "subscribeWithOptions"; query: number; optionsJson: string }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string };
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | {
+      type: "stageMutation";
+      transaction: number;
+      mutation: ForegroundMutationKind;
+      table: string;
+      rowId?: Uint8Array;
+      cells: Uint8Array;
+      optionsJson: string;
+    };
 
 type ForegroundEvent =
   | {
@@ -384,6 +403,7 @@ export class NativeForegroundDb {
       type: "commitTransaction",
       transaction: transaction.handle,
     });
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "transactionCommitted")
       return unexpected("commitTransaction", response.type);
     this.transactions.delete(openTransactionId);
@@ -416,70 +436,54 @@ export class NativeForegroundDb {
   insertEncoded(
     table: string,
     cells: Uint8Array,
-    options?: { rowId?: Uint8Array },
+    options?: ForegroundMutationOptions,
   ): NativeForegroundWrite {
-    return this.withOneMutation("insert", (transaction) => {
-      const response = this.execute({
-        type: "insert",
-        transaction: transaction.handle,
-        table,
-        cells,
-        rowId: options?.rowId,
-      });
-      if (response.type !== "inserted") return unexpected("insert", response.type);
-      return response.rowId;
-    });
+    return this.withOneMutation("insert", (tx) =>
+      this.stageMutation(tx, "insert", table, options?.rowId, cells, options),
+    );
   }
 
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("update", (transaction) => {
-      const response = this.execute({
-        type: "update",
-        transaction: transaction.handle,
-        table,
-        rowId,
-        patch,
-      });
-      if (response.type !== "mutationStaged") return unexpected("update", response.type);
-      return rowId;
-    });
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.withOneMutation("update", (tx) =>
+      this.stageMutation(tx, "update", table, rowId, patch, options),
+    );
   }
 
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("upsert", (transaction) => {
-      const response = this.execute({
-        type: "upsert",
-        transaction: transaction.handle,
-        table,
-        rowId,
-        cells,
-      });
-      if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
-      return rowId;
-    });
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.withOneMutation("upsert", (tx) =>
+      this.stageMutation(tx, "upsert", table, rowId, cells, options),
+    );
   }
 
-  deleteEncoded(table: string, rowId: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("delete", (transaction) => {
-      const response = this.execute({
-        type: "delete",
-        transaction: transaction.handle,
-        table,
-        rowId,
-      });
-      if (response.type !== "mutationStaged") return unexpected("delete", response.type);
-      return rowId;
-    });
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.withOneMutation("restore", (tx) =>
+      this.stageMutation(tx, "restore", table, rowId, cells, options),
+    );
   }
 
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
-    // The current shared command ABI has no restore discriminant. Upsert is
-    // not equivalent for a tombstoned row, so make the limitation explicit
-    // rather than silently changing restore semantics.
-    void table;
-    void rowId;
-    void cells;
-    return unsupported("restore");
+  deleteEncoded(
+    table: string,
+    rowId: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.withOneMutation("delete", (tx) =>
+      this.stageMutation(tx, "delete", table, rowId, new Uint8Array(), options),
+    );
   }
 
   mergeableTx(): never {
@@ -510,6 +514,7 @@ export class NativeForegroundDb {
         type: "commitTransaction",
         transaction: transaction.handle,
       });
+      if (committed.type === "operationError") throw new Error(committed.reason);
       if (committed.type !== "transactionCommitted") {
         return unexpected(`${operation}.commit`, committed.type);
       }
@@ -531,63 +536,41 @@ export class NativeForegroundDb {
     }
   }
 
-  stageInsert(
+  stageMutation(
     transaction: NativeForegroundTransaction,
+    mutation: ForegroundMutationKind,
     table: string,
+    rowId: Uint8Array | undefined,
     cells: Uint8Array,
-    rowId?: Uint8Array,
+    options?: ForegroundMutationOptions,
   ): Uint8Array {
+    if (transaction.closed) throw new Error("React Native native foreground transaction is closed");
+    if (mutation === "upsert" && options && "branch" in options) {
+      throw new Error(
+        "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view",
+      );
+    }
+    if (
+      options?.updatedAtMs !== undefined &&
+      (!Number.isSafeInteger(options.updatedAtMs) || options.updatedAtMs < 0)
+    ) {
+      throw new Error("updatedAtMs must be a non-negative safe integer");
+    }
+    // Identity belongs to the admitted native capability, never the command.
+    const { rowId: _rowId, author: _author, ...wireOptions } = options ?? {};
     const response = this.execute({
-      type: "insert",
+      type: "stageMutation",
       transaction: transaction.handle,
-      table,
-      cells,
-      rowId,
-    });
-    if (response.type !== "inserted") return unexpected("insert", response.type);
-    return response.rowId;
-  }
-
-  stageUpdate(
-    transaction: NativeForegroundTransaction,
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-  ): void {
-    const response = this.execute({
-      type: "update",
-      transaction: transaction.handle,
-      table,
-      rowId,
-      patch,
-    });
-    if (response.type !== "mutationStaged") return unexpected("update", response.type);
-  }
-
-  stageUpsert(
-    transaction: NativeForegroundTransaction,
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-  ): void {
-    const response = this.execute({
-      type: "upsert",
-      transaction: transaction.handle,
+      mutation,
       table,
       rowId,
       cells,
+      optionsJson: JSON.stringify(wireOptions),
     });
-    if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
-  }
-
-  stageDelete(transaction: NativeForegroundTransaction, table: string, rowId: Uint8Array): void {
-    const response = this.execute({
-      type: "delete",
-      transaction: transaction.handle,
-      table,
-      rowId,
-    });
-    if (response.type !== "mutationStaged") return unexpected("delete", response.type);
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (mutation === "insert" && response.type === "inserted") return response.rowId;
+    if (mutation !== "insert" && response.type === "mutationStaged") return rowId!;
+    return unexpected(mutation, response.type);
   }
 
   private transaction(id: string, kind: "mergeable" | "exclusive"): NativeForegroundTransaction {
@@ -645,24 +628,35 @@ class NativeForegroundTx {
     return false;
   }
 
-  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array {
-    return this.db.stageInsert(this.transaction, table, cells, options?.rowId);
+  insertEncoded(table: string, cells: Uint8Array, options?: ForegroundMutationOptions): Uint8Array {
+    return this.db.stageMutation(this.transaction, "insert", table, options?.rowId, cells, options);
   }
-
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void {
-    this.db.stageUpdate(this.transaction, table, rowId, patch);
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "update", table, rowId, cells, options);
   }
-
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void {
-    this.db.stageUpsert(this.transaction, table, rowId, cells);
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "upsert", table, rowId, cells, options);
   }
-
-  deleteEncoded(table: string, rowId: Uint8Array): void {
-    this.db.stageDelete(this.transaction, table, rowId);
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "restore", table, rowId, cells, options);
   }
-
-  restoreEncoded(): never {
-    return unsupported("restore");
+  deleteEncoded(table: string, rowId: Uint8Array, options?: ForegroundMutationOptions): void {
+    this.db.stageMutation(this.transaction, "delete", table, rowId, new Uint8Array(), options);
   }
 }
 
