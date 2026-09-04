@@ -141,10 +141,11 @@ export class NativeForegroundDb {
     // before ticking or issuing a read rather than silently reading outside it.
     if (openTransactionId !== undefined) return unsupported("transaction reads");
     assertLocalReadOptions(opts);
-    // An attached foreground is an ordinary peer of the native relay. One
-    // bounded relay turn admits already-persisted rows before materializing a
-    // local read; without it a newly opened foreground can only observe rows
-    // after some unrelated caller happens to tick the host.
+    // An attached foreground is an ordinary peer of the native relay. Advance
+    // one bounded relay turn before materializing its current LocalFirst
+    // snapshot. This progresses queued peer work but does not promise relay
+    // coverage: rows not yet delivered to this foreground remain absent until
+    // a later owner wake updates its local knowledge.
     this.tick();
     const response = this.execute({ type: "all", query: queryHandle(query) });
     if (response.type === "rows") return response.rows;

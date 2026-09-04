@@ -1055,6 +1055,15 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     /must not swallow lifecycle failures/,
     "relay readback must reject an empty catch that hides read or assertion failures",
   );
+  const leakedSubscription = highLevelForeground.replace(
+    relayReadback,
+    relayReadback.replace("    unsubscribe();\n    await client.shutdown();", "    await client.shutdown();"),
+  );
+  assert.throws(
+    () => assertPublicClientRelayReadback(leakedSubscription),
+    /unsubscribe before client shutdown/,
+    "relay readback must retire its propagation subscription after failure or success",
+  );
   assertPublicClientSeedStages(highLevelForeground);
   for (const stage of [
     "open",

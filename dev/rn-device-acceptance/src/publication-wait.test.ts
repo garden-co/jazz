@@ -18,24 +18,43 @@ test("production publication wait services an event-loop task", async () => {
 
 test("publication wait yields event-loop turns until the native wake arrives", async () => {
   let turns = 0;
+  let time = 0;
   const published = await waitForPublication(
     () => turns === 3,
     async () => {
       turns += 1;
+      time += 10;
     },
+    () => time,
   );
   assert.equal(published, true);
   assert.equal(turns, 3);
 });
 
-test("publication wait fails after exactly eight bounded turns", async () => {
-  let turns = 0;
+test("publication wait rejects an empty opening until the run marker arrives", async () => {
+  let marker = false;
+  let time = 0;
+  const published = await waitForPublication(
+    () => marker,
+    async () => {
+      time += 10;
+      if (time === 30) marker = true;
+    },
+    () => time,
+  );
+  assert.equal(published, true);
+  assert.equal(time, 30);
+});
+
+test("publication wait fails at its elapsed-time deadline", async () => {
+  let time = 0;
   const published = await waitForPublication(
     () => false,
     async () => {
-      turns += 1;
+      time += 10_000;
     },
+    () => time,
   );
   assert.equal(published, false);
-  assert.equal(turns, 8);
+  assert.equal(time, 30_000);
 });
