@@ -564,7 +564,7 @@ type RuntimeSession = {
 };
 
 type PendingNativeOperation<T> = {
-  poll(): T | null;
+  poll(): T | null | undefined;
   cancel(): void;
   setWake(callback: () => void): void;
 };
@@ -2879,7 +2879,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (progressError) throw progressError;
         const observed = wakeVersion;
         const result = pending.poll();
-        if (result !== null) return result;
+        if (result !== null && result !== undefined) return result;
         // A pending operation can own the core. Transport must run alongside
         // its woken continuation, never become a prerequisite for polling it.
         void this.pumpServerTransport().catch((error) => {

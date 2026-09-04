@@ -8151,57 +8151,60 @@ it("retains deferred admission failure until execute installs its callback", asy
   expect(callback).toHaveBeenCalledWith(failure);
 });
 
-it("wakes pending admission while an async transport tick waits on its owner", async () => {
-  let polls = 0;
-  let wake = () => {};
-  let releaseOwner!: () => void;
-  const ownerReleased = new Promise<void>((resolve) => {
-    releaseOwner = resolve;
-  });
-  const runtime = new NativeRuntimeAdapter(
-    {
-      openMemory: () =>
-        fakeDb({
-          prepareQueryAsync: () => ({
-            poll: () => {
-              polls++;
-              if (polls === 1) {
-                queueMicrotask(() => wake());
-                return null;
-              }
-              releaseOwner();
-              return {};
-            },
-            cancel: () => {},
-            setWake: (callback: () => void) => {
-              wake = callback;
-            },
-          }),
-          tick: () => ownerReleased,
-        } as never),
-      openBrowser: async () => {
-        throw new Error("unused");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-  );
-  const inner = runtime as unknown as Record<string, any>;
-  inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
-  inner.serverCarrier = { send: () => {}, close: () => {} };
-  const preparation = inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), null);
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(polls).toBeGreaterThan(1);
-  } finally {
-    releaseOwner();
-    await preparation;
-    inner.closed = true;
-  }
-});
+it.each([null, undefined])(
+  "wakes pending admission while an async transport tick waits on its owner (pending %s)",
+  async (pendingResult) => {
+    let polls = 0;
+    let wake = () => {};
+    let releaseOwner!: () => void;
+    const ownerReleased = new Promise<void>((resolve) => {
+      releaseOwner = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQueryAsync: () => ({
+              poll: () => {
+                polls++;
+                if (polls === 1) {
+                  queueMicrotask(() => wake());
+                  return pendingResult;
+                }
+                releaseOwner();
+                return {};
+              },
+              cancel: () => {},
+              setWake: (callback: () => void) => {
+                wake = callback;
+              },
+            }),
+            tick: () => ownerReleased,
+          } as never),
+        openBrowser: async () => {
+          throw new Error("unused");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inner = runtime as unknown as Record<string, any>;
+    inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
+    inner.serverCarrier = { send: () => {}, close: () => {} };
+    const preparation = inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), null);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(polls).toBeGreaterThan(1);
+    } finally {
+      releaseOwner();
+      await preparation;
+      inner.closed = true;
+    }
+  },
+);
 
 it("finishes wake-driven attachment admission before starting its dependent read", async () => {
   let polls = 0;

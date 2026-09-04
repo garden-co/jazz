@@ -6,7 +6,7 @@ import {
   encodeSchema,
   NativeRuntimeAdapter,
 } from "./native-runtime/native-runtime-adapter.js";
-import { openConfig } from "./native-runtime/native-codec.js";
+import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import {
   createWasmRuntime,
   hasJazzWasmBuild,
@@ -153,6 +153,78 @@ async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3
 }
 
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
+  it("keeps real WASM query admission pending while storage owns the node", async () => {
+    const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
+    const prepared = db.prepareQuery(queryFromTable("todos"));
+    const opts = { tier: "local", propagation: "local_only" };
+    const commitGate = pageStore.armCommitGate();
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000131"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+    const push = upload.push(new TextEncoder().encode("pending owner"));
+    let cancelSubscription: number | undefined;
+    try {
+      await withWatchdog(commitGate.started, "push holds the real WASM owner");
+      const preparation = db.prepareQueryAsync(queryFromTable("todos"));
+      const subscription = db.subscribeAsync(prepared, opts);
+      const attachment = db.attachQuery(prepared, opts) as {
+        poll(): boolean | undefined;
+        cancel(): void;
+      };
+      // wasm-bindgen encodes all three Option::None return types as undefined.
+      expect(preparation.poll()).toBeUndefined();
+      expect(subscription.poll()).toBeUndefined();
+      expect(attachment.poll()).toBeUndefined();
+      preparation.cancel();
+      subscription.cancel();
+      attachment.cancel();
+
+      let finished = false;
+      const query = runtime.query(JSON.stringify({ table: "todos" })).then(
+        (rows) => {
+          finished = true;
+          return { rows };
+        },
+        (error: unknown) => {
+          finished = true;
+          return { error };
+        },
+      );
+      cancelSubscription = runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        undefined,
+        "local",
+        JSON.stringify({ propagation: "local_only" }),
+      );
+      const opening = deferredVoid();
+      let openingError: unknown;
+      runtime.executeSubscription(cancelSubscription, (result: unknown) => {
+        if (result instanceof Error) openingError = result;
+        opening.resolve();
+      });
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(finished).toBe(false);
+      commitGate.release();
+      await push;
+      await expect(withWatchdog(query, "woken concurrent query")).resolves.toEqual({ rows: [] });
+      await withWatchdog(opening.promise, "woken concurrent subscription");
+      expect(openingError).toBeUndefined();
+      await upload.abort();
+    } finally {
+      commitGate.release();
+      if (cancelSubscription !== undefined) runtime.unsubscribe(cancelSubscription);
+      await upload.abort();
+    }
+  });
+
   it("waits for an in-flight WASM push before aborting its staged upload", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
     const commitGate = pageStore.armCommitGate();
