@@ -3,6 +3,12 @@ type ForegroundCommand =
   | "close"
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
+  | {
+      type: "allWithOptions" | "allRelationSnapshotWithOptions";
+      query: number;
+      optionsJson: string;
+      transaction?: number;
+    }
   | { type: "subscribe"; query: number }
   | { type: "drainSubscription"; subscription: number }
   | { type: "unsubscribe"; subscription: number }
@@ -41,6 +47,7 @@ type ForegroundEvent =
       settled: boolean;
       tier: string;
       delta: Uint8Array;
+      terminalOperations?: unknown[];
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
@@ -137,16 +144,21 @@ export class NativeForegroundDb {
     opts: unknown,
     openTransactionId?: string,
   ): Uint8Array | { poll(): Uint8Array | null } {
-    // ABI V1 cannot select a transaction snapshot for an all command. Fail
-    // before ticking or issuing a read rather than silently reading outside it.
-    if (openTransactionId !== undefined) return unsupported("transaction reads");
-    assertLocalReadOptions(opts);
+    const transaction =
+      openTransactionId === undefined
+        ? undefined
+        : this.openTransaction(openTransactionId, "read").handle;
     // An attached foreground is an ordinary peer of the native relay. One
     // bounded relay turn admits already-persisted rows before materializing a
     // local read; without it a newly opened foreground can only observe rows
     // after some unrelated caller happens to tick the host.
     this.tick();
-    const response = this.execute({ type: "all", query: queryHandle(query) });
+    const response = this.execute({
+      type: "allWithOptions",
+      query: queryHandle(query),
+      optionsJson: JSON.stringify(opts ?? {}),
+      transaction,
+    });
     if (response.type === "rows") return response.rows;
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
@@ -158,6 +170,27 @@ export class NativeForegroundDb {
     openTransactionId?: string,
   ): Uint8Array | { poll(): Uint8Array | null } {
     return this.all(query, opts, openTransactionId);
+  }
+
+  allRelationSnapshot(
+    query: object,
+    opts: unknown,
+    openTransactionId?: string,
+  ): Uint8Array | { poll(): Uint8Array | null } {
+    const transaction =
+      openTransactionId === undefined
+        ? undefined
+        : this.openTransaction(openTransactionId, "read").handle;
+    this.tick();
+    const response = this.execute({
+      type: "allRelationSnapshotWithOptions",
+      query: queryHandle(query),
+      optionsJson: JSON.stringify(opts ?? {}),
+      transaction,
+    });
+    if (response.type === "rows") return response.rows;
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("allRelationSnapshot", response.type);
   }
 
   allForIdentity(): never {

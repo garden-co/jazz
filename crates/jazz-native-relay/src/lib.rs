@@ -583,6 +583,14 @@ pub enum ForegroundSubscriptionEvent {
         reason: String,
     },
     Closed,
+    /// Existing terminal-operation JSON codec, alongside ordinary row deltas.
+    StructuredDelta {
+        reset: bool,
+        settled: bool,
+        tier: String,
+        delta: Vec<u8>,
+        terminal_operations_json: String,
+    },
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
@@ -2410,6 +2418,42 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
             }
         }
+        ForegroundDbCommandRequest::AllWithOptions {
+            query,
+            options_json,
+            transaction,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.start_foreground_read_with_options(query, options_json, transaction, false)
+            {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::AllRelationSnapshotWithOptions {
+            query,
+            options_json,
+            transaction,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.start_foreground_read_with_options(query, options_json, transaction, true)
+            {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::Subscribe { query } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -2595,9 +2639,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         }
         // Each extension fails closed until its handler is installed. Keep this
         // list explicit so future vocabulary additions require dispatch review.
-        ForegroundDbCommandRequest::AllWithOptions { .. }
-        | ForegroundDbCommandRequest::AllRelationSnapshotWithOptions { .. }
-        | ForegroundDbCommandRequest::SubscribeWithOptions { .. }
+        ForegroundDbCommandRequest::SubscribeWithOptions { .. }
         | ForegroundDbCommandRequest::WaitForTransaction { .. }
         | ForegroundDbCommandRequest::StageMutation { .. }
         | ForegroundDbCommandRequest::DisconnectNativeUpstream
@@ -2848,6 +2890,25 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.start_foreground_read(id, query))
+    }
+
+    fn start_foreground_read_with_options(
+        &self,
+        query: u64,
+        options_json: String,
+        transaction: Option<u64>,
+        structured: bool,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.start_foreground_read_with_options(
+                id,
+                query,
+                options_json,
+                transaction,
+                structured,
+            )
+        })
     }
 
     fn subscribe_foreground_query(&self, query: u64) -> Result<u64, RelayError> {
@@ -3861,6 +3922,24 @@ impl RelayWorker {
         client: u64,
         query: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
+        self.start_foreground_read_with_options(client, query, "{}".to_owned(), None, false)
+    }
+
+    fn start_foreground_read_with_options(
+        &mut self,
+        client: u64,
+        query: u64,
+        options_json: String,
+        transaction: Option<u64>,
+        structured: bool,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let opts = foreground_read_opts_from_json(&options_json)?;
+        let open_tx = transaction
+            .map(|handle| {
+                self.foreground_transaction(client, handle)
+                    .map(|(_, tx)| tx.open_tx_id)
+            })
+            .transpose()?;
         let (db, prepared) = {
             let client = self.foreground_client(client)?;
             let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
@@ -3868,11 +3947,53 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
+        let attachment = match open_tx {
+            Some(tx) => db.attach_query_in_transaction_with_opts(&prepared, tx, opts.clone()),
+            None => db.attach_query_with_opts(&prepared, opts.clone()),
+        }
+        .map_err(RelayError::Db)?;
+        let coverage = ForegroundReadCoverage {
+            db: Rc::clone(&db),
+            attachment: Some(attachment),
+        };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let mut rows = db
-                .all(&prepared, ReadOpts::default())
-                .await
+            std::future::poll_fn(|_| {
+                if db.query_attachment_is_covered(
+                    coverage.attachment.as_ref().expect("live coverage"),
+                ) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            // Retain and detach coverage even when the pending read is cancelled.
+            let _coverage = coverage;
+            if structured {
+                let mut snapshot = match open_tx {
+                    Some(tx) => {
+                        db.relation_snapshot_in_open_transaction(tx, &prepared, opts, None)
+                            .await
+                    }
+                    None => db.all_relation_snapshot(&prepared, opts).await,
+                }
                 .map_err(RelayError::Db)?;
+                if open_tx.is_none() {
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(RelayError::Db)?;
+                }
+                let bytes =
+                    jazz::binding_codec::encode_relation_snapshot(&snapshot).map_err(|error| {
+                        RelayError::ForegroundCommand(format!("encode relation snapshot: {error}"))
+                    })?;
+                return Ok(ForegroundOperationResult::Rows(bytes));
+            }
+            let mut rows = match open_tx {
+                Some(tx) => db.all_in_open_transaction(tx, &prepared, opts, None).await,
+                None => db.all(&prepared, opts).await,
+            }
+            .map_err(RelayError::Db)?;
             db.hydrate_rows_for_binding(&mut rows)
                 .await
                 .map_err(RelayError::Db)?;
@@ -4288,6 +4409,67 @@ impl RelayWorker {
 /// Decode the established NAPI/WASM encoded-cell record envelope. The
 /// foreground ABI deliberately shares this compact descriptor-plus-bytes
 /// representation; it does not invent a React-Native row/value object shape.
+struct ForegroundReadCoverage {
+    db: Rc<Db<MemoryStorage>>,
+    attachment: Option<jazz::db::QueryAttachment>,
+}
+
+impl Drop for ForegroundReadCoverage {
+    fn drop(&mut self) {
+        if let Some(attachment) = self.attachment.take() {
+            self.db.detach_query(attachment);
+        }
+    }
+}
+
+fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
+    let failure =
+        |error: String| RelayError::ForegroundCommand(format!("invalid read options: {error}"));
+    let supplied: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| failure(e.to_string()))?;
+    let mut value =
+        serde_json::to_value(ReadOpts::default()).map_err(|e| failure(e.to_string()))?;
+    if supplied.is_null() {
+        return Ok(ReadOpts::default());
+    }
+    let object = supplied
+        .as_object()
+        .ok_or_else(|| failure("expected object".to_owned()))?;
+    for (key, item) in object {
+        if item.is_null() {
+            continue;
+        }
+        let key = if key == "readView" {
+            "read_view"
+        } else {
+            key.as_str()
+        };
+        let normalized = match (key, item.as_str()) {
+            ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
+            (
+                "tier",
+                Some(
+                    "edge" | "Edge" | "remote" | "Remote" | "remote-if-possible"
+                    | "RemoteIfPossible",
+                ),
+            ) => Some("Edge"),
+            ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
+            ("tier", Some("none" | "None")) => Some("None"),
+            ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
+            ("local_updates", Some("deferred" | "Deferred")) => Some("Deferred"),
+            ("propagation", Some("full" | "Full")) => Some("Full"),
+            ("propagation", Some("LocalOnly" | "local_only" | "localOnly" | "local-only")) => {
+                Some("LocalOnly")
+            }
+            _ => None,
+        };
+        value[key] = normalized
+            .map(|s| serde_json::Value::String(s.to_owned()))
+            .unwrap_or_else(|| item.clone());
+    }
+    serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+}
+
 fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
     let ((descriptor, raw), trailing): ((RecordDescriptor, Vec<u8>), _) =
         postcard::take_from_bytes(bytes)
@@ -4339,19 +4521,27 @@ fn encode_foreground_subscription_event(
             tier,
             ..
         } => {
-            // `binding_codec` intentionally carries only rows and occurrence
-            // positions. Terminal operations need their existing dedicated
-            // shared codec before this capability can claim full structured
-            // relation support, so fail closed rather than dropping them.
-            if !terminal_operations.is_empty() {
-                return Err(RelayError::ForegroundCommand(
-                    "foreground V1 does not yet encode terminal operations".to_owned(),
-                ));
-            }
             let delta = jazz::binding_codec::encode_subscription_delta(added, updated, removed)
                 .map_err(|error| {
                     RelayError::ForegroundCommand(format!("encode subscription delta: {error}"))
                 })?;
+            if !terminal_operations.is_empty() {
+                let terminal_operations_json =
+                    jazz::binding_codec::terminal_operations_to_json(terminal_operations)
+                        .map_err(|error| {
+                            RelayError::ForegroundCommand(format!(
+                                "encode terminal operations: {error}"
+                            ))
+                        })?
+                        .to_string();
+                return Ok(ForegroundSubscriptionEvent::StructuredDelta {
+                    reset: *reset,
+                    settled: *settled,
+                    tier: format!("{tier:?}").to_ascii_lowercase(),
+                    delta,
+                    terminal_operations_json,
+                });
+            }
             Ok(ForegroundSubscriptionEvent::Delta {
                 reset: *reset,
                 settled: *settled,

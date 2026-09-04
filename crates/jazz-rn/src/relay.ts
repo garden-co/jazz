@@ -71,6 +71,7 @@ export type NativeForegroundCommand =
   | 'tick'
   | { type: 'prepareQuery'; query: Uint8Array }
   | { type: 'all'; query: number }
+  | { type: 'allWithOptions' | 'allRelationSnapshotWithOptions'; query: number; optionsJson: string; transaction?: number }
   | { type: 'subscribe'; query: number }
   | { type: 'drainSubscription'; subscription: number }
   | { type: 'unsubscribe'; subscription: number }
@@ -131,6 +132,7 @@ export type NativeForegroundSubscriptionEvent =
       settled: boolean;
       tier: string;
       delta: Uint8Array;
+      terminalOperations?: unknown[];
     }
   | { type: 'rejected'; reason: string }
   | { type: 'closed' };
@@ -257,6 +259,13 @@ export function encodeNativeForegroundCommand(
     return concatForegroundBytes(
       Uint8Array.of(3),
       encodeForegroundU64(command.query)
+    );
+  if (command.type === 'allWithOptions' || command.type === 'allRelationSnapshotWithOptions')
+    return concatForegroundBytes(
+      Uint8Array.of(command.type === 'allWithOptions' ? 18 : 19),
+      encodeForegroundU64(command.query),
+      encodeForegroundString(command.optionsJson),
+      command.transaction === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.transaction))
     );
   if (command.type === 'subscribe')
     return concatForegroundBytes(
@@ -563,7 +572,7 @@ function decodeForegroundSubscriptionEvents(
   const events: NativeForegroundSubscriptionEvent[] = [];
   for (let index = 0; index < count; index += 1) {
     const tag = readVarint();
-    if (tag === 0) {
+    if (tag === 0 || tag === 3) {
       const reset = bytes[offset++];
       const settled = bytes[offset++];
       if ((reset !== 0 && reset !== 1) || (settled !== 0 && settled !== 1))
@@ -580,12 +589,22 @@ function decodeForegroundSubscriptionEvents(
         throw new Error(
           'Jazz native foreground returned truncated subscription delta'
         );
+      let terminalOperations: unknown[] | undefined;
+      if (tag === 3) {
+        const length = readVarint();
+        const json = decodeForegroundUtf8(bytes, offset, length, 'terminal operations');
+        offset += length;
+        const parsed: unknown = JSON.parse(json);
+        if (!Array.isArray(parsed)) throw new Error('Jazz native foreground returned malformed terminal operations');
+        terminalOperations = parsed;
+      }
       events.push({
         type: 'delta',
         reset: reset === 1,
         settled: settled === 1,
         tier,
         delta,
+        ...(terminalOperations === undefined ? {} : { terminalOperations }),
       });
     } else if (tag === 1) {
       const length = readVarint();
