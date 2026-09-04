@@ -184,6 +184,7 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   /** Native foreground capabilities are bound to admission-time auth. */
   rejectAuthUpdate?(): never;
+  isNativeForegroundClosed?(): boolean;
   disconnectNativeUpstream?(): void;
   reconnectNativeUpstream?(): void;
   nativeConnectionStatus?(): {
@@ -3399,7 +3400,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      void this.runCoreTick().catch(reportAsyncRuntimeError);
+      void this.runCoreTick().catch((error) => {
+        // Native revocation can retire a foreground after its wake crossed
+        // into the JS queue. Native liveness distinguishes that stale wake
+        // from a still-live scope with an actual transport/core failure.
+        if (this.db.isNativeForegroundClosed?.()) return;
+        reportAsyncRuntimeError(error);
+      });
     });
   }
 

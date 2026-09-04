@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
+import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
@@ -42,7 +43,16 @@ it("revokes the old foreground before opening an isolated newly admitted identit
   await withNativeRelayFixture(app, async (first) => {
     const old = await first.createDb();
     await old.insert(app.notes, { title: "first identity private row" }).wait({ tier: "local" });
+    const pending = old.all(app.notes, { tier: ReadTier.Remote });
+    const pendingRejected = expect(pending).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const transaction = old.beginTransaction();
+    transaction.insert(app.notes, { title: "abandoned old-scope mutation" });
     first.nativeHost.revoke(first.capability);
+    await pendingRejected;
+    await expect(
+      Promise.resolve().then(() => transaction.commit().wait({ tier: "local" })),
+    ).rejects.toThrow();
     await expect(old.all(app.notes, { tier: "local" })).rejects.toThrow();
     await expect(first.createDb()).rejects.toThrow();
     const newCapability = first.nativeHost.admit(

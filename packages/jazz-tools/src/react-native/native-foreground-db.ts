@@ -285,6 +285,18 @@ export class NativeForegroundDb {
     }
   }
 
+  isNativeForegroundClosed(): boolean {
+    if (this.closed) return true;
+    try {
+      // This command checks native capability liveness without pumping the
+      // socket. A transient upstream error does not make this probe fail.
+      this.nativeSessionMetadata();
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
   nativeSessionMetadata(): { issuer: string; userId: string } {
     const response = this.execute({ type: "nativeSessionMetadata" });
     if (response.type !== "nativeSessionMetadata")
