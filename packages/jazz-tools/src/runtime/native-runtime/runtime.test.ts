@@ -11,7 +11,6 @@ import {
   PostcardWriter,
   queryWithPredicates,
   readNativeSubscriptionDelta,
-  writeDescriptor,
   writeNativeRowDescriptor,
 } from "./native-codec.js";
 import {
