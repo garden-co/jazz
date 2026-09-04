@@ -18,6 +18,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # setup-build uses this to bind rust-cache and sticky-disk keys to this
+  # repository. This receipt is dispatch-only, so it must never inherit a
+  # caller-controlled fork identifier.
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+
 jobs:
   indexeddb-webkit:
     name: WebKit IndexedDB physical receipt

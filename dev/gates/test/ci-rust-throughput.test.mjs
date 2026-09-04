@@ -37,6 +37,10 @@ const previewBuild = fs.readFileSync(
   path.join(root, ".github/workflows/preview-build.yml"),
   "utf8",
 );
+const webkitIndexedDbReceipt = fs.readFileSync(
+  path.join(root, ".github/workflows/ios-webkit-indexeddb-receipt.yml"),
+  "utf8",
+);
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
 const routeSubscriptionCurve = fs.readFileSync(
   path.join(root, "crates/jazz/benches/route_subscription_curve.rs"),
@@ -1254,6 +1258,20 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
         ),
       ),
     /job environment must not expose the signing key/,
+  );
+});
+
+test("on-demand WebKit IndexedDB receipt scopes build caches to its repository", () => {
+  assert.equal(
+    parse(webkitIndexedDbReceipt).env.CACHE_SCOPE_REPOSITORY_ID,
+    "${{ github.repository_id }}",
+  );
+  assert.match(webkitIndexedDbReceipt, /uses: \.\/\.github\/actions\/setup-build/);
+  assert.equal(
+    parse(
+      webkitIndexedDbReceipt.replace("  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}\n", ""),
+    ).env?.CACHE_SCOPE_REPOSITORY_ID,
+    undefined,
   );
 });
 
