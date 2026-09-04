@@ -5242,9 +5242,7 @@ impl RelayWorker {
     }
 }
 
-/// Decode the established NAPI/WASM encoded-cell record envelope. The
-/// foreground ABI deliberately shares this compact descriptor-plus-bytes
-/// representation; it does not invent a React-Native row/value object shape.
+/// Await read coverage and hydrate results through the shared binding codecs.
 fn foreground_read_future(
     db: Rc<Db<MemoryStorage>>,
     prepared: PreparedQuery,
@@ -5381,6 +5379,9 @@ struct ForegroundMutationOptions {
     updated_at_ms: Option<u64>,
 }
 
+/// Decode the established NAPI/WASM encoded-cell record envelope. The
+/// foreground ABI deliberately shares this compact descriptor-plus-bytes
+/// representation; it does not invent a React-Native row/value object shape.
 fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
     let ((descriptor, raw), trailing): ((RecordDescriptor, Vec<u8>), _) =
         postcard::take_from_bytes(bytes)
