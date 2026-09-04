@@ -96,7 +96,7 @@ function makeDbWithCookieSession(cookieSession: Session) {
 
 describe("Db auth state", () => {
   it("keeps transport identity out of Db properties and ignores planted aliases", () => {
-    const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
+    const { db } = makeDbWithJwt(makeJwt({ sub: "alice", role: "reader" }));
     const forbidden = new Set(["issuer", "user_id", "internalSession", "trustedReservedSession"]);
 
     expect(
@@ -221,7 +221,7 @@ describe("Db auth state", () => {
     const db = new TestDb(
       {
         appId: "test-app",
-        jwtToken: makeJwt({ sub: "bob", claims: { role: "reader" } }),
+        jwtToken: makeJwt({ sub: "bob", role: "reader" }),
       },
       runtimeClient as any,
       { authMode: session.authMode, session },
@@ -232,7 +232,7 @@ describe("Db auth state", () => {
       session,
     });
 
-    db.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
+    db.updateAuthToken(makeJwt({ sub: "bob", role: "admin" }));
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
@@ -250,14 +250,14 @@ describe("Db auth state", () => {
     const sharedDb = new TestDb(
       {
         appId: "test-app",
-        jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+        jwtToken: makeJwt({ sub: "alice", role: "reader" }),
       },
       runtimeClient as any,
     );
     const scopedDb = new TestDb(
       {
         appId: "test-app",
-        jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+        jwtToken: makeJwt({ sub: "alice", role: "reader" }),
       },
       runtimeClient as any,
       {
@@ -270,7 +270,7 @@ describe("Db auth state", () => {
       },
     );
 
-    scopedDb.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
+    scopedDb.updateAuthToken(makeJwt({ sub: "bob", role: "admin" }));
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(sharedDb.getAuthState()).toMatchObject({
@@ -288,7 +288,7 @@ describe("Db auth state", () => {
   });
 
   it("returns the initial bearer auth state", () => {
-    const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
+    const { db } = makeDbWithJwt(makeJwt({ sub: "alice", role: "reader" }));
 
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
@@ -302,7 +302,7 @@ describe("Db auth state", () => {
 
   it("updates auth for same-principal JWT refresh", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice" }));
-    const refreshed = makeJwt({ sub: "alice", claims: { role: "writer" } });
+    const refreshed = makeJwt({ sub: "alice", role: "writer" });
     const states: AuthState[] = [];
     const listenerInternalRoles: unknown[] = [];
 
@@ -332,7 +332,7 @@ describe("Db auth state", () => {
   });
 
   it("ignores redundant auth updates when the token is unchanged", () => {
-    const jwt = makeJwt({ sub: "alice", claims: { role: "reader" } });
+    const jwt = makeJwt({ sub: "alice", role: "reader" });
     const { db, runtimeClient } = makeDbWithJwt(jwt);
     const states: AuthState[] = [];
     const before = getDbInternalSession(db);

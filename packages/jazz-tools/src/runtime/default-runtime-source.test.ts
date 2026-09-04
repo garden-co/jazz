@@ -104,7 +104,7 @@ describe("trustAttachedBrowserWorkerSession", () => {
       jwtToken: unsignedJwt({
         iss: LOCAL_FIRST_JWT_ISSUER,
         sub: "alice",
-        claims: { role: "writer" },
+        role: "writer",
       }),
       runtimeSources: {
         browserWorkerPort: {} as MessagePort,
