@@ -208,7 +208,9 @@ test("Android relay artifact contract keeps 32-bit x86 verifier-only", () => {
   assert.match(builder, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(builder, /\[x86_64\]=x86_64-linux-android/);
   const verifier = sources.get("artifact verifier");
-  assert.match(verifier, /\["x86", "x86\/libjazz_native_relay\.a"\]/);
+  assert.match(verifier, /expected\.has\("x86\/libjazz_native_relay\.a"\)/);
+  assert.match(verifier, /join\(target\.root, "x86\/libjazz_native_relay\.a"\)/);
+  assert.match(verifier, /\["x86"\]/);
   assert.doesNotMatch(
     builder,
     /\[x86\]=i686-linux-android/,
