@@ -739,13 +739,19 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+struct ParkedSubscription {
+    subscribe: Subscribe,
+    policy_binding: Option<PolicyBindingKey>,
+}
+
 /// Payloads parked until missing schema or catalogue context arrives.
 #[derive(Clone, Debug, Default)]
 struct Parking {
     /// Shape registrations waiting for an unknown schema version.
     parked_shape_registrations: BTreeMap<ShapeId, ShapeAst>,
     /// Subscription attaches waiting for their shape registration to become installable.
-    parked_binding_deltas: BTreeMap<ShapeId, Vec<Subscribe>>,
+    parked_binding_deltas: BTreeMap<ShapeId, Vec<ParkedSubscription>>,
     /// Commit units waiting for parent transactions or schema context.
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.
