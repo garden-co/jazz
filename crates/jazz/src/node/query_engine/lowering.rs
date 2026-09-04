@@ -21,20 +21,14 @@ use closure::{
 const FIXPOINT_MAX_ITERS: usize = 128;
 fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> String {
     let source_field = field.source_field.as_deref().unwrap_or(&field.output);
-    let logical = logical_user_column(source_field);
-    if source
-        .table_schema
-        .columns
-        .iter()
-        .any(|column| column.name == logical)
-    {
-        logical_user_column(&field.output).to_owned()
-    } else {
-        // Collector slots already carry their public path field as their
-        // physical descriptor name. Do not infer from a reserved-looking
-        // prefix here: table columns may legitimately use any such name.
-        field.output.clone()
-    }
+    source
+        .row_shape
+        .descriptor
+        .field_index(source_field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(crate::node::query_engine::descriptor_public_name)
+        .map(str::to_owned)
+        .unwrap_or_else(|| field.output.clone())
 }
 
 /// Parameter domains attached to one lowered graph.

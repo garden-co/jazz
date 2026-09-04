@@ -1172,11 +1172,19 @@ fn physical_descriptor_with_enum_registries(
     physical_names: Vec<String>,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    Ok(records::RecordDescriptor::new(
+    Ok(records::RecordDescriptor::new_with_fields(
         physical_names
             .into_iter()
             .zip(logical.fields())
             .map(|(name, field)| {
+                let identity = if let Some(id) = name
+                    .strip_prefix("user_")
+                    .and_then(|id| id.parse::<u64>().ok())
+                {
+                    Some(records::FieldIdentity::Slot(id))
+                } else {
+                    field.identity.clone()
+                };
                 let value_type = if let Some(id) = name
                     .strip_prefix("user_")
                     .and_then(|id| id.parse::<u64>().ok())
@@ -1215,7 +1223,11 @@ fn physical_descriptor_with_enum_registries(
                 } else {
                     field.value_type.clone()
                 };
-                Ok((name, value_type))
+                Ok(records::DescriptorField {
+                    name: Some(name),
+                    identity,
+                    value_type,
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))

@@ -1473,7 +1473,12 @@ impl CurrentRow {
         record: OwnedRecord,
         binding_fields: Vec<CurrentRowBindingField>,
     ) -> Self {
-        let binding_field_names = vec![None; binding_fields.len()];
+        let binding_field_names = record
+            .descriptor()
+            .fields()
+            .iter()
+            .map(|field| field.logical_name().map(str::to_owned))
+            .collect();
         Self::new_with_explicit_binding_fields_and_names(
             table,
             record,
@@ -1588,45 +1593,19 @@ impl CurrentRow {
             .columns
             .iter()
             .find(|candidate| candidate.name == column)?;
-        let physical_name = user_column_field(column);
-        let fields = self.record.descriptor().fields();
-        fields
-            .iter()
-            .zip(
-                self.binding_fields
-                    .iter()
-                    .zip(self.binding_field_names.iter()),
-            )
-            .position(|(field, (binding, _))| {
-                *binding == CurrentRowBindingField::PhysicalColumn
-                    && field.name.as_deref() == Some(physical_name.as_str())
-            })
-            // A terminal may carry a public logical column through an internal
-            // `user_{column}` slot. The producer-provided name is authoritative;
-            // never infer it by stripping a prefix, since a genuine logical
-            // `user_{column}` remains a distinct public output.
-            .or_else(|| {
-                fields
-                    .iter()
-                    .zip(
-                        self.binding_fields
-                            .iter()
-                            .zip(self.binding_field_names.iter()),
-                    )
-                    .position(|(field, (binding, public_name))| {
-                        *binding == CurrentRowBindingField::LogicalField
-                            && public_name.as_deref().or(field.name.as_deref()) == Some(column)
-                    })
-            })
+        self.application_column_index_by_name(column)
     }
 
-    fn binding_field_for_column(
-        &self,
-        table: &TableSchema,
-        column: &str,
-    ) -> Option<CurrentRowBindingField> {
-        let index = self.application_column_index(table, column)?;
-        self.binding_fields.get(index).copied()
+    fn application_column_index_by_name(&self, column: &str) -> Option<usize> {
+        self.binding_fields
+            .iter()
+            .zip(self.binding_field_names.iter())
+            .position(|(binding, public_name)| {
+                matches!(
+                    binding,
+                    CurrentRowBindingField::PhysicalColumn | CurrentRowBindingField::LogicalField
+                ) && public_name.as_deref() == Some(column)
+            })
     }
 
     /// Encoded groove record backing this projected current row.
@@ -1708,23 +1687,28 @@ impl CurrentRow {
             .iter()
             .filter(|column| selected.contains(column.name.as_str()))
             .collect::<Vec<_>>();
-        let descriptor = records::RecordDescriptor::new(
-            std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
-                .chain(projected_columns.iter().map(|column| {
-                    (
-                        user_column_field(&column.name),
-                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                    )
-                }))
-                .chain([
-                    ("$createdBy".to_owned(), records::ValueType::String),
-                    ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::String),
-                    ("$updatedAt".to_owned(), records::ValueType::U64),
-                    ("tx_time".to_owned(), records::ValueType::U64),
-                    ("tx_node_id".to_owned(), records::ValueType::U64),
-                ]),
-        );
+        let mut descriptor_fields = vec![records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        )];
+        descriptor_fields.extend(projected_columns.iter().map(|column| {
+            let public_name = self::query_engine::aggregate_output_logical_name(&column.name)
+                .unwrap_or(&column.name);
+            records::DescriptorField::new(
+                user_column_field(&column.name),
+                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+            )
+            .with_identity(records::FieldIdentity::Name(public_name.to_owned()))
+        }));
+        descriptor_fields.extend([
+            records::DescriptorField::new("$createdBy", records::ValueType::String),
+            records::DescriptorField::new("$createdAt", records::ValueType::U64),
+            records::DescriptorField::new("$updatedBy", records::ValueType::String),
+            records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+            records::DescriptorField::new("tx_time", records::ValueType::U64),
+            records::DescriptorField::new("tx_node_id", records::ValueType::U64),
+        ]);
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
         let row_uuid_field = self
             .record
@@ -1735,7 +1719,16 @@ impl CurrentRow {
         let mut binding_fields = vec![row_uuid_field];
         let mut binding_field_names = vec![None];
         for column in projected_columns {
-            let cell = self.cell(table, &column.name);
+            let public_name = self::query_engine::aggregate_output_logical_name(&column.name)
+                .unwrap_or(&column.name);
+            let cell = self
+                .application_column_index_by_name(public_name)
+                .and_then(|idx| self.record.borrowed().get_idx(idx).ok())
+                .and_then(|value| match value {
+                    Value::Nullable(None) => None,
+                    Value::Nullable(Some(value)) => Some(*value),
+                    value => Some(value),
+                });
             let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
                 match cell {
                     Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
@@ -1749,18 +1742,11 @@ impl CurrentRow {
             };
             values.push(projected);
             let binding = self
-                .binding_field_for_column(table, &column.name)
+                .application_column_index_by_name(public_name)
+                .and_then(|index| self.binding_fields.get(index).copied())
                 .unwrap_or(CurrentRowBindingField::LogicalField);
             binding_fields.push(binding);
-            // Projection always writes into the physical-looking
-            // `user_{column}` carrier above. Logical sources therefore need
-            // an explicit public name even when their input descriptor used
-            // the public name directly; otherwise the carrier spelling would
-            // become the logical identity after projection.
-            binding_field_names.push(match binding {
-                CurrentRowBindingField::PhysicalColumn => None,
-                CurrentRowBindingField::LogicalField => Some(column.name.clone()),
-            });
+            binding_field_names.push(Some(public_name.to_owned()));
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
@@ -1883,18 +1869,9 @@ impl CurrentRow {
             .enumerate()
             .filter_map(move |(idx, (field, (binding, public_name)))| {
                 let raw_name = field.name.as_ref()?.as_str();
-                // Descriptor provenance is part of the public field identity:
-                // a physical `user_check` denotes application column `check`,
-                // while a logical output legitimately named `user_check` must
-                // remain visible under that exact name.
-                let name = if *binding == CurrentRowBindingField::LogicalField {
-                    public_name.as_deref().unwrap_or(raw_name)
-                } else if raw_name.starts_with("user_") {
-                    let name = self::query_engine::logical_user_column(raw_name);
-                    self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
-                } else if let Some(name) =
-                    self::query_engine::aggregate_output_logical_name(raw_name)
-                {
+                let name = if let Some(name) = public_name.as_deref() {
+                    name
+                } else if let Some(name) = self::query_engine::descriptor_public_name(field) {
                     name
                 } else if matches!(
                     raw_name,
@@ -1945,12 +1922,7 @@ impl CurrentRow {
             .skip(user_cells)
             .filter_map(|(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
-                let name = if name.starts_with("user_") {
-                    let name = self::query_engine::logical_user_column(name);
-                    self::query_engine::aggregate_output_logical_name(name)
-                        .unwrap_or(name)
-                        .to_owned()
-                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                let name = if let Some(name) = self::query_engine::descriptor_public_name(field) {
                     name.to_owned()
                 } else if matches!(field.value_type, records::ValueType::Nullable(_))
                     && !matches!(name, "authored_columns" | "settle_position")

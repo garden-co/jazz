@@ -2886,10 +2886,6 @@ pub(super) fn source_field_type<'a>(
         .row_shape
         .descriptor
         .field_index(field)
-        .or_else(|| {
-            let user_field = user_column_field(field);
-            source.row_shape.descriptor.field_index(&user_field)
-        })
         .and_then(|index| source.row_shape.descriptor.fields().get(index))
         .map(|field| &field.value_type)
 }
@@ -3059,6 +3055,9 @@ fn lower_aggregate_expr(
         expression,
         distinct: false,
         output_name: Some(aggregate_output_field(&aggregate.output.name)),
+        output_identity: Some(groove::records::FieldIdentity::Name(
+            aggregate.output.name.clone(),
+        )),
     })
 }
 
@@ -3679,14 +3678,24 @@ pub(super) fn require_source_field(
     source: &ResolvedSource,
     field: &str,
 ) -> Result<String, UnsupportedReason> {
-    if source.row_shape.descriptor.field_index(field).is_some() {
-        Ok(field.to_owned())
-    } else {
-        Err(UnsupportedReason::Operator(format!(
+    let Some(index) = source.row_shape.descriptor.field_index(field) else {
+        return Err(UnsupportedReason::Operator(format!(
             "resolved source {:?} does not provide field '{field}'",
             source.row_shape.source
-        )))
-    }
+        )));
+    };
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .get(index)
+        .and_then(|field| field.name.clone())
+        .ok_or_else(|| {
+            UnsupportedReason::Operator(format!(
+                "resolved source {:?} field '{field}' has no carrier name",
+                source.row_shape.source
+            ))
+        })
 }
 
 fn provenance_source_field(field: ProvenanceField) -> &'static str {

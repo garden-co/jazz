@@ -19,7 +19,7 @@ use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
     ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
-    VersionedRowRefSchema, logical_user_column,
+    VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias};
@@ -1827,12 +1827,21 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
                     // The compiler binds this identity before terminal
                     // publication. Carrier describes encoding, not naming:
                     // a logical include may legitimately begin with `user_`.
-                    name: rows.public_field_names.get(name).cloned().unwrap_or_else(
-                        || match carrier {
-                            AppRowCarrier::CurrentRow => logical_user_column(name).to_owned(),
-                            AppRowCarrier::Logical => name.to_owned(),
-                        },
-                    ),
+                    name: rows
+                        .public_field_names
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            rows.descriptor
+                                .fields()
+                                .get(slot)
+                                .and_then(crate::node::query_engine::descriptor_public_name)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| match carrier {
+                                    AppRowCarrier::CurrentRow => name.to_owned(),
+                                    AppRowCarrier::Logical => name.to_owned(),
+                                })
+                        }),
                     descriptor_field_name: name.to_owned(),
                     slot,
                     carrier: match carrier {

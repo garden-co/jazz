@@ -14,7 +14,9 @@ use std::{
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::records::{RecordDescriptor, Value, ValueType, collect_by_ordered_scalar};
+use crate::records::{
+    FieldIdentity, RecordDescriptor, Value, ValueType, collect_by_ordered_scalar,
+};
 use thiserror::Error;
 
 use super::op_types::*;
@@ -1113,6 +1115,7 @@ impl GraphBuilder {
 pub struct ProjectField {
     pub expression: ProjectExpr,
     pub output_name: String,
+    pub output_identity: FieldIdentity,
 }
 
 impl ProjectField {
@@ -1120,28 +1123,47 @@ impl ProjectField {
         let name = name.into();
         Self {
             expression: ProjectExpr::Field(FieldRef::name(name.clone())),
+            output_identity: FieldIdentity::Name(name.clone()),
             output_name: name,
         }
     }
 
     pub fn renamed(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Field(FieldRef::name(source_name)),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
     pub fn renamed_resolved(source_idx: usize, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Field(FieldRef::resolved(source_idx)),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
+        }
+    }
+
+    pub fn renamed_with_identity(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        output_identity: FieldIdentity,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::Field(FieldRef::name(source_name)),
             output_name: output_name.into(),
+            output_identity,
         }
     }
 
     pub fn literal(output_name: impl Into<String>, value: impl Into<LiteralValue>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Literal(value.into()),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1150,12 +1172,14 @@ impl ProjectField {
         value: impl Into<LiteralValue>,
         value_type: ValueType,
     ) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::TypedLiteral {
                 value: value.into(),
                 value_type,
             },
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1166,30 +1190,38 @@ impl ProjectField {
     }
 
     pub fn null_typed(output_name: impl Into<String>, value_type: ValueType) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Null(value_type),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
     pub fn nullable(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Nullable(FieldRef::name(source_name)),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
     pub fn nullable_resolved(source_idx: usize, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::Nullable(FieldRef::resolved(source_idx)),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
     pub fn nullable_flat(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::NullableFlat(FieldRef::name(source_name)),
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1201,12 +1233,14 @@ impl ProjectField {
         output_name: impl Into<String>,
         tags: Vec<Option<u8>>,
     ) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::EnumTagRemap {
                 source: FieldRef::name(source_name),
                 tags,
             },
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1217,12 +1251,14 @@ impl ProjectField {
         output_name: impl Into<String>,
         tags: Vec<Option<u32>>,
     ) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::EnumRemap {
                 source: FieldRef::name(source_name),
                 tags,
             },
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1235,6 +1271,7 @@ impl ProjectField {
         target: ValueType,
         remaps: RecursiveEnumRemaps,
     ) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::RecursiveEnumRemap {
                 source: FieldRef::name(source_name),
@@ -1242,7 +1279,8 @@ impl ProjectField {
                 remaps,
                 omit_unrepresentable: false,
             },
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 
@@ -1255,6 +1293,7 @@ impl ProjectField {
         target: ValueType,
         remaps: RecursiveEnumRemaps,
     ) -> Self {
+        let output_name = output_name.into();
         Self {
             expression: ProjectExpr::RecursiveEnumRemap {
                 source: FieldRef::name(source_name),
@@ -1262,7 +1301,8 @@ impl ProjectField {
                 remaps,
                 omit_unrepresentable: true,
             },
-            output_name: output_name.into(),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
         }
     }
 

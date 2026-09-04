@@ -41,6 +41,7 @@ pub(super) fn resolve_aggregate_expr(
         expression,
         distinct: aggregate.distinct,
         output_name: aggregate.output_name.clone(),
+        output_identity: aggregate.output_identity.clone(),
     })
 }
 

@@ -755,6 +755,7 @@ impl IvmRuntime {
                                         ProjectionExpr {
                                             expression,
                                             output_name: Some(field.output_name.clone()),
+                                            output_identity: field.output_identity.clone(),
                                         }
                                     })
                                 })

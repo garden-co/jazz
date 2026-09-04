@@ -8,6 +8,14 @@
 use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
+
+fn current_row_column_field(
+    column: &crate::schema::ColumnSchema,
+    value_type: ValueType,
+) -> records::DescriptorField {
+    records::DescriptorField::new(user_column_field(&column.name), value_type)
+        .with_identity(records::FieldIdentity::Name(column.name.clone()))
+}
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
@@ -3598,21 +3606,28 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
             current
                 .field_index(&storage_name)
                 .and_then(|index| current.fields().get(index))
-                .map(|field| (user_column_field(&column.name), field.value_type.clone()))
+                .map(|field| {
+                    (
+                        user_column_field(&column.name),
+                        (field.identity.clone(), field.value_type.clone()),
+                    )
+                })
         })
         .collect::<BTreeMap<_, _>>();
-    RecordDescriptor::new(logical.fields().iter().map(|field| {
+    RecordDescriptor::new_with_fields(logical.fields().iter().map(|field| {
         let name = field
             .name
             .clone()
             .expect("compiler-owned current source descriptor fields are named");
-        (
-            name.clone(),
-            current_types
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| field.value_type.clone()),
-        )
+        let (identity, value_type) = current_types
+            .get(&name)
+            .map(|(identity, value_type)| (identity.clone(), value_type.clone()))
+            .unwrap_or_else(|| (field.identity.clone(), field.value_type.clone()));
+        records::DescriptorField {
+            name: Some(name),
+            identity,
+            value_type,
+        }
     }))
 }
 
@@ -3635,7 +3650,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     branch_columns_nonnullable: bool,
     include_deletion_marker: bool,
 ) -> RecordDescriptor {
-    let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
+    let mut fields = std::iter::once(records::DescriptorField::new("row_uuid", ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
@@ -3643,64 +3658,73 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             } else {
                 ValueType::Nullable(Box::new(column.column_type.clone()))
             };
-            (user_column_field(&column.name), value_type)
+            current_row_column_field(column, value_type)
         }))
         .chain([
-            ("$createdBy".to_owned(), ValueType::String),
-            ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::String),
-            ("$updatedAt".to_owned(), ValueType::U64),
-            ("tx_time".to_owned(), ValueType::U64),
-            ("tx_node_id".to_owned(), ValueType::U64),
+            records::DescriptorField::new("$createdBy", ValueType::String),
+            records::DescriptorField::new("$createdAt", ValueType::U64),
+            records::DescriptorField::new("$updatedBy", ValueType::String),
+            records::DescriptorField::new("$updatedAt", ValueType::U64),
+            records::DescriptorField::new("tx_time", ValueType::U64),
+            records::DescriptorField::new("tx_node_id", ValueType::U64),
         ])
         .collect::<Vec<_>>();
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
-            ("table".to_owned(), ValueType::String),
-            ("layer".to_owned(), ValueType::String),
-            ("schema_version".to_owned(), ValueType::U64),
-            (
-                "parents".to_owned(),
+            records::DescriptorField::new("table", ValueType::String),
+            records::DescriptorField::new("layer", ValueType::String),
+            records::DescriptorField::new("schema_version", ValueType::U64),
+            records::DescriptorField::new(
+                "parents",
                 ValueType::Array(Box::new(ValueType::Tuple(vec![
                     ValueType::U64,
                     ValueType::Uuid,
                 ]))),
             ),
-            (
-                "authored_columns".to_owned(),
+            records::DescriptorField::new(
+                "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
-            ("created_by".to_owned(), ValueType::String),
-            ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::String),
-            ("updated_at".to_owned(), ValueType::U64),
+            records::DescriptorField::new("created_by", ValueType::String),
+            records::DescriptorField::new("created_at", ValueType::U64),
+            records::DescriptorField::new("updated_by", ValueType::String),
+            records::DescriptorField::new("updated_at", ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((field.clone(), ValueType::Bytes));
+            fields.push(records::DescriptorField::new(
+                field.clone(),
+                ValueType::Bytes,
+            ));
         }
     }
     if branch_columns_nonnullable
         && !metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses)
     {
-        fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
+        fields.push(records::DescriptorField::new(
+            "supplying_branch_key",
+            ValueType::Bytes,
+        ));
     }
     if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
-        fields.push((
-            "settle_position".to_owned(),
+        fields.push(records::DescriptorField::new(
+            "settle_position",
             ValueType::Nullable(Box::new(ValueType::U64)),
         ));
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
-        fields.push(("coverage".to_owned(), ValueType::String));
+        fields.push(records::DescriptorField::new("coverage", ValueType::String));
     }
     if include_deletion_marker {
-        fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
+        fields.push(records::DescriptorField::new(
+            "__jazz_deleted",
+            ValueType::Bool,
+        ));
     }
-    RecordDescriptor::new(fields)
+    RecordDescriptor::new_with_fields(fields)
 }
 
 impl<S> NodeState<S>

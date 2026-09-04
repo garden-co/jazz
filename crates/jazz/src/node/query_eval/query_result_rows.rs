@@ -7,8 +7,8 @@ use groove::schema::ColumnType;
 
 use super::{
     Aggregate, AggregateFunction, ColumnSchema, CurrentRow, Error, ResultMemberEntry, RowUuid,
-    SyntheticReplacementToken, TableSchema, Value, aggregate_output_app_field,
-    aggregate_output_column, aggregate_result_member_row_uuid, nullable_value, user_column_field,
+    SyntheticReplacementToken, TableSchema, Value, aggregate_output_column,
+    aggregate_result_member_row_uuid, nullable_value,
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
@@ -20,29 +20,8 @@ pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>)
     }
 }
 
-pub(super) fn aggregate_row_cell(
-    row: &CurrentRow,
-    query: &crate::query::Query,
-    column: &str,
-) -> Option<Value> {
-    let field = if query
-        .aggregate
-        .as_ref()
-        .and_then(|aggregate| aggregate.group_by.as_deref())
-        == Some(column)
-    {
-        user_column_field(column)
-    } else if query.aggregate.as_ref().is_some_and(|aggregate| {
-        aggregate
-            .aggregates
-            .iter()
-            .any(|aggregate| aggregate.alias == column)
-    }) {
-        aggregate_output_app_field(column)
-    } else {
-        user_column_field(column)
-    };
-    let idx = row.record.descriptor().field_index(&field)?;
+pub(super) fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
+    let idx = row.record.descriptor().field_index(column)?;
     nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
 }
 
@@ -112,14 +91,13 @@ pub(super) fn aggregate_query_row_uuid(
     ))?;
     let (row_value, row_type) = match &aggregate.group_by {
         Some(group_by) => {
-            let field = user_column_field(group_by);
-            let index = record
-                .descriptor()
-                .field_index(&field)
-                .or_else(|| record.descriptor().field_index(group_by))
-                .ok_or(Error::InvalidStoredValue(
-                    "aggregate record is missing group identity",
-                ))?;
+            let index =
+                record
+                    .descriptor()
+                    .field_index(group_by)
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate record is missing group identity",
+                    ))?;
             (
                 record.get_idx(index)?,
                 record

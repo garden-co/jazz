@@ -1069,8 +1069,8 @@ where
                 |(left_row, left_occurrence), (right_row, right_occurrence)| {
                     for order in &query.order_by {
                         let ordering = compare_optional_values(
-                            aggregate_row_cell(left_row, query, &order.column),
-                            aggregate_row_cell(right_row, query, &order.column),
+                            aggregate_row_cell(left_row, &order.column),
+                            aggregate_row_cell(right_row, &order.column),
                         );
                         let ordering = match order.direction {
                             OrderDirection::Asc => ordering,
@@ -1138,8 +1138,8 @@ where
             rows.sort_by(|left, right| {
                 for order in &query.order_by {
                     let ordering = compare_optional_values(
-                        aggregate_row_cell(left, query, &order.column),
-                        aggregate_row_cell(right, query, &order.column),
+                        aggregate_row_cell(left, &order.column),
+                        aggregate_row_cell(right, &order.column),
                     );
                     let ordering = match order.direction {
                         OrderDirection::Asc => ordering,

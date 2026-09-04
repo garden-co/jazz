@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::node::query_eval::coerce_prepared_binding_value;
+use groove::records::{DescriptorField, FieldIdentity};
 
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
@@ -415,14 +416,19 @@ pub(super) fn lowered_terminals(
                     .map(|field| {
                         (
                             field.name.clone(),
-                            logical_user_column(&field.name).to_owned(),
+                            descriptor
+                                .field_index(&field.name)
+                                .and_then(|index| descriptor.fields().get(index))
+                                .and_then(crate::node::query_engine::descriptor_public_name)
+                                .unwrap_or(field.name.as_str())
+                                .to_owned(),
                         )
                     })
                     .collect();
                 (
                     graph,
                     descriptor,
-                    BTreeSet::new(),
+                    BTreeSet::<String>::new(),
                     AppRowCarrier::Logical,
                     BTreeMap::new(),
                     public_field_names,
@@ -2927,20 +2933,39 @@ fn aggregate_app_row_descriptor(
                 explain: ExplainPlan::default(),
             })
         })?;
-        fields.push((field, value_type));
+        let descriptor_field = source
+            .row_shape
+            .descriptor
+            .field_index(&field)
+            .and_then(|index| source.row_shape.descriptor.fields().get(index))
+            .cloned()
+            .ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "aggregate group field {field:?} is missing from resolved descriptor"
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+        fields.push(DescriptorField {
+            name: Some(field),
+            value_type,
+            identity: descriptor_field.identity,
+        });
     }
     fields.extend(
         outputs
             .iter()
             .map(|output| {
-                Ok((
+                Ok(DescriptorField::new(
                     aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
-                ))
+                )
+                .with_identity(FieldIdentity::Name(output.output.name.clone())))
             })
             .collect::<CapabilityResult<Vec<_>>>()?,
     );
-    Ok(RecordDescriptor::new(fields))
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 fn aggregate_result_schema(

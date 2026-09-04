@@ -867,6 +867,7 @@ fn album_count_graph() -> GraphBuilder {
             expression: None,
             distinct: false,
             output_name: Some("count".to_owned()),
+            output_identity: None,
         }],
     )
 }

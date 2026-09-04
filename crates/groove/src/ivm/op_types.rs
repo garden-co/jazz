@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use crate::ivm::graph::DurableStorage;
-use crate::records::{RecordDescriptor, Value, ValueType};
+use crate::records::{FieldIdentity, RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
 
 // Operator categories:
@@ -210,6 +210,7 @@ pub struct RecursiveEnumRemaps {
 pub struct ProjectionExpr {
     pub expression: PlanExpr,
     pub output_name: Option<String>,
+    pub output_identity: FieldIdentity,
 }
 
 /// Nullable unwrap operator descriptor.
@@ -474,6 +475,7 @@ pub struct AggregateExpr {
     pub expression: Option<PlanExpr>,
     pub distinct: bool,
     pub output_name: Option<String>,
+    pub output_identity: Option<FieldIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

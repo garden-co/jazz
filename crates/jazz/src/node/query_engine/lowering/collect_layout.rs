@@ -1,5 +1,24 @@
 use super::*;
 
+fn resolved_source_field_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .field_index(field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(|field| field.name.clone())
+}
+
+fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .field_index(field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(crate::node::query_engine::descriptor_public_name)
+        .map(str::to_owned)
+}
+
 pub(super) fn collect_layout(
     projection: &AppProjectionTree,
     plan: &AnalyzedQueryPlan,
@@ -123,7 +142,8 @@ fn collect_unwrapped_output_type(
     if source_field == source.row_shape.row_uuid_field {
         return fallback.clone();
     }
-    let logical = logical_user_column(source_field);
+    let logical = resolved_source_public_name(source, source_field)
+        .unwrap_or_else(|| source_field.to_owned());
     source
         .table_schema
         .columns
@@ -211,7 +231,7 @@ fn collect_slot_layouts(
                         output: if is_row_id {
                             source_field.clone()
                         } else {
-                            collect_nested_projection_output_field(&source_field)
+                            collect_nested_projection_output_field(source, &source_field)
                         },
                         value_type,
                         output_value_type,
@@ -246,10 +266,10 @@ fn collect_slot_layouts(
         .collect()
 }
 
-fn collect_projection_source_field(_source: &ResolvedSource, field: &str) -> String {
+fn collect_projection_source_field(source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
-        _ => user_column_field(field),
+        _ => resolved_source_field_name(source, field).unwrap_or_else(|| user_column_field(field)),
     }
 }
 
@@ -269,7 +289,7 @@ fn collect_projection_output_field(field: &str) -> String {
     }
 }
 
-fn collect_nested_projection_output_field(field: &str) -> String {
+fn collect_nested_projection_output_field(source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
         "created_at" => "$createdAt".to_owned(),
@@ -278,7 +298,7 @@ fn collect_nested_projection_output_field(field: &str) -> String {
         "updated_by" => "$updatedBy".to_owned(),
         // Nested records are public tree payloads rather than CurrentRow codec
         // records, so their user columns retain the logical schema names.
-        _ => logical_user_column(field).to_owned(),
+        _ => resolved_source_public_name(source, field).unwrap_or_else(|| field.to_owned()),
     }
 }
 

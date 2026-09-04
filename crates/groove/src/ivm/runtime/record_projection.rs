@@ -1,7 +1,7 @@
 //! Record descriptors, projection, enum remapping, and operator shape validation.
 
 use super::*;
-use crate::records::collect_by_ordered_scalar;
+use crate::records::{DescriptorField, collect_by_ordered_scalar};
 
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
@@ -143,10 +143,13 @@ pub(super) fn project_descriptor(
                 }
                 ProjectExpr::RecursiveEnumRemap { target, .. } => target.clone(),
             };
-            Ok((project_field.output_name.clone(), value_type))
+            Ok(
+                DescriptorField::new(project_field.output_name.clone(), value_type)
+                    .with_identity(project_field.output_identity.clone()),
+            )
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn collect_by_descriptor(
@@ -210,13 +213,13 @@ pub(super) fn collect_by_root_descriptor(
         .iter()
         .map(|field| {
             let index = resolve_field_ref(input, &field.field)?;
-            Ok((
+            Ok(DescriptorField::new(
                 field.output_name.clone(),
                 collect_by_field_value_type(input, index, field)?,
             ))
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn collect_by_tree_descriptor(
@@ -1060,10 +1063,14 @@ pub(super) fn unwrap_nullable_descriptor(
             } else {
                 field.value_type.clone()
             };
-            Ok((field.name.clone().unwrap_or_default(), value_type))
+            Ok(DescriptorField {
+                name: field.name.clone(),
+                identity: field.identity.clone(),
+                value_type,
+            })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn unnest_descriptor(
@@ -1081,15 +1088,17 @@ pub(super) fn unnest_descriptor(
     let mut fields = input
         .fields()
         .iter()
-        .map(|field| {
-            (
-                field.name.clone().unwrap_or_default(),
-                field.value_type.clone(),
-            )
+        .map(|field| DescriptorField {
+            name: field.name.clone(),
+            identity: field.identity.clone(),
+            value_type: field.value_type.clone(),
         })
         .collect::<Vec<_>>();
-    fields.push((element_field.to_owned(), (**element_type).clone()));
-    Ok(RecordDescriptor::new(fields))
+    fields.push(DescriptorField::new(
+        element_field.to_owned(),
+        (**element_type).clone(),
+    ));
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 pub(super) fn variant_project_descriptor(
@@ -1122,16 +1131,34 @@ pub(super) fn aggregate_descriptor(
             .fields()
             .get(field_idx)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-        fields.push((field_ref_name(input, group_col)?, field.value_type.clone()));
+        fields.push(
+            DescriptorField::new(field_ref_name(input, group_col)?, field.value_type.clone())
+                .with_identity(field.identity.clone().unwrap_or_else(|| {
+                    crate::records::FieldIdentity::Name(
+                        field
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| field_ref_name(input, group_col).unwrap()),
+                    )
+                })),
+        );
     }
     for (index, aggregate) in aggregates.iter().enumerate() {
         let name = aggregate
             .output_name
             .clone()
             .unwrap_or_else(|| format!("aggregate_{index}"));
-        fields.push((name, aggregate_output_type(input, aggregate)?));
+        fields.push(
+            DescriptorField::new(name.clone(), aggregate_output_type(input, aggregate)?)
+                .with_identity(
+                    aggregate
+                        .output_identity
+                        .clone()
+                        .unwrap_or(crate::records::FieldIdentity::Name(name)),
+                ),
+        );
     }
-    Ok(RecordDescriptor::new(fields))
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 fn aggregate_output_type(

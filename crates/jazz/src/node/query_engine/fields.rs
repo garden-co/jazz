@@ -1,5 +1,6 @@
 use super::ClaimPath;
 use crate::schema::TableSchema;
+use groove::records::DescriptorField;
 
 pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
 /// Physical namespace for aggregate result values.
@@ -68,6 +69,15 @@ pub(crate) fn aggregate_output_column(output: &str) -> String {
 
 pub(crate) fn aggregate_output_logical_name(column: &str) -> Option<&str> {
     column.strip_prefix(AGGREGATE_OUTPUT_PREFIX)
+}
+
+pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
+    field.logical_name().or_else(|| {
+        field
+            .name
+            .as_deref()
+            .and_then(aggregate_output_logical_name)
+    })
 }
 
 pub(crate) fn join_field(prefix: &str, field: &str) -> String {

@@ -17,7 +17,7 @@ use groove::ivm::{
     StaticScanSpec,
 };
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
+use groove::records::{BorrowedRecord, DescriptorField, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
@@ -46,10 +46,10 @@ use super::query_engine::{
     SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
     SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
-    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, prepare_and_lower_query_program,
-    query_program_source_requests, right_field, route_param_field, user_column_field,
+    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
+    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
+    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
+    route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -3945,18 +3945,16 @@ fn aggregate_current_row_from_record(
     row_uuid: RowUuid,
     record: &BorrowedRecord<'_>,
 ) -> Result<CurrentRow, Error> {
-    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    let mut fields = vec![DescriptorField::new("row_uuid", ValueType::Uuid)];
     let mut values = vec![Value::Uuid(row_uuid.0)];
     let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
         "aggregate record has no aggregate query shape",
     ))?;
 
     if let Some(group_by) = &aggregate.group_by {
-        let logical = user_column_field(group_by);
         let index = record
             .descriptor()
-            .field_index(&logical)
-            .or_else(|| record.descriptor().field_index(group_by))
+            .field_index(group_by)
             .ok_or(Error::InvalidStoredValue(
                 "aggregate record is missing group output",
             ))?;
@@ -3967,17 +3965,19 @@ fn aggregate_current_row_from_record(
             .ok_or(Error::InvalidStoredValue(
                 "aggregate group descriptor is missing",
             ))?;
-        fields.push((logical, field.value_type.clone()));
+        fields.push(
+            DescriptorField::new(user_column_field(group_by), field.value_type.clone())
+                .with_identity(records::FieldIdentity::Name(group_by.clone())),
+        );
         values.push(record.get_idx(index)?);
     }
 
     for output in &aggregate.aggregates {
-        let app_field = aggregate_output_app_field(&output.alias);
         let internal_field = aggregate_output_field(&output.alias);
         let index = record
             .descriptor()
-            .field_index(&app_field)
-            .or_else(|| record.descriptor().field_index(&internal_field))
+            .field_index(&internal_field)
+            .or_else(|| record.descriptor().field_index(&output.alias))
             .ok_or(Error::InvalidStoredValue(
                 "aggregate record is missing aggregate output",
             ))?;
@@ -3988,10 +3988,13 @@ fn aggregate_current_row_from_record(
             .ok_or(Error::InvalidStoredValue(
                 "aggregate output descriptor is missing",
             ))?;
-        fields.push((app_field, field.value_type.clone()));
+        fields.push(
+            DescriptorField::new(user_column_field(&internal_field), field.value_type.clone())
+                .with_identity(records::FieldIdentity::Name(output.alias.clone())),
+        );
         values.push(record.get_idx(index)?);
     }
-    let descriptor = RecordDescriptor::new(fields);
+    let descriptor = RecordDescriptor::new_with_fields(fields);
     let raw = descriptor.create(&values)?;
     // This synthetic descriptor deliberately uses `user_{column}` names for
     // the grouped source column and aggregate outputs.  Those are physical
