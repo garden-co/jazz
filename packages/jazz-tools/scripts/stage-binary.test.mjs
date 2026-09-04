@@ -58,15 +58,20 @@ test("replaces an existing destination with a distinct source binary", async () 
   const nativeDir = await mkdtemp(join(tmpdir(), "jazz-stage-binary-"));
   const destination = join(nativeDir, fileName);
   const source = join(nativeDir, "new-source");
+  const oldDestinationAlias = join(nativeDir, "old-destination-alias");
   const sourceBytes = Buffer.from("new-binary");
   try {
     await writeFile(destination, "old-binary");
+    // Keep the old inode alive: replacing a cached executable must unlink it,
+    // not overwrite its contents in place (even when the copied bytes match).
+    await link(destination, oldDestinationAlias);
     await writeFile(source, sourceBytes);
 
     await assert.doesNotReject(stageBinary({ source, platform, arch, nativeDir }));
 
     assert.deepEqual(await readFile(destination), sourceBytes);
     assert.deepEqual(await readFile(source), sourceBytes);
+    assert.equal(await readFile(oldDestinationAlias, "utf8"), "old-binary");
     const destinationStats = await stat(destination, { bigint: true });
     const sourceStats = await stat(source, { bigint: true });
     if (destinationStats.ino !== 0n && sourceStats.ino !== 0n) {
