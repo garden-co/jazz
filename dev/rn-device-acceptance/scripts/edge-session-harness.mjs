@@ -64,12 +64,22 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
   });
   const child = spawn("cargo", ["run", "--quiet", ...harnessCargoArgs], {
     cwd: harnessRoot,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, JAZZ_DEVICE_RUN_NONCE: runNonce },
   });
   let observation;
   let stdout = "";
   let stderr = "";
+  const waitForLine = (prefix, timeoutMs = 15_000) =>
+    new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error(`harness did not emit ${prefix}`)), timeoutMs);
+      const poll = () => {
+        const line = stdout.split(/\r?\n/).find((item) => item.startsWith(prefix));
+        if (line) { clearTimeout(deadline); resolve(line); }
+        else setTimeout(poll, 20);
+      };
+      poll();
+    });
   const session = await new Promise((resolveSession, rejectSession) => {
     let settled = false;
     const fail = (reason) => {
@@ -152,10 +162,26 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       return assertCoreObservation(observation, runNonce);
     },
     stopForOfflineRestart: () => stopForOfflineRestart(child, session.edge_port),
+    async interruptAndRecover() {
+      child.stdin.write("interrupt-edge\n");
+      await waitForLine("JAZZ_RN_EDGE_INTERRUPTED ");
+      await assertEndpointRefused(session.edge_port);
+      child.stdin.write("recover-edge\n");
+      await waitForLine("JAZZ_RN_EDGE_RECOVERED ");
+    },
     endpoint: `http://${host}:${session.edge_port}`,
     bearerA: session.bearer_a,
     bearerB: session.bearer_b,
   };
+}
+
+function assertEndpointRefused(port) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => { socket.destroy(); reject(new Error("interrupted Edge remained reachable")); });
+    socket.once("error", (error) => { socket.destroy(); error.code === "ECONNREFUSED" ? resolve() : reject(error); });
+    socket.setTimeout(1_000, () => { socket.destroy(); reject(new Error("interrupted Edge refusal timed out")); });
+  });
 }
 
 /** Fail closed: a stopped process alone is insufficient if a descendant still

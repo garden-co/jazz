@@ -50,6 +50,7 @@ export async function startCoreObservationControl({ session, expected, host }) {
       status.coreWaitStarted++;
       try {
         await session.waitForCoreObservation();
+        await session.interruptAndRecover();
         status.coreWaitSucceeded++;
       } catch {
         status.coreWaitFailed++;
