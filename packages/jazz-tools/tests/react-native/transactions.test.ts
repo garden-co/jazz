@@ -110,11 +110,11 @@ it("waits for native upstream authority before accepting an exclusive commit", a
       async (fixture) => {
         const openForeground = vi.spyOn(fixture.nativeHost, "openAttached");
         const db = await fixture.createDb();
-        const applicationOpens = openForeground.mock.calls.length;
         const base = await db
           .insert(app.todos, { title: "before", done: false })
           .wait({ tier: "global" });
         await db.all(app.todos, { tier: ReadTier.Remote });
+        const applicationOpens = openForeground.mock.calls.length;
         await db.disconnect();
         expect(openForeground).toHaveBeenCalledTimes(applicationOpens);
         const tx = db.beginExclusiveTransaction();

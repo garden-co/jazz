@@ -82,10 +82,18 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
-        const liveForeground = (): NativeForegroundDb => {
-          if (!this.lifecycleForeground)
-            throw new Error("React Native application foreground is not open");
-          return this.lifecycleForeground;
+        const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
+          if (this.lifecycleForeground) return run(this.lifecycleForeground);
+          // Connectivity is available before the lazy schema client exists.
+          const temporary = new NativeForegroundDb(
+            this.foregroundFactory!.openAttached(capability),
+            foreground,
+          );
+          try {
+            return run(temporary);
+          } finally {
+            temporary.close();
+          }
         };
         const opened = new NativeForegroundDb(
           this.foregroundFactory.openAttached(capability),
@@ -99,8 +107,8 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           // foreground merely to inspect or change connectivity.
           this.nativeConnection = {
             configured: () => configured,
-            disconnect: () => liveForeground().disconnectNativeUpstream(),
-            reconnect: () => liveForeground().reconnectNativeUpstream(),
+            disconnect: () => withForeground((db) => db.disconnectNativeUpstream()),
+            reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
           };
           this.admittedSession = markTrustedReservedSession({
             issuer: metadata.issuer,
