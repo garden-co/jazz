@@ -3217,11 +3217,7 @@ impl NativeRelayClient {
             if no_foreground_scheduler {
                 worker.persistent.set_tick_scheduler(None);
             }
-            let mut client = worker
-                .clients
-                .remove(&id)
-                .ok_or(RelayError::UnknownClient(id))?;
-            client.abandon_foreground_transactions()
+            worker.retire_foreground(id)
         })
     }
 
@@ -4162,6 +4158,7 @@ type ForegroundSubscriptionOpen =
     Pin<Box<dyn Future<Output = Result<SubscriptionStream, RelayError>>>>;
 
 struct ConnectedClient {
+    retiring: bool,
     db: Rc<Db<MemoryStorage>>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
@@ -4289,6 +4286,10 @@ impl ConnectedClient {
     /// during host shutdown; none of those paths may leave a mutable core
     /// transaction reusable by a later foreground handle.
     fn abandon_foreground_transactions(&mut self) -> Result<(), RelayError> {
+        if self.retiring {
+            return Ok(());
+        }
+        self.retiring = true;
         self.cancel_pending_work();
         let transactions = std::mem::take(&mut self.transactions);
         let first_error = self.mutations.close(&self.db).err();
@@ -4506,6 +4507,27 @@ fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest,
     Ok(command)
 }
 
+struct ClosingForeground {
+    client: ConnectedClient,
+    close: Option<RelayTickFuture>,
+}
+
+impl ClosingForeground {
+    fn poll(&mut self, waker: &Waker) -> Result<bool, RelayError> {
+        self.client.upstream_io.poll(waker)?;
+        self.client.poll_served_io(waker)?;
+        if let Some(close) = &mut self.close
+            && let Poll::Ready(result) = close.as_mut().poll(&mut Context::from_waker(waker))
+        {
+            self.close = None;
+            result.map_err(RelayError::Db)?;
+        }
+        self.client.upstream_io.poll(waker)?;
+        self.client.poll_served_io(waker)?;
+        Ok(self.close.is_none())
+    }
+}
+
 struct RelayWorker {
     wake: Arc<RelayWake>,
     persistent: Rc<Db<SqliteStorage>>,
@@ -4513,6 +4535,7 @@ struct RelayWorker {
     upstream_io: RelayPeerIo,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     clients: BTreeMap<u64, ConnectedClient>,
+    closing: VecDeque<ClosingForeground>,
     next_client_id: u64,
     pump_cursor: Option<u64>,
     schema: JazzSchema,
@@ -4557,11 +4580,50 @@ impl RelayWorker {
             upstream_io,
             _upstream: upstream,
             clients: BTreeMap::new(),
+            closing: VecDeque::new(),
             next_client_id: 1,
             pump_cursor: None,
             schema: config.schema,
             liveness,
         })
+    }
+
+    fn retire_foreground(&mut self, id: u64) -> Result<(), RelayError> {
+        let mut client = self
+            .clients
+            .remove(&id)
+            .ok_or(RelayError::UnknownClient(id))?;
+        client.abandon_foreground_transactions()?;
+        let db = Rc::clone(&client.db);
+        self.closing.push_back(ClosingForeground {
+            client,
+            close: Some(Box::pin(async move { db.close().await })),
+        });
+        // Cleanup is owned by this worker after public handle retirement. Its
+        // timeout-driven owner turns continue even with no JS wake callbacks.
+        Ok(())
+    }
+
+    fn poll_closing(&mut self, waker: &Waker) -> Result<(), RelayError> {
+        for _ in 0..self.closing.len().min(NATIVE_RELAY_PUMP_MAX_CLIENTS) {
+            let mut closing = self.closing.pop_front().expect("selected closing owner");
+            match closing.poll(waker) {
+                Ok(true) => {}
+                Ok(false) => self.closing.push_back(closing),
+                Err(error) => {
+                    self.closing.push_back(closing);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn retire_all_foregrounds(&mut self) {
+        let ids: Vec<_> = self.clients.keys().copied().collect();
+        for id in ids {
+            let _ = self.retire_foreground(id);
+        }
     }
 
     fn attach_client(
@@ -4612,6 +4674,7 @@ impl RelayWorker {
         self.clients.insert(
             id,
             ConnectedClient {
+                retiring: false,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -4645,6 +4708,7 @@ impl RelayWorker {
 
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
+        self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
         // observe resulting view/fate messages. More cascades schedule another
@@ -5138,6 +5202,8 @@ impl RelayWorker {
         .map_err(RelayError::Db)?;
         db.drive_queued_mutation_once();
         if let Some(error) = db.queued_transaction_error(open_tx_id) {
+            db.enqueue_abandon_transaction_handle(open_tx_id);
+            db.drive_queued_mutation_once();
             return Err(RelayError::Db(error));
         }
         self.foreground_client_mut(client)?
@@ -5800,13 +5866,47 @@ impl NativeRelay {
                         return;
                     }
                 };
-                while let Ok(command) = receiver.recv() {
+                loop {
+                    let command = if worker.closing.is_empty() {
+                        receiver
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    } else {
+                        receiver.recv_timeout(std::time::Duration::from_millis(1))
+                    };
+                    let command = match command {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let _ = worker.pump();
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            worker.retire_all_foregrounds();
+                            while !worker.closing.is_empty() {
+                                if worker.pump().is_err() {
+                                    break;
+                                }
+                            }
+                            return;
+                        }
+                    };
                     match command {
                         RelayCommand::Run {
                             job,
                             _normal_permit,
-                        } => job(&mut worker),
+                        } => {
+                            job(&mut worker);
+                            if !worker.closing.is_empty() {
+                                let _ = worker.pump();
+                            }
+                        }
                         RelayCommand::Shutdown(done) => {
+                            worker.retire_all_foregrounds();
+                            while !worker.closing.is_empty() {
+                                if worker.pump().is_err() {
+                                    break;
+                                }
+                            }
                             drop(worker);
                             let _ = done.send(());
                             return;
@@ -8420,73 +8520,183 @@ mod tests {
     // Internal owner contention has no public JS test control.
     #[test]
     fn foreground_close_with_queued_transaction_is_bounded() {
+        for committed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let relay = NativeRelay::spawn(config(
+                directory.path().join("tx-close.sqlite"),
+                Some("tx-close"),
+            ))
+            .unwrap();
+            let client = relay
+                .attach_client(
+                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4b; 16])).unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let id = client.id;
+            relay
+                .run(move |worker| {
+                    let db = Rc::clone(&worker.foreground_client(id)?.db);
+                    worker.start_foreground_operation(
+                        id,
+                        None,
+                        Box::pin(async move {
+                            db.hold_node_owner_for_test().await;
+                            unreachable!()
+                        }),
+                    )
+                })
+                .unwrap();
+            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+            relay
+                .run(move |worker| {
+                    CLOSED_DB.with(|weak| {
+                        *weak.borrow_mut() =
+                            Rc::downgrade(&worker.foreground_client(id).unwrap().db)
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            let query = client
+                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .unwrap();
+            let tx = client
+                .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
+                .unwrap();
+            client
+                .insert_foreground_transaction(
+                    tx,
+                    "todos".into(),
+                    encoded_title_cells("abandoned"),
+                    None,
+                )
+                .unwrap();
+            let pending = client
+                .start_foreground_read_with_options(query, "{}".into(), Some(tx), false)
+                .unwrap();
+            assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
+            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
+            if committed {
+                let tx_id = client.commit_foreground_transaction(tx).unwrap();
+                relay
+                    .run(move |worker| {
+                        CLOSED_WRITE.with(|write| {
+                            *write.borrow_mut() = worker
+                                .foreground_client(id)
+                                .unwrap()
+                                .mutations
+                                .writes
+                                .borrow()
+                                .get(&tx_id)
+                                .cloned()
+                        });
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            let stale = client.clone();
+            client.close().unwrap();
+            let mut released = false;
+            for _ in 0..100 {
+                released = relay
+                    .run(|_| Ok(CLOSED_DB.with(|weak| weak.borrow().upgrade().is_none())))
+                    .unwrap();
+                if released {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                released,
+                "closed foreground must release its Db allocation without JS ticks"
+            );
+            assert!(stale.commit_foreground_transaction(tx).is_err());
+            let sibling = relay
+                .attach_client(
+                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4c; 16])).unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let query = sibling
+                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .unwrap();
+            let mut read = sibling.start_foreground_read(query).unwrap();
+            for _ in 0..100 {
+                let ForegroundOperationPoll::Pending { operation } = read else {
+                    break;
+                };
+                relay.pump().unwrap();
+                read = sibling.poll_foreground_operation(operation).unwrap();
+            }
+            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
+                panic!("sibling read stalled")
+            };
+            if committed {
+                relay
+                    .run(|_| {
+                        CLOSED_WRITE.with(|write| {
+                            let write = write.borrow_mut().take().unwrap();
+                            let error = block_on(write.write_state())
+                                .expect_err("published write's node has been retired");
+                            assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
+                            assert_eq!(error.message, "database handle was dropped");
+                        });
+                        Ok(())
+                    })
+                    .unwrap();
+            } else {
+                assert!(
+                    postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
+                        .unwrap()
+                        .iter()
+                        .all(|b| b.rows.is_empty())
+                );
+            }
+            sibling.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn rolled_back_staging_failures_retire_queued_error_bookkeeping() {
         let directory = tempfile::tempdir().unwrap();
         let relay = NativeRelay::spawn(config(
-            directory.path().join("tx-close.sqlite"),
-            Some("tx-close"),
+            directory.path().join("tx-errors.sqlite"),
+            Some("tx-errors"),
         ))
         .unwrap();
         let client = relay
             .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x4b; 16])).unwrap(),
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4d; 16])).unwrap(),
                 BTreeMap::new(),
             )
             .unwrap();
         let id = client.id;
         relay
             .run(move |worker| {
-                let db = Rc::clone(&worker.foreground_client(id)?.db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        db.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )
+                for _ in 0..32 {
+                    let tx = worker
+                        .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
+                    let (db, state) = worker.foreground_transaction(id, tx)?;
+                    assert!(
+                        worker
+                            .insert_foreground_transaction(
+                                id,
+                                tx,
+                                "missing_table".into(),
+                                encoded_title_cells("rejected"),
+                                None
+                            )
+                            .is_err()
+                    );
+                    assert!(db.queued_transaction_error(state.open_tx_id).is_some());
+                    assert!(worker.rollback_foreground_transaction(id, tx)?);
+                    assert!(db.queued_transaction_error(state.open_tx_id).is_none());
+                }
+                assert!(worker.foreground_client(id)?.transactions.is_empty());
+                Ok(())
             })
             .unwrap();
-        let tx = client
-            .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
-            .unwrap();
-        client
-            .insert_foreground_transaction(
-                tx,
-                "todos".into(),
-                encoded_title_cells("abandoned"),
-                None,
-            )
-            .unwrap();
-        let stale = client.clone();
         client.close().unwrap();
-        assert!(stale.commit_foreground_transaction(tx).is_err());
-        let sibling = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x4c; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
-        let query = sibling
-            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
-            .unwrap();
-        let mut read = sibling.start_foreground_read(query).unwrap();
-        for _ in 0..100 {
-            let ForegroundOperationPoll::Pending { operation } = read else {
-                break;
-            };
-            relay.pump().unwrap();
-            read = sibling.poll_foreground_operation(operation).unwrap();
-        }
-        let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
-            panic!("sibling read stalled")
-        };
-        assert!(
-            postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
-                .unwrap()
-                .iter()
-                .all(|b| b.rows.is_empty())
-        );
-        sibling.close().unwrap();
     }
 
     #[test]

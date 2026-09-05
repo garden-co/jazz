@@ -453,6 +453,12 @@ where
             .cloned()
     }
 
+    pub(super) fn retire_queued_transaction_error(&self, id: OpenTransactionId) {
+        self.queued_open_transaction_failures
+            .borrow_mut()
+            .remove(&id);
+    }
+
     /// Poll one FIFO owner-queue entry, retaining a pending continuation.
     pub(super) fn poll_queued_mutation_once(&self) -> bool {
         use std::task::{Context, Poll, Waker};

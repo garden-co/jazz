@@ -742,10 +742,12 @@ where
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_cleanup(Box::pin(async move {
             let mut node = db.node.node.lock().await;
-            match node.abandon_tx(open_tx_id) {
+            let result = match node.abandon_tx(open_tx_id) {
                 Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
                 Err(error) => Err(error.into()),
-            }
+            };
+            db.node.retire_queued_transaction_error(open_tx_id);
+            result
         }));
     }
 

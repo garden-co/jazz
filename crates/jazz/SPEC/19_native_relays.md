@@ -551,6 +551,10 @@ retained; a cold operation retaining the owner still yields the native turn.
 Cancelling a read drops its coverage and releases that FIFO fence, but does not
 roll back a later admitted commit. Rollback and foreground close enqueue cleanup
 after already-admitted transaction work and immediately retire the public handle.
+The relay worker retains removed foreground owners until their ordinary local
+`Db::close` drain finishes, including accepted commits; bounded cleanup turns run
+without callbacks into the closed JavaScript runtime. It does not wait for all
+peer frames or strengthen foreground close into a relay/network flush primitive.
 
 The V1 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation
