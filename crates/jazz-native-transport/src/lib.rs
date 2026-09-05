@@ -775,8 +775,8 @@ async fn run_ws_pump(
                                 }
                             };
                             if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                                return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
-                                    format!("websocket send failed: {error}"),
+                                return NativeTransportTerminal::Failed(native_transport_error(
+                                    WebSocketClientError::Send(error),
                                 ));
                             }
                             batch.clear();
@@ -797,9 +797,9 @@ async fn run_ws_pump(
                         }
                     };
                     if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                        return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
-                            "websocket send failed: {error}"
-                        )));
+                        return NativeTransportTerminal::Failed(native_transport_error(
+                            WebSocketClientError::Send(error),
+                        ));
                     }
                     drop(batch);
                     if outbound_backpressured.swap(false, Ordering::AcqRel) {
@@ -822,9 +822,10 @@ async fn run_ws_pump(
                             return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         Some(Err(error)) => {
-                            let reason = format!("websocket receive failed: {error}");
+                            let classified = native_transport_error(WebSocketClientError::Receive(error));
+                            let reason = classified.to_string();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
+                            return NativeTransportTerminal::Failed(classified);
                         }
                         None => {
                             let reason = "websocket peer closed before completing wire exchange"
