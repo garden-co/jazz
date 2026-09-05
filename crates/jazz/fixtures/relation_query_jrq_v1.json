@@ -28,6 +28,155 @@
       "jrq_hex": "4a525101010001740009"
     },
     {
+      "name": "predicate_cmp_literal",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Cmp": {
+                "left": {
+                  "column": "c"
+                },
+                "op": "Eq",
+                "right": {
+                  "Literal": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a52510101000174000000016300000302"
+    },
+    {
+      "name": "predicate_nulls",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "And": [
+                {
+                  "IsNull": {
+                    "column": {
+                      "column": "a"
+                    }
+                  }
+                },
+                {
+                  "IsNotNull": {
+                    "column": {
+                      "column": "b"
+                    }
+                  }
+                },
+                "False"
+              ]
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a5251010100017400060301000161020001620a"
+    },
+    {
+      "name": "predicate_in_values",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "In": {
+                "left": {
+                  "column": "c"
+                },
+                "values": [
+                  {
+                    "Literal": "x"
+                  },
+                  {
+                    "Param": "p"
+                  },
+                  {
+                    "SessionRef": [
+                      "actor"
+                    ]
+                  },
+                  {
+                    "OuterColumn": {
+                      "column": "o"
+                    }
+                  },
+                  {
+                    "FrontierColumn": {
+                      "column": "f"
+                    }
+                  },
+                  {
+                    "RowId": "Outer"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a52510101000174000300016306000601780101700201056163746f720300016f040001660501"
+    },
+    {
+      "name": "predicate_contains_enum_or_not",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Or": [
+                {
+                  "Contains": {
+                    "left": {
+                      "column": "tags"
+                    },
+                    "right": {
+                      "Literal": "x"
+                    }
+                  }
+                },
+                {
+                  "EnumMatch": {
+                    "case": "A",
+                    "column": {
+                      "column": "kind"
+                    },
+                    "payload": "True"
+                  }
+                },
+                {
+                  "Not": "False"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a5251010100017400070304000474616773000601780500046b696e64014109080a"
+    },
+    {
       "name": "union",
       "relation": {
         "rel": {
