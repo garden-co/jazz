@@ -4077,8 +4077,15 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
     let mut progressed = false;
     for message in relay_wire.take_outbound()? {
         let _live_connection = relay_wire.enter()?;
-        upstream.send(message).map_err(|error| {
-            RelayError::ForegroundCommand(format!("native upstream send: {error:?}"))
+        upstream.send(message).map_err(|error| match error {
+            // `WebSocketTransport` exposes an already-retired peer through
+            // this concrete transport state. Preserve it as `Closed` so the
+            // socket worker can reconnect; every other send error remains a
+            // terminal foreground error.
+            TransportError::Failed(message) if message == "websocket pump is closed" => {
+                RelayError::Closed
+            }
+            error => RelayError::ForegroundCommand(format!("native upstream send: {error:?}")),
         })?;
         progressed = true;
     }
@@ -4361,15 +4368,22 @@ async fn run_native_relay_socket_worker(
                 // It shares the retryable reconnect path below; pre-connect
                 // authentication and protocol admission failures remain
                 // terminal above.
-                let _ = error;
+                if !matches!(error, RelayError::Closed) {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay wire bridge failed: {error}"
+                    )));
+                }
                 break;
             }
             if let Err(error) = relay.pump() {
-                // Peer teardown can invalidate the borrowed upstream while an
-                // owner turn is in flight. The reconnect owner has already
-                // retained local state; retry from a fresh socket instead of
-                // poisoning foreground-local SQLite work.
-                let _ = error;
+                // Only the explicit closed state is the expected race with a
+                // peer teardown. Every other owner/storage/program error must
+                // remain visible as terminal to the foreground host.
+                if !matches!(error, RelayError::Closed) {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay owner pump failed: {error}"
+                    )));
+                }
                 break;
             }
             tokio::select! {
