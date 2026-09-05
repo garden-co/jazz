@@ -2,7 +2,11 @@
 //! acceptance driver. It deliberately prints endpoint and short-lived bearer
 //! material only to its direct parent process, never to a checked-in fixture.
 
-use std::{io::Write, time::Duration};
+use std::{
+    collections::HashMap,
+    io::{BufRead, Write},
+    time::Duration,
+};
 
 #[path = "support/device_fixture.rs"]
 mod device_fixture;
@@ -72,7 +76,7 @@ async fn run() {
     let observer = connect(AppContext {
         app_id: core.app_id(),
         client_id: None,
-        schema,
+        schema: schema.clone(),
         server_url: core.base_url(),
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
@@ -116,6 +120,88 @@ async fn run() {
     });
     println!("JAZZ_RN_CORE_OBSERVATION {observation}");
     std::io::stdout().flush().expect("flush Core observation");
+
+    // The installed-app driver owns this narrow control protocol. It lets the
+    // existing foreground stay alive while Edge is genuinely absent, then
+    // recreates Edge at the identical configured endpoint.
+    let mut line = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        line
+    })
+    .await
+    .expect("join control reader");
+    assert_eq!(line.trim(), "interrupt-edge");
+    let edge_port = edge.port();
+    assert_eq!(
+        edge.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+    println!("JAZZ_RN_EDGE_INTERRUPTED {{\"edge_port\":{edge_port}}}");
+    std::io::stdout().flush().expect("flush Edge interruption");
+    line = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        line
+    })
+    .await
+    .expect("join control reader");
+    assert_eq!(line.trim(), "recover-edge");
+    let edge = JazzServer::builder()
+        .with_port(edge_port)
+        .with_app_id(core.app_id())
+        .with_schema(schema.clone())
+        .with_jwks_url(issuer.endpoint())
+        .with_admin_secret(core.admin_secret().to_owned())
+        .with_upstream_url(core.base_url())
+        .with_native_transport_connector(native_connector())
+        .start()
+        .await;
+    for _ in 0..300 {
+        if edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        edge.server_state().edge_upstream_health(),
+        EdgeUpstreamHealth::Connected
+    );
+    let writer_storage = tempfile::tempdir().expect("Core writer scratch directory");
+    let core_writer = connect(AppContext {
+        app_id: core.app_id(),
+        client_id: None,
+        schema: schema.clone(),
+        server_url: core.base_url(),
+        data_dir: writer_storage.path().to_owned(),
+        storage: ClientStorage::Memory,
+        storage_factory: None,
+        jwt_token: Some(TestJwtIssuer::jwt_for_user(
+            "rn-device-core-recovery-writer",
+        )),
+        backend_secret: None,
+        admin_secret: Some(core.admin_secret().to_owned()),
+    })
+    .await
+    .expect("connect Core recovery writer");
+    let (_, _, transaction) = core_writer
+        .insert(
+            "todos",
+            HashMap::from([(
+                "title".to_owned(),
+                Value::Text(format!("{title}:recovered-by-core")),
+            )]),
+        )
+        .expect("Core writer writes post-recovery marker");
+    core_writer
+        .wait_for_transaction(
+            transaction.expect("Core write owns a transaction"),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("Core commits post-recovery marker");
+    println!("JAZZ_RN_EDGE_RECOVERED {{\"edge_port\":{edge_port}}}");
+    std::io::stdout().flush().expect("flush Edge recovery");
 
     // The parent owns process lifetime. It kills this local-only fixture after
     // both installed-app launches, which also ensures credentials cannot be

@@ -3,12 +3,14 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   assertCoreObservation,
   boundedHarnessOutput,
   startLocalEdgeSessionHarness,
   stopForOfflineRestart,
+  terminateHarness,
 } from "./edge-session-harness.mjs";
 
 const nonce = "12345678-1234-4234-9234-123456789abc";
@@ -71,7 +73,7 @@ setInterval(() => {}, 1000);
             /invalid run-bound Core observation|missing run-bound Core observation/,
           );
       } finally {
-        harness.child.kill("SIGTERM");
+        await harness.terminate();
       }
     }
   } finally {
@@ -94,7 +96,7 @@ test("both installed drivers gate termination on Core evidence and clean up the 
     const observed = source.indexOf("await localSession.waitForCoreObservation()");
     const verify = source.indexOf('await launchAndAssert("verify")');
     assert.ok(seed >= 0 && observed > seed && verify > observed);
-    assert.match(source, /finally\s*\{\s*localSession\.child\.kill\("SIGTERM"\)/);
+    assert.match(source, /finally\s*\{\s*await localSession\.terminate\(\)/);
   }
 });
 
@@ -102,6 +104,7 @@ test("native acknowledgement checks every identity field and stays pending until
   const { startCoreObservationControl } = await import("./core-observation-control.mjs");
   let release;
   let calls = 0;
+  const events = [];
   const observed = new Promise((resolve) => {
     release = resolve;
   });
@@ -115,8 +118,12 @@ test("native acknowledgement checks every identity field and stays pending until
     session: {
       async waitForCoreObservation() {
         calls++;
+        events.push("observed");
         await observed;
         return valid;
+      },
+      async interruptAndRecover() {
+        events.push("recovered");
       },
     },
     expected,
@@ -143,6 +150,7 @@ test("native acknowledgement checks every identity field and stays pending until
     release();
     assert.equal((await pending).status, 204);
     assert.equal(calls, 1);
+    assert.deepEqual(events, ["observed", "recovered"]);
     assert.equal(
       control.diagnostic(),
       "requests=5,identityRejected=4,coreWaitStarted=1,coreWaitSucceeded=1,coreWaitFailed=0,acknowledgementsFinished=1,responsesClosedEarly=0",
@@ -186,20 +194,44 @@ test("missing Core observation cannot release the native foreground", async () =
 });
 
 function assertCoreObserverContract(source) {
-  const context = /let observer = connect\(AppContext \{([\s\S]*?)\}\)/.exec(source)?.[1];
-  assert.ok(context, "observer must use an explicit isolated client context");
-  assert.match(context, /server_url: core\.base_url\(\)/, "observer must connect directly to Core");
-  assert.match(context, /storage: ClientStorage::Memory/);
-  assert.doesNotMatch(
-    source,
-    /\.insert\(|\.insert_with_id\(|\.update\(|\.upsert\(/,
-    "observer harness cannot manufacture the device write",
+  const observer = /let observer = connect\(AppContext \{([\s\S]*?)\}\)/.exec(source)?.[1];
+  const writer = /let core_writer = connect\(AppContext \{([\s\S]*?)\}\)/.exec(source)?.[1];
+  assert.ok(observer, "observer must use an explicit isolated client context");
+  assert.ok(writer, "recovery writer must use an explicit isolated client context");
+  assert.match(
+    observer,
+    /server_url: core\.base_url\(\)/,
+    "observer must connect directly to Core",
   );
+  assert.match(observer, /storage: ClientStorage::Memory/);
+  assert.match(
+    writer,
+    /server_url: core\.base_url\(\)/,
+    "recovery writer must connect directly to Core",
+  );
+  assert.match(writer, /rn-device-core-recovery-writer/);
+  assert.doesNotMatch(writer, /rn-device-core-observer/);
+  assert.doesNotMatch(source, /observer\.insert\(/);
+  assert.match(
+    source,
+    /core_writer\s*\.insert\([\s\S]*?Value::Text\(format!\("\{title\}:recovered-by-core"\)\)/,
+  );
+  assert.match(source, /wait_for_transaction\([\s\S]*DurabilityTier::GlobalServer/);
   assert.match(source, /wait_for_query\(\s*&observer,/);
   assert.match(source, /values\.contains\(&Value::Text\(title\.clone\(\)\)\)/);
+  const recovery = source.slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'));
+  const healthAssertion =
+    /assert_eq!\(\s*edge\.server_state\(\)\.edge_upstream_health\(\),\s*EdgeUpstreamHealth::Connected\s*\);/.exec(
+      recovery,
+    );
+  assert.ok(healthAssertion, "recovered Edge must be confirmed healthy");
+  assert.ok(
+    healthAssertion.index < recovery.indexOf("core_writer\n        .insert"),
+    "recovery writer must wait for Edge health before writing",
+  );
 }
 
-test("observer source stays read-only and Core-connected; planted Edge reader and writer fail", () => {
+test("Core observer cannot seed the device marker and a separate Core writer waits for recovered Edge", () => {
   const source = readFileSync(
     new URL(
       "../../../crates/jazz-native-relay/examples/rn_edge_session_harness.rs",
@@ -216,8 +248,124 @@ test("observer source stays read-only and Core-connected; planted Edge reader an
     /directly to Core/,
   );
   assert.throws(
-    () => assertCoreObserverContract(`${source}\n observer.insert("todos", fake);`),
-    /cannot manufacture/,
+    () => assertCoreObserverContract(source.replace(/core_writer\s*\.insert/, "observer.insert")),
+    /observer\.insert/,
+  );
+  assert.throws(
+    () => assertCoreObserverContract(source.replace(":recovered-by-core", "")),
+    /recovered-by-core/,
+  );
+  assert.throws(
+    () =>
+      assertCoreObserverContract(
+        source.slice(0, source.indexOf('assert_eq!(line.trim(), "recover-edge")')) +
+          source
+            .slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'))
+            .replace(
+              /assert_eq!\(\n        edge\.server_state\(\)\.edge_upstream_health\(\),\n        EdgeUpstreamHealth::Connected\n    \);/,
+              "",
+            ),
+      ),
+    /recovered Edge must be confirmed healthy|recovery writer must wait for Edge health/,
+  );
+});
+
+test("harness termination escalates its process group and rejects a surviving group", async () => {
+  const signals = [];
+  let groupAlive = true;
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: 42,
+    stdin: {
+      ended: false,
+      end() {
+        this.ended = true;
+      },
+    },
+  });
+  const processInfo = {
+    platform: "linux",
+    kill(pid, signal) {
+      signals.push([pid, signal]);
+      if (signal === 0) {
+        if (!groupAlive) {
+          const error = new Error("missing group");
+          error.code = "ESRCH";
+          throw error;
+        }
+        return;
+      }
+      if (signal === "SIGKILL") {
+        groupAlive = false;
+        child.exitCode = 137;
+        setTimeout(() => child.emit("exit", 137, "SIGKILL"), 0);
+      }
+    },
+  };
+  await terminateHarness(child, 1, processInfo);
+  assert.equal(child.stdin.ended, true);
+  assert.deepEqual(
+    signals.filter(([, signal]) => signal !== 0),
+    [
+      [-42, "SIGTERM"],
+      [-42, "SIGKILL"],
+    ],
+  );
+
+  const survivor = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: 43,
+    stdin: { end() {} },
+  });
+  const survivorSignals = [];
+  await assert.rejects(
+    terminateHarness(survivor, 1, {
+      platform: "linux",
+      kill(pid, signal) {
+        survivorSignals.push([pid, signal]);
+      },
+    }),
+    /survived SIGKILL/,
+  );
+  assert.deepEqual(
+    survivorSignals.filter(([, signal]) => signal !== 0),
+    [
+      [-43, "SIGTERM"],
+      [-43, "SIGKILL"],
+    ],
+  );
+
+  let orphanedGroupAlive = true;
+  const exitedParent = Object.assign(new EventEmitter(), {
+    exitCode: 0,
+    signalCode: null,
+    pid: 44,
+    stdin: { end() {} },
+  });
+  const orphanedSignals = [];
+  await assert.rejects(
+    terminateHarness(exitedParent, 1, {
+      platform: "linux",
+      kill(pid, signal) {
+        orphanedSignals.push([pid, signal]);
+        if (signal === 0 && !orphanedGroupAlive) {
+          const error = new Error("missing group");
+          error.code = "ESRCH";
+          throw error;
+        }
+      },
+    }),
+    /survived SIGKILL/,
+  );
+  assert.equal(orphanedGroupAlive, true);
+  assert.deepEqual(
+    orphanedSignals.filter(([, signal]) => signal !== 0),
+    [
+      [-44, "SIGTERM"],
+      [-44, "SIGKILL"],
+    ],
   );
 });
 
@@ -232,6 +380,16 @@ test("offline restart rejects a live endpoint even after its claimed parent exit
     await new Promise((resolve) => server.close(resolve));
   }
   await stopForOfflineRestart(stoppedChild, port);
+});
+
+test("offline restart terminates a live group even when Cargo has already exited", async () => {
+  let terminated = 0;
+  const exitedCargoParent = { exitCode: 0, signalCode: null, pid: 45 };
+  await stopForOfflineRestart(exitedCargoParent, 65_534, async (child) => {
+    assert.equal(child, exitedCargoParent);
+    terminated++;
+  });
+  assert.equal(terminated, 1);
 });
 
 test("both drivers establish offline provenance before reopening the unchanged scope", () => {
@@ -288,6 +446,7 @@ test("Core observation counters distinguish server observation from a closed HTT
         await observation;
         return valid;
       },
+      async interruptAndRecover() {},
     },
     expected,
     host: "127.0.0.1",

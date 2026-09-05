@@ -64,19 +64,44 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
   });
   const child = spawn("cargo", ["run", "--quiet", ...harnessCargoArgs], {
     cwd: harnessRoot,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     env: { ...process.env, JAZZ_DEVICE_RUN_NONCE: runNonce },
   });
   let observation;
   let stdout = "";
   let stderr = "";
+  const waitForLine = (prefix, timeoutMs = 15_000) =>
+    new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (run) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(deadline);
+          run();
+        }
+      };
+      const deadline = setTimeout(
+        () => finish(() => reject(new Error(`harness did not emit ${prefix}`))),
+        timeoutMs,
+      );
+      const poll = () => {
+        if (settled) return;
+        const line = stdout.split(/\r?\n/).find((item) => item.startsWith(prefix));
+        if (line) finish(() => resolve(line));
+        else if (child.exitCode !== null || child.signalCode)
+          finish(() => reject(new Error(`harness exited before ${prefix}`)));
+        else setTimeout(poll, 20);
+      };
+      poll();
+    });
   const session = await new Promise((resolveSession, rejectSession) => {
     let settled = false;
     const fail = (reason) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (!child.killed) child.kill("SIGTERM");
+      void terminateHarness(child).catch(() => {});
       rejectSession(
         new Error(`${reason}; ${harnessDiagnostic({ child, stdout, stderr, device })}`),
       );
@@ -134,7 +159,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
     typeof session.bearer_a !== "string" ||
     typeof session.bearer_b !== "string"
   ) {
-    child.kill("SIGTERM");
+    await terminateHarness(child);
     throw new Error("local Edge/Core harness emitted malformed session material");
   }
   return {
@@ -152,25 +177,86 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       return assertCoreObservation(observation, runNonce);
     },
     stopForOfflineRestart: () => stopForOfflineRestart(child, session.edge_port),
+    terminate: () => terminateHarness(child),
+    async interruptAndRecover() {
+      child.stdin.write("interrupt-edge\n");
+      await waitForLine("JAZZ_RN_EDGE_INTERRUPTED ");
+      await assertEndpointRefused(session.edge_port);
+      child.stdin.write("recover-edge\n");
+      await waitForLine("JAZZ_RN_EDGE_RECOVERED ");
+    },
     endpoint: `http://${host}:${session.edge_port}`,
     bearerA: session.bearer_a,
     bearerB: session.bearer_b,
   };
 }
 
+/** Cargo can be a parent of the actual fixture. Close its control reader and
+ * terminate the whole Unix process group, escalating if it does not exit. */
+export async function terminateHarness(child, timeoutMs = 5_000, processInfo = process) {
+  const groupAlive = () => {
+    if (processInfo.platform === "win32" || !child.pid)
+      return child.exitCode === null && !child.signalCode;
+    try {
+      processInfo.kill(-child.pid, 0);
+      return true;
+    } catch (error) {
+      // Permission still proves a process group exists; only ESRCH proves it
+      // disappeared. Do not confuse Cargo's parent exit with group cleanup.
+      if (error?.code === "ESRCH") return false;
+      if (error?.code === "EPERM") return true;
+      throw error;
+    }
+  };
+  if (!groupAlive()) return;
+  child.stdin?.end();
+  const signal = (name) => {
+    try {
+      if (processInfo.platform !== "win32" && child.pid) processInfo.kill(-child.pid, name);
+      else child.kill(name);
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  };
+  const waitForGroupExit = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (groupAlive()) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    }
+    return true;
+  };
+  signal("SIGTERM");
+  if (!(await waitForGroupExit(timeoutMs))) {
+    signal("SIGKILL");
+    if (!(await waitForGroupExit(timeoutMs))) {
+      throw new Error("local Edge/Core harness process group survived SIGKILL");
+    }
+  }
+}
+
+function assertEndpointRefused(port) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error("interrupted Edge remained reachable"));
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      error.code === "ECONNREFUSED" ? resolve() : reject(error);
+    });
+    socket.setTimeout(1_000, () => {
+      socket.destroy();
+      reject(new Error("interrupted Edge refusal timed out"));
+    });
+  });
+}
+
 /** Fail closed: a stopped process alone is insufficient if a descendant still
  * serves Edge. Preserve the original endpoint for the native SQLite scope. */
-export async function stopForOfflineRestart(child, port) {
-  if (child.exitCode === null && !child.signalCode) {
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("upstream did not stop")), 5_000);
-      child.once("exit", () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-      child.kill("SIGTERM");
-    });
-  }
+export async function stopForOfflineRestart(child, port, terminate = terminateHarness) {
+  await terminate(child);
   await new Promise((resolve, reject) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     socket.setTimeout(1_000);

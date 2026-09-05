@@ -3,6 +3,7 @@ import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
+import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -44,6 +45,7 @@ export async function seedHighLevelForegroundRuntime(
   const client = await createJazzClient(clientConfig(capability));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
+  let recoveredObserved = false;
   let completed = false;
   let failed = false;
   let unsubscribe = () => {};
@@ -51,6 +53,7 @@ export async function seedHighLevelForegroundRuntime(
     markFailure("public-client-subscribe-failed");
     unsubscribe = client.db.subscribe(app.todos, (todos) => {
       observed ||= todos.some((todo) => todo.title === title);
+      recoveredObserved ||= todos.some((todo) => todo.title === `${title}:recovered-by-core`);
     });
     markFailure("public-client-write-failed");
     const write = client.db.insert(app.todos, { title });
@@ -74,6 +77,15 @@ export async function seedHighLevelForegroundRuntime(
     boundary?.("js-before-core-await");
     await waitForCoreObservation();
     boundary?.("js-core-await-returned");
+    markFailure("public-client-reconnect-failed");
+    await requireCoreRecoveryMarker(
+      () => recoveredObserved,
+      async () => (await client.db.all(app.todos)).map((row) => row.title),
+      title,
+    );
+    // A second native acknowledgement is issued only after the same original
+    // subscription has observed the Core-authored marker.
+    await waitForCoreObservation();
     completed = true;
   } catch (error) {
     failed = true;
