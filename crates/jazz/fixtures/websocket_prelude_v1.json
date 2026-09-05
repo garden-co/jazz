@@ -1,0 +1,33 @@
+{
+  "fixture_set": "jazz-websocket-prelude-v1",
+  "transport": "first WebSocket message is one UTF-8 JSON object",
+  "fixtures": [
+    {
+      "name": "native_admin_default_link",
+      "writer": "rust-native",
+      "peer_identity": "[\"urn:jazz:system\",\"system\"]",
+      "auth": { "admin_secret": "admin-secret" },
+      "bootstrap_catalogue": false,
+      "requested_link": "ordinary_session",
+      "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":null,\"admin_secret\":\"admin-secret\",\"backend_session\":null}}"
+    },
+    {
+      "name": "native_admin_catalogue_bootstrap",
+      "writer": "rust-native",
+      "peer_identity": "[\"urn:jazz:system\",\"system\"]",
+      "auth": { "admin_secret": "admin-secret" },
+      "bootstrap_catalogue": true,
+      "requested_link": "ordinary_session",
+      "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":null,\"admin_secret\":\"admin-secret\",\"backend_session\":null},\"bootstrap_catalogue\":true}"
+    },
+    {
+      "name": "typescript_admin_default_link",
+      "writer": "typescript-native-runtime",
+      "peer_identity": "[\"urn:jazz:system\",\"system\"]",
+      "auth_json": "{\"admin_secret\":\"admin-secret\"}",
+      "bootstrap_catalogue": false,
+      "requested_link": "ordinary_session",
+      "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"admin_secret\":\"admin-secret\",\"auth\":{\"admin_secret\":\"admin-secret\",\"sub\":\"system\"},\"sub\":\"system\"}"
+    }
+  ]
+}

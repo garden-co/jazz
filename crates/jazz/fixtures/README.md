@@ -10,6 +10,7 @@ ABI runtime. Future fixtures should target stable byte payloads directly:
 - `AbiEncodedCellPatch` write/probe payloads
 - `AbiSubscriptionStreamChunk` subscription payloads
 - wire `WireFrame` envelopes
+- WebSocket v1 admission preludes (the one JSON message before binary wire frames)
 
 Fixture generators should use core `Db`/`Node` APIs directly rather than routing
 through a binding object manager.
