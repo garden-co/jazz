@@ -5749,6 +5749,12 @@ where
         let mut node_ref = node.lock().await;
         match node_ref.apply_view_updates_in_batch(updates).await {
             Ok(()) => {
+                let authoritative_cut = confirmed_subscriptions
+                    .iter()
+                    .map(|(_, settled_through)| *settled_through)
+                    .max()
+                    .unwrap_or_default();
+                node_ref.record_authoritative_settled_through(authoritative_cut);
                 node_ref
                     .record_scope_relay_authoritative_bundles(&ledger_bundles)
                     .await?;

@@ -16,12 +16,9 @@ export async function createTestKeySet(): Promise<TestKeySet> {
     alg: "ES256",
   };
 
-  // WorkOS-shaped JWT: the `role` claim is nested under `claims` to match the
-  // template the README documents (WorkOS dashboard > Authentication > Sessions
-  // > JWT Template). Jazz's permission DSL reads `session.claims.role` via the
-  // path "claims.role".
+  // Jazz reads standard flat JWT application metadata as `session.claims.role`.
   async function mintJwt(role: string, sub: string): Promise<string> {
-    return new SignJWT({ claims: { role } })
+    return new SignJWT({ role })
       .setProtectedHeader({ alg: "ES256", kid: KID })
       .setSubject(sub)
       .setIssuedAt()

@@ -343,3 +343,43 @@ test("a successful native producer remains visible when a TypeScript consumer fa
     "TypeScript consumers",
   ]);
 });
+
+test("storage compatibility executes the historical browser file and propagates its failure", async () => {
+  const partition = planFor({ partition: "storage-compat" });
+  const assertBrowser = (commands) => {
+    const browser = commands.find((item) => item.label === "browser storage compatibility corpus");
+    assert.ok(browser, "storage partition must execute browser corpus");
+    assert.equal(browser.executable, "pnpm");
+    assert.deepEqual(browser.args, [
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
+      "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]);
+  };
+  assertBrowser(partition);
+  assert.throws(
+    () =>
+      assertBrowser(
+        partition.filter((item) => item.label !== "browser storage compatibility corpus"),
+      ),
+    /must execute browser corpus/,
+  );
+  const seen = [];
+  await assert.rejects(
+    runPlan(partition, async (item) => {
+      seen.push(item.label);
+      if (item.label === "browser storage compatibility corpus")
+        throw new Error("planted browser corpus failure");
+    }),
+    /planted browser corpus failure/,
+  );
+  assert.deepEqual(seen, [
+    "native storage compatibility corpus",
+    "native correctness-artifact producer",
+    "preinstalled Chromium",
+    "browser storage compatibility corpus",
+  ]);
+  assert.equal(workflowModel.jobs["test-storage-compat"]["timeout-minutes"], 30);
+});

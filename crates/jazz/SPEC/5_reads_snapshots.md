@@ -12,7 +12,7 @@ currency and deletion semantics of chapter 4 and feeds queries (ch. 6) and the
 
 Invariant digest:
 
-- `INV-READ-1`: Opening an exclusive transaction on a history-complete core MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the core's atomically committed `GlobalTime`, whose `local_base` is the current `TxTime`, and whose dots are empty; a partial node MUST NOT derive a whole-database base from query-scoped receipts and MUST represent held accepted global transactions above its frontier as explicit dots.
+- `INV-READ-1`: Opening an exclusive transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the highest authority-committed `GlobalTime` known to the node, and whose `local_base` is the current `TxTime`. A history-complete core has no dots; a partial node MUST represent held accepted global transactions above its known authority cut as explicit dots and hydrate missing snapshot data from the authority at that fixed cut.
 - `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_time <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
 - `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
 - `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
@@ -84,11 +84,17 @@ and empty `dots` (`INV-READ-1`). Core settlement serializes HLC allocation with
 the durable accepted commit, so this is a clean prefix even though timestamp
 values are sparse. Numerical adjacency has no semantic role.
 
-Edges and clients are partial by design. Their per-binding `settled_through`
-receipts prove query-result completeness, not possession of every transaction in
-the database, and therefore MUST NOT be promoted into `Snapshot.global_base`.
-They represent locally held work through the owner-local cut and explicit dots;
-the core validates recorded row, absent, and predicate reads at commit (ch. 3).
+Edges and clients are partial by design. A validated `settled_through` receipt
+from the selected authority proves both that the authority has durably committed
+through that coordinate and that this exact binding is complete there. The node
+MUST advance its known `committed_global_time` from that receipt, but this does
+not claim that its local store contains every transaction through the cut.
+Missing transaction reads are hydrated by registering the same query against a
+`ReadViewSourceSpec::Snapshot` carrying the transaction's frozen snapshot. The
+per-binding receipt remains necessary to prove that the locally materialized
+query result is complete. Locally held work above the authority cut is represented
+through the owner-local cut and explicit dots; the core validates recorded row,
+absent, and predicate reads at commit (ch. 3).
 
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
 ref can name explicit transaction dots outside the contiguous/global and

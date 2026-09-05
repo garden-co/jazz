@@ -50,7 +50,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
-  createDb: mocks.createDb,
   getDbSubscriptionSource: (db: unknown) => db,
   resolveDefaultPersistentDbName: (config: DbConfig) => {
     const driver = config.driver;
@@ -59,6 +58,14 @@ vi.mock("../runtime/db.js", () => ({
     }
     return config.dbName?.trim() || config.appId;
   },
+}));
+
+// Browser/Node construction lives behind this wrapper so the React Native
+// entrypoint cannot statically reach the WASM runtime. Keep the client tests
+// at that public factory boundary rather than accidentally exercising its
+// native runtime implementation.
+vi.mock("../runtime/default-create-db.js", () => ({
+  createDb: mocks.createDb,
 }));
 
 vi.mock("../subscriptions-orchestrator.js", () => ({
@@ -83,7 +90,7 @@ function createMockDb(
       session: session
         ? {
             user: JSON.stringify([session.issuer, session.user_id]),
-            claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+            claims: session.claims,
             authMode: session.authMode,
           }
         : null,
@@ -139,7 +146,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(client.db).toBe(db);
     expect(client.session).toEqual({
       user: canonicalAuthorSubject(session.issuer, session.user_id),
-      claims: { iss: session.issuer, sub: session.user_id },
+      claims: {},
       authMode: session.authMode,
     });
     expect("manager" in client).toBe(false);

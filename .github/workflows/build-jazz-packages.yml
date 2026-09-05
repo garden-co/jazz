@@ -235,7 +235,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
           sccache: "true"
           sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
@@ -546,24 +546,19 @@ jobs:
       - name: Install the packed relay into an isolated Expo fixture
         run: |
           FIXTURE=$(mktemp -d)
-          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
           TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
           test -n "${TARBALL}"
-          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
-            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
-            delete pkg.dependencies["jazz-tools"];
-            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
-          '
+          node dev/scripts/prepare-jazz-rn-consumer-fixture.mjs \
+            examples/todo-client-localfirst-expo \
+            "${FIXTURE}/app" \
+            "${TARBALL}"
           pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
           FIXTURE="${FIXTURE}" node -e '
             const fs = require("fs");
             const path = require("path");
             const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
-            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+            const modules = fs.realpathSync(path.join(process.env.FIXTURE, "app", "node_modules"));
+            if (!installed.startsWith(modules + path.sep)) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
           '
           echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 
@@ -596,24 +591,19 @@ jobs:
       - name: Install the packed relay into an isolated Expo fixture
         run: |
           FIXTURE=$(mktemp -d)
-          cp -R examples/todo-client-localfirst-expo "${FIXTURE}/app"
           TARBALL=$(find "$GITHUB_WORKSPACE/dist" -name 'jazz-rn-*.tgz' -type f -print -quit)
           test -n "${TARBALL}"
-          FIXTURE="${FIXTURE}" TARBALL="${TARBALL}" node -e '
-            const fs = require("fs");
-            const path = require("path");
-            const packagePath = path.join(process.env.FIXTURE, "app", "package.json");
-            const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-            pkg.dependencies["jazz-rn"] = `file:${process.env.TARBALL}`;
-            delete pkg.dependencies["jazz-tools"];
-            fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
-          '
+          node dev/scripts/prepare-jazz-rn-consumer-fixture.mjs \
+            examples/todo-client-localfirst-expo \
+            "${FIXTURE}/app" \
+            "${TARBALL}"
           pnpm --dir "${FIXTURE}/app" install --no-frozen-lockfile
           FIXTURE="${FIXTURE}" node -e '
             const fs = require("fs");
             const path = require("path");
             const installed = fs.realpathSync(require.resolve("jazz-rn/package.json", { paths: [path.join(process.env.FIXTURE, "app")] }));
-            if (!installed.startsWith(path.join(process.env.FIXTURE, "app", "node_modules"))) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
+            const modules = fs.realpathSync(path.join(process.env.FIXTURE, "app", "node_modules"));
+            if (!installed.startsWith(modules + path.sep)) throw new Error(`jazz-rn resolved outside the fixture: ${installed}`);
           '
           echo "JAZZ_RN_CONSUMER_FIXTURE=${FIXTURE}/app" >> "$GITHUB_ENV"
 

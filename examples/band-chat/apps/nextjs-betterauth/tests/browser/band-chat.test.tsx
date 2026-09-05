@@ -13,7 +13,51 @@ import { BandChatPreview } from "../../src/BandChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const mounts: Array<{ root: Root; element: HTMLDivElement }> = [];
+type PreviewLabel = "owner" | "guest" | "local";
+const mounts: Array<{ root: Root; element: HTMLDivElement; label: PreviewLabel }> = [];
+let invitation:
+  | {
+      input: HTMLInputElement;
+      form: HTMLFormElement;
+      expectedValue: string;
+      submitted: boolean;
+      reachedRoot: boolean;
+    }
+  | undefined;
+
+function failureDiagnostics() {
+  // Emit only synthetic labels, counts and categories. Never include DOM text,
+  // input contents, canonical authors, tokens, server URLs or raw errors.
+  const previews = mounts.map(({ element, label }) => ({
+    label,
+    connected: element.isConnected,
+    rooms: element.querySelectorAll("button.room").length,
+    conversation: element.querySelector(".conversation") !== null,
+    memberships: element.querySelectorAll("[aria-label='Room membership'] li").length,
+    inviteInput: element.querySelector("input[aria-label='Invite canonical author']") !== null,
+    alerts: [...element.querySelectorAll("[role='alert']")].map((alert) => {
+      const message = alert.textContent ?? "";
+      if (/permission|unauthori[sz]ed|forbidden|denied/i.test(message)) return "permission";
+      if (/connect|network|transport|socket/i.test(message)) return "connection";
+      if (/storage|indexeddb|sqlite|quota/i.test(message)) return "storage";
+      if (/query|subscription/i.test(message)) return "query";
+      return "other";
+    }),
+  }));
+  return JSON.stringify({
+    previews,
+    invitation: invitation
+      ? {
+          submitted: invitation.submitted,
+          reachedRoot: invitation.reachedRoot,
+          inputConnected: invitation.input.isConnected,
+          formConnected: invitation.form.isConnected,
+          inputMatchesExpected: invitation.input.value === invitation.expectedValue,
+          inputCleared: invitation.input.value === "",
+        }
+      : null,
+  });
+}
 
 async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
@@ -21,7 +65,7 @@ async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000)
     if (check()) return;
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 30)));
   }
-  throw new Error(message);
+  throw new Error(`${message}; diagnostics=${failureDiagnostics()}`);
 }
 
 async function mount(
@@ -30,11 +74,12 @@ async function mount(
     driver: { type: "memory" },
     secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
   },
+  label: PreviewLabel = "local",
 ) {
   const element = document.createElement("div");
   document.body.append(element);
   const root = createRoot(element);
-  mounts.push({ root, element });
+  mounts.push({ root, element, label });
   await act(async () => {
     root.render(<BandChatPreview config={config} />);
   });
@@ -43,6 +88,7 @@ async function mount(
 }
 
 afterEach(async () => {
+  invitation = undefined;
   for (const { root, element } of mounts.splice(0)) {
     await act(async () => root.unmount());
     element.remove();
@@ -76,26 +122,48 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
   const guestToken = await getJazzServerJwtForUser(guestUserId, undefined, server.appId);
   const guestTokenClaims = JSON.parse(atob(guestToken.split(".")[1]!)) as { iss: string };
   const guestAuthor = JSON.stringify([guestTokenClaims.iss, guestUserId]);
-  const owner = await mount({
-    appId: server.appId,
-    driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
-    jwtToken: ownerToken,
-    serverUrl: server.serverUrl,
-  });
+  const owner = await mount(
+    {
+      appId: server.appId,
+      driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
+      jwtToken: ownerToken,
+      serverUrl: server.serverUrl,
+    },
+    "owner",
+  );
   await createRoom(owner, "Owner room");
 
-  const guest = await mount({
-    appId: server.appId,
-    driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
-    jwtToken: guestToken,
-    serverUrl: server.serverUrl,
-  });
+  const guest = await mount(
+    {
+      appId: server.appId,
+      driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
+      jwtToken: guestToken,
+      serverUrl: server.serverUrl,
+    },
+    "guest",
+  );
   await createRoom(guest, "Guest profile bootstrap");
 
   const invitee = owner.querySelector<HTMLInputElement>(
     "input[aria-label='Invite canonical author']",
   )!;
+  const observation = {
+    input: invitee,
+    form: invitee.closest("form")!,
+    expectedValue: guestAuthor,
+    submitted: false,
+    reachedRoot: false,
+  };
+  invitation = observation;
+  owner.addEventListener(
+    "submit",
+    () => {
+      observation.reachedRoot = true;
+    },
+    { once: true },
+  );
   await setInputValue(invitee, guestAuthor);
+  observation.submitted = true;
   await act(async () =>
     invitee
       .closest("form")!

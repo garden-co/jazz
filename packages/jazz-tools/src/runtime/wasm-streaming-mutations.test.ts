@@ -1,7 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import type { TxId, WriteReceipt } from "./client.js";
-import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
+import {
+  encodeCellsForRow,
+  encodeSchema,
+  NativeRuntimeAdapter,
+} from "./native-runtime/native-runtime-adapter.js";
+import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
+import {
+  createWasmRuntime,
+  hasJazzWasmBuild,
+  loadWasmModuleForTest,
+} from "./testing/wasm-runtime-test-utils.js";
 
 const app = s.defineApp({
   todos: s.table({
@@ -10,6 +20,115 @@ const app = s.defineApp({
     metadata: s.json().optional(),
   }),
 });
+const streamingApp = s.defineApp({
+  todos: s.table({
+    title: s.string().optional(),
+    done: s.boolean(),
+  }),
+});
+
+type PageStoreMetadata = {
+  pageSize: number;
+  generation: number;
+  rootPageId: number | null;
+  nextPageId: number;
+};
+
+function deferredVoid() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function createTestPageStore() {
+  let persistedMetadata: PageStoreMetadata | null = null;
+  const pages = new Map<number, Uint8Array>();
+  let pendingGate:
+    | {
+        started: () => void;
+        wait: Promise<void>;
+        release: () => void;
+        failAfterRelease: boolean;
+      }
+    | undefined;
+
+  const pageStore = {
+    metadata: async () => persistedMetadata,
+    readPage: async (pageId: number) => pages.get(pageId) ?? null,
+    commitPages: async (
+      expectedGeneration: number,
+      pageSize: number,
+      rootPageId: number,
+      nextPageId: number,
+      pageIds: number[],
+      pageBytes: Uint8Array[],
+      deletedPageIds: number[],
+    ) => {
+      const gate = pendingGate;
+      if (gate) {
+        pendingGate = undefined;
+        gate.started();
+        await gate.wait;
+        if (gate.failAfterRelease) throw new Error("injected page-store commit failure");
+      }
+      for (let index = 0; index < pageIds.length; index += 1) {
+        pages.set(pageIds[index]!, new Uint8Array(pageBytes[index]!));
+      }
+      for (const pageId of deletedPageIds) pages.delete(pageId);
+      persistedMetadata = {
+        pageSize,
+        generation: expectedGeneration + 1,
+        rootPageId: rootPageId < 0 ? null : rootPageId,
+        nextPageId,
+      };
+      return persistedMetadata;
+    },
+  };
+
+  return {
+    pageStore,
+    armCommitGate(failAfterRelease = false) {
+      const wait = deferredVoid();
+      const started = deferredVoid();
+      pendingGate = {
+        started: started.resolve,
+        wait: wait.promise,
+        release: wait.resolve,
+        failAfterRelease,
+      };
+      return { started: started.promise, release: wait.resolve };
+    },
+  };
+}
+
+async function createBrowserWasmFixture() {
+  const wasmModule = await loadWasmModuleForTest();
+  const node = new Uint8Array(16);
+  node[0] = 1;
+  const author = new TextEncoder().encode(
+    JSON.stringify(["urn:jazz:test", "wasm-streaming-abort:author"]),
+  );
+  const pageStore = createTestPageStore();
+  const db = await wasmModule.WasmDb.openBrowser(
+    pageStore.pageStore,
+    encodeSchema(streamingApp.wasmSchema),
+    openConfig(node, author, 1, true),
+    "wasm-streaming-abort-owner",
+  );
+  const runtime = NativeRuntimeAdapter.fromDb(db, streamingApp.wasmSchema, node, author, 1, true);
+  onTestFinished(async () => {
+    await runtime.close?.();
+  });
+  return { db, runtime, pageStore, author };
+}
+
+function uuidBytes(value: string): Uint8Array {
+  return Uint8Array.from(value.replaceAll("-", "").match(/../g)!, (byte) =>
+    Number.parseInt(byte, 16),
+  );
+}
 
 async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
@@ -34,6 +153,191 @@ async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3
 }
 
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
+  it("keeps real WASM query admission pending while storage owns the node", async () => {
+    const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
+    const prepared = db.prepareQuery(queryFromTable("todos"));
+    const opts = { tier: "local", propagation: "local_only" };
+    const commitGate = pageStore.armCommitGate();
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000131"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+    const push = upload.push(new TextEncoder().encode("pending owner"));
+    let cancelSubscription: number | undefined;
+    try {
+      await withWatchdog(commitGate.started, "push holds the real WASM owner");
+      const preparation = db.prepareQueryAsync(queryFromTable("todos"));
+      const subscription = db.subscribeAsync(prepared, opts);
+      const attachment = db.attachQuery(prepared, opts) as {
+        poll(): boolean | undefined;
+        cancel(): void;
+      };
+      // wasm-bindgen encodes all three Option::None return types as undefined.
+      expect(preparation.poll()).toBeUndefined();
+      expect(subscription.poll()).toBeUndefined();
+      expect(attachment.poll()).toBeUndefined();
+      preparation.cancel();
+      subscription.cancel();
+      attachment.cancel();
+
+      let cancelledCallbacks = 0;
+      const cancelled = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+      runtime.executeSubscription(cancelled, () => {
+        cancelledCallbacks += 1;
+      });
+      runtime.unsubscribe(cancelled);
+
+      let finished = false;
+      const query = runtime.query(JSON.stringify({ table: "todos" })).then(
+        (rows) => {
+          finished = true;
+          return { rows };
+        },
+        (error: unknown) => {
+          finished = true;
+          return { error };
+        },
+      );
+      cancelSubscription = runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        undefined,
+        "local",
+        JSON.stringify({ propagation: "local-only" }),
+      );
+      const opening = deferredVoid();
+      let openingError: unknown;
+      runtime.executeSubscription(cancelSubscription, (result: unknown) => {
+        if (result instanceof Error) openingError = result;
+        opening.resolve();
+      });
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(finished).toBe(false);
+      commitGate.release();
+      await push;
+      await expect(withWatchdog(query, "woken concurrent query")).resolves.toEqual({ rows: [] });
+      await withWatchdog(opening.promise, "woken concurrent subscription");
+      expect(openingError).toBeUndefined();
+      expect(cancelledCallbacks).toBe(0);
+      await upload.abort();
+    } finally {
+      commitGate.release();
+      if (cancelSubscription !== undefined) runtime.unsubscribe(cancelSubscription);
+      await upload.abort();
+    }
+  });
+
+  it("waits for an in-flight WASM push before aborting its staged upload", async () => {
+    const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
+    const commitGate = pageStore.armCommitGate();
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000128"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+
+    const push = upload.push(new TextEncoder().encode("gated push"));
+    try {
+      await withWatchdog(commitGate.started, "push entered storage");
+      let abortSettled = false;
+      const abort = upload.abort().then((result: boolean) => {
+        abortSettled = true;
+        return result;
+      });
+      const finishRejected = expect(upload.finish()).rejects.toThrow(/closed/i);
+      const secondPushRejected = expect(upload.push(Uint8Array.of(65))).rejects.toThrow(/closed/i);
+      const duplicate = upload.abort();
+      await Promise.all([finishRejected, secondPushRejected]);
+      await expect(duplicate).resolves.toBe(false);
+      expect(abortSettled).toBe(false);
+
+      commitGate.release();
+      await expect(push).resolves.toBeUndefined();
+      await expect(abort).resolves.toBe(true);
+      expect(abortSettled).toBe(true);
+      await expect(upload.finish()).rejects.toThrow(/closed/i);
+      await expect(upload.push(Uint8Array.of(65))).rejects.toThrow(/closed/i);
+    } finally {
+      commitGate.release();
+    }
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+
+    db.setLargeValueStagingPolicy(Number.MAX_SAFE_INTEGER, 60_000, 0);
+    // Expiry uses the platform clock; advance one event-loop turn past maxAgeMs=0.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await expect(db.evictExpiredStagedLargeValues()).resolves.toBe(0);
+  });
+
+  it("hands failed in-flight push ownership to abort without retaining staged chunks", async () => {
+    const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
+    const commitGate = pageStore.armCommitGate(true);
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000130"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+    const pushRejected = expect(
+      upload.push(new TextEncoder().encode("failed push")),
+    ).rejects.toThrow(/injected page-store commit failure/);
+    try {
+      await withWatchdog(commitGate.started, "failed push entered storage");
+      const abort = upload.abort();
+      commitGate.release();
+      await pushRejected;
+      await expect(abort).resolves.toBe(true);
+      await expect(upload.abort()).resolves.toBe(false);
+      await expect(upload.finish()).rejects.toThrow(/closed/i);
+    } finally {
+      commitGate.release();
+    }
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+    db.setLargeValueStagingPolicy(Number.MAX_SAFE_INTEGER, 60_000, 0);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await expect(db.evictExpiredStagedLargeValues()).resolves.toBe(0);
+  });
+
+  it("keeps abort terminal across synchronous finish and repeated abort calls", async () => {
+    const { db, runtime, author } = await createBrowserWasmFixture();
+    const upload = db.beginStreamingMutationEncoded(
+      "todos",
+      uuidBytes("00000000-0000-4000-8000-000000000129"),
+      encodeCellsForRow(streamingApp.wasmSchema.todos!, {
+        done: { type: "Boolean", value: false },
+      }),
+      "title",
+      "insert",
+      author,
+    );
+
+    await expect(
+      upload.push(new TextEncoder().encode("preserved push result")),
+    ).resolves.toBeUndefined();
+    const abort = upload.abort();
+    const finish = upload.finish();
+    const repeatedAbort = upload.abort();
+
+    await expect(abort).resolves.toBe(true);
+    await expect(repeatedAbort).resolves.toBe(false);
+    await expect(finish).rejects.toThrow(/closed/i);
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
   it("selects and filters public provenance authors as canonical text", async () => {
     const appId = "wasm-public-provenance";
     const author = JSON.stringify(["urn:jazz:test", `${appId}:test:default:author`]);

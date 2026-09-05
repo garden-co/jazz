@@ -8,10 +8,34 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 package="$root/crates/jazz-rn"
 relay_manifest="$root/crates/jazz-native-relay/Cargo.toml"
 platform=${1:?usage: build-relay-artifacts.sh <android|ios>}
-abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_VERSION: u16 = ([0-9]+);/\1/p' \
+abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_V1: u16 = ([0-9]+);/\1/p' \
   "$root/crates/jazz-native-relay/src/lib.rs")
 if [[ -z "$abi" ]]; then
   echo "could not determine native relay ABI version" >&2
+  exit 1
+fi
+
+# This is intentionally a content fingerprint rather than only a commit ID:
+# release assembly can compare it after extracting an npm tarball, and cache
+# keys can avoid rebuilding when unrelated JavaScript changes land.
+native_source_fingerprint=$(node - "$root" <<'NODE'
+const { createHash } = require("node:crypto");
+const { execFileSync } = require("node:child_process");
+const root = process.argv[2];
+const source = execFileSync(
+  "git",
+  [
+    "-C", root, "ls-tree", "-r", "--full-tree", "HEAD", "--",
+    "Cargo.lock", "Cargo.toml", "crates/groove", "crates/idb-tree",
+    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-storage-sqlite",
+    "crates/jazz-rn/scripts/build-relay-artifacts.sh",
+  ],
+);
+process.stdout.write(createHash("sha256").update(source).digest("hex"));
+NODE
+)
+if [[ ! "$native_source_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "could not determine native relay source fingerprint" >&2
   exit 1
 fi
 
@@ -21,11 +45,11 @@ write_manifest() {
   local source_revision
   source_revision=${JAZZ_NATIVE_RELAY_SOURCE_REVISION:-$(git -C "$root" rev-parse HEAD)}
   local cargo_ndk_version=${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}
-  node - "$destination" "$abi" "$source_revision" "$cargo_ndk_version" "$@" <<'NODE'
+  node - "$destination" "$abi" "$source_revision" "$native_source_fingerprint" "$cargo_ndk_version" "$@" <<'NODE'
 const { createHash } = require("node:crypto");
 const { readdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
 const { join, relative } = require("node:path");
-const [destination, abi, sourceRevision, cargoNdkVersion, ...roots] = process.argv.slice(2);
+const [destination, abi, sourceRevision, nativeSourceFingerprint, cargoNdkVersion, ...roots] = process.argv.slice(2);
 const files = [];
 const visit = (root, directory = root) => {
   for (const name of readdirSync(directory).sort()) {
@@ -42,7 +66,7 @@ const visit = (root, directory = root) => {
 for (const root of roots) visit(root);
 if (!files.length) throw new Error("relay artifact build produced no static libraries");
 const toolchain = cargoNdkVersion ? { cargoNdk: cargoNdkVersion } : undefined;
-writeFileSync(destination, JSON.stringify({ format: 1, nativeRelayAbi: Number(abi), sourceRevision, toolchain, files }, null, 2) + "\n");
+writeFileSync(destination, JSON.stringify({ format: 2, nativeRelayAbi: Number(abi), sourceRevision, nativeSourceFingerprint, toolchain, files }, null, 2) + "\n");
 NODE
 }
 
@@ -74,7 +98,6 @@ case "$platform" in
     declare -A rust_targets=(
       [arm64-v8a]=aarch64-linux-android
       [armeabi-v7a]=armv7-linux-androideabi
-      [x86]=i686-linux-android
       [x86_64]=x86_64-linux-android
     )
     for android_abi in "${!rust_targets[@]}"; do

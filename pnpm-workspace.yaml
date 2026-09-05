@@ -10,6 +10,10 @@ packages:
   - dev/stress-tests/*
   - "!dev/stress-tests/stress-test-expo"
   - dev/local-telemetry/web
+  # The label-gated Android/iOS acceptance workflow invokes this package via
+  # `pnpm --filter`; it must be a workspace member so CI installs Expo and its
+  # declared native dependencies before prebuild.
+  - dev/rn-device-acceptance
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi

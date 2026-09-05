@@ -627,6 +627,41 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
   }, 15_000);
 
+  it("admits concurrent reads and cancels a subscription before callback admission", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-concurrent-query-admission:node"),
+      testAuthorBytes("jazz-napi-concurrent-query-admission:alice"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "concurrent admission" },
+      done: { type: "Boolean", value: false },
+    });
+    await runtime.waitForTransaction(await committedTxId(inserted), "local");
+    const query = JSON.stringify({ table: "todos" });
+    let cancelledCallbacks = 0;
+    const cancelled = runtime.createSubscription(query);
+    runtime.unsubscribe(cancelled);
+    runtime.executeSubscription(cancelled, () => {
+      cancelledCallbacks += 1;
+    });
+    const reads = await Promise.all(Array.from({ length: 12 }, () => runtime.query(query)));
+    for (const rows of reads) expect(rows).toEqual([expect.objectContaining({ id: inserted.id })]);
+    expect(cancelledCallbacks).toBe(0);
+    const active = runtime.createSubscription(query);
+    const opening = new Promise<unknown>((resolve) => runtime.executeSubscription(active, resolve));
+    await opening;
+    runtime.unsubscribe(active);
+    await expect(runtime.query(query)).resolves.toEqual([
+      expect.objectContaining({ id: inserted.id }),
+    ]);
+  });
+
   it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
@@ -991,36 +1026,48 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       return event;
     };
 
+    const observeSource = (source: object) =>
+      new Proxy(source, {
+        get(sourceTarget, sourceProperty) {
+          const sourceValue = Reflect.get(sourceTarget, sourceProperty, sourceTarget) as unknown;
+          if (sourceProperty === "readAll" && typeof sourceValue === "function") {
+            return () => {
+              const events = Reflect.apply(
+                sourceValue,
+                sourceTarget,
+                [],
+              ) as NapiSubscriptionEvent[];
+              rawEvents.push(...events);
+              return events;
+            };
+          }
+          return typeof sourceValue === "function" ? sourceValue.bind(sourceTarget) : sourceValue;
+        },
+      });
+    const observePending = (pending: object) =>
+      new Proxy(pending, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target) as unknown;
+          if (property === "poll" && typeof value === "function") {
+            return () => {
+              const source = Reflect.apply(value, target, []) as object | null | undefined;
+              return source == null ? source : observeSource(source);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
     const observeDb = (nativeDb: ReturnType<typeof NapiDb.openMemory>) =>
       new Proxy(nativeDb, {
         get(target, property) {
           const value = Reflect.get(target, property, target) as unknown;
-          if (property === "subscribe" && typeof value === "function") {
+          if (
+            (property === "subscribe" || property === "subscribeAsync") &&
+            typeof value === "function"
+          ) {
             return (...args: unknown[]) => {
               const source = Reflect.apply(value, target, args) as object;
-              return new Proxy(source, {
-                get(sourceTarget, sourceProperty) {
-                  const sourceValue = Reflect.get(
-                    sourceTarget,
-                    sourceProperty,
-                    sourceTarget,
-                  ) as unknown;
-                  if (sourceProperty === "readAll" && typeof sourceValue === "function") {
-                    return () => {
-                      const events = Reflect.apply(
-                        sourceValue,
-                        sourceTarget,
-                        [],
-                      ) as NapiSubscriptionEvent[];
-                      rawEvents.push(...events);
-                      return events;
-                    };
-                  }
-                  return typeof sourceValue === "function"
-                    ? sourceValue.bind(sourceTarget)
-                    : sourceValue;
-                },
-              });
+              return property === "subscribeAsync" ? observePending(source) : observeSource(source);
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
@@ -1636,32 +1683,25 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     // bytes directly cannot re-authorize this Alice-opened mergeable batch.
     const raw = runtime as unknown as {
       db: {
-        allInTransactionForIdentity(
+        all(
           query: unknown,
-          tx: unknown,
-          author: Uint8Array,
           opts: unknown,
+          openTransactionId: string,
+          author: Uint8Array,
         ): Uint8Array | Promise<Uint8Array>;
       };
-      pendingTxs: Map<OpenTransactionId, { txByView: Map<NativeRuntimeAdapter, unknown> }>;
       prepareQuery(queryJson: string): unknown;
     };
-    const tx = raw.pendingTxs.get(transactionId)?.txByView.get(runtime);
-    expect(tx).toBeDefined();
     const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
     const aliceAuthor = new TextEncoder().encode(
       JSON.stringify(["https://issuer.example", ALICE_ID]),
     );
     const bobAuthor = new TextEncoder().encode(JSON.stringify(["https://issuer.example", BOB_ID]));
     await expect(
-      Promise.resolve().then(() =>
-        raw.db.allInTransactionForIdentity(query, tx, aliceAuthor, undefined),
-      ),
+      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, aliceAuthor)),
     ).resolves.toBeInstanceOf(Uint8Array);
     await expect(
-      Promise.resolve().then(() =>
-        raw.db.allInTransactionForIdentity(query, tx, bobAuthor, undefined),
-      ),
+      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, bobAuthor)),
     ).rejects.toThrow(/open transaction identity.*bound identity/i);
     await runtime.rollbackTransaction(transactionId);
   });

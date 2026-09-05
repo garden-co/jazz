@@ -2724,3 +2724,106 @@ fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joi
         );
     }
 }
+
+/// Alice's admitted team-A subscription keeps its claims when a live catalogue
+/// token invalidates the maintained plan, while the same subject's ambient
+/// claims say team B. This internal test uses the existing token-invalidation
+/// hook because that lifecycle boundary has no small public trigger.
+///
+/// alice/A subscribe ──token invalidation──► rebuild ──new A row──► alice/A
+#[test]
+fn request_claims_survive_subscription_runtime_rebuild() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("title", &["claims", "team"])),
+                ),
+        ),
+    );
+    let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
+    let a = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-a".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let b = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-b".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let alice = AuthorSubject::for_test_bytes([0x6b; 16]);
+    let claims = |team: &str| {
+        [(
+            crate::query::provider_claim_key("team"),
+            Value::String(team.into()),
+        )]
+        .into()
+    };
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let scoped = prepared
+        .clone()
+        .with_identity_claims(alice, claims("team-a"));
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    db.set_identity_claims(alice, claims("team-b"));
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&scoped, opts.clone(), alice)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected initial rows")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![a]
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .invalidate_groove_runtime_for_test();
+    block_on(db.refresh_subscriptions()).unwrap();
+    let new_a = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-a".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    block_on(db.refresh_subscriptions()).unwrap();
+    let mut saw_new_a = false;
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                !added
+                    .iter()
+                    .map(|row| row.row_uuid())
+                    .collect::<Vec<_>>()
+                    .contains(&b),
+                "rebuild must never substitute ambient team-B claims"
+            );
+            saw_new_a |= added
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>()
+                .contains(&new_a);
+        }
+    }
+    assert!(
+        saw_new_a,
+        "rebuilt subscription still receives its admitted team's updates"
+    );
+    assert_eq!(
+        row_ids(&block_on(db.all_for_identity(&prepared, opts, alice)).unwrap()),
+        vec![b],
+        "request scope restores ambient claims"
+    );
+    block_on(subscription.close()).unwrap();
+}

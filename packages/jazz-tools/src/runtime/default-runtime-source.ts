@@ -1,9 +1,5 @@
-import {
-  JazzClient,
-  loadWasmModule,
-  type ConnectRuntimeOptions,
-  type WasmModule,
-} from "./client.js";
+import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
+import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
@@ -185,6 +181,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
   override async load(config: DbConfig): Promise<void> {
     this.module ??= await loadWasmModule(config.runtimeSources);
+  }
+
+  override admitConfig(config: DbConfig): void {
+    trustAttachedBrowserWorkerSession(config);
   }
 
   override createClient({

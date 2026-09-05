@@ -127,6 +127,28 @@ where
         )
     }
 
+    /// Attach one-shot coverage for the immutable base of an open transaction.
+    /// Pending writes remain local overlays and are never sent upstream.
+    #[doc(hidden)]
+    pub fn attach_query_in_transaction_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        open_tx_id: OpenTransactionId,
+        mut opts: ReadOpts,
+    ) -> Result<QueryAttachment, Error> {
+        let snapshot = self
+            .node
+            .node
+            .borrow()
+            .open_transaction_snapshot(open_tx_id)?;
+        opts.read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: snapshot.into(),
+            },
+        };
+        self.attach_query_with_opts(prepared, opts)
+    }
+
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
     pub fn attach_query_with_opts_for_identity(
         &self,
@@ -156,8 +178,103 @@ where
         )
     }
 
+    /// Identity-aware counterpart of [`Db::attach_query_in_transaction_with_opts`].
+    #[doc(hidden)]
+    pub fn attach_query_in_transaction_with_opts_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        open_tx_id: OpenTransactionId,
+        mut opts: ReadOpts,
+        author: AuthorSubject,
+    ) -> Result<QueryAttachment, Error> {
+        let snapshot = self
+            .node
+            .node
+            .borrow()
+            .open_transaction_snapshot(open_tx_id)?;
+        opts.read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: snapshot.into(),
+            },
+        };
+        self.attach_query_with_opts_for_identity(prepared, opts, author)
+    }
+
     fn attach_or_refresh_query_coverage(
         &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        upstream_opts: RegisterShapeOptions,
+        identity: AuthorSubject,
+        requires_current_authority_receipt: bool,
+    ) -> Result<QueryAttachment, Error> {
+        let node = self.node.node.borrow();
+        self.attach_or_refresh_query_coverage_with_node(
+            &node,
+            shape,
+            binding,
+            upstream_opts,
+            identity,
+            requires_current_authority_receipt,
+        )
+    }
+
+    /// Wait for the node owner before opening ordinary or identity-aware coverage.
+    pub async fn attach_query_with_opts_async(
+        &self,
+        prepared: &PreparedQuery,
+        mut opts: ReadOpts,
+        open_tx_id: Option<OpenTransactionId>,
+        author: Option<AuthorSubject>,
+    ) -> Result<QueryAttachment, Error> {
+        ensure_supported_read_view(&opts)?;
+        let mut node = match open_tx_id {
+            Some(open_tx_id) => {
+                self.node
+                    .lock_for_transaction_operation(open_tx_id, self.owner_operation_admitted)
+                    .await?
+            }
+            None => self.node.node.lock().await,
+        };
+        let mut node = prepared.scoped_node(&mut node, author.unwrap_or(self.identity.author))?;
+        if let Some(open_tx_id) = open_tx_id {
+            opts.read_view = ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot {
+                    snapshot: node.open_transaction_snapshot(open_tx_id)?.into(),
+                },
+            };
+        }
+        let upstream_opts = self.node.upstream_register_shape_options(
+            effective_read_tier(&opts),
+            opts.read_view.clone(),
+            opts.propagation == Propagation::Full,
+        );
+        let (shape, binding) = if let Some(author) = author {
+            let (shape, binding, _) = node
+                .prepare_query_binding_for_link(
+                    &prepared.shape,
+                    &prepared.binding,
+                    upstream_opts.tier,
+                    author,
+                )
+                .await?;
+            (shape, binding)
+        } else {
+            (prepared.shape.clone(), prepared.binding.clone())
+        };
+        self.attach_or_refresh_query_coverage_with_node(
+            &node,
+            &shape,
+            &binding,
+            upstream_opts,
+            author.unwrap_or(self.identity.author),
+            effective_read_tier(&opts) >= DurabilityTier::Edge,
+        )
+    }
+
+    fn attach_or_refresh_query_coverage_with_node(
+        &self,
+        node: &NodeState<S>,
         shape: &ValidatedQuery,
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
@@ -176,11 +293,8 @@ where
         // share this physical binding view.  The explicit unscoped key is the
         // only compatibility baseline; a scoped stream records its own exact
         // generation once it is registered below.
-        let required_after = self
-            .node
-            .node
-            .borrow()
-            .applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
+        let required_after =
+            node.applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
         // All live usages pin one stream. One-shot freshness is a newer
         // receipt on that stream, not another stream with the same inputs.
@@ -321,7 +435,9 @@ where
         if !attachment.requires_delivery_receipt {
             return true;
         }
-        let node = self.node.node.borrow();
+        let Some(node) = self.node.node.try_lock() else {
+            return false;
+        };
         let active_receipts = self.node.active_authority_view_receipts.borrow();
         let has_current_authority_receipt = active_receipts.as_ref().is_some_and(|receipts| {
             attachment
@@ -469,24 +585,18 @@ where
         let pending_overlay = authorization_mode == QueryAuthorizationMode::ClientLocal
             && requested_read_tier >= DurabilityTier::Edge
             && opts.local_updates == LocalUpdates::Immediate;
-        self.node
-            .node
-            .lock()
-            .await
-            .ensure_peer_maintained_subscription_view_supported(
-                &prepared.shape,
-                &prepared.binding,
-                read_tier,
-                author,
-                &opts.read_view,
-                authorization_mode,
-            )
-            .await?;
-        let (local_shape, local_binding, _local_plan) = self
-            .node
-            .node
-            .lock()
-            .await
+        let mut owner = self.node.node.lock().await;
+        let mut node = prepared.scoped_node(&mut owner, author)?;
+        node.ensure_peer_maintained_subscription_view_supported(
+            &prepared.shape,
+            &prepared.binding,
+            read_tier,
+            author,
+            &opts.read_view,
+            authorization_mode,
+        )
+        .await?;
+        let (local_shape, local_binding, _local_plan) = node
             .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
@@ -499,11 +609,7 @@ where
         // current host scheduler as the cold-storage continuation owner,
         // rather than the short-lived foreground future opening this stream.
         let progress_waker = self.node.query_runtime_waker();
-        let (mut subscription, mut snapshot) = self
-            .node
-            .node
-            .lock()
-            .await
+        let (mut subscription, mut snapshot) = node
             .open_maintained_view_subscription_in_authorization_mode_with_waker(
                 &local_shape,
                 &local_binding,
@@ -516,20 +622,24 @@ where
                 progress_waker.as_ref(),
             )
             .await?;
+        let local_runtime_token = node.groove_runtime_token();
+        drop(node);
+        drop(owner);
         let local_subscription_id = subscription.subscription_id();
-        let local_node = Rc::clone(&self.node.node);
-        let local_runtime_token = local_node.lock().await.groove_runtime_token();
         let local_subscription_cleanup = Rc::new(Cell::new(Some((
             local_runtime_token,
             local_subscription_id,
         ))));
         let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
         let local_cleanup_node = Rc::clone(&self.node);
+        let opening_upstream = Rc::new(RefCell::new(Vec::new()));
+        let cleanup_upstream = Rc::clone(&opening_upstream);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
             // Opening failed before a public state existed; this is the one
             // intentionally ID-based cleanup path.
             local_cleanup_node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
                 state: None,
+                opening_upstream: std::mem::take(&mut *cleanup_upstream.borrow_mut()),
                 opening_local: local_cleanup_handle.take(),
                 acknowledgement: None,
             });
@@ -562,11 +672,9 @@ where
             let (shape, binding) = if upstream_opts.tier == read_tier {
                 (state_shape.clone(), state_binding.clone())
             } else {
-                let (shape, binding, _) = self
-                    .node
-                    .node
-                    .lock()
-                    .await
+                let mut owner = self.node.node.lock().await;
+                let mut node = prepared.scoped_node(&mut owner, author)?;
+                let (shape, binding, _) = node
                     .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
@@ -584,14 +692,18 @@ where
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
             requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
-            let opened = self.open_subscription_upstream_coverage(
-                &shape,
-                &binding,
-                upstream_opts,
-                author,
-                authorization_mode,
-            )?;
+            let opened = self
+                .open_subscription_upstream_coverage(
+                    prepared,
+                    &shape,
+                    &binding,
+                    upstream_opts,
+                    author,
+                    authorization_mode,
+                )
+                .await?;
             upstream_subscription_handles = opened.handles;
+            *opening_upstream.borrow_mut() = upstream_subscription_handles.clone();
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
                 && requested_read_tier >= DurabilityTier::Edge
@@ -735,10 +847,11 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
-            groove_runtime_token: self.node.node.lock().await.groove_runtime_token(),
+            groove_runtime_token: local_runtime_token,
             local_subscription_cleanup: Rc::clone(&local_subscription_cleanup),
             upstream_subscription_handles,
             propagates_upstream,
+            request_identity_claims: prepared.request_identity_claims.clone(),
             author,
             authorization_mode,
             read_tier,
@@ -788,6 +901,7 @@ where
                 let finalization_node = acknowledgement.as_ref().map(|_| Rc::clone(&node));
                 node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
                     state: Some(state),
+                    opening_upstream: Vec::new(),
                     opening_local: None,
                     acknowledgement,
                 });
@@ -834,27 +948,28 @@ where
             .await
     }
 
-    fn open_subscription_upstream_coverage(
+    async fn open_subscription_upstream_coverage(
         &self,
+        prepared: &PreparedQuery,
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<OpenedUpstreamCoverage, Error> {
-        super::block_on(
-            self.node
-                .node
-                .borrow_mut()
-                .ensure_peer_maintained_subscription_view_supported(
-                    shape,
-                    binding,
-                    opts.tier,
-                    identity,
-                    &opts.read_view,
-                    authorization_mode,
-                ),
-        )?;
+        let mut owner = self.node.node.lock().await;
+        let mut node = prepared.scoped_node(&mut owner, identity)?;
+        node.ensure_peer_maintained_subscription_view_supported(
+            shape,
+            binding,
+            opts.tier,
+            identity,
+            &opts.read_view,
+            authorization_mode,
+        )
+        .await?;
+        drop(node);
+        drop(owner);
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node

@@ -211,8 +211,15 @@ pub(super) fn query_read_set_for_read_view(
             None,
             false,
         )),
-        ReadViewSourceSpec::Snapshot { .. } => Err(Error::QueryCapability(
-            "snapshot read_view requires unified snapshot source lowering".to_owned(),
+        ReadViewSourceSpec::Snapshot { snapshot } => Ok(snapshot_query_read_set(
+            shape,
+            read_schema,
+            Snapshot {
+                owner: snapshot.owner,
+                global_base: snapshot.global_base,
+                local_base: snapshot.local_base,
+                dots: snapshot.dots.clone(),
+            },
         )),
         ReadViewSourceSpec::BranchView { head, base } => {
             let projection = SchemaProjection {

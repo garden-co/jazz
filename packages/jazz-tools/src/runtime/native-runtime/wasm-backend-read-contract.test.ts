@@ -13,7 +13,7 @@ const app = s.defineApp({
 
 describe("WASM backend read capability parity", () => {
   for (const backend of [false, true]) {
-    it(`${backend ? "admits" : "rejects"} every backend read surface after ${backend ? "backend" : "ordinary"} open`, async () => {
+    it(`uses the consolidated read surface after ${backend ? "backend" : "ordinary"} open`, async () => {
       const { WasmDb } = await loadWasmModuleForTest();
       const open = backend ? WasmDb.openMemoryAsBackend : WasmDb.openMemory;
       const db = open(
@@ -30,25 +30,22 @@ describe("WASM backend read capability parity", () => {
       const opts = { tier: "local" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
-      const tx = db.attachMergeableTx(txId);
       const reads = [
-        () => db.allForBackend(query, opts),
-        () => db.allInTransactionForBackend(query, tx, opts),
-        () => db.allRelationSnapshotForBackend(query, opts),
-        () => db.allRelationSnapshotInTransactionForBackend(query, tx, opts),
-        () => db.allRelationQueryForBackend(relation, opts),
+        () => db.allAsync(query, opts),
+        () => db.allAsync(query, opts, txId),
+        () => db.allRelationSnapshot(query, opts),
+        () => db.allRelationSnapshot(query, opts, txId),
+        () => db.allRelationQuery(relation, opts),
       ];
       try {
+        const attachment = db.attachQuery(query, opts);
+        db.detachQuery(attachment);
+        for (const read of reads) expect(await read()).toBeInstanceOf(Uint8Array);
         if (backend) {
-          for (const read of reads) expect(await read()).toBeInstanceOf(Uint8Array);
-          const attachment = db.attachQueryForBackend(query, opts);
-          db.detachQuery(attachment);
           await db.subscribeForBackend(query, opts).cancel();
           await db.subscribeRelationQueryForBackend(relation, opts).cancel();
         } else {
           for (const read of [
-            ...reads,
-            () => db.attachQueryForBackend(query, opts),
             () => db.subscribeForBackend(query, opts),
             () => db.subscribeRelationQueryForBackend(relation, opts),
           ])

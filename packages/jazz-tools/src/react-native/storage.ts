@@ -1,9 +1,6 @@
 export const REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR =
   "React Native SQLite storage is not implemented in this alpha; the v2 runtime rejects sqliteStorage before opening a driver";
 
-export const REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR =
-  "React Native persistent storage is not available in this alpha; memory mode is unverified scaffolding, not device-supported persistence";
-
 export const REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR =
   "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)";
 

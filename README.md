@@ -43,7 +43,10 @@ pnpm build
 pnpm test
 ```
 
-`pnpm run ensure:rust-toolchain` runs `dev/scripts/install-jazz-rn-deps.sh` to bootstrap Rust (via `rustup` if needed), required Rust targets, `cargo-ndk`, and platform build tools (`cmake`, `ninja`, `clang-format`).
+`pnpm run ensure:rust-toolchain` adds the `wasm32-unknown-unknown` Rust target
+and installs `wasm-pack` if it is missing. It requires an existing Rust/rustup
+installation. React Native build dependencies have a separate bootstrap script:
+[`dev/scripts/install-jazz-rn-deps.sh`](dev/scripts/install-jazz-rn-deps.sh).
 
 The homepage and documentation are a self-contained Next.js application under
 `docs/`. Build them with `pnpm build:vercel-docs`; they do not need a Rust or
@@ -53,7 +56,7 @@ Server builds compile RocksDB from source on first build (cached afterwards by `
 
 ## Package versioning
 
-`jazz-tools`, `jazz-wasm`, `jazz-napi`, and `jazz-rn` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
+`jazz-tools`, `jazz-wasm`, `jazz-napi`, `jazz-rn`, and `create-jazz` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
 
 ### Fast local binding builds
 
@@ -63,34 +66,50 @@ release artifact. `pnpm --filter jazz-wasm build` remains the optimized release
 build used by CI and publishing. `dev/rebuild-artifacts.sh wasm-fast` exposes the
 same path alongside the other local artifact rebuilds.
 
-Generated WASM and NAPI bindings carry a small provenance manifest. The manifest
-binds an artifact to the exact Git tree (including local changes), Cargo.lock,
-Rust toolchain/version, target/profile and relevant Rust/package inputs. Run
-`dev/gates/artifacts-fresh.sh` before a focused test that consumes an existing
-binding; it prints the precise rebuild command when an artifact is stale. This
-works from any checkout on macOS, Linux, and CI—no devbox-specific paths or hash
-utilities are required.
-
-Releases are currently locked to the alpha prerelease channel via `.changeset/pre.json` (`tag: alpha`).
-The `Changesets Release PR` workflow uses `changesets/action` to auto-create/update a `Version Packages (alpha)` PR on `main`.
-Install the [Changeset bot app](https://github.com/apps/changeset-bot) on this repo so PRs get changeset guidance comments.
+For Node/browser correctness tests, produce and seal the native artifacts in
+the checkout where the tests will run, then launch the admitted consumers:
 
 ```sh
-# add release intent
-pnpm changeset
-
-# apply version bumps from changesets
-pnpm release:version
-
-# apply alpha snapshot versions (manual fallback)
-pnpm release:version:alpha
-
-# publish with resolved non-workspace dependency versions
-pnpm release:publish
-
-# publish with the alpha dist-tag
-pnpm release:publish:alpha
+pnpm build:correctness-artifacts
+pnpm test:typescript-consumers
 ```
+
+The producer seals fast-WASM and release-NAPI artifacts with their source
+identity and hashes. The consumer verifies that receipt, rebuilds Jazz Tools,
+and runs the Node/browser suites against the sealed artifacts. Source changes
+require another producer run. For focused suites, use
+`node dev/gates/run-correctness-consumer.mjs -- <command>` and rebuild Jazz Tools
+through that wrapper before testing after native production. Keep generated
+artifacts and producer manifests in their own checkout; `artifacts-fresh.sh`
+provides provenance diagnostics, while the consumer wrapper admits test inputs.
+
+### Alpha releases
+
+Releases use alpha prerelease mode in `.changeset/pre.json` (`mode: pre`,
+`tag: alpha`). Add release intent with `pnpm changeset`. After release work
+settles on `main`, the
+[Changesets Release PR workflow](.github/workflows/changesets-release-pr.yml)
+runs ordinary `pnpm release:version` and updates `changeset-release/main`.
+All five packages must advance together. Preserve prerelease state while
+preparing changesets and let versioning record consumed entries.
+
+The release workflow dispatches
+[Release preview (alpha)](.github/workflows/preview-jazz-tools-alpha-release.yml)
+on the generated release branch. Before merging the release PR, verify its
+versions and release notes, and require a successful preview on that exact head,
+the separate [Starters E2E](.github/workflows/starters-e2e.yml) matrix, and the
+required correctness and React Native device-acceptance receipts. The preview
+builds and verifies packed native/React Native artifacts and their consumers.
+If a preview or starter run is missing, dispatch its workflow on
+`changeset-release/main`.
+
+Merging the versioned release PR triggers the
+[alpha publisher](.github/workflows/publish-jazz-tools-alpha.yml), which checks
+source versions and package payloads before publishing. Use the preview workflow
+for build-and-verify runs: it selects `dry-run`, whereas manual publisher
+dispatch defaults to `publish`. The `release:version:alpha` script creates
+snapshot versions; ordinary alpha release preparation uses `release:version`
+with prerelease mode active.
 
 # License
 

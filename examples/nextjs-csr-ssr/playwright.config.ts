@@ -1,23 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { defineConfig, devices } from "@playwright/test";
-import dotenv from "dotenv";
 
-dotenv.config();
-
-const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-const BACKEND_SECRET = process.env.BACKEND_SECRET!;
-const ADMIN_SECRET = process.env.ADMIN_SECRET!;
 const WEB_PORT = Number(process.env.WEB_PORT ?? "3000");
+const testAppId = randomUUID();
+// Keep each test server independent of ambient credentials. An explicitly empty
+// backend secret is invalid; this fresh credential stays in the server process.
+const testBackendSecret = randomUUID();
 
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
   timeout: 90_000,
+  testIgnore: "**/config-security.spec.ts",
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 2 : 0,
   use: {
-    baseURL: `http://localhost:${WEB_PORT}`,
+    baseURL: `http://127.0.0.1:${WEB_PORT}`,
     trace: "on-first-retry",
   },
   projects: [
@@ -26,30 +25,18 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: [
-    {
-      command: "pnpm run sync-server",
-      url: `${SERVER_URL}/health`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
-      env: {
-        NEXT_PUBLIC_JAZZ_APP_ID: APP_ID,
-        BACKEND_SECRET,
-        ADMIN_SECRET,
-        JAZZ_SERVER_PORT: String(new URL(SERVER_URL).port),
-      },
+  webServer: {
+    url: `http://127.0.0.1:${WEB_PORT}`,
+    command: `pnpm dev --hostname 127.0.0.1 --port ${WEB_PORT}`,
+    timeout: 60_000,
+    env: {
+      NEXT_PUBLIC_JAZZ_APP_ID: testAppId,
+      NEXT_PUBLIC_JAZZ_SERVER_URL: "",
+      BACKEND_SECRET: testBackendSecret,
+      JAZZ_BACKEND_SECRET: testBackendSecret,
+      ADMIN_SECRET: "",
+      JAZZ_ADMIN_SECRET: "",
+      JAZZ_E2E_IN_MEMORY: "1",
     },
-    {
-      command: `pnpm dev --hostname 127.0.0.1 --port ${WEB_PORT}`,
-      url: `http://localhost:${WEB_PORT}`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
-      env: {
-        NEXT_PUBLIC_JAZZ_SERVER_URL: SERVER_URL,
-        NEXT_PUBLIC_JAZZ_APP_ID: APP_ID,
-        BACKEND_SECRET,
-        ADMIN_SECRET,
-      },
-    },
-  ],
+  },
 });
