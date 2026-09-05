@@ -194,6 +194,43 @@ Other standalone integration targets contain no additional embedded
 row-byte corpus beyond the already-covered `wire_fixtures` target; the persistent
 codec registry checks exact proof anchors rather than encoding records itself.
 
+## Reviewed React Native integration
+
+The full reviewed RN ancestry at `0a788192db` merges into the typed branch.
+Typed application-storage names and current `JVRR` fixture bytes remain
+authoritative; both independently added read tests are retained. The merge
+keeps the explicit NAPI/WASM named-cell readers and exact local-row schema
+publication binder while bringing the reviewed upstream admission, cancellation,
+detach, committed-deletion, and permission-advice behavior together.
+
+An initial combined core/native Rust run measured 2972 passes and ten failures.
+Every failure came from the relay test consumer reading the new publication
+descriptor as the generic execution `RecordDescriptor`. The test consumer now
+reads the explicit stored/result/hidden role grammar and recursive name/type
+grammar; exact content, identity, lifecycle and real reopen assertions remain.
+The sibling RN production cell reader also still used generic descriptor serde,
+which its old fixture producer masked. It now delegates to the shared named-cell
+reader, and fixture producers use the shared named-cell encoder. All 83 relay
+tests pass. A literal U64 ABI input at the RN boundary passes with the shared
+reader; a planted generic descriptor read fails with `DeserializeBadOption`,
+then is restored before the combined gate.
+The restored combined Jazz/Groove/NAPI/native-relay/native-transport library and
+integration run passes all 2982 tests, with eight skipped, using the canonical
+4 MiB stack and the RN bridge feature. This is still a Rust receipt; default
+and RN bridge artifact consumers remain separate required gates.
+
+The subsequent reviewed RN merge at `458bc466ab` adds the live-upload evidence
+retention and foreground connection-lifecycle fixes. Its new native exclusive
+transaction canary uses the shared cell fixture encoder. The combined Rust
+gate then passes all 2983 tests, with eight skipped, including that new canary.
+
+This inventory is scoped to descriptor ownership, not a repository-wide claim
+that Postcard is runtime-only. Outer peer transport still uses its frozen
+Postcard grammar. Query and binding IDs use explicit canonical request bytes;
+the policy-branch semantic label and authorization-support digests still hash
+Postcard tuples. Their indirect use in durable identities requires a separate
+freeze audit before claiming that all durable hash inputs are independent of
+serializer layouts.
 Independent review added a grouped branch-view ordering/window canary: after
 moving one source row, the groups are alpha=1, bravo=3, charlie=2, so count
 descending/title ascending with offset 1 and limit 1 must return charlie=2.

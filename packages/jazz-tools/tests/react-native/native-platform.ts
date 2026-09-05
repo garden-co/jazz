@@ -5,6 +5,8 @@ import type { NativeForegroundRuntime } from "../../src/react-native/native-fore
 
 type NativeHandle = object; // NAPI External with Rust Drop, never a pointer number.
 interface TestBinding {
+  __testRnDecodeForegroundCommand(command: Uint8Array): string;
+  __testRnForegroundResponseCorpus(): string;
   nativeArtifactFingerprint(): string;
   __testRnHostNew(): NativeHandle;
   __testRnHostAbiVersion(host: NativeHandle): number;
@@ -20,6 +22,7 @@ interface TestBinding {
   __testRnHostRevoke(host: NativeHandle, capability: Uint8Array): void;
   __testRnForegroundExecute(foreground: NativeHandle, command: Uint8Array): Uint8Array;
   __testRnForegroundTick(foreground: NativeHandle): void;
+  __testRnForegroundIsClosed(foreground: NativeHandle): boolean;
   __testRnForegroundSetTickScheduler(
     foreground: NativeHandle,
     callback: (urgency: string) => void,
@@ -42,18 +45,22 @@ export function createPlatformHost() {
   const nativeHost = binding.__testRnHostNew();
   return {
     abiVersion,
-    admit: (config: string) => binding.__testRnHostAdmit(nativeHost, config),
+    // NAPI bytes originate in Node's realm; JSI constructs Uint8Array in the
+    // calling runtime. Preserve that contract when the renderer uses jsdom.
+    admit: (config: string) => new Uint8Array(binding.__testRnHostAdmit(nativeHost, config)),
     beginPrivateSession: (config: string) =>
-      binding.__testRnHostBeginPrivateSession(nativeHost, config),
+      new Uint8Array(binding.__testRnHostBeginPrivateSession(nativeHost, config)),
     attachCanonicalSchema: (capability: Uint8Array, schema: string) =>
-      binding.__testRnHostAttachCanonicalSchema(nativeHost, capability, schema),
+      new Uint8Array(binding.__testRnHostAttachCanonicalSchema(nativeHost, capability, schema)),
     revoke: (capability: Uint8Array) => binding.__testRnHostRevoke(nativeHost, capability),
     close: () => binding.__testRnHostClose(nativeHost),
     openAttached(capability: Uint8Array): NativeForegroundRuntime {
       const foreground = binding.__testRnHostOpenAttached(nativeHost, capability);
       return {
-        execute: (command) => binding.__testRnForegroundExecute(foreground, command),
+        execute: (command) =>
+          new Uint8Array(binding.__testRnForegroundExecute(foreground, command)),
         tick: () => binding.__testRnForegroundTick(foreground),
+        isClosed: () => binding.__testRnForegroundIsClosed(foreground),
         setTickScheduler: (callback) =>
           binding.__testRnForegroundSetTickScheduler(foreground, callback),
         close: () => binding.__testRnForegroundClose(foreground),
@@ -68,3 +75,13 @@ export function installPlatformHost(host: ReturnType<typeof createPlatformHost>)
   });
 }
 export default { getAbiVersion: () => abiVersion };
+
+// Cross-language codec probes use the same sealed bridge as the real host tests.
+export function decodeCommandInRust(command: Uint8Array): unknown {
+  return JSON.parse(binding.__testRnDecodeForegroundCommand(command));
+}
+export function rustResponseCorpus(): Uint8Array[] {
+  return (JSON.parse(binding.__testRnForegroundResponseCorpus()) as number[][]).map((bytes) =>
+    Uint8Array.from(bytes),
+  );
+}

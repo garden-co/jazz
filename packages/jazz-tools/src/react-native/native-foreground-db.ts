@@ -1,8 +1,38 @@
+import type { MutationErrorEvent } from "../runtime/client.js";
+
+type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
+type ForegroundMutationOptions = {
+  rowId?: Uint8Array;
+  branch?: unknown;
+  head?: unknown;
+  base?: unknown;
+  updatedAtMs?: number;
+  author?: Uint8Array;
+};
+
+type ForegroundPermissionAdviceAction =
+  | { type: "insert"; table: string; cells: Uint8Array }
+  | { type: "read" | "delete"; table: string; rowId: Uint8Array }
+  | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
+
 type ForegroundCommand =
+  | { type: "permissionAdvice"; action: ForegroundPermissionAdviceAction }
   | "tick"
   | "close"
+  | { type: "disconnectNativeUpstream" }
+  | { type: "reconnectNativeUpstream" }
+  | { type: "nativeConnectionStatus" }
+  | { type: "nativeSessionMetadata" }
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
+  | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "allRelationQuery" | "subscribeRelationQuery"; queryJson: string; optionsJson: string }
+  | {
+      type: "allWithOptions" | "allRelationSnapshotWithOptions";
+      query: number;
+      optionsJson: string;
+      transaction?: number;
+    }
   | { type: "subscribe"; query: number }
   | { type: "drainSubscription"; subscription: number }
   | { type: "unsubscribe"; subscription: number }
@@ -32,7 +62,47 @@ type ForegroundCommand =
     }
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number };
+  | { type: "rollbackTransaction"; transaction: number }
+  | { type: "subscribeWithOptions"; query: number; optionsJson: string }
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | {
+      type: "stageMutation";
+      transaction: number;
+      mutation: ForegroundMutationKind;
+      table: string;
+      rowId?: Uint8Array;
+      cells: Uint8Array;
+      optionsJson: string;
+    }
+  | {
+      type: "directMutation";
+      mutation: ForegroundMutationKind;
+      table: string;
+      rowId?: Uint8Array;
+      cells: Uint8Array;
+      optionsJson: string;
+    }
+  | { type: "writeState"; txId: Uint8Array }
+  | { type: "drainMutationErrors" }
+  | {
+      type: "beginStreamingMutation";
+      mutation: "insert" | "update" | "upsert";
+      table: string;
+      rowId: Uint8Array;
+      cells: Uint8Array;
+      column: string;
+      optionsJson: string;
+    }
+  | { type: "pushStreamingMutation"; upload: number; chunk: Uint8Array }
+  | { type: "finishStreamingMutation" | "abortStreamingMutation"; upload: number }
+  | {
+      type: "updateLargeValues";
+      table: string;
+      rowId: Uint8Array;
+      patch: Uint8Array;
+      descriptorsJson: string;
+      updatedAtMs?: number;
+    };
 
 type ForegroundEvent =
   | {
@@ -41,11 +111,22 @@ type ForegroundEvent =
       settled: boolean;
       tier: string;
       delta: Uint8Array;
+      terminalOperations?: unknown[];
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
 
+type NativeConnectionStatus = {
+  type: "nativeConnectionStatus";
+  configured: boolean;
+  explicitlyOffline: boolean;
+  connected: boolean;
+};
+
 type ForegroundResponse =
+  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
+  | { type: "nativeSessionMetadata"; issuer: string; userId: string }
+  | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
   | { type: "rows"; rows: Uint8Array }
@@ -60,11 +141,19 @@ type ForegroundResponse =
   | { type: "inserted"; rowId: Uint8Array }
   | { type: "mutationStaged" }
   | { type: "transactionCommitted"; txId: Uint8Array }
-  | { type: "transactionRolledBack"; rolledBack: boolean };
+  | { type: "transactionRolledBack"; rolledBack: boolean }
+  | { type: "transactionSettled"; txId: Uint8Array }
+  | { type: "writeState"; stateJson: string }
+  | { type: "mutationErrors"; eventsJson: string }
+  | { type: "streamingMutationOpened"; upload: number }
+  | { type: "streamingMutationPushed" }
+  | { type: "streamingMutationAborted"; aborted: boolean }
+  | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array };
 
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
+  isClosed?(): boolean;
   setTickScheduler?(callback: (urgency: string) => void): void;
   close(): boolean;
 };
@@ -102,6 +191,7 @@ export const REACT_NATIVE_UNSUPPORTED_ERROR =
  */
 export class NativeForegroundDb {
   private closed = false;
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
@@ -124,7 +214,10 @@ export class NativeForegroundDb {
     });
   }
 
-  onMutationError(_callback: unknown): void {}
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    this.assertOpen();
+    this.mutationErrorCallback = callback;
+  }
 
   prepareQuery(query: Uint8Array): object {
     const response = this.execute({ type: "prepareQuery", query });
@@ -137,18 +230,23 @@ export class NativeForegroundDb {
     opts: unknown,
     openTransactionId?: string,
   ): Uint8Array | { poll(): Uint8Array | null } {
-    // ABI V1 cannot select a transaction snapshot for an all command. Fail
-    // before ticking or issuing a read rather than silently reading outside it.
-    if (openTransactionId !== undefined) return unsupported("transaction reads");
-    assertLocalReadOptions(opts);
-    // An attached foreground is an ordinary peer of the native relay. Advance
-    // one bounded relay turn before materializing its current LocalFirst
-    // snapshot. This progresses queued peer work but does not promise relay
-    // coverage: rows not yet delivered to this foreground remain absent until
-    // a later owner wake updates its local knowledge.
+    const transaction =
+      openTransactionId === undefined
+        ? undefined
+        : this.openTransaction(openTransactionId, "read").handle;
+    // An attached foreground is an ordinary peer of the native relay. One
+    // bounded relay turn admits already-persisted rows before materializing a
+    // local read; without it a newly opened foreground can only observe rows
+    // after some unrelated caller happens to tick the host.
     this.tick();
-    const response = this.execute({ type: "all", query: queryHandle(query) });
+    const response = this.execute({
+      type: "allWithOptions",
+      query: queryHandle(query),
+      optionsJson: JSON.stringify(opts ?? {}),
+      transaction,
+    });
     if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
   }
@@ -161,24 +259,76 @@ export class NativeForegroundDb {
     return this.all(query, opts, openTransactionId);
   }
 
+  allRelationSnapshot(
+    query: object,
+    opts: unknown,
+    openTransactionId?: string,
+  ): Uint8Array | { poll(): Uint8Array | null } {
+    const transaction =
+      openTransactionId === undefined
+        ? undefined
+        : this.openTransaction(openTransactionId, "read").handle;
+    this.tick();
+    const response = this.execute({
+      type: "allRelationSnapshotWithOptions",
+      query: queryHandle(query),
+      optionsJson: JSON.stringify(opts ?? {}),
+      transaction,
+    });
+    if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("allRelationSnapshot", response.type);
+  }
+
+  // The shared mutation adapter needs one exact local row, without coverage
+  // registration or hydration, to merge staged patches synchronously.
+  localCurrentRow(table: string, rowId: Uint8Array): Uint8Array {
+    const response = this.execute({ type: "localCurrentRow", table, rowId });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "rows") return unexpected("localCurrentRow", response.type);
+    return response.rows;
+  }
+
   allForIdentity(): never {
     return unsupported("trusted-serving reads");
   }
 
-  allRelationQuery(): never {
-    return unsupported("relation terminal reads");
+  allRelationQuery(queryJson: string, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
+    this.tick();
+    const response = this.execute({
+      type: "allRelationQuery",
+      queryJson,
+      optionsJson: JSON.stringify(opts ?? {}),
+    });
+    if (response.type === "rows") return response.rows;
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("allRelationQuery", response.type);
   }
 
   allRelationQueryForIdentity(): never {
     return unsupported("trusted-serving relation reads");
   }
 
-  subscribe(query: object, opts: unknown): NativeForegroundSubscription {
-    assertLocalReadOptions(opts);
+  subscribeRelationQuery(queryJson: string, opts: unknown): NativeForegroundSubscription {
     this.tick();
     const response = this.execute({
-      type: "subscribe",
+      type: "subscribeRelationQuery",
+      queryJson,
+      optionsJson: JSON.stringify(opts ?? {}),
+    });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "subscribed") return unexpected("subscribeRelationQuery", response.type);
+    return new NativeForegroundSubscription(response.subscription, this);
+  }
+
+  subscribe(query: object, opts: unknown): NativeForegroundSubscription {
+    this.tick();
+    const response = this.execute({
+      type: "subscribeWithOptions",
       query: queryHandle(query),
+      optionsJson: JSON.stringify(opts),
     });
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
@@ -187,6 +337,17 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
+    if (this.mutationErrorCallback) {
+      const response = this.execute({ type: "drainMutationErrors" });
+      if (response.type === "operationError") throw new Error(response.reason);
+      if (response.type !== "mutationErrors")
+        return unexpected("drainMutationErrors", response.type);
+      const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
+      for (const event of events)
+        queueMicrotask(() => {
+          if (!this.closed) this.mutationErrorCallback?.(event);
+        });
+    }
   }
 
   close(): boolean {
@@ -204,6 +365,38 @@ export class NativeForegroundDb {
       // platform logout revoked the capability just before this call).
       this.runtime.close();
     }
+  }
+
+  isNativeForegroundClosed(): boolean {
+    // Only a typed native closed/revoked receipt suppresses a stale wake.
+    // Missing support or any unexpected native/probe failure is not closure.
+    return this.closed || this.runtime.isClosed?.() === true;
+  }
+
+  nativeSessionMetadata(): { issuer: string; userId: string } {
+    const response = this.execute({ type: "nativeSessionMetadata" });
+    if (response.type !== "nativeSessionMetadata")
+      return unexpected("nativeSessionMetadata", response.type);
+    return response;
+  }
+
+  disconnectNativeUpstream(): void {
+    const response = this.execute({ type: "disconnectNativeUpstream" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("disconnectNativeUpstream", response.type);
+  }
+
+  reconnectNativeUpstream(): void {
+    const response = this.execute({ type: "reconnectNativeUpstream" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("reconnectNativeUpstream", response.type);
+  }
+
+  nativeConnectionStatus(): NativeConnectionStatus {
+    const response = this.execute({ type: "nativeConnectionStatus" });
+    if (response.type !== "nativeConnectionStatus")
+      return unexpected("nativeConnectionStatus", response.type);
+    return response;
   }
 
   rejectAuthUpdate(): never {
@@ -243,6 +436,68 @@ export class NativeForegroundDb {
     // to do it for us.
     if (response.closed) this.tick();
     return response.closed;
+  }
+
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "insert", table, cells });
+  }
+
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "read", table, rowId });
+  }
+
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "update", table, rowId, patch });
+  }
+
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "delete", table, rowId });
+  }
+
+  private requestPermissionAdvice(action: ForegroundPermissionAdviceAction) {
+    let response = this.execute({ type: "permissionAdvice", action });
+    if (response.type === "permissionAdvice") return response.advice;
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "pending") return unexpected("permissionAdvice", response.type);
+    const operation = response.operation;
+    let completed = false;
+    return {
+      poll: (): string | null => {
+        if (completed || this.closed) return "unknown";
+        this.tick();
+        response = this.execute({ type: "poll", operation });
+        if (response.type === "pending") return null;
+        completed = true;
+        if (response.type === "operationError") throw new Error(response.reason);
+        if (response.type !== "permissionAdvice")
+          return unexpected("permissionAdvice", response.type);
+        return response.advice;
+      },
+      cancel: (): boolean => {
+        if (completed || this.closed) return false;
+        completed = true;
+        const cancelled = this.execute({ type: "cancel", operation });
+        if (cancelled.type !== "cancelled")
+          return unexpected("permissionAdvice cancellation", cancelled.type);
+        return cancelled.cancelled;
+      },
+    };
+  }
+
+  async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {
+    if (!["local", "edge", "global"].includes(tier)) {
+      throw new Error(`Unsupported write durability tier: ${tier}`);
+    }
+    let response = this.execute({ type: "waitForTransaction", txId, tier });
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "transactionSettled")
+      return unexpected("waitForTransaction", response.type);
   }
 
   private execute(command: ForegroundCommand): ForegroundResponse {
@@ -303,11 +558,12 @@ export class NativeForegroundDb {
       type: "commitTransaction",
       transaction: transaction.handle,
     });
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "transactionCommitted")
       return unexpected("commitTransaction", response.type);
     this.transactions.delete(openTransactionId);
     transaction.closed = true;
-    return nativeWrite(response.txId);
+    return nativeWrite(this, response.txId);
   }
 
   rollbackTransaction(openTransactionId: string): void {
@@ -335,70 +591,44 @@ export class NativeForegroundDb {
   insertEncoded(
     table: string,
     cells: Uint8Array,
-    options?: { rowId?: Uint8Array },
+    options?: ForegroundMutationOptions,
   ): NativeForegroundWrite {
-    return this.withOneMutation("insert", (transaction) => {
-      const response = this.execute({
-        type: "insert",
-        transaction: transaction.handle,
-        table,
-        cells,
-        rowId: options?.rowId,
-      });
-      if (response.type !== "inserted") return unexpected("insert", response.type);
-      return response.rowId;
-    });
+    return this.directMutation("insert", table, options?.rowId, cells, options);
   }
 
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("update", (transaction) => {
-      const response = this.execute({
-        type: "update",
-        transaction: transaction.handle,
-        table,
-        rowId,
-        patch,
-      });
-      if (response.type !== "mutationStaged") return unexpected("update", response.type);
-      return rowId;
-    });
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.directMutation("update", table, rowId, patch, options);
   }
 
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("upsert", (transaction) => {
-      const response = this.execute({
-        type: "upsert",
-        transaction: transaction.handle,
-        table,
-        rowId,
-        cells,
-      });
-      if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
-      return rowId;
-    });
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.directMutation("upsert", table, rowId, cells, options);
   }
 
-  deleteEncoded(table: string, rowId: Uint8Array): NativeForegroundWrite {
-    return this.withOneMutation("delete", (transaction) => {
-      const response = this.execute({
-        type: "delete",
-        transaction: transaction.handle,
-        table,
-        rowId,
-      });
-      if (response.type !== "mutationStaged") return unexpected("delete", response.type);
-      return rowId;
-    });
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.directMutation("restore", table, rowId, cells, options);
   }
 
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
-    // The current shared command ABI has no restore discriminant. Upsert is
-    // not equivalent for a tombstoned row, so make the limitation explicit
-    // rather than silently changing restore semantics.
-    void table;
-    void rowId;
-    void cells;
-    return unsupported("restore");
+  deleteEncoded(
+    table: string,
+    rowId: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    return this.directMutation("delete", table, rowId, new Uint8Array(), options);
   }
 
   mergeableTx(): never {
@@ -408,105 +638,181 @@ export class NativeForegroundDb {
     return unsupported("JavaScript upstream transport");
   }
 
-  private withOneMutation(
-    operation: string,
-    stage: (transaction: NativeForegroundTransaction) => Uint8Array,
-  ): NativeForegroundWrite {
-    const response = this.execute({
-      type: "beginTransaction",
-      kind: "mergeable",
-    });
-    if (response.type !== "transactionOpened")
-      return unexpected(`${operation}.begin`, response.type);
-    const transaction: NativeForegroundTransaction = {
-      handle: response.transaction,
-      kind: "mergeable",
-      closed: false,
-    };
-    try {
-      const rowId = stage(transaction);
-      const committed = this.execute({
-        type: "commitTransaction",
-        transaction: transaction.handle,
-      });
-      if (committed.type !== "transactionCommitted") {
-        return unexpected(`${operation}.commit`, committed.type);
-      }
-      transaction.closed = true;
-      return nativeWrite(committed.txId, rowId);
-    } catch (error) {
-      if (!transaction.closed) {
-        try {
-          this.execute({
-            type: "rollbackTransaction",
-            transaction: transaction.handle,
-          });
-        } catch {
-          // The original command failure is the useful error. The native host
-          // retires remaining open transactions during foreground close.
-        }
-      }
-      throw error;
-    }
+  writeState(txId: Uint8Array): unknown {
+    const response = this.execute({ type: "writeState", txId });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "writeState") return unexpected("writeState", response.type);
+    return JSON.parse(response.stateJson);
   }
 
-  stageInsert(
-    transaction: NativeForegroundTransaction,
-    table: string,
-    cells: Uint8Array,
-    rowId?: Uint8Array,
-  ): Uint8Array {
-    const response = this.execute({
-      type: "insert",
-      transaction: transaction.handle,
-      table,
-      cells,
-      rowId,
-    });
-    if (response.type !== "inserted") return unexpected("insert", response.type);
-    return response.rowId;
-  }
-
-  stageUpdate(
-    transaction: NativeForegroundTransaction,
+  updateLargeValuesEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-  ): void {
+    descriptors: readonly unknown[],
+    updatedAtMs?: number,
+  ): NativeForegroundWrite {
     const response = this.execute({
-      type: "update",
-      transaction: transaction.handle,
+      type: "updateLargeValues",
       table,
       rowId,
       patch,
+      descriptorsJson: JSON.stringify(descriptors),
+      updatedAtMs,
     });
-    if (response.type !== "mutationStaged") return unexpected("update", response.type);
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "transactionCommitted")
+      return unexpected("updateLargeValues", response.type);
+    return nativeWrite(this, response.txId, rowId);
   }
 
-  stageUpsert(
-    transaction: NativeForegroundTransaction,
+  beginStreamingMutationEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-  ): void {
+    column: string,
+    mutation: "insert" | "update" | "upsert" = "insert",
+    _author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ) {
+    if (updatedAtMs !== undefined && (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0)) {
+      throw new Error("updatedAtMs must be a non-negative safe integer");
+    }
     const response = this.execute({
-      type: "upsert",
-      transaction: transaction.handle,
+      type: "beginStreamingMutation",
+      mutation,
       table,
       rowId,
       cells,
+      column,
+      optionsJson: JSON.stringify({ updatedAtMs, head, base }),
     });
-    if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "streamingMutationOpened")
+      return unexpected("beginStreamingMutation", response.type);
+    const upload = response.upload;
+    let closed = false;
+    const assertOpen = () => {
+      if (closed) throw new Error("streaming mutation is closed");
+      this.assertOpen();
+    };
+    return {
+      push: async (chunk: Uint8Array): Promise<void> => {
+        assertOpen();
+        const pushed = await this.completeMutationOperation(
+          this.execute({ type: "pushStreamingMutation", upload, chunk }),
+        );
+        if (pushed.type === "operationError") throw new Error(pushed.reason);
+        if (pushed.type !== "streamingMutationPushed")
+          return unexpected("pushStreamingMutation", pushed.type);
+      },
+      finish: async (): Promise<NativeForegroundWrite> => {
+        assertOpen();
+        let finished = this.execute({ type: "finishStreamingMutation", upload });
+        if (finished.type === "operationError") throw new Error(finished.reason);
+        closed = true;
+        while (finished.type === "pending") {
+          const operation = finished.operation;
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          this.tick();
+          finished = this.execute({ type: "poll", operation });
+        }
+        if (finished.type === "operationError") throw new Error(finished.reason);
+        if (finished.type !== "transactionCommitted")
+          return unexpected("finishStreamingMutation", finished.type);
+        return nativeWrite(this, finished.txId, rowId);
+      },
+      abort: async (): Promise<boolean> => {
+        if (closed || this.closed) return false;
+        const admitted = this.execute({ type: "abortStreamingMutation", upload });
+        if (admitted.type === "operationError") throw new Error(admitted.reason);
+        closed = true;
+        const aborted = await this.completeMutationOperation(admitted);
+        if (aborted.type === "operationError") throw new Error(aborted.reason);
+        if (aborted.type !== "streamingMutationAborted")
+          return unexpected("abortStreamingMutation", aborted.type);
+        return aborted.aborted;
+      },
+    };
   }
 
-  stageDelete(transaction: NativeForegroundTransaction, table: string, rowId: Uint8Array): void {
+  private async completeMutationOperation(
+    response: ForegroundResponse,
+  ): Promise<ForegroundResponse> {
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    return response;
+  }
+
+  private directMutation(
+    mutation: ForegroundMutationKind,
+    table: string,
+    rowId: Uint8Array | undefined,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): NativeForegroundWrite {
+    if (mutation === "upsert" && options && "branch" in options)
+      throw new Error("upsert option `branch` is not supported; use `head`");
+    if (
+      options?.updatedAtMs !== undefined &&
+      (!Number.isSafeInteger(options.updatedAtMs) || options.updatedAtMs < 0)
+    )
+      throw new Error("updatedAtMs must be a non-negative safe integer");
+    const { rowId: _rowId, author: _author, ...wireOptions } = options ?? {};
     const response = this.execute({
-      type: "delete",
-      transaction: transaction.handle,
+      type: "directMutation",
+      mutation,
       table,
       rowId,
+      cells,
+      optionsJson: JSON.stringify(wireOptions),
     });
-    if (response.type !== "mutationStaged") return unexpected("delete", response.type);
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "mutationCommitted") return unexpected(mutation, response.type);
+    return nativeWrite(this, response.txId, response.rowId);
+  }
+
+  stageMutation(
+    transaction: NativeForegroundTransaction,
+    mutation: ForegroundMutationKind,
+    table: string,
+    rowId: Uint8Array | undefined,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): Uint8Array {
+    if (transaction.closed) throw new Error("React Native native foreground transaction is closed");
+    if (mutation === "upsert" && options && "branch" in options) {
+      throw new Error(
+        "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view",
+      );
+    }
+    if (
+      options?.updatedAtMs !== undefined &&
+      (!Number.isSafeInteger(options.updatedAtMs) || options.updatedAtMs < 0)
+    ) {
+      throw new Error("updatedAtMs must be a non-negative safe integer");
+    }
+    // Identity belongs to the admitted native capability, never the command.
+    const { rowId: _rowId, author: _author, ...wireOptions } = options ?? {};
+    const response = this.execute({
+      type: "stageMutation",
+      transaction: transaction.handle,
+      mutation,
+      table,
+      rowId,
+      cells,
+      optionsJson: JSON.stringify(wireOptions),
+    });
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (mutation === "insert" && response.type === "inserted") return response.rowId;
+    if (mutation !== "insert" && response.type === "mutationStaged") return rowId!;
+    return unexpected(mutation, response.type);
   }
 
   private transaction(id: string, kind: "mergeable" | "exclusive"): NativeForegroundTransaction {
@@ -564,45 +870,57 @@ class NativeForegroundTx {
     return false;
   }
 
-  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array {
-    return this.db.stageInsert(this.transaction, table, cells, options?.rowId);
+  insertEncoded(table: string, cells: Uint8Array, options?: ForegroundMutationOptions): Uint8Array {
+    return this.db.stageMutation(this.transaction, "insert", table, options?.rowId, cells, options);
   }
-
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void {
-    this.db.stageUpdate(this.transaction, table, rowId, patch);
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "update", table, rowId, cells, options);
   }
-
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void {
-    this.db.stageUpsert(this.transaction, table, rowId, cells);
+  upsertEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "upsert", table, rowId, cells, options);
   }
-
-  deleteEncoded(table: string, rowId: Uint8Array): void {
-    this.db.stageDelete(this.transaction, table, rowId);
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: ForegroundMutationOptions,
+  ): void {
+    this.db.stageMutation(this.transaction, "restore", table, rowId, cells, options);
   }
-
-  restoreEncoded(): never {
-    return unsupported("restore");
+  deleteEncoded(table: string, rowId: Uint8Array, options?: ForegroundMutationOptions): void {
+    this.db.stageMutation(this.transaction, "delete", table, rowId, new Uint8Array(), options);
   }
 }
 
 function nativeWrite(
+  db: NativeForegroundDb,
   txId: Uint8Array<ArrayBufferLike>,
   rowId: Uint8Array<ArrayBufferLike> = new Uint8Array(16),
 ): NativeForegroundWrite {
-  const id = formatUuid(txId);
+  const id = formatTransactionId(txId);
   let closed = false;
   return {
     txId: id,
     payload: new Uint8Array(),
     rowId: rowId.slice(),
     async wait(tier: string): Promise<void> {
-      if (tier !== "local") {
-        throw new Error(
-          `React Native native foreground only confirms local writes; ${tier} settlement is not implemented`,
-        );
-      }
+      if (closed) throw new Error("write state is unavailable");
+      await db.waitForTransaction(txId, tier);
     },
-    writeState: () => ({ state: "committed" }),
+    writeState: () => {
+      if (closed) throw new Error("write state is unavailable");
+      return db.writeState(txId);
+    },
     close: () => {
       if (closed) return false;
       closed = true;
@@ -655,16 +973,6 @@ function queryHandle(query: object): number {
   return handle as number;
 }
 
-function assertLocalReadOptions(opts: unknown): void {
-  if (!opts || typeof opts !== "object") throw new Error(REACT_NATIVE_UNSUPPORTED_ERROR);
-  const entries = Object.entries(opts as Record<string, unknown>);
-  if (entries.some(([key, value]) => key !== "tier" || value !== "local")) {
-    throw new Error(
-      `${REACT_NATIVE_UNSUPPORTED_ERROR}; remote tiers, historical views, and include-deleted reads are not implemented`,
-    );
-  }
-}
-
 function unsupported(operation: string): never {
   throw new Error(`${REACT_NATIVE_UNSUPPORTED_ERROR}; ${operation} is unavailable`);
 }
@@ -675,9 +983,9 @@ function unexpected(operation: string, response: string): never {
   );
 }
 
-function formatUuid(bytes: Uint8Array<ArrayBufferLike>): string {
+function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
   if (bytes.byteLength !== 16)
     throw new Error("React Native native foreground returned malformed transaction id");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return hex;
 }

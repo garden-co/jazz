@@ -110,8 +110,9 @@ Named-cell input has the explicit v1 postcard field order `descriptor, raw`.
 Its descriptor is an ordered vector of `name: Option<String>, value_type`;
 recursive records and enum case payloads use that same name/type grammar.
 It never includes `FieldIdentity`, a compiler slot, or a local physical ID.
-The NAPI and WASM adapters call the same `binding_codec::decode_named_cells`
-reader. Before installing logical name bindings it rejects trailing or
+The NAPI, WASM, and React Native foreground adapters call the same
+`binding_codec::decode_named_cells` reader. Before installing logical name
+bindings it rejects trailing or
 noncanonical framing, noncanonical packed rows, duplicate or absent top-level
 names, unknown types, more than 1024 type/case nodes, and depth 128 or greater.
 Scalar type discriminants match the output type grammar; internal scalar tags

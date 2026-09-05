@@ -273,6 +273,8 @@ export interface Runtime {
    * disconnect before replying.
    */
   disconnect(options?: { rejectWaiters?: boolean }): Promise<void>;
+  /** Native admission owns its upstream independently of a JavaScript URL. */
+  nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -1774,7 +1776,9 @@ export class JazzClient {
 
   /** @internal */
   async waitForExclusiveTransaction(txId: TxId): Promise<void> {
-    await this.waitForTransaction(txId, this.context.serverUrl ? "global" : "local");
+    const hasAuthority =
+      Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
+    await this.waitForTransaction(txId, hasAuthority ? "global" : "local");
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {

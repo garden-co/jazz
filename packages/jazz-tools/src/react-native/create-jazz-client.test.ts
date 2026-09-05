@@ -3,6 +3,7 @@ import { schema as s } from "../index.js";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
   PostcardWriter,
+  PostcardReader,
   createRecord,
   writeDescriptor,
 } from "../runtime/native-runtime/native-codec.js";
@@ -172,14 +173,19 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     });
     let subscriptionDrainCount = 0;
     const commandTags: number[] = [];
+    const readOptions: unknown[] = [];
     nativeForegroundTest.execute = (command) => {
       commandTags.push(command[0]!);
       switch (command[0]) {
         case 2:
           return Uint8Array.of(2, 11);
-        case 3:
+        case 18: {
+          const reader = new PostcardReader(command.subarray(1));
+          expect(reader.u64()).toBe(11);
+          readOptions.push(JSON.parse(reader.string()));
           return encodeBytesResponse(3, rows);
-        case 4:
+        }
+        case 20:
           return Uint8Array.of(4, 12);
         case 5: {
           subscriptionDrainCount += 1;
@@ -194,8 +200,25 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.of(7, 1);
         case 10:
           return Uint8Array.of(11, 13);
-        case 11:
+        case 36: {
+          const reader = new PostcardReader(command.subarray(1));
+          expect(reader.u64()).toBe(0); // direct insert
+          expect(reader.string()).toBe("notes");
+          expect(reader.u64()).toBe(0); // native allocates the row id
+          expect(reader.bytes().length).toBeGreaterThan(0);
+          expect(JSON.parse(reader.string())).toEqual({ updatedAtMs: expect.any(Number) });
+          return Uint8Array.from([24, ...new Uint8Array(16).fill(4), ...rowId]);
+        }
+        case 22:
           return Uint8Array.from([12, ...rowId]);
+        case 21:
+          return Uint8Array.from([16, ...command.subarray(1, 17)]);
+        case 25:
+          return Uint8Array.of(17, 0, 0, 0);
+        case 26:
+          return encodeNativeSession("reader");
+        case 28:
+          return Uint8Array.of(20, 2, 91, 93); // mutationErrors: "[]"
         case 15:
           return Uint8Array.from([14, ...new Uint8Array(16).fill(4)]);
         case 16:
@@ -237,11 +260,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     await expect(inserted.wait({ tier: "local" })).resolves.toMatchObject({
       title: "Native note",
     });
-    await expect(inserted.txId).resolves.toMatch(/[0-9a-f-]{36}/);
-    await expect(client.db.all(app.notes, { tier: "edge" })).rejects.toThrow(
-      /remote tiers.*not implemented/,
-    );
-    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 10, 11, 15]));
+    await expect(inserted.txId).resolves.toBe("04".repeat(16));
+    await expect(client.db.all(app.notes, { tier: "edge" })).resolves.toMatchObject([
+      { title: "Native note" },
+    ]);
+    expect(readOptions).toContainEqual({ tier: "edge" });
+    expect(commandTags).toEqual(expect.arrayContaining([2, 18, 20, 5, 6, 36, 21, 26, 28]));
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");
     expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
@@ -251,10 +275,16 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     // generic TurboModule frame executor or WASM.
     expect(relay.commands).toEqual([]);
 
+    const closedBeforeShutdown = nativeForegroundTest.close.mock.calls.length;
     await client.shutdown();
     client = undefined;
     expect(commandTags).toContain(7);
-    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(1);
+    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(closedBeforeShutdown + 1);
+    // Native metadata/status preflights own temporary foregrounds too. Every
+    // opened facade must be released exactly once, including the actual Db.
+    expect(nativeForegroundTest.close.mock.calls).toHaveLength(
+      nativeForegroundTest.openAttached.mock.calls.length,
+    );
   });
 
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
@@ -269,7 +299,10 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     ]);
     nativeForegroundTest.execute = (command) => {
       if (command[0] === 2) return Uint8Array.of(2, 21);
-      if (command[0] === 3) return encodeBytesResponse(3, rows);
+      if (command[0] === 18) return encodeBytesResponse(3, rows);
+      if (command[0] === 25) return Uint8Array.of(17, 0, 0, 0);
+      if (command[0] === 26) return encodeNativeSession("old-reader");
+      if (command[0] === 28) return Uint8Array.of(20, 2, 91, 93);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);
     };
@@ -288,6 +321,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     await expect(client.db.all(app.notes)).resolves.toMatchObject([
       { title: "old admitted scope" },
     ]);
+    const closedBeforeAuthRefresh = nativeForegroundTest.close.mock.calls.length;
     expect(() =>
       client!.db.updateCookieSession({
         issuer: "https://issuer.example",
@@ -295,12 +329,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
         claims: { role: "changed-by-auth-refresh" },
         authMode: "external",
       }),
-    ).toThrow(/cannot rotate authentication in place/);
+    ).toThrow(/native-admission bound; revoke the old native scope/);
     expect(client.db.getAuthState().session?.claims.role).toBeUndefined();
     await expect(client.db.all(app.notes)).resolves.toMatchObject([
       { title: "old admitted scope" },
     ]);
-    expect(nativeForegroundTest.close).not.toHaveBeenCalled();
+    expect(nativeForegroundTest.close).toHaveBeenCalledTimes(closedBeforeAuthRefresh);
   });
 
   it("rejects an opaque relay capability when memory mode would ignore it", async () => {
@@ -422,4 +456,12 @@ function encodeBytesResponse(tag: number, bytes: Uint8Array): Uint8Array {
 function encodeSubscriptionEvents(delta: Uint8Array): Uint8Array {
   const tier = new TextEncoder().encode("local");
   return Uint8Array.from([5, 1, 0, 1, 1, tier.length, ...tier, ...varint(delta.length), ...delta]);
+}
+
+function encodeNativeSession(userId: string): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(18);
+  writer.string("https://issuer.example");
+  writer.string(userId);
+  return writer.finish();
 }

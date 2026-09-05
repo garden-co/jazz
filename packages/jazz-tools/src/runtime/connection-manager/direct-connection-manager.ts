@@ -64,6 +64,7 @@ export class DirectConnectionManager extends ConnectionManager {
 
   private connectClient(client: ConnectionManagerClientInput["client"]): void {
     const { config } = this.host;
+    if (this.host.runtimeSource?.nativeConnection) return;
     if (!config.serverUrl) return;
     client.connectTransport(config.serverUrl, {
       jwt_token: config.jwtToken,
@@ -109,11 +110,15 @@ export class DirectConnectionManager extends ConnectionManager {
   }
 
   async disconnect(): Promise<void> {
-    if (!this.host.config.serverUrl) {
+    if (!this.host.config.serverUrl && !this.host.runtimeSource?.nativeConnection?.configured()) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
-      await this.clientEntry?.client.disconnectTransport();
+      if (this.host.runtimeSource?.nativeConnection) {
+        await this.host.runtimeSource?.nativeConnection.disconnect();
+      } else {
+        await this.clientEntry?.client.disconnectTransport();
+      }
       // An in-flight or failed disconnect is not permission for a
       // RemoteIfPossible read to fall back locally.
       this.isDisconnected = true;
@@ -122,12 +127,14 @@ export class DirectConnectionManager extends ConnectionManager {
   }
 
   async reconnect(): Promise<void> {
-    if (!this.host.config.serverUrl) {
+    if (!this.host.config.serverUrl && !this.host.runtimeSource?.nativeConnection?.configured()) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
       const client = this.clientEntry?.client;
-      if (client) this.connectClient(client);
+      if (this.host.runtimeSource?.nativeConnection) {
+        await this.host.runtimeSource?.nativeConnection.reconnect();
+      } else if (client) this.connectClient(client);
       this.isDisconnected = false;
       this.publishExplicitOfflineState();
     });
