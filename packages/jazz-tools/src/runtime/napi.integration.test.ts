@@ -504,7 +504,30 @@ describe("NAPI integration", () => {
         { id: alpha.id, title: "alpha" },
         { id: alpha.id, title: "alpha" },
       ]);
+      const repeatedNamedArm = publicUnionApp.todos.where({ done: false });
+      const namedDuplicateUnion = publicUnionApp
+        .union({ first: repeatedNamedArm, second: repeatedNamedArm })
+        .orderBy("title")
+        .limit(2);
+      await expect(db.all(namedDuplicateUnion, { tier: "local" })).resolves.toMatchObject([
+        { id: alpha.id, title: "alpha" },
+        { id: alpha.id, title: "alpha" },
+      ]);
+      const offsetAcrossDuplicateBoundary = publicUnionApp
+        .union(arms)
+        .orderBy("title")
+        .offset(1)
+        .limit(2);
+      await expect(db.all(offsetAcrossDuplicateBoundary, { tier: "local" })).resolves.toMatchObject(
+        [{ id: alpha.id, title: "alpha" }, { title: "beta" }],
+      );
 
+      const limitOneUpdates: string[][] = [];
+      const stopLimitOne = db.subscribe(
+        publicUnionApp.union(arms).orderBy("title").limit(1),
+        (rows) => limitOneUpdates.push(rows.map((row) => row.title)),
+        { tier: "local" },
+      );
       const updates: string[][] = [];
       const unsubscribe = db.subscribe(
         arrayUnion,
@@ -523,7 +546,10 @@ describe("NAPI integration", () => {
         await vi.waitFor(() => expect(updates.at(-1)).toEqual(["aardvark", "alpha"]));
       } finally {
         unsubscribe();
+        stopLimitOne();
       }
+      expect(limitOneUpdates).toContainEqual(["alpha"]);
+      expect(limitOneUpdates.at(-1)).toEqual(["aardvark"]);
     } finally {
       if (context) await context.shutdown();
       await rm(dataRoot, { recursive: true, force: true });
