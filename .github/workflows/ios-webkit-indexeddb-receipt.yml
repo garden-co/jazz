@@ -144,6 +144,17 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-cache: "true"
+      - name: Exclude CI-local receipt outputs before source sealing
+        run: |
+          # The selected-ref producer fingerprints the checkout. These files
+          # are diagnostic artifacts only, so exclude them before the WebDriver
+          # capability probe writes its first receipt.
+          cat >> .git/info/exclude <<'EOF'
+          /safari-local-receipt/
+          /safaridriver-probe.log
+          /safaridriver-probe.pid
+          /safaridriver-probe-status.json
+          EOF
       - name: Probe Safari WebDriver before selected-ref build
         run: |
           set -euo pipefail
