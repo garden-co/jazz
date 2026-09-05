@@ -4968,6 +4968,11 @@ fn apply_maintained_update_to_snapshot(
             snapshot: current,
             occurrence_ids,
         } => {
+            // Validate the entire replacement facade before touching the
+            // currently published snapshot. In particular, a BTreeMap would
+            // otherwise silently collapse duplicate occurrence identities.
+            let current_index =
+                relation_snapshot_index_with_root_occurrences(&current, &occurrence_ids)?;
             let event = subscription_terminal_delta_event(
                 tier,
                 settled,
@@ -4977,8 +4982,7 @@ fn apply_maintained_update_to_snapshot(
                 &occurrence_ids,
             )?;
             *snapshot = current;
-            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
-            snapshot_index.roots = root_occurrence_positions(&occurrence_ids);
+            *snapshot_index = current_index;
             Ok(event)
         }
         LocalMaintainedViewSubscriptionUpdate::Flat { added, removed } => {
