@@ -968,7 +968,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 }
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
-  return value instanceof Uint8Array ? [...value] : value;
+  if (value instanceof Uint8Array) return [...value];
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
