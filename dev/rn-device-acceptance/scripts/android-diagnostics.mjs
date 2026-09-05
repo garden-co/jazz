@@ -8,7 +8,7 @@ const THREADTIME_DIAGNOSTIC =
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =
-  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzCoreObservation\s*:\s*(request-started|request-sent|promise-resolved|js-(?:core-await-returned|before-unsubscribe|after-unsubscribe|before-shutdown|after-shutdown)|http-status-(?:[1-5]\d{2}|invalid)|failure-(?:setup|request|response|promise)-(?:timeout|connection|dns|tls|protocol|io|state|other))\s*$/;
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzCoreObservation\s*:\s*(request-started|request-sent|promise-resolved|js-(?:before-core-await|core-await-returned|before-unsubscribe|after-unsubscribe|before-shutdown|after-shutdown)|http-status-(?:[1-5]\d{2}|invalid)|failure-(?:setup|request|response|promise)-(?:timeout|connection|dns|tls|protocol|io|state|other))\s*$/;
 
 export function androidCoreObservationDiagnostic(output) {
   const codes = new Set();

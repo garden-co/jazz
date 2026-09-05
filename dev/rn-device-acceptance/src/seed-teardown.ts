@@ -1,4 +1,5 @@
 export type SeedBoundary =
+  | "js-before-core-await"
   | "js-core-await-returned"
   | "js-before-unsubscribe"
   | "js-after-unsubscribe"

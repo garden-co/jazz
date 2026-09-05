@@ -300,7 +300,7 @@ function assertPublicClientSeedStages(source) {
     /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
-    /markFailure\("public-client-core-observation-failed"\);\s*await waitForCoreObservation\(\);/,
+    /markFailure\("public-client-core-observation-failed"\);\s*boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);/,
     /if \(completed && !failed\) markFailure\("public-client-shutdown-failed"\);\s*await finishSeedClient/,
   ]) {
     assert.match(source, pattern, "public client seed stage moved away from its native boundary");
@@ -1476,4 +1476,18 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
       app.indexOf("await diagnostic.clear()") < app.indexOf("await recordDeviceReceipt"),
     "the native receipt sink must run only after the complete JS relay lifecycle proof",
   );
+});
+
+test("Android validates the synchronous boundary sink before awaiting native Core acknowledgement", () => {
+  const foreground = read("src/high-level-foreground.ts");
+  assert.match(
+    foreground,
+    /boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);\s*boundary\?\.\("js-core-await-returned"\)/,
+  );
+  const android = read("native/android/JazzDeviceFixtureModule.kt");
+  assert.match(
+    android,
+    /@ReactMethod\(isBlockingSynchronousMethod = true\)\s*fun recordSeedBoundary/,
+  );
+  assert.match(android, /setOf\("js-before-core-await"/);
 });

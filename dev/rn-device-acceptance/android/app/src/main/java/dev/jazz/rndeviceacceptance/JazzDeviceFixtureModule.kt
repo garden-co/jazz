@@ -153,7 +153,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   // strand this fixed marker in the asynchronous native-module queue.
   @ReactMethod(isBlockingSynchronousMethod = true)
   fun recordSeedBoundary(code: String): Boolean {
-    if (code !in setOf("js-core-await-returned", "js-before-unsubscribe",
+    if (code !in setOf("js-before-core-await", "js-core-await-returned", "js-before-unsubscribe",
         "js-after-unsubscribe", "js-before-shutdown", "js-after-shutdown")) return false
     Log.e("JazzCoreObservation", code)
     return true

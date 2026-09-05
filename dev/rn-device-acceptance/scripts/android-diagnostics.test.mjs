@@ -94,6 +94,7 @@ test("synchronous seed boundaries survive alongside native acknowledgement witho
     "request-sent",
     "http-status-204",
     "promise-resolved",
+    "js-before-core-await",
     "js-core-await-returned",
     "js-before-unsubscribe",
     "js-after-unsubscribe",

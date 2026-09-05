@@ -71,6 +71,7 @@ export async function seedHighLevelForegroundRuntime(
     // independent Core reader observes the same run-bound title. This fixture
     // handshake does not widen the public RN local-only write.wait contract.
     markFailure("public-client-core-observation-failed");
+    boundary?.("js-before-core-await");
     await waitForCoreObservation();
     boundary?.("js-core-await-returned");
     completed = true;
