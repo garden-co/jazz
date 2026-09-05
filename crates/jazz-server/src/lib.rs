@@ -83,7 +83,10 @@ pub async fn run(
         || spawn_sigterm_shutdown_task(shutdown.clone()),
         || {
             bound_port_file.map_or(Ok(()), |path| {
-                std::fs::write(&path, bound_addr.port().to_string()).map_err(|error| {
+                // The bound-port file is a readiness record consumed by process
+                // tests. Terminate it so readers can distinguish a complete
+                // record from a file observed while its write is in progress.
+                std::fs::write(&path, format!("{}\n", bound_addr.port())).map_err(|error| {
                     std::io::Error::new(
                         error.kind(),
                         format!("failed to write bound port file {path}: {error}"),
