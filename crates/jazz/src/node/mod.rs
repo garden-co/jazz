@@ -313,6 +313,7 @@ mod catalogue_ingest;
 mod codec;
 mod currency;
 mod database_slot;
+mod descriptor_roles;
 mod eviction;
 mod global_state;
 mod ingest;
@@ -1399,6 +1400,108 @@ pub struct CurrentRow {
     table: groove::Intern<String>,
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
+    publication_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
+}
+
+/// Constructor-time source or logical role before publication is finalized.
+///
+/// This role is never serialized. The single publication metadata owner below
+/// carries authoritative catalogue IDs, names and application-cell visibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRowBindingRole {
+    /// A persisted CurrentRow field using Jazz's private physical name.
+    PhysicalColumn,
+    /// A query, relation, or collector field using its public logical name.
+    LogicalField,
+}
+
+/// Application cells, public provenance, and private engine metadata have
+/// different publication roles even when their names happen to be identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurrentRowResultVisibility {
+    /// A query-visible application cell, included in subscription cell comparison.
+    ApplicationCell,
+    /// Public magic provenance, available to explicit projections and row metadata.
+    PublicProvenance,
+    /// Engine bookkeeping carried only for decoding/internal identity.
+    HiddenMetadata,
+}
+
+impl CurrentRowResultVisibility {
+    /// Classify metadata constructed by the CurrentRow producer, not a wire
+    /// field guessed by a consumer. Explicit application outputs bypass this.
+    pub(crate) fn current_row_metadata(name: &str) -> Self {
+        match name {
+            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
+            _ => Self::HiddenMetadata,
+        }
+    }
+}
+
+/// One producer-owned publication binding. Runtime query slots are separate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CurrentRowPublicationField {
+    /// A source application cell with its authoritative catalogue identity.
+    StoredColumn {
+        /// Exact catalogue column identity.
+        id: PhysicalColumnId,
+        /// Application output name, including explicit aliases.
+        output_name: String,
+    },
+    /// A derived or metadata field with an explicit name and visibility.
+    ResultField {
+        /// Exact name sent to the host.
+        name: String,
+        /// Explicit application/provenance/internal role assigned by the producer.
+        visibility: CurrentRowResultVisibility,
+    },
+    /// Construction-only source cell, resolved before publication.
+    UnresolvedSourceCell {
+        /// Source application name in the selected read schema.
+        output_name: String,
+    },
+}
+
+impl CurrentRowPublicationField {
+    pub(crate) fn public_name(&self) -> Option<&str> {
+        match self {
+            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
+                Some(output_name)
+            }
+            Self::ResultField {
+                name,
+                visibility:
+                    CurrentRowResultVisibility::ApplicationCell
+                    | CurrentRowResultVisibility::PublicProvenance,
+            } => Some(name),
+            Self::ResultField {
+                visibility: CurrentRowResultVisibility::HiddenMetadata,
+                ..
+            } => None,
+        }
+    }
+
+    pub(crate) fn application_name(&self) -> Option<&str> {
+        match self {
+            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
+                Some(output_name)
+            }
+            Self::ResultField {
+                name,
+                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+            } => Some(name),
+            Self::ResultField { .. } => None,
+        }
+    }
+
+    fn role(&self) -> CurrentRowBindingRole {
+        match self {
+            Self::StoredColumn { .. } | Self::UnresolvedSourceCell { .. } => {
+                CurrentRowBindingRole::PhysicalColumn
+            }
+            Self::ResultField { .. } => CurrentRowBindingRole::LogicalField,
+        }
+    }
 }
 
 /// Work performed by the durable local-write replay lookup.
@@ -1454,10 +1557,114 @@ pub struct RelationSnapshot {
 impl CurrentRow {
     /// Construct a current row from an encoded projection record.
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
+        Self::new_with_binding_fields(table, record, CurrentRowBindingRole::PhysicalColumn)
+    }
+
+    pub(crate) fn new_with_binding_fields(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        default_field: CurrentRowBindingRole,
+    ) -> Self {
+        let binding_fields = vec![default_field; record.descriptor().fields().len()];
+        Self::new_with_explicit_binding_fields(table, record, binding_fields)
+    }
+
+    pub(crate) fn new_with_explicit_binding_fields(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_fields: Vec<CurrentRowBindingRole>,
+    ) -> Self {
+        let binding_field_names = record
+            .descriptor()
+            .fields()
+            .iter()
+            .zip(&binding_fields)
+            .map(|(field, binding)| match binding {
+                CurrentRowBindingRole::PhysicalColumn => None,
+                CurrentRowBindingRole::LogicalField => {
+                    self::query_engine::descriptor_public_name(field).map(str::to_owned)
+                }
+            })
+            .collect();
+        Self::new_with_explicit_binding_fields_and_names(
+            table,
+            record,
+            binding_fields,
+            binding_field_names,
+        )
+    }
+
+    /// Construct a row with explicit binding provenance and any logical
+    /// descriptor-name overrides supplied by its producer.
+    pub(crate) fn new_with_explicit_binding_fields_and_names(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        binding_fields: Vec<CurrentRowBindingRole>,
+        binding_field_names: Vec<Option<String>>,
+    ) -> Self {
+        assert_eq!(
+            binding_fields.len(),
+            record.descriptor().fields().len(),
+            "native binding fields must align with their record descriptor"
+        );
+        assert_eq!(
+            binding_field_names.len(),
+            binding_fields.len(),
+            "native binding field names must align with their record descriptor"
+        );
+        let publication_fields = record
+            .descriptor()
+            .fields()
+            .iter()
+            .zip(binding_fields)
+            .zip(binding_field_names)
+            .map(|((field, role), public_name)| {
+                let name = field.name.as_deref().expect("current row fields are named");
+                match role {
+                    CurrentRowBindingRole::PhysicalColumn => {
+                        match public_name
+                            .or_else(|| Self::physical_application_name(field).map(str::to_owned))
+                        {
+                            Some(output_name) => {
+                                CurrentRowPublicationField::UnresolvedSourceCell { output_name }
+                            }
+                            None => CurrentRowPublicationField::ResultField {
+                                name: name.to_owned(),
+                                visibility: CurrentRowResultVisibility::current_row_metadata(name),
+                            },
+                        }
+                    }
+                    CurrentRowBindingRole::LogicalField => {
+                        CurrentRowPublicationField::ResultField {
+                            visibility: if public_name.is_some() {
+                                CurrentRowResultVisibility::ApplicationCell
+                            } else {
+                                CurrentRowResultVisibility::current_row_metadata(name)
+                            },
+                            name: public_name.unwrap_or_else(|| name.to_owned()),
+                        }
+                    }
+                }
+            })
+            .collect();
+        Self::new_with_publication_fields(table, record, publication_fields)
+    }
+
+    pub(crate) fn new_with_publication_fields(
+        table: impl Into<String>,
+        record: OwnedRecord,
+        publication_fields: Vec<CurrentRowPublicationField>,
+    ) -> Self {
+        assert_eq!(
+            publication_fields.len(),
+            record.descriptor().fields().len(),
+            "publication fields must align with record slots"
+        );
         Self {
             table: groove::Intern::new(table.into()),
             record: std::sync::Arc::new(record),
             deleted: false,
+            publication_fields: std::sync::Arc::new(publication_fields),
         }
     }
 
@@ -1469,6 +1676,38 @@ impl CurrentRow {
     /// Whether this row was returned as a current deleted row by an opt-in read.
     pub fn is_deleted(&self) -> bool {
         self.deleted
+    }
+
+    /// The explicit native-binding provenance of every encoded descriptor field.
+    #[doc(hidden)]
+    pub fn binding_fields(&self) -> Vec<CurrentRowBindingRole> {
+        self.publication_fields
+            .iter()
+            .map(CurrentRowPublicationField::role)
+            .collect()
+    }
+
+    /// Producer-owned publication metadata, aligned with descriptor slots.
+    #[doc(hidden)]
+    pub fn publication_fields(&self) -> &[CurrentRowPublicationField] {
+        &self.publication_fields
+    }
+
+    /// Logical public names derived from the single publication metadata owner.
+    #[doc(hidden)]
+    pub fn binding_field_names(&self) -> Vec<Option<&str>> {
+        self.publication_fields
+            .iter()
+            .map(|field| match field {
+                CurrentRowPublicationField::ResultField {
+                    name,
+                    visibility:
+                        CurrentRowResultVisibility::ApplicationCell
+                        | CurrentRowResultVisibility::PublicProvenance,
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Logical table name.
@@ -1512,15 +1751,7 @@ impl CurrentRow {
 
     /// Cell value by application column name using the table schema to resolve position.
     pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
-        let _ = table
-            .columns
-            .iter()
-            .find(|candidate| candidate.name == column)?;
-        let user_name = user_column_field(column);
-        let idx = self.record.descriptor().fields().iter().position(|field| {
-            field.name.as_deref() == Some(user_name.as_str())
-                || field.name.as_deref() == Some(column)
-        })?;
+        let idx = self.application_column_index(table, column)?;
         match self.record.borrowed().get_idx(idx).ok()? {
             Value::Nullable(None) => None,
             Value::Nullable(Some(value)) => Some(*value),
@@ -1528,9 +1759,56 @@ impl CurrentRow {
         }
     }
 
+    /// Resolve an application-schema column through explicit descriptor-field
+    /// provenance. A logical field may legitimately be named `user_{column}`;
+    /// it must never shadow the physical current-row column of that name.
+    fn application_column_index(&self, table: &TableSchema, column: &str) -> Option<usize> {
+        let _ = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
+        self.application_column_index_by_name(column)
+    }
+
+    fn application_column_index_by_name(&self, column: &str) -> Option<usize> {
+        for role in [
+            CurrentRowBindingRole::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
+        ] {
+            if let Some(index) = self
+                .publication_fields
+                .iter()
+                .position(|field| field.role() == role && field.application_name() == Some(column))
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn physical_application_name(field: &records::DescriptorField) -> Option<&str> {
+        let name = self::query_engine::descriptor_public_name(field)?;
+        if field.name.as_deref() == Some(name) {
+            // This conversion is confined to the explicitly tagged physical
+            // CurrentRow boundary, never used to resolve a graph field.
+            name.strip_prefix(self::query_engine::USER_COLUMN_PREFIX)
+        } else {
+            Some(name)
+        }
+    }
+
     /// Encoded groove record backing this projected current row.
     pub fn encoded_record(&self) -> (&records::RecordDescriptor, &[u8]) {
         (self.record.descriptor(), self.record.raw())
+    }
+
+    /// Read one application field through its explicit publication binding.
+    /// Unlike a descriptor/carrier lookup this remains exact when a literal
+    /// application name equals another field's generated storage carrier.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn application_field(&self, name: &str) -> Option<Value> {
+        let index = self.application_column_index_by_name(name)?;
+        self.record.borrowed().get_idx(index).ok()
     }
 
     pub(crate) fn raw_field(&self, field: &str) -> Option<Value> {
@@ -1601,32 +1879,72 @@ impl CurrentRow {
     }
 
     pub(crate) fn project(&self, table: &TableSchema, columns: &[String]) -> Result<Self, Error> {
+        self.project_with_column_binding(table, columns, |name| {
+            self.application_column_index_by_name(name)
+        })
+    }
+
+    fn project_with_column_binding(
+        &self,
+        table: &TableSchema,
+        columns: &[String],
+        column_binding: impl Fn(&str) -> Option<usize>,
+    ) -> Result<Self, Error> {
+        let projected_public_name = |column_name: &str| -> String {
+            column_binding(column_name)
+                .and_then(|index| self.publication_fields[index].application_name())
+                .unwrap_or(column_name)
+                .to_owned()
+        };
         let selected = columns.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let projected_columns = table
             .columns
             .iter()
             .filter(|column| selected.contains(column.name.as_str()))
             .collect::<Vec<_>>();
-        let descriptor = records::RecordDescriptor::new(
-            std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
-                .chain(projected_columns.iter().map(|column| {
-                    (
-                        user_column_field(&column.name),
-                        records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                    )
-                }))
-                .chain([
-                    ("$createdBy".to_owned(), records::ValueType::String),
-                    ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::String),
-                    ("$updatedAt".to_owned(), records::ValueType::U64),
-                    ("tx_time".to_owned(), records::ValueType::U64),
-                    ("tx_node_id".to_owned(), records::ValueType::U64),
-                ]),
-        );
+        let mut descriptor_fields = vec![records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        )];
+        descriptor_fields.extend(projected_columns.iter().map(|column| {
+            let public_name = projected_public_name(&column.name);
+            records::DescriptorField::new(
+                user_column_field(&column.name),
+                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+            )
+            .with_identity(records::FieldIdentity::Name(public_name))
+        }));
+        descriptor_fields.extend([
+            records::DescriptorField::new("$createdBy", records::ValueType::String),
+            records::DescriptorField::new("$createdAt", records::ValueType::U64),
+            records::DescriptorField::new("$updatedBy", records::ValueType::String),
+            records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+            records::DescriptorField::new("tx_time", records::ValueType::U64),
+            records::DescriptorField::new("tx_node_id", records::ValueType::U64),
+        ]);
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        let row_uuid_field = self
+            .record
+            .descriptor()
+            .field_index("row_uuid")
+            .and_then(|index| {
+                self.publication_fields
+                    .get(index)
+                    .map(CurrentRowPublicationField::role)
+            })
+            .unwrap_or(CurrentRowBindingRole::LogicalField);
+        let mut binding_fields = vec![row_uuid_field];
+        let mut binding_field_names = vec![None];
         for column in projected_columns {
-            let cell = self.cell(table, &column.name);
+            let public_name = projected_public_name(&column.name);
+            let cell = column_binding(&column.name)
+                .and_then(|idx| self.record.borrowed().get_idx(idx).ok())
+                .and_then(|value| match value {
+                    Value::Nullable(None) => None,
+                    Value::Nullable(Some(value)) => Some(*value),
+                    value => Some(value),
+                });
             let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
                 match cell {
                     Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
@@ -1639,17 +1957,42 @@ impl CurrentRow {
                 Value::Nullable(cell.map(Box::new))
             };
             values.push(projected);
+            let binding = column_binding(&column.name)
+                .and_then(|index| {
+                    self.publication_fields
+                        .get(index)
+                        .map(CurrentRowPublicationField::role)
+                })
+                .unwrap_or(CurrentRowBindingRole::LogicalField);
+            binding_fields.push(binding);
+            binding_field_names.push(Some(public_name));
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
             values.push(Value::U64(provenance.created_at));
             values.push(Value::String(provenance.updated_by.canonical().to_owned()));
             values.push(Value::U64(provenance.updated_at));
+            binding_fields.extend(
+                ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
+                    .into_iter()
+                    .map(|column| {
+                        self.provenance_field_index(column)
+                            .and_then(|index| {
+                                self.publication_fields
+                                    .get(index)
+                                    .map(CurrentRowPublicationField::role)
+                            })
+                            .unwrap_or(CurrentRowBindingRole::LogicalField)
+                    }),
+            );
+            binding_field_names.extend(std::iter::repeat_n(None, 4));
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
+            binding_fields.extend([CurrentRowBindingRole::LogicalField; 4]);
+            binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
             values.push(Value::U64(time.0));
@@ -1658,11 +2001,25 @@ impl CurrentRow {
             values.push(Value::U64(0));
             values.push(Value::U64(0));
         }
+        binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
+        binding_field_names.extend(std::iter::repeat_n(None, 2));
         let raw = descriptor.create(&values)?;
-        Ok(Self::new(
+        let mut projected = Self::new_with_explicit_binding_fields_and_names(
             table.name.clone(),
             OwnedRecord::new(raw, descriptor),
-        ))
+            binding_fields,
+            binding_field_names,
+        );
+        let fields = std::sync::Arc::make_mut(&mut projected.publication_fields);
+        for field in fields {
+            let Some(name) = field.application_name() else {
+                continue;
+            };
+            if let Some(index) = self.application_column_index_by_name(name) {
+                *field = self.publication_fields[index].clone();
+            }
+        }
+        Ok(projected)
     }
 
     pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {
@@ -1732,48 +2089,12 @@ impl CurrentRow {
     }
 
     fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
-        let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        let physical_current = descriptor.field_index("schema_version").is_some()
-            && descriptor.field_index("created_by").is_some()
-            && descriptor.field_index("updated_by").is_some();
-        descriptor
-            .fields()
+        self.publication_fields
             .iter()
             .enumerate()
             .filter_map(move |(idx, field)| {
-                let name = field.name.as_ref()?.as_str();
-                let name = if name.starts_with("user_") {
-                    let name = self::query_engine::logical_user_column(name);
-                    self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
-                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
-                    name
-                } else if matches!(
-                    name,
-                    "$createdBy"
-                        | "$createdAt"
-                        | "$updatedBy"
-                        | "$updatedAt"
-                        | "branch_key"
-                        | "row_uuid"
-                        | "tx_time"
-                        | "tx_node_id"
-                        | "schema_version"
-                        | "parents"
-                        | "authored_columns"
-                        | "global_time"
-                        | "settle_position"
-                ) || name.starts_with("__jazz_")
-                    || (physical_current
-                        && matches!(
-                            name,
-                            "created_by" | "created_at" | "updated_by" | "updated_at"
-                        ))
-                {
-                    return None;
-                } else {
-                    name
-                };
+                let name = field.application_name()?;
                 let value = match borrowed.get_idx(idx).ok()? {
                     Value::Nullable(value) => value.map(|value| *value),
                     value => Some(value),
@@ -1784,39 +2105,10 @@ impl CurrentRow {
 
     #[cfg(test)]
     pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
-        let user_cells = self
-            .record
-            .descriptor()
-            .field_index("row_uuid")
-            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
-        self.record
-            .descriptor()
-            .fields()
-            .iter()
-            .enumerate()
-            .skip(user_cells)
-            .filter_map(|(idx, field)| {
-                let name = field.name.as_ref()?.as_str();
-                let name = if name.starts_with("user_") {
-                    let name = self::query_engine::logical_user_column(name);
-                    self::query_engine::aggregate_output_logical_name(name)
-                        .unwrap_or(name)
-                        .to_owned()
-                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
-                    name.to_owned()
-                } else if matches!(field.value_type, records::ValueType::Nullable(_))
-                    && !matches!(name, "authored_columns" | "settle_position")
-                {
-                    name.to_owned()
-                } else {
-                    return None;
-                };
-                let value = match self.record.borrowed().get_idx(idx).ok()? {
-                    Value::Nullable(value) => value.map(|value| *value)?,
-                    value => value,
-                };
-                Some((name, value))
-            })
+        // Expected test maps describe application cells. Compiler carrier names
+        // and metadata visibility are not an alternate publication contract.
+        self.subscription_cells()
+            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value)))
             .collect()
     }
 }
@@ -2383,12 +2675,25 @@ pub enum CatalogueActivationFailpoint {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PreparedQueryPlan {
-    Graph(GraphBuilder),
+    Graph {
+        graph: GraphBuilder,
+        output: query_engine::AppRowSchema,
+    },
     Prepared {
         shape: PreparedShapeId,
         params: Vec<PreparedQueryParam>,
+        output: query_engine::AppRowSchema,
     },
     PeerMaintainedMarker,
+}
+
+impl PreparedQueryPlan {
+    fn app_row_schema(&self) -> Option<&query_engine::AppRowSchema> {
+        match self {
+            Self::Graph { output, .. } | Self::Prepared { output, .. } => Some(output),
+            Self::PeerMaintainedMarker => None,
+        }
+    }
 }
 
 pub(crate) type PreparedQueryPlanHandle = Arc<PreparedQueryPlan>;

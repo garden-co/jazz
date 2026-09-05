@@ -25,17 +25,12 @@ pub(crate) struct AuthorizationSupportScope {
 
 fn empty_policy_filtered_current_source_graph(
     base: GraphBuilder,
-    output_fields: &[String],
+    output_fields: &[ProjectField],
 ) -> PolicyAuthorizationGraph {
     let keys = ["row_uuid".to_owned()];
     PolicyAuthorizationGraph {
         graph: GraphBuilder::join(base, empty_authorized_row_id_graph(), keys.clone(), keys)
-            .project_fields(
-                output_fields
-                    .iter()
-                    .map(|field| ProjectField::renamed(left_field(field), field.clone()))
-                    .collect::<Vec<_>>(),
-            ),
+            .project_fields(output_fields.to_vec()),
         route_fields: BTreeSet::new(),
         access_paths: BTreeMap::new(),
     }
@@ -726,12 +721,12 @@ where
             .prepared_query_plan_from_program(&program, &policy_shape, &binding)
             .await?
         {
-            PreparedQueryPlan::Graph(graph) => self
+            PreparedQueryPlan::Graph { graph, .. } => self
                 .database
                 .query_graph(graph)
                 .await
                 .map_err(Error::Groove)?,
-            PreparedQueryPlan::Prepared { shape, params } => {
+            PreparedQueryPlan::Prepared { shape, params, .. } => {
                 let values = binding_values_for_plan(
                     &binding,
                     &params,
@@ -775,6 +770,31 @@ where
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics
             .policy_authorized_source_joins += 1;
+        // Policy proof joins restore the protected source's exact descriptor.
+        // The join's prefixed carrier names are execution plumbing, not new
+        // application identities.
+        let descriptor = self.database.graph_output_descriptor(&base)?;
+        let output_fields = output_fields
+            .iter()
+            .map(|name| {
+                let field = descriptor
+                    .fields()
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some(name.as_str()))
+                    .ok_or(Error::InvalidStoredValue(
+                        "policy source output carrier is missing",
+                    ))?;
+                Ok(ProjectField {
+                    expression: groove::ivm::ProjectExpr::Field(
+                        groove::ivm::FieldRef::stored_name(left_field(name)),
+                    ),
+                    output_name: name.clone(),
+                    output_identity: field.identity.clone().ok_or(Error::InvalidStoredValue(
+                        "policy source output identity is missing",
+                    ))?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         let policy_request = match policy_request {
             Ok(policy_request) => policy_request,
             Err(Error::QueryCapability(err)) if err.contains("PolicyProofCycle") => {
@@ -783,7 +803,7 @@ where
             Err(Error::QueryCapability(_)) => {
                 return Ok(empty_policy_filtered_current_source_graph(
                     base,
-                    output_fields,
+                    &output_fields,
                 ));
             }
             Err(err) => return Err(err),
@@ -862,7 +882,7 @@ where
                     .project_fields(
                         output_fields
                             .iter()
-                            .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                            .cloned()
                             .chain(route_fields.iter().map(|field| {
                                 ProjectField::renamed(right_field(field), field.clone())
                             }))
@@ -875,10 +895,7 @@ where
         let mut join_keys = vec!["row_uuid".to_owned()];
         join_keys.extend(authorized.route_fields.iter().cloned());
         if authorized.route_fields.is_empty() {
-            let mut fields = output_fields
-                .iter()
-                .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
-                .collect::<Vec<_>>();
+            let mut fields = output_fields.to_vec();
             fields.extend(
                 binding_route_fields
                     .iter()
@@ -891,10 +908,7 @@ where
                 access_paths: BTreeMap::new(),
             });
         }
-        let mut fields = output_fields
-            .iter()
-            .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
-            .collect::<Vec<_>>();
+        let mut fields = output_fields.to_vec();
         fields.extend(
             authorized
                 .route_fields

@@ -5,7 +5,95 @@
 //! schemas used to decode those outputs.
 
 use super::*;
+use crate::node::CurrentRowPublicationField;
 use crate::node::query_eval::coerce_prepared_binding_value;
+use groove::records::{DescriptorField, FieldIdentity};
+
+fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some(field))
+        .and_then(crate::node::query_engine::descriptor_public_name)
+        .map(str::to_owned)
+}
+
+fn source_publication_field(source: &ResolvedSource, name: String) -> CurrentRowPublicationField {
+    match source.stored_column_ids.get(&name) {
+        Some(id) => CurrentRowPublicationField::StoredColumn {
+            id: *id,
+            output_name: name,
+        },
+        None => CurrentRowPublicationField::ResultField {
+            name,
+            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+        },
+    }
+}
+
+fn collect_publication_fields(
+    source: &ResolvedSource,
+    layout: &CollectLayout,
+) -> BTreeMap<String, CurrentRowPublicationField> {
+    let mut fields = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output)
+        .map(|field| {
+            let binding = match (&field.origin, &field.source_public_name) {
+                (CollectFieldOrigin::SourceRow, Some(name)) if !field.is_row_id => {
+                    source_publication_field(source, name.clone())
+                }
+                (CollectFieldOrigin::SourceRow, _) => CurrentRowPublicationField::ResultField {
+                    name: field.output.clone(),
+                    visibility: crate::node::CurrentRowResultVisibility::current_row_metadata(
+                        field.source_field.as_deref().unwrap_or(&field.output),
+                    ),
+                },
+                _ => CurrentRowPublicationField::ResultField {
+                    name: field.output.clone(),
+                    visibility: if field.is_row_id {
+                        crate::node::CurrentRowResultVisibility::HiddenMetadata
+                    } else {
+                        crate::node::CurrentRowResultVisibility::ApplicationCell
+                    },
+                },
+            };
+            (field.output.clone(), binding)
+        })
+        .collect::<BTreeMap<_, _>>();
+    fields.extend(layout.slots.iter().map(|slot| {
+        (
+            slot.collection_field.clone(),
+            CurrentRowPublicationField::ResultField {
+                name: slot.collection_field.clone(),
+                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+            },
+        )
+    }));
+    fields
+}
+
+pub(super) fn validate_app_row_publication_schema(rows: &AppRowSchema) -> CapabilityResult<()> {
+    for field in rows.descriptor.fields() {
+        let name = field.name.as_deref().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(
+                "application row descriptor has an unnamed field".to_owned(),
+            ))
+        })?;
+        if name != "row_uuid"
+            && !rows.hidden_fields.contains(name)
+            && !rows.publication_fields.contains_key(name)
+        {
+            return Err(single_gap_report(UnsupportedReason::Runtime(format!(
+                "application row field {name:?} has no publication binding"
+            ))));
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
@@ -346,6 +434,7 @@ pub(super) fn lowered_terminals(
             carrier,
             field_carriers,
             public_field_names,
+            publication_fields,
             terminal,
         ) = match app_rows.projection.clone() {
             _ if !app_rows.public_terminal => (
@@ -355,6 +444,27 @@ pub(super) fn lowered_terminals(
                 AppRowCarrier::CurrentRow,
                 BTreeMap::new(),
                 BTreeMap::new(),
+                source
+                    .row_shape
+                    .descriptor
+                    .fields()
+                    .iter()
+                    .filter_map(|field| {
+                        let carrier = field.name.clone()?;
+                        let binding = match crate::node::query_engine::descriptor_public_name(field)
+                        {
+                            Some(name) => source_publication_field(source, name.to_owned()),
+                            None => CurrentRowPublicationField::ResultField {
+                                name: carrier.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                        &carrier,
+                                    ),
+                            },
+                        };
+                        Some((carrier, binding))
+                    })
+                    .collect(),
                 AppRowTerminal::Direct,
             ),
             PayloadProjection::Tree(tree) => {
@@ -375,6 +485,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.publication_fields,
                     collected.terminal,
                 )
             }
@@ -415,17 +526,34 @@ pub(super) fn lowered_terminals(
                     .map(|field| {
                         (
                             field.name.clone(),
-                            logical_user_column(&field.name).to_owned(),
+                            descriptor
+                                .field_index(&field.name)
+                                .and_then(|index| descriptor.fields().get(index))
+                                .and_then(crate::node::query_engine::descriptor_public_name)
+                                .unwrap_or(field.name.as_str())
+                                .to_owned(),
+                        )
+                    })
+                    .collect();
+                let publication_fields = public_fields
+                    .iter()
+                    .map(|field| {
+                        let name = resolved_source_public_name(output_source, &field.name)
+                            .unwrap_or_else(|| field.name.clone());
+                        (
+                            field.name.clone(),
+                            source_publication_field(output_source, name),
                         )
                     })
                     .collect();
                 (
                     graph,
                     descriptor,
-                    BTreeSet::new(),
+                    BTreeSet::<String>::new(),
                     AppRowCarrier::Logical,
                     BTreeMap::new(),
                     public_field_names,
+                    publication_fields,
                     AppRowTerminal::Direct,
                 )
             }
@@ -450,6 +578,7 @@ pub(super) fn lowered_terminals(
                     collected.carrier,
                     collected.field_carriers,
                     collected.public_field_names,
+                    collected.publication_fields,
                     collected.terminal,
                 )
             }
@@ -468,6 +597,7 @@ pub(super) fn lowered_terminals(
                 carrier,
                 field_carriers,
                 public_field_names,
+                publication_fields,
                 terminal,
             }),
         });
@@ -904,12 +1034,20 @@ fn collect_correlated_covered_source_members(
 /// resulting stream is deliberately source-row based: no target id is later
 /// dereferenced to reconstruct a child payload.
 #[derive(Clone, Debug)]
+pub(super) enum CollectFieldOrigin {
+    SourceRow,
+    Derived,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct CollectFlatField {
     pub(super) input: String,
     pub(super) output: String,
     pub(super) value_type: ValueType,
     pub(super) output_value_type: ValueType,
     pub(super) source_field: Option<String>,
+    pub(super) source_public_name: Option<String>,
+    pub(super) origin: CollectFieldOrigin,
     pub(super) is_row_id: bool,
     pub(super) is_presence: bool,
     pub(super) is_output: bool,
@@ -942,6 +1080,7 @@ pub(super) struct CollectLayout {
 
 #[derive(Clone, Debug)]
 struct LoweredCollectByAppRows {
+    pub(super) publication_fields: BTreeMap<String, CurrentRowPublicationField>,
     pub(super) graph: GraphBuilder,
     pub(super) descriptor: RecordDescriptor,
     pub(super) hidden_fields: BTreeSet<String>,
@@ -973,8 +1112,9 @@ fn lower_collect_by_app_rows(
         &parameter_domain,
         available_fields,
     )?;
-    align_collect_root_window(&mut layout, plan)?;
+    align_collect_root_window(&mut layout, plan, root_source)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
+    let publication_fields = collect_publication_fields(root_source, &layout);
     if layout.slots.is_empty() {
         // A collect-all root preserves the source CurrentRow application-cell
         // wrappers. Explicit projections unwrap those cells to their declared
@@ -1010,14 +1150,9 @@ fn lower_collect_by_app_rows(
             .root_fields
             .iter()
             .filter(|field| field.is_output && !field.is_row_id)
-            .map(|field| {
-                (
-                    field.output.clone(),
-                    public_root_field_name(root_source, field),
-                )
-            })
+            .map(|field| (field.output.clone(), public_root_field_name(field)))
             .collect();
-        let anchor = collect_anchor_graph(visible_root, &layout)?;
+        let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
                 .iter()
@@ -1065,6 +1200,7 @@ fn lower_collect_by_app_rows(
         );
         let descriptor = collect_output_descriptor(&layout)?;
         return Ok(LoweredCollectByAppRows {
+            publication_fields,
             graph,
             descriptor,
             // Route parameters are retained in the collector record so the
@@ -1078,7 +1214,7 @@ fn lower_collect_by_app_rows(
             terminal: AppRowTerminal::RootCollector,
         });
     }
-    let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
+    let root_context = root_collect_context_graph(visible_root.clone(), root_source, &layout)?;
     let mut field_carriers = layout
         .root_fields
         .iter()
@@ -1104,12 +1240,7 @@ fn lower_collect_by_app_rows(
         .root_fields
         .iter()
         .filter(|field| field.is_output && !field.is_row_id)
-        .map(|field| {
-            (
-                field.output.clone(),
-                public_root_field_name(root_source, field),
-            )
-        })
+        .map(|field| (field.output.clone(), public_root_field_name(field)))
         .collect::<BTreeMap<_, _>>();
     public_field_names.extend(layout.slots.iter().map(|slot| {
         // Collection field names are public query-path identities. They are
@@ -1137,7 +1268,7 @@ fn lower_collect_by_app_rows(
             request,
         )?);
     }
-    let anchor = collect_anchor_graph(visible_root, &layout)?;
+    let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
     let input = GraphBuilder::union(std::iter::once(anchor).chain(association_graphs));
     let descriptor = collect_output_descriptor(&layout)?;
     let root_group = layout
@@ -1179,6 +1310,7 @@ fn lower_collect_by_app_rows(
     let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
     hidden_fields.extend(route_fields.iter().cloned());
     Ok(LoweredCollectByAppRows {
+        publication_fields,
         graph,
         descriptor,
         hidden_fields,
@@ -1251,7 +1383,7 @@ fn align_collect_join_key_types(
                     slot.order_cols = keys
                         .iter()
                         .map(|key| {
-                            let field = collect_slot_input_for_value(slot, &key.value)?;
+                            let field = collect_slot_input_for_value(slot, &key.value, child)?;
                             Ok(match key.direction {
                                 SortDirection::Asc => TopByOrder::asc(field),
                                 SortDirection::Desc => TopByOrder::desc(field),
@@ -1274,7 +1406,7 @@ fn align_collect_join_key_types(
                         .unwrap_or(TopByLimit::Unbounded);
                     slot.tie_cols = tie_breaker
                         .iter()
-                        .map(|value| collect_slot_input_for_value(slot, value))
+                        .map(|value| collect_slot_input_for_value(slot, value, child))
                         .collect::<CapabilityResult<Vec<_>>>()?;
                 }
                 _ => {}
@@ -1294,6 +1426,7 @@ fn align_collect_join_key_types(
 fn align_collect_root_window(
     layout: &mut CollectLayout,
     plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
 ) -> CapabilityResult<()> {
     let steps = match plan {
         AnalyzedQueryPlan::Linear(linear) => linear.steps.iter().collect::<Vec<_>>(),
@@ -1308,10 +1441,13 @@ fn align_collect_root_window(
     for step in steps {
         match step {
             LinearStep::OrderBy(keys) => {
+                for key in keys {
+                    retain_collect_root_value(layout, &key.value, source)?;
+                }
                 layout.root_order_cols = keys
                     .iter()
                     .map(|key| {
-                        let field = collect_root_input_for_value(layout, &key.value)?;
+                        let field = collect_root_input_for_value(layout, &key.value, source)?;
                         Ok(match key.direction {
                             SortDirection::Asc => TopByOrder::asc(field),
                             SortDirection::Desc => TopByOrder::desc(field),
@@ -1325,13 +1461,16 @@ fn align_collect_root_window(
                 tie_breaker,
                 ..
             } => {
+                for value in tie_breaker {
+                    retain_collect_root_value(layout, value, source)?;
+                }
                 layout.root_offset = u64::from(*offset);
                 layout.root_limit = limit
                     .map(|limit| TopByLimit::Finite(u64::from(limit)))
                     .unwrap_or(TopByLimit::Unbounded);
                 layout.root_tie_cols = tie_breaker
                     .iter()
-                    .map(|value| collect_root_input_for_value(layout, value))
+                    .map(|value| collect_root_input_for_value(layout, value, source))
                     .collect::<CapabilityResult<Vec<_>>>()?;
             }
             _ => {}
@@ -1361,24 +1500,56 @@ fn align_collect_root_window(
 /// Keep values used to order or slice a nested collector slot in its internal
 /// input row. They are deliberately not public payload fields: a path can
 /// order by provenance even when its projection selects only ordinary columns.
+fn retain_collect_root_value(
+    layout: &mut CollectLayout,
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<()> {
+    let Some(descriptor_field) = collect_window_source_field(source, value) else {
+        return Ok(());
+    };
+    let source_field = descriptor_field
+        .name
+        .clone()
+        .expect("source window fields are named");
+    if layout
+        .root_fields
+        .iter()
+        .any(|field| field.source_field.as_deref() == Some(source_field.as_str()))
+    {
+        return Ok(());
+    }
+    let source_value_type = descriptor_field.value_type.clone();
+    layout.root_fields.push(CollectFlatField {
+        input: format!("__collect_root_{source_field}"),
+        output: source_field.clone(),
+        value_type: source_value_type.clone(),
+        output_value_type: source_value_type,
+        source_public_name: resolved_source_public_name(source, &source_field),
+        source_field: Some(source_field),
+        origin: CollectFieldOrigin::SourceRow,
+        is_row_id: false,
+        is_presence: false,
+        is_output: false,
+    });
+    Ok(())
+}
+
+/// Keep values used to order or slice a nested collector slot in its internal
+/// input row. They are deliberately not public payload fields: a path can
+/// order by provenance even when its projection selects only ordinary columns.
 fn retain_collect_slot_value(
     slot: &mut CollectSlotLayout,
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<()> {
-    let Some(requested_field) = collect_source_field_for_value(value) else {
+    let Some(descriptor_field) = collect_window_source_field(source, value) else {
         return Ok(());
     };
-    let source_field = if source
-        .row_shape
-        .descriptor
-        .field_index(requested_field)
-        .is_some()
-    {
-        requested_field.to_owned()
-    } else {
-        user_column_field(requested_field)
-    };
+    let source_field = descriptor_field
+        .name
+        .clone()
+        .expect("source window fields are named");
     if slot
         .fields
         .iter()
@@ -1386,14 +1557,7 @@ fn retain_collect_slot_value(
     {
         return Ok(());
     }
-    let source_value_type = source_field_type(source, &source_field)
-        .cloned()
-        .ok_or_else(|| {
-            single_gap_report(UnsupportedReason::Operator(format!(
-                "collector child source {:?} does not provide window key {requested_field:?}",
-                source.row_shape.source
-            )))
-        })?;
+    let source_value_type = descriptor_field.value_type.clone();
     let prefix = slot
         .row_id_input
         .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
@@ -1413,7 +1577,9 @@ fn retain_collect_slot_value(
         output: source_field.clone(),
         value_type,
         output_value_type: source_value_type,
+        source_public_name: resolved_source_public_name(source, &source_field),
         source_field: Some(source_field),
+        origin: CollectFieldOrigin::SourceRow,
         is_row_id: false,
         is_presence: false,
         is_output: false,
@@ -1424,18 +1590,13 @@ fn retain_collect_slot_value(
 fn collect_root_input_for_value(
     layout: &CollectLayout,
     value: &NormalizedValueRef,
+    source: &ResolvedSource,
 ) -> CapabilityResult<String> {
-    match collect_source_field_for_value(value) {
+    match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => layout
             .root_fields
             .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
-            })
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
             .root_fields
@@ -1454,18 +1615,13 @@ fn collect_root_input_for_value(
 fn collect_slot_input_for_value(
     slot: &CollectSlotLayout,
     value: &NormalizedValueRef,
+    source: &ResolvedSource,
 ) -> CapabilityResult<String> {
-    match collect_source_field_for_value(value) {
+    match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => slot
             .fields
             .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
-            })
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
             .map(|candidate| candidate.input.clone()),
         None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {
             Some(slot.row_id_input.clone())
@@ -1479,20 +1635,43 @@ fn collect_slot_input_for_value(
     })
 }
 
-/// Map a normalized field reference to the canonical name retained by a
-/// resolved source. Provenance is source metadata, not a public projection
-/// field, but ordered and sliced collectors still need it as an internal key.
-fn collect_source_field_for_value(value: &NormalizedValueRef) -> Option<&str> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => Some(field),
-        NormalizedValueRef::Provenance { field, .. } => Some(match field {
+/// Resolve a window reference at the application-to-source boundary. Declared
+/// columns use their canonical CurrentRow carrier, so a logical `user_title`
+/// cannot resolve to the carrier for `title`. Derived logical fields retain
+/// their explicit descriptor identity; provenance uses its metadata carrier.
+pub(super) fn collect_window_source_field<'a>(
+    source: &'a ResolvedSource,
+    value: &NormalizedValueRef,
+) -> Option<&'a DescriptorField> {
+    let descriptor = &source.row_shape.descriptor;
+    let carrier = match value {
+        NormalizedValueRef::SourceField { field, .. } => {
+            if source
+                .table_schema
+                .columns
+                .iter()
+                .any(|column| column.name == *field)
+            {
+                user_column_field(field)
+            } else {
+                return descriptor
+                    .field_index(field)
+                    .and_then(|index| descriptor.fields().get(index));
+            }
+        }
+        NormalizedValueRef::Provenance { field, .. } => match field {
             ProvenanceField::CreatedAt => "$createdAt",
             ProvenanceField::CreatedBy => "$createdBy",
             ProvenanceField::UpdatedAt => "$updatedAt",
             ProvenanceField::UpdatedBy => "$updatedBy",
-        }),
-        _ => None,
-    }
+        }
+        .to_owned(),
+        _ => return None,
+    };
+    descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some(carrier.as_str()))
 }
 
 pub(super) fn root_join_occurrence_fields(
@@ -1642,13 +1821,20 @@ fn lowered_aggregate_terminals(
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
+    let aggregate_descriptor = aggregate_app_row_descriptor(plan, source)?;
     let aggregate_graph = if root_route_fields.is_empty() {
         graph
     } else {
         graph.project_fields(
-            available_fields
+            aggregate_descriptor
+                .fields()
                 .iter()
-                .map(ProjectField::named)
+                .map(|field| {
+                    ProjectField::named_with_identity(
+                        field.name.as_ref().expect("aggregate carrier"),
+                        field.identity.clone().expect("aggregate identity"),
+                    )
+                })
                 .chain(root_route_fields.iter().map(ProjectField::named))
                 .collect::<Vec<_>>(),
         )
@@ -1659,6 +1845,35 @@ fn lowered_aggregate_terminals(
             sink: "app_rows".to_owned(),
             graph: aggregate_graph.clone(),
             output: OutputTerminalSchema::AppRows(AppRowSchema {
+                publication_fields: {
+                    let (groups, outputs) = root_aggregate_step(plan).expect("aggregate plan");
+                    let mut fields = BTreeMap::new();
+                    for value in groups {
+                        let carrier = aggregate_source_field_name(value, source)?;
+                        let name = if matches!(value, NormalizedValueRef::RowId(_)) {
+                            "id".to_owned()
+                        } else {
+                            resolved_source_public_name(source, &carrier).ok_or_else(|| {
+                                single_gap_report(UnsupportedReason::Runtime(
+                                    "aggregate source field has no explicit application name"
+                                        .to_owned(),
+                                ))
+                            })?
+                        };
+                        fields.insert(carrier, source_publication_field(source, name));
+                    }
+                    for output in outputs {
+                        fields.insert(
+                            aggregate_output_field(&output.output.name),
+                            CurrentRowPublicationField::ResultField {
+                                name: output.output.name.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
+                            },
+                        );
+                    }
+                    fields
+                },
                 descriptor: aggregate_app_row_descriptor(plan, source)?,
                 hidden_fields: root_route_fields.clone(),
                 carrier: AppRowCarrier::Logical,
@@ -1931,14 +2146,24 @@ pub(super) fn project_source_fields_from_prefix_rewrapping_nullable(
         .descriptor
         .fields()
         .iter()
-        .filter_map(|field| field.name.as_ref())
-        .map(|field| {
-            let source_field = format!("{prefix}{field}");
-            if nullable_field == Some(field.as_str()) {
-                ProjectField::nullable(source_field, field.clone())
-            } else {
-                ProjectField::renamed(source_field, field.clone())
-            }
+        .filter_map(|field| {
+            let name = field.name.as_ref()?;
+            let source_field = FieldRef::stored_name(format!("{prefix}{name}"));
+            // This projection restores a source row after joins or policy
+            // filtering. Retain its source identity, rather than turning its
+            // private carrier spelling into a new logical application name.
+            Some(ProjectField {
+                expression: if nullable_field == Some(name.as_str()) {
+                    groove::ivm::ProjectExpr::Nullable(source_field)
+                } else {
+                    groove::ivm::ProjectExpr::Field(source_field)
+                },
+                output_name: name.clone(),
+                output_identity: field
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| FieldIdentity::Name(name.clone())),
+            })
         })
         .collect()
 }
@@ -2053,6 +2278,30 @@ fn fact_output_with_terminal(
                 row_field: source.row_shape.row_uuid_field.clone(),
                 occurrence_id_fields,
                 occurrence_union_arm_fields,
+                payload_publication_fields: payload_fields
+                    .iter()
+                    .map(|field| {
+                        let binding = if !flat_join_payload.is_empty() {
+                            CurrentRowPublicationField::ResultField {
+                                name: field.name.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
+                            }
+                        } else if let Some(name) = resolved_source_public_name(source, &field.name)
+                        {
+                            source_publication_field(source, name)
+                        } else {
+                            CurrentRowPublicationField::ResultField {
+                                name: field.name.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                        &field.name,
+                                    ),
+                            }
+                        };
+                        (field.name.clone(), binding)
+                    })
+                    .collect(),
                 payload_fields,
                 // Version witnesses may carry either a legacy physical prefix
                 // or a branch key. Only view-relative sources use that field
@@ -2218,11 +2467,12 @@ fn result_payload_fields(
         .iter()
         .filter_map(|field| {
             let name = field.name.as_ref()?;
-            (!hidden.contains(name) && !source.routing_fields.contains(name)).then(|| {
-                TypedOutputField {
-                    name: name.clone(),
-                    ty: field.value_type.clone(),
-                }
+            (name != &source.row_shape.row_uuid_field
+                && !hidden.contains(name)
+                && !source.routing_fields.contains(name))
+            .then(|| TypedOutputField {
+                name: name.clone(),
+                ty: field.value_type.clone(),
             })
         })
         .collect()
@@ -2899,6 +3149,9 @@ fn result_membership_fields(
     fields.extend(
         payload_fields
             .iter()
+            // The row identity is already the terminal's authoritative root
+            // carrier. Branch payloads also list it among their source cells.
+            .filter(|field| field.name != source.row_shape.row_uuid_field)
             .map(|field| ProjectField::named(field.name.clone())),
     );
     Ok(fields)
@@ -2919,28 +3172,45 @@ fn aggregate_app_row_descriptor(
     let mut fields = Vec::new();
     for value in group_by {
         let field = aggregate_source_field_name(value, source)?;
-        let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-            Box::new(CapabilityReport {
-                gaps: vec![UnsupportedReason::Runtime(format!(
-                    "aggregate group field {field:?} is missing from resolved descriptor"
-                ))],
-                explain: ExplainPlan::default(),
-            })
-        })?;
-        fields.push((field, value_type));
+        // `aggregate_source_field_name` has already selected a physical carrier.
+        let descriptor_field = source
+            .row_shape
+            .descriptor
+            .fields()
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some(field.as_str()))
+            .cloned()
+            .ok_or_else(|| {
+                Box::new(CapabilityReport {
+                    gaps: vec![UnsupportedReason::Runtime(format!(
+                        "aggregate group field {field:?} is missing from resolved descriptor"
+                    ))],
+                    explain: ExplainPlan::default(),
+                })
+            })?;
+        fields.push(DescriptorField {
+            name: Some(field),
+            // lower_aggregate removes the source cell-presence wrapper once
+            // before grouping. Its output schema must describe that graph.
+            value_type: aggregate_unwrapped_input_type(descriptor_field.value_type),
+            identity: descriptor_field.identity,
+        });
     }
     fields.extend(
         outputs
             .iter()
             .map(|output| {
-                Ok((
+                Ok(DescriptorField::new(
                     aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
-                ))
+                )
+                .with_identity(FieldIdentity::Name(aggregate_output_field(
+                    &output.output.name,
+                ))))
             })
             .collect::<CapabilityResult<Vec<_>>>()?,
     );
-    Ok(RecordDescriptor::new(fields))
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 fn aggregate_result_schema(
@@ -2956,10 +3226,10 @@ fn aggregate_result_schema(
             explain: ExplainPlan::default(),
         })
     })?;
-    let group_key_fields = group_by
-        .iter()
-        .map(|value| aggregate_typed_group_field(value, source))
-        .collect::<CapabilityResult<Vec<_>>>()?;
+    // Use the same typed fields as the emitted app-row descriptor. Carrier
+    // spellings are diagnostic/output metadata, never a lookup identity.
+    let descriptor = aggregate_app_row_descriptor(plan, source)?;
+    let (group_key_fields, value_fields) = descriptor.fields().split_at(group_by.len());
     Ok(AggregateResultSchema {
         synthetic: SyntheticResultMembershipSchema {
             table_field: "table_name".to_owned(),
@@ -2967,11 +3237,27 @@ fn aggregate_result_schema(
             replacement_field: "synthetic_replacement".to_owned(),
             routing_param_fields: routing_param_fields.clone(),
         },
-        group_key_fields,
-        value_fields: outputs
+        group_key_fields: group_key_fields.to_vec(),
+        group_names: group_by
             .iter()
-            .map(|output| aggregate_typed_output_field(output, source))
+            .map(|group| {
+                let carrier = aggregate_source_field_name(group, source)?;
+                if matches!(group, NormalizedValueRef::RowId(_)) {
+                    Ok("id".to_owned())
+                } else {
+                    resolved_source_public_name(source, &carrier).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "aggregate group has no declared logical name".to_owned(),
+                        ))
+                    })
+                }
+            })
             .collect::<CapabilityResult<Vec<_>>>()?,
+        value_fields: value_fields.to_vec(),
+        value_names: outputs
+            .iter()
+            .map(|output| output.output.name.clone())
+            .collect(),
         routing_param_fields,
     })
 }
@@ -3005,10 +3291,13 @@ fn aggregate_result_membership_fields(
         Value::String("aggregate_result".to_owned()),
     )];
     if let Some(group) = group_by.first() {
-        fields.push(ProjectField::renamed(
-            aggregate_source_field_name(group, source)?,
-            "synthetic_row",
-        ));
+        fields.push(ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(
+                aggregate_source_field_name(group, source)?,
+            )),
+            output_name: "synthetic_row".to_owned(),
+            output_identity: FieldIdentity::Name("synthetic_row".to_owned()),
+        });
     } else {
         fields.push(ProjectField::literal(
             "synthetic_row",
@@ -3031,44 +3320,36 @@ fn aggregate_result_membership_fields(
     }
     for group in group_by {
         let field = aggregate_source_field_name(group, source)?;
-        fields.push(ProjectField::named(field));
-    }
-    fields.extend(
-        outputs
+        let identity = source
+            .row_shape
+            .descriptor
+            .fields()
             .iter()
-            .map(|output| ProjectField::named(aggregate_output_field(&output.output.name))),
-    );
+            .find(|candidate| candidate.name.as_deref() == Some(field.as_str()))
+            .and_then(|candidate| candidate.identity.clone())
+            .unwrap_or_else(|| FieldIdentity::Name(field.clone()));
+        fields.push(ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(field.clone())),
+            output_name: field,
+            output_identity: identity,
+        });
+    }
+    fields.extend(outputs.iter().map(|output| ProjectField {
+        expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(aggregate_output_field(
+            &output.output.name,
+        ))),
+        output_name: aggregate_output_field(&output.output.name),
+        output_identity: FieldIdentity::Name(output.output.name.clone()),
+    }));
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
 }
 
-fn aggregate_typed_group_field(
-    value: &NormalizedValueRef,
-    source: &ResolvedSource,
-) -> CapabilityResult<TypedOutputField> {
-    let field = aggregate_source_field_name(value, source)?;
-    let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-        Box::new(CapabilityReport {
-            gaps: vec![UnsupportedReason::Runtime(format!(
-                "aggregate group field {field:?} is missing from resolved descriptor"
-            ))],
-            explain: ExplainPlan::default(),
-        })
-    })?;
-    Ok(TypedOutputField {
-        name: field,
-        ty: value_type,
-    })
-}
-
-fn aggregate_typed_output_field(
-    output: &AggregateExpr,
-    source: &ResolvedSource,
-) -> CapabilityResult<TypedOutputField> {
-    Ok(TypedOutputField {
-        name: aggregate_output_field(&output.output.name),
-        ty: aggregate_output_value_type(output, source)?,
-    })
+fn aggregate_unwrapped_input_type(value_type: ValueType) -> ValueType {
+    match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    }
 }
 
 fn aggregate_output_value_type(
@@ -3088,15 +3369,17 @@ fn aggregate_output_value_type(
                 })
             })?;
             let field = aggregate_source_field_name(input, source)?;
-            let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
-                Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Runtime(format!(
-                        "aggregate input field {field:?} is missing from resolved descriptor"
-                    ))],
-                    explain: ExplainPlan::default(),
-                })
-            })?;
-            Ok(match value_type {
+            let value_type = aggregate_carrier_field_type(source, &field)
+                .cloned()
+                .ok_or_else(|| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Runtime(format!(
+                            "aggregate input field {field:?} is missing from resolved descriptor"
+                        ))],
+                        explain: ExplainPlan::default(),
+                    })
+                })?;
+            Ok(match aggregate_unwrapped_input_type(value_type) {
                 ValueType::Nullable(inner) => ValueType::Nullable(inner),
                 value_type => ValueType::Nullable(Box::new(value_type)),
             })
@@ -3112,14 +3395,13 @@ fn aggregate_source_field_name(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == &source.row_shape.source => {
-            require_source_field(source, &user_column_field(field)).map_err(|gap| {
+        } if value_source == &source.row_shape.source => require_source_field(source, field)
+            .map_err(|gap| {
                 Box::new(CapabilityReport {
                     gaps: vec![gap],
                     explain: ExplainPlan::default(),
                 })
-            })
-        }
+            }),
         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
             if value_source == &source.row_shape.source =>
         {
@@ -3134,6 +3416,19 @@ fn aggregate_source_field_name(
     }
 }
 
+fn aggregate_carrier_field_type<'a>(
+    source: &'a ResolvedSource,
+    carrier: &str,
+) -> Option<&'a ValueType> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some(carrier))
+        .map(|field| &field.value_type)
+}
+
 fn version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
@@ -3146,6 +3441,30 @@ fn unprefixed_version_witness_fields_for_tagged_rows(
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
     prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "")
+}
+
+/// Witness field names identify compiler-owned source carriers, including
+/// metadata whose spelling can collide with an application column identity.
+fn bind_witness_carrier_fields(mut fields: Vec<ProjectField>) -> Vec<ProjectField> {
+    use groove::ivm::{FieldRef, ProjectExpr};
+    for field in &mut fields {
+        let source = match &mut field.expression {
+            ProjectExpr::Field(source)
+            | ProjectExpr::Nullable(source)
+            | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::EnumTagRemap { source, .. }
+            | ProjectExpr::EnumRemap { source, .. }
+            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
+            _ => None,
+        };
+        if let Some(source @ FieldRef::Name(_)) = source {
+            let FieldRef::Name(name) = source else {
+                unreachable!()
+            };
+            *source = FieldRef::stored_name(std::mem::take(name));
+        }
+    }
+    fields
 }
 
 fn prefixed_version_witness_fields_for_tagged_rows(
@@ -3201,7 +3520,7 @@ fn prefixed_version_witness_fields_for_tagged_rows(
             branch_or_prefix,
         ));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn inline_version_witness_fields_for_tagged_rows(
@@ -3241,7 +3560,7 @@ fn inline_version_witness_fields_for_tagged_rows(
     if let Some(branch_or_prefix) = version.branch_or_prefix_field {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn deletion_witness_fields_for_tagged_rows(
@@ -3282,7 +3601,7 @@ fn deletion_witness_fields_for_tagged_rows(
     {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn relation_edge_schema(
@@ -3622,4 +3941,36 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
         }
     }
     fields
+}
+
+#[cfg(test)]
+mod publication_schema_tests {
+    use super::*;
+
+    #[test]
+    fn missing_publication_binding_is_rejected_before_row_materialization() {
+        let mut schema = AppRowSchema {
+            descriptor: RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                ("_app_title", ValueType::String),
+                ("route", ValueType::String),
+            ]),
+            publication_fields: BTreeMap::from([(
+                "_app_title".to_owned(),
+                CurrentRowPublicationField::ResultField {
+                    name: "title".to_owned(),
+                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                },
+            )]),
+            hidden_fields: BTreeSet::from(["route".to_owned()]),
+            carrier: AppRowCarrier::Logical,
+            field_carriers: BTreeMap::new(),
+            public_field_names: BTreeMap::new(),
+            terminal: AppRowTerminal::Direct,
+        };
+        validate_app_row_publication_schema(&schema).expect("complete typed publication");
+        schema.publication_fields.clear();
+        let error = validate_app_row_publication_schema(&schema).unwrap_err();
+        assert!(format!("{error:?}").contains("has no publication binding"));
+    }
 }

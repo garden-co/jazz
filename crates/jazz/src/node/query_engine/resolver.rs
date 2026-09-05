@@ -127,6 +127,8 @@ pub(crate) trait SourceGraphPreparer {
 /// Concrete source selected for one logical source request.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedSource {
+    /// Catalogue-owned IDs for logical columns in the selected read schema.
+    pub(crate) stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
     /// Logical table schema after schema/lens resolution.
     pub(crate) table_schema: TableSchema,
     /// Concrete groove graph source.

@@ -40,6 +40,7 @@ fn aggregate(
         expression: column.map(|column| PlanExpr::Field(column.to_owned())),
         distinct: false,
         output_name: Some(output_name.to_owned()),
+        output_identity: None,
     }
 }
 

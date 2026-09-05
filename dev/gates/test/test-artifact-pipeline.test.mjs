@@ -419,10 +419,15 @@ test("CI uses the correctness artifact path while package builds keep release WA
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
   const localCi = readFileSync(new URL("../local-ci-equivalent.mjs", import.meta.url), "utf8");
   const consumers = readFileSync(new URL("../run-ts-consumers.mjs", import.meta.url), "utf8");
+  const ensureArtifacts = readFileSync(
+    new URL("../ensure-correctness-artifacts.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(ensureArtifacts, /spawn\("pnpm", \["build:correctness-artifacts"\]/);
   assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
   assert.match(
     localCi,
-    /native correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/,
+    /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
   );
   assert.match(
     packageJson,

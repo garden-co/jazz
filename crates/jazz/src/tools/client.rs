@@ -2819,7 +2819,7 @@ fn aggregate_public_values(
     columns
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
-            let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+            let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
@@ -3065,13 +3065,9 @@ impl PublicQueryDecoder {
                                     "unknown column {column} on table {table}"
                                 ))
                             })?;
-                        let physical_column = crate::node::query_engine::user_column_field(column);
-                        let value = row
-                            .raw_field(&physical_column)
-                            .or_else(|| row.raw_field(column))
-                            .ok_or_else(|| {
-                                JazzError::Query(format!("row missing column {column}"))
-                            })?;
+                        let value = row.application_field(column).ok_or_else(|| {
+                            JazzError::Query(format!("row missing column {column}"))
+                        })?;
                         let column_schema = &table_schema.columns.columns[position];
                         if matches!(value, CoreValue::Nullable(None)) && !column_schema.nullable {
                             return Err(JazzError::Query(format!(
@@ -4001,7 +3997,9 @@ mod tests {
                             terminal,
                         })
                     }
-                    ControlledAdmissionResult::Refused(error) => Err(NativeTransportError(error)),
+                    ControlledAdmissionResult::Refused(error) => {
+                        Err(NativeTransportError::Terminal(error))
+                    }
                 }
             })
         }
@@ -4011,7 +4009,7 @@ mod tests {
             _request: NativeTransportRequest,
         ) -> NativeCatalogueBootstrapFuture {
             Box::pin(async {
-                Err(NativeTransportError(
+                Err(NativeTransportError::Terminal(
                     "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
                 ))
             })
@@ -5183,7 +5181,9 @@ mod tests {
                     ),
                     (
                         "failed",
-                        NativeTransportTerminal::Failed(NativeTransportError("failed".to_owned())),
+                        NativeTransportTerminal::Failed(NativeTransportError::Terminal(
+                            "failed".to_owned(),
+                        )),
                     ),
                 ] {
                     let (mut first, first_admission) = successful_controlled_admission();
@@ -5495,9 +5495,9 @@ mod tests {
                 .expect("connect");
                 let observed = Arc::clone(&first.observed);
 
-                first.send(NativeTransportTerminal::Failed(NativeTransportError(
-                    "controlled terminal failure".to_owned(),
-                )));
+                first.send(NativeTransportTerminal::Failed(
+                    NativeTransportError::Terminal("controlled terminal failure".to_owned()),
+                ));
                 wait_for_terminal_observation(&observed).await;
                 wait_for_connect_count(&connector, 2).await;
                 tokio::task::yield_now().await;
@@ -5711,6 +5711,276 @@ mod tests {
         assert_eq!(values[2], CoreValue::U64(physical_ms));
         assert_eq!(values[3], CoreValue::U64(physical_ms + 1));
         assert_eq!(values[4], CoreValue::U64(created.0));
+    }
+
+    /// Alice's projected ordered windows keep `title` and `user_title`
+    /// distinct even though one public name matches the other's carrier.
+    #[tokio::test]
+    async fn projected_ordered_windows_distinguish_user_prefixed_columns() {
+        use crate::query::{OrderDirection, Query};
+
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("title", ColumnType::Text)
+                        .column("user_title", ColumnType::Text)
+                        .column("label", ColumnType::Text),
+                )
+                .build(),
+        )
+        .await;
+        for (id, title, user_title, label) in [
+            (1, "alpha", "zulu", "first by title"),
+            (2, "zulu", "alpha", "first by user_title"),
+        ] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("title" => title, "user_title" => user_title, "label" => label),
+                )
+                .expect("insert opposing sort values");
+        }
+        for (column, expected) in [
+            ("title", "first by title"),
+            ("user_title", "first by user_title"),
+        ] {
+            let rows = client
+                .query_results(
+                    Query::from("items")
+                        .order_by(column, OrderDirection::Asc)
+                        .limit(1)
+                        .select(["label"]),
+                    Some(DurabilityTier::Local),
+                )
+                .await
+                .expect("evaluate projected window");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("label"),
+                Some(&Value::Text(expected.to_owned()))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_owned_carriers_preserve_literal_storage_and_aggregate_prefix_names() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("_app_1", ColumnType::Integer)
+                        .column("score", ColumnType::Integer)
+                        .column("_app_score", ColumnType::Integer)
+                        .column("user_score", ColumnType::Integer)
+                        .column("sum_score", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        client
+            .upsert(
+                "items",
+                Uuid::from_u128(1),
+                crate::row_input!(
+                    "_app_1" => 11_i32, "score" => 1_i32, "_app_score" => 9_i32,
+                    "user_score" => 17_i32, "sum_score" => 23_i32
+                ),
+            )
+            .unwrap();
+        client
+            .upsert(
+                "items",
+                Uuid::from_u128(2),
+                crate::row_input!(
+                    "_app_1" => 12_i32, "score" => 9_i32, "_app_score" => 1_i32,
+                    "user_score" => 18_i32, "sum_score" => 24_i32
+                ),
+            )
+            .unwrap();
+        for (order, expected) in [
+            ("score", [11, 1, 9, 17, 23]),
+            ("_app_score", [12, 9, 1, 18, 24]),
+        ] {
+            let rows = client
+                .query_results(
+                    Query::from("items")
+                        .order_by(order, OrderDirection::Asc)
+                        .limit(1),
+                    Some(DurabilityTier::Local),
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            for (name, expected) in ["_app_1", "score", "_app_score", "user_score", "sum_score"]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    rows[0].get(name),
+                    Some(&Value::Integer(expected)),
+                    "{order}: {name}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_value_inputs_preserve_declared_column_identity_with_carrier_collision() {
+        use crate::query::Query;
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("state", ColumnType::Integer)
+                        .column("user_state", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        for (id, state) in [(1, 1_i32), (2, 2_i32), (3, 1_i32)] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("state" => state, "user_state" => 7_i32),
+                )
+                .unwrap();
+        }
+        for (column, sum, min, max) in [("state", 4, 1, 2), ("user_state", 21, 7, 7)] {
+            for (query, alias, expected) in [
+                (
+                    Query::from("items").sum(column),
+                    format!("sum_{column}"),
+                    sum,
+                ),
+                (
+                    Query::from("items").min(column),
+                    format!("min_{column}"),
+                    min,
+                ),
+                (
+                    Query::from("items").max(column),
+                    format!("max_{column}"),
+                    max,
+                ),
+            ] {
+                let rows = client
+                    .query_results(query, Some(DurabilityTier::Local))
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0].get(&alias),
+                    Some(&Value::Integer(expected)),
+                    "{alias}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_aggregate_preserves_declared_column_identity_with_carrier_collision() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("items")
+                        .column("state", ColumnType::Text)
+                        .column("user_state", ColumnType::Integer),
+                )
+                .build(),
+        )
+        .await;
+        for (id, state) in [(1, "alpha"), (2, "beta"), (3, "alpha")] {
+            client
+                .upsert(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("state" => state, "user_state" => 7_i32),
+                )
+                .unwrap();
+        }
+        let rows = client
+            .query_results(
+                Query::from("items")
+                    .count()
+                    .group_by("state")
+                    .order_by("state", OrderDirection::Asc),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "state has two groups; user_state has only one"
+        );
+        assert_eq!(rows[0].get("state"), Some(&Value::Text("alpha".into())));
+        assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(2)));
+        assert_eq!(rows[1].get("state"), Some(&Value::Text("beta".into())));
+        assert_eq!(rows[1].get("count"), Some(&Value::Timestamp(1)));
+        let rows = client
+            .query_results(
+                Query::from("items").count().group_by("user_state"),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("user_state"), Some(&Value::Integer(7)));
+        assert_eq!(rows[0].get("count"), Some(&Value::Timestamp(3)));
+    }
+
+    #[tokio::test]
+    async fn joined_ordered_window_keeps_root_cells_and_duplicate_occurrences() {
+        use crate::query::{OrderDirection, Query};
+        let client = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(TableSchema::builder("people").column("name", ColumnType::Text))
+                .table(TableSchema::builder("tasks").fk_column("owner", "people"))
+                .build(),
+        )
+        .await;
+        for (id, name) in [(1, "alpha"), (2, "middle"), (3, "zulu")] {
+            client
+                .upsert(
+                    "people",
+                    Uuid::from_u128(id),
+                    crate::row_input!("name" => name),
+                )
+                .unwrap();
+        }
+        for (id, owner) in [(11, 1), (12, 1), (13, 2), (14, 3)] {
+            client
+                .upsert(
+                    "tasks",
+                    Uuid::from_u128(id),
+                    crate::row_input!("owner" => ObjectId::from_uuid(Uuid::from_u128(owner))),
+                )
+                .unwrap();
+        }
+        let rows = client
+            .query_results(
+                Query::from("people")
+                    .join_via_column("tasks", "owner", "id", [])
+                    .order_by("name", OrderDirection::Desc)
+                    .offset(1)
+                    .limit(3),
+                Some(DurabilityTier::Local),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.get("name")).collect::<Vec<_>>(),
+            [
+                Some(&Value::Text("middle".into())),
+                Some(&Value::Text("alpha".into())),
+                Some(&Value::Text("alpha".into()))
+            ]
+        );
     }
 
     #[tokio::test]

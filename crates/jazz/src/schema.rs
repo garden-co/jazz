@@ -886,7 +886,7 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// Storage descriptors are schema-derived. JSON remains string-shaped to
 /// callers and operators, but its internal cell codec is distinct so a large
 /// JSON descriptor cannot be mistaken for text.
-fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+pub(crate) fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
     match column.large_value_kind {
         LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
             groove::large_values::LargeValueKind::Json,
@@ -1087,7 +1087,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1126,7 +1126,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1208,7 +1208,7 @@ impl TableSchema {
         // on the indexed subset below.
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1227,7 +1227,7 @@ impl TableSchema {
         for indexed in &indexed_columns {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
-                ["branch_key".to_owned(), format!("user_{indexed}")],
+                ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
         vec![
@@ -1273,7 +1273,7 @@ impl TableSchema {
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1337,8 +1337,9 @@ impl TableSchema {
     /// Wire records contain row payload data and immutable row provenance:
     /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
     /// Receiver-local currentness and authority-state columns are deliberately
-    /// excluded. Schema changes change this descriptor; v0 requires identical
-    /// descriptors at sender and receiver.
+    /// excluded. Schema changes change this descriptor; v1 requires identical
+    /// descriptors at sender and receiver. JSON cells retain their schema-derived
+    /// stored-scalar kind so indirect JSON is never encoded as ordinary text.
     pub fn wire_record_descriptor(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             [
@@ -1359,8 +1360,8 @@ impl TableSchema {
             .into_iter()
             .chain(self.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
+                    app_storage_column_name(&column.name),
+                    ValueType::Nullable(Box::new(storage_column_type(column))),
                 )
             })),
         )
@@ -1611,8 +1612,16 @@ fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::sch
     groove::schema::ColumnSchema::new(name, column_type)
 }
 
+/// Frozen carrier namespace used by schema-owned stored/current/wire fields.
+/// Application names are encoded by this constructor, never parsed as identity.
+pub(crate) const APP_COLUMN_PREFIX: &str = "_app_";
+
+pub(crate) fn app_storage_column_name(column: &str) -> String {
+    format!("{APP_COLUMN_PREFIX}{column}")
+}
+
 pub(crate) fn global_current_index_name(column: &str) -> String {
-    format!("by_user_{column}")
+    format!("by_app_{column}")
 }
 
 fn nodes_table() -> GrooveTableSchema {
@@ -2089,7 +2098,7 @@ mod tests {
             table
                 .columns
                 .iter()
-                .any(|column| column.name == "user_title")
+                .any(|column| column.name == "_app_title")
         );
         assert!(
             table
@@ -2522,8 +2531,8 @@ mod tests {
             registry(right.register_storage_table(), "_deletion")
         );
         assert_ne!(
-            registry(left.history_storage_table(), "user_state"),
-            registry(right.history_storage_table(), "user_state"),
+            registry(left.history_storage_table(), "_app_state"),
+            registry(right.history_storage_table(), "_app_state"),
             "structurally identical user enums must retain independent registries"
         );
     }

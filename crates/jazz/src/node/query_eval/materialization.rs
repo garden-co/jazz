@@ -206,14 +206,15 @@ where
     pub(super) fn materialize_aggregate_query_rows(
         &mut self,
         query: &crate::query::Query,
-        _table: &TableSchema,
-        deltas: groove::ivm::RecordDeltas,
+        output: &AppRowSchema,
+        deltas: &groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             rows.push(aggregate_current_row_from_record(
                 query,
-                aggregate_query_row_uuid(query, &record)?,
+                output,
+                aggregate_query_row_uuid(output, &record)?,
                 &record,
             )?);
         }
@@ -291,6 +292,20 @@ where
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
     ) -> Result<Option<CurrentRow>, Error> {
+        let mut row = self
+            .materialize_local_maintained_view_result_member_unbound(local, member)
+            .await?;
+        if let Some(row) = &mut row {
+            self.bind_current_row_columns_in_schema(local.result_schema_version, row)?;
+        }
+        Ok(row)
+    }
+
+    async fn materialize_local_maintained_view_result_member_unbound(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<CurrentRow>, Error> {
         if is_public_aggregate_result_member(
             member,
             local.result_table.as_str(),
@@ -303,7 +318,13 @@ where
                     "aggregate result member is missing its payload",
                 ))?;
             return self
-                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .current_row_from_aggregate_result_payload(
+                    local.result_schema_version,
+                    &local.result_query,
+                    local.terminal_schemas.aggregate_app_row_schema()?,
+                    member,
+                    payload,
+                )
                 .map(Some);
         }
         let Some(entry) = member.as_row() else {
@@ -324,13 +345,21 @@ where
                     "flat joined result member is missing its tuple payload",
                 ))?;
             return self
-                .current_row_from_result_payload(&table, payload)
+                .current_row_from_result_payload(
+                    &table,
+                    payload,
+                    local.terminal_schemas.current_payload_schema()?,
+                )
                 .map(Some);
         }
         if local.result_select.is_some()
             && let Some(payload) = local.result_payloads.get(member)
         {
-            let mut row = self.current_row_from_result_payload(&table, payload)?;
+            let mut row = self.current_row_from_result_payload(
+                &table,
+                payload,
+                local.terminal_schemas.current_payload_schema()?,
+            )?;
             if let Some(columns) = &local.result_select {
                 row = row.project(&table, columns)?;
             }
@@ -419,7 +448,13 @@ where
                     "aggregate result member is missing its payload",
                 ))?;
             return self
-                .current_row_from_aggregate_result_payload(&local.result_query, member, payload)
+                .current_row_from_aggregate_result_payload(
+                    local.result_schema_version,
+                    &local.result_query,
+                    local.terminal_schemas.aggregate_app_row_schema()?,
+                    member,
+                    payload,
+                )
                 .map(Some);
         }
         let Some(entry) = member.as_row() else {
@@ -438,7 +473,11 @@ where
                     "flat joined result member is missing its tuple payload",
                 ))?;
             return self
-                .current_row_from_result_payload(&table, payload)
+                .current_row_from_result_payload(
+                    &table,
+                    payload,
+                    local.terminal_schemas.current_payload_schema()?,
+                )
                 .map(Some);
         }
         let tx_versions = self
@@ -633,77 +672,41 @@ where
             return Ok(None);
         };
         let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
-        current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
+        let mut row = current_row_from_materialized_cells(&read_table, version, &cells)?;
+        self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
+        Ok(Some(row))
     }
 
     fn current_row_from_aggregate_result_payload(
         &mut self,
+        read_schema: SchemaVersionId,
         query: &crate::query::Query,
+        output: &AppRowSchema,
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
-        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
-            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        if payload_descriptor
-            .fields()
-            .iter()
-            .any(|field| field.name.is_none())
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload descriptor field must be named",
-            ));
-        }
-        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
-        aggregate_current_row_from_record(
+        let decoded = crate::node::descriptor_roles::decode_aggregate_payload_record(
+            payload,
+            aggregate_output_schema(output)?,
+        )?;
+        let payload_record = decoded.borrowed();
+        let mut row = aggregate_current_row_from_record(
             query,
+            output,
             aggregate_result_member_row_uuid(member)?,
             &payload_record,
-        )
+        )?;
+        self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
+        Ok(row)
     }
 
     pub(super) fn current_row_from_result_payload(
         &mut self,
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,
+        schema: &crate::node::query_engine::ResultMembershipSchema,
     ) -> Result<CurrentRow, Error> {
-        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
-            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        if payload_descriptor
-            .fields()
-            .iter()
-            .any(|field| field.name.is_none())
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload descriptor field must be named",
-            ));
-        }
-        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
-        let row_uuid_idx = payload_descriptor
-            .field_index("row_uuid")
-            .or_else(|| payload_descriptor.field_index("id"))
-            .ok_or(Error::InvalidStoredValue(
-                "result payload is missing row identity",
-            ))?;
-        let row_uuid = payload_record.get_uuid(row_uuid_idx)?;
-        let mut descriptor_fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
-        let mut values = vec![Value::Uuid(row_uuid)];
-        for (index, field) in payload_descriptor.fields().iter().enumerate() {
-            let Some(name) = &field.name else {
-                continue;
-            };
-            if name == "row_uuid" || name == "id" {
-                continue;
-            }
-            descriptor_fields.push((name.clone(), field.value_type.clone()));
-            values.push(payload_record.get_idx(index)?);
-        }
-        let descriptor = RecordDescriptor::new(descriptor_fields);
-        let raw = descriptor.create(&values)?;
-        let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
-        if row.raw_field("__flat_join_row_1").is_some() {
-            return Ok(row);
-        }
-        self.materialize_current_row(table, row)
+        crate::node::descriptor_roles::decode_current_payload_record(&table.name, payload, schema)
     }
 
     pub(super) async fn materialize_relation_snapshot_from_query_engine(
@@ -711,8 +714,9 @@ where
         shape: &ValidatedQuery,
         read_view: &ReadViewSpec,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<RelationSnapshot, Error> {
-        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots)?;
+        let root_rows = self.materialize_relation_snapshot_root_rows(shape, snapshots, program)?;
         let root_count = root_rows.len();
         // Groove's app-rows terminal is the sole structured-output owner.
         // Jazz transports its recursive roots; relation facts are not a second
@@ -990,12 +994,27 @@ where
         &mut self,
         shape: &ValidatedQuery,
         snapshots: &MultisinkDeltas,
+        program: &QueryProgram,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(app_rows) = snapshots.get(JAZZ_APP_ROWS_SINK) else {
             return Err(Error::QueryLowering(
                 "relation snapshot program did not emit app rows".to_owned(),
             ));
         };
+        if shape.query().aggregate.is_some() {
+            // Aggregate terminals own synthetic result identities and public
+            // bindings. Decoding these as source-table rows would turn count
+            // aliases into unresolved catalogue columns.
+            let output = materialization_app_row_schema(None, Some(program))?;
+            let mut rows =
+                self.materialize_aggregate_query_rows(shape.query(), &output, app_rows)?;
+            self.finish_engine_query_rows_in_schema(
+                shape.query(),
+                shape.schema_version(),
+                &mut rows,
+            )?;
+            return Ok(rows);
+        }
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
             .clone();
@@ -1008,8 +1027,97 @@ where
         }
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
+        for row in &mut rows {
+            if shape.query().array_subqueries.is_empty() {
+                self.bind_current_row_columns_in_schema(shape.schema_version(), row)?;
+            } else {
+                Self::bind_compiled_app_row_fields(row, program)?;
+            }
+        }
         self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
+    }
+
+    fn bind_compiled_app_row_fields(
+        row: &mut CurrentRow,
+        program: &QueryProgram,
+    ) -> Result<(), Error> {
+        let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+        let schema = outputs
+            .iter()
+            .find_map(|output| match output {
+                OutputTerminalSchema::AppRows(schema) => Some(schema),
+                _ => None,
+            })
+            .ok_or(Error::InvalidStoredValue(
+                "compiled query has no application row schema",
+            ))?;
+        Self::bind_app_row_schema_fields(row, schema)
+    }
+
+    pub(super) fn bind_app_row_schema_fields(
+        row: &mut CurrentRow,
+        schema: &AppRowSchema,
+    ) -> Result<(), Error> {
+        row.publication_fields = std::sync::Arc::new(
+            row.record
+                .descriptor()
+                .fields()
+                .iter()
+                .map(|field| {
+                    let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                        "application row field is unnamed",
+                    ))?;
+                    Ok(schema
+                        .publication_fields
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| CurrentRowPublicationField::ResultField {
+                            name: name.to_owned(),
+                            visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
+                        }))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        );
+        Ok(())
+    }
+
+    pub(in crate::node) fn bind_current_row_columns_in_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        row: &mut CurrentRow,
+    ) -> Result<(), Error> {
+        if !row.publication_fields.iter().any(|field| {
+            matches!(
+                field,
+                CurrentRowPublicationField::UnresolvedSourceCell { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(row.table()))
+            .ok_or(Error::InvalidStoredValue(
+                "native row has no read-schema physical mapping",
+            ))?;
+        for field in std::sync::Arc::make_mut(&mut row.publication_fields) {
+            if let CurrentRowPublicationField::UnresolvedSourceCell { output_name } = field {
+                let id = *mapping
+                    .columns
+                    .get(output_name)
+                    .ok_or(Error::InvalidStoredValue(
+                        "source application cell has no catalogue column identity",
+                    ))?;
+                *field = CurrentRowPublicationField::StoredColumn {
+                    id,
+                    output_name: output_name.clone(),
+                };
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn finish_engine_query_rows_in_schema(
@@ -1018,6 +1126,9 @@ where
         schema_version: SchemaVersionId,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<(), Error> {
+        for row in rows.iter_mut() {
+            self.bind_current_row_columns_in_schema(schema_version, row)?;
+        }
         if query.aggregate.is_some() {
             self.apply_query_order_in_schema(query, schema_version, rows)?;
             apply_query_window(query, rows);
@@ -1065,21 +1176,11 @@ where
                 },
             );
         } else if query.aggregate.is_some() {
-            paired.sort_by(
+            sort_aggregate_rows(
+                query,
+                &mut paired,
+                |(row, _)| row,
                 |(left_row, left_occurrence), (right_row, right_occurrence)| {
-                    for order in &query.order_by {
-                        let ordering = compare_optional_values(
-                            aggregate_row_cell(left_row, query, &order.column),
-                            aggregate_row_cell(right_row, query, &order.column),
-                        );
-                        let ordering = match order.direction {
-                            OrderDirection::Asc => ordering,
-                            OrderDirection::Desc => ordering.reverse(),
-                        };
-                        if ordering != Ordering::Equal {
-                            return ordering;
-                        }
-                    }
                     left_row
                         .row_uuid()
                         .to_bytes()
@@ -1087,7 +1188,7 @@ where
                         .then_with(|| left_row.record.raw().cmp(right_row.record.raw()))
                         .then_with(|| left_occurrence.cmp(right_occurrence))
                 },
-            );
+            )?;
         } else {
             let table = table.ok_or(Error::InvalidStoredValue(
                 "ordered maintained rows are missing their table schema",
@@ -1135,22 +1236,12 @@ where
         }
         sort_current_rows(rows);
         if query.aggregate.is_some() {
-            rows.sort_by(|left, right| {
-                for order in &query.order_by {
-                    let ordering = compare_optional_values(
-                        aggregate_row_cell(left, query, &order.column),
-                        aggregate_row_cell(right, query, &order.column),
-                    );
-                    let ordering = match order.direction {
-                        OrderDirection::Asc => ordering,
-                        OrderDirection::Desc => ordering.reverse(),
-                    };
-                    if ordering != Ordering::Equal {
-                        return ordering;
-                    }
-                }
-                left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes())
-            });
+            sort_aggregate_rows(
+                query,
+                rows,
+                |row| row,
+                |left, right| left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes()),
+            )?;
             return Ok(());
         }
         let table = self.table_in_schema(&query.table, schema_version)?;
@@ -1225,7 +1316,17 @@ where
                                 "collector terminal key cannot identify its root occurrence",
                             )
                         })?,
-                        CurrentRow::new(local.result_table.clone(), record),
+                        CurrentRow::new_with_publication_fields(
+                            local.result_table.clone(),
+                            record,
+                            crate::db::terminal_root_publication_fields(
+                                local
+                                    .terminal_root_layout()
+                                    .ok_or(Error::InvalidStoredValue(
+                                        "collector terminal has no root layout",
+                                    ))?,
+                            ),
+                        ),
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;

@@ -88,7 +88,7 @@ fn scalar_inner_include_preserves_nullable_root_carrier_descriptor() {
     assert_eq!(runtime_rows.descriptor, app_rows.descriptor);
     let todo = runtime_rows
         .descriptor
-        .field_index("user_todo")
+        .field_index("_app_todo")
         .expect("whole-row terminal retains the source FK");
     assert_eq!(
         runtime_rows.descriptor.fields()[todo].value_type,
@@ -261,7 +261,7 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
         panic!("tags must contain records");
     };
     assert!(row.field_index("title").is_some());
-    assert!(row.field_index("user_title").is_none());
+    assert!(row.field_index("_app_title").is_none());
     assert!(row.field_index("$createdAt").is_some());
     assert!(row.field_index("$updatedAt").is_some());
     assert!(row.field_index("$createdBy").is_none());
@@ -423,7 +423,7 @@ fn shape_default_collector_retains_current_row_provenance_window_keys() {
     assert_eq!(output.len(), 1);
     let title_field = schema
         .descriptor
-        .field_index("user_title")
+        .field_index("_app_title")
         .expect("current row title field");
     assert_eq!(
         output[0].0[title_field],
@@ -976,7 +976,7 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
                             GraphBuilder::UnwrapNullable { input, field }
                                 if matches!(
                                     field,
-                                    groove::ivm::FieldRef::Name(name) if name == "user_todo"
+                                    groove::ivm::FieldRef::Name(name) if name == "_app_todo"
                                 )
                                     && matches!(
                                         input.as_ref(),
@@ -990,7 +990,7 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
                         )
                         && matches!(
                             right_on.first(),
-                            Some(groove::ivm::FieldRef::Name(name)) if name == "user_todo"
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "_app_todo"
                         )
                         && left_on.len() == right_on.len()
                         && left_on.iter().skip(1).eq(right_on.iter().skip(1))
@@ -1054,7 +1054,7 @@ fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
                             GraphBuilder::UnwrapNullable { input, field }
                                 if matches!(
                                     field,
-                                    groove::ivm::FieldRef::Name(name) if name == "user_todo"
+                                    groove::ivm::FieldRef::Name(name) if name == "_app_todo"
                                 )
                                     && matches!(
                                         input.as_ref(),
@@ -1068,7 +1068,7 @@ fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
                         )
                         && matches!(
                             right_on.first(),
-                            Some(groove::ivm::FieldRef::Name(name)) if name == "user_todo"
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "_app_todo"
                         )
                         && left_on.len() == right_on.len()
                         && left_on.iter().skip(1).eq(right_on.iter().skip(1))
@@ -1129,7 +1129,7 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
                     right_on,
                     ..
                 } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "_app_todo")
             )
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;

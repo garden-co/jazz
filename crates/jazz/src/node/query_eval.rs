@@ -17,7 +17,7 @@ use groove::ivm::{
     StaticScanSpec,
 };
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
+use groove::records::{BorrowedRecord, DescriptorField, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
@@ -46,10 +46,10 @@ use super::query_engine::{
     SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
     SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
-    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, prepare_and_lower_query_program,
-    query_program_source_requests, right_field, route_param_field, user_column_field,
+    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column, aggregate_output_field,
+    authorized_deletion_preimage_source_request, claim_param_field, claim_path_from_param_field,
+    left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
+    route_param_field, user_column_field,
 };
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
@@ -78,7 +78,8 @@ pub(crate) use prepared_bindings::coerce_prepared_binding_value;
 use prepared_bindings::*;
 use query_read_sets::*;
 use query_result_rows::{
-    aggregate_query_row_uuid, aggregate_result_table, aggregate_row_cell, compare_optional_values,
+    aggregate_output_schema, aggregate_query_row_uuid, aggregate_record_field_index,
+    aggregate_result_table, compare_optional_values, sort_aggregate_rows,
 };
 
 #[cfg(test)]
@@ -1518,6 +1519,7 @@ where
         };
         let policy = self.query_program_policy_context(identity);
         let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
+        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -1527,7 +1529,7 @@ where
                 .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
-                PreparedQueryPlan::Prepared { shape, params } => {
+                PreparedQueryPlan::Prepared { shape, params, .. } => {
                     let values = binding_values_for_plan(
                         binding,
                         params,
@@ -1539,7 +1541,7 @@ where
                         JAZZ_APP_ROWS_SINK,
                     )
                 }
-                PreparedQueryPlan::Graph(graph) => self
+                PreparedQueryPlan::Graph { graph, .. } => self
                     .database
                     .query_graph(graph.clone())
                     .await
@@ -1564,7 +1566,7 @@ where
         let deltas = deltas_result?;
         retire_result?;
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
         } else if shape.query().flat_join.is_some() {
             deltas
                 .iter()
@@ -1586,6 +1588,11 @@ where
             }
             rows
         };
+        if shape.query().aggregate.is_none() {
+            for row in &mut rows {
+                Self::bind_app_row_schema_fields(row, &app_output)?;
+            }
+        }
         // The graph used for synchronous materialization intentionally retains
         // physical provenance fields so policy witnesses can
         // be resolved above.  Do not let that internal descriptor cross the
@@ -1599,7 +1606,7 @@ where
         // it.  Flat rows still need this boundary to remove materializer-only
         // physical fields.
         if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
-            normalize_public_current_rows(&table_schema, &mut rows)?;
+            normalize_public_current_rows(shape.query(), &table_schema, &mut rows)?;
         }
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -1709,6 +1716,7 @@ where
         profile.select_plan = phase_started.elapsed();
 
         let phase_started = Instant::now();
+        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -1718,7 +1726,7 @@ where
                 .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
-                PreparedQueryPlan::Prepared { shape, params } => {
+                PreparedQueryPlan::Prepared { shape, params, .. } => {
                     let values = binding_values_for_plan(
                         binding,
                         params,
@@ -1730,7 +1738,7 @@ where
                         JAZZ_APP_ROWS_SINK,
                     )
                 }
-                PreparedQueryPlan::Graph(graph) => self
+                PreparedQueryPlan::Graph { graph, .. } => self
                     .database
                     .query_graph(graph.clone())
                     .await
@@ -1745,7 +1753,7 @@ where
 
         let phase_started = Instant::now();
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
@@ -1756,6 +1764,11 @@ where
             }
             rows
         };
+        if shape.query().aggregate.is_none() {
+            for row in &mut rows {
+                Self::bind_app_row_schema_fields(row, &app_output)?;
+            }
+        }
         profile.decode_materialize = phase_started.elapsed();
 
         let query = shape.query();
@@ -2102,7 +2115,11 @@ where
             .await
             .map_err(Error::Groove)?;
         if query.aggregate.is_some() {
-            self.materialize_aggregate_query_rows(query, &table, deltas)
+            self.materialize_aggregate_query_rows(
+                query,
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )
         } else {
             self.materialize_include_deleted_query_rows(table, deltas)
         }
@@ -2401,7 +2418,7 @@ where
         };
         let snapshots = snapshots_result?;
         retire_result?;
-        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
+        self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots, &program)
             .await
     }
 
@@ -2667,7 +2684,7 @@ where
             .await?;
         let policy = self.query_program_policy_context(identity);
         let deltas = match plan {
-            PreparedQueryPlan::Prepared { shape, params } => {
+            PreparedQueryPlan::Prepared { shape, params, .. } => {
                 let values = binding_values_for_plan(
                     binding,
                     &params,
@@ -2676,7 +2693,7 @@ where
                 )?;
                 self.bind_disposable_shape_snapshot(shape, &values).await?
             }
-            PreparedQueryPlan::Graph(graph) => self
+            PreparedQueryPlan::Graph { graph, .. } => self
                 .database
                 .query_graph(graph)
                 .await
@@ -2720,7 +2737,11 @@ where
             .await
             .map_err(Error::Groove)?;
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &table, deltas)?
+            self.materialize_aggregate_query_rows(
+                shape.query(),
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )?
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)?
         };
@@ -3010,6 +3031,7 @@ where
                 shape,
                 &ReadViewSpec::default(),
                 &snapshots,
+                &program,
             )
             .await?;
         let predicate_read = PredicateRead {
@@ -3895,7 +3917,10 @@ where
             .await
             .map_err(Error::Groove)?;
         let subscription_id = subscription.id();
-        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        let snapshot = match futures::future::poll_fn(|cx| subscription.poll_next_event(cx)).await {
+            GrooveSubscriptionEvent::Update(update) => Ok(update.deltas),
+            GrooveSubscriptionEvent::Error(error) => Err(Error::Groove(error.into())),
+        };
         self.database.unsubscribe(subscription_id);
         snapshot
     }
@@ -3924,7 +3949,10 @@ where
             }
         };
         let subscription_id = subscription.id();
-        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        let snapshot = match futures::future::poll_fn(|cx| subscription.poll_next_event(cx)).await {
+            GrooveSubscriptionEvent::Update(update) => Ok(update.deltas),
+            GrooveSubscriptionEvent::Error(error) => Err(Error::Groove(error.into())),
+        };
         self.database.unsubscribe(subscription_id);
         self.database
             .retire_prepared_shape(shape)
@@ -3942,60 +3970,73 @@ where
 /// they expose the same synthetic `CurrentRow` descriptor.
 fn aggregate_current_row_from_record(
     query: &crate::query::Query,
+    output: &AppRowSchema,
     row_uuid: RowUuid,
     record: &BorrowedRecord<'_>,
 ) -> Result<CurrentRow, Error> {
-    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    let mut fields = vec![DescriptorField::new("row_uuid", ValueType::Uuid)];
     let mut values = vec![Value::Uuid(row_uuid.0)];
+    let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
+        name: "row_uuid".to_owned(),
+        visibility: CurrentRowResultVisibility::HiddenMetadata,
+    }];
     let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
         "aggregate record has no aggregate query shape",
     ))?;
-
+    let schema = aggregate_output_schema(output)?;
+    if schema.group_key_fields.len() != usize::from(aggregate.group_by.is_some())
+        || schema.value_fields.len() != aggregate.aggregates.len()
+    {
+        return Err(Error::InvalidStoredValue(
+            "aggregate query differs from its lowered output shape",
+        ));
+    }
+    let mut append =
+        |field: &DescriptorField, public_name: &str, carrier: String| -> Result<(), Error> {
+            let index = aggregate_record_field_index(record, field)?;
+            let binding = field
+                .name
+                .as_ref()
+                .and_then(|name| output.publication_fields.get(name))
+                .ok_or(Error::InvalidStoredValue(
+                    "lowered aggregate field has no publication binding",
+                ))?;
+            if binding.application_name() != Some(public_name) {
+                return Err(Error::InvalidStoredValue(
+                    "aggregate publication name differs from query output",
+                ));
+            }
+            fields.push(
+                DescriptorField::new(
+                    carrier,
+                    record.descriptor().fields()[index].value_type.clone(),
+                )
+                .with_identity(records::FieldIdentity::Name(public_name.to_owned())),
+            );
+            values.push(record.get_idx(index)?);
+            publication_fields.push(binding.clone());
+            Ok(())
+        };
     if let Some(group_by) = &aggregate.group_by {
-        let logical = user_column_field(group_by);
-        let index = record
-            .descriptor()
-            .field_index(&logical)
-            .or_else(|| record.descriptor().field_index(group_by))
-            .ok_or(Error::InvalidStoredValue(
-                "aggregate record is missing group output",
-            ))?;
-        let descriptor = record.descriptor();
-        let field = descriptor
-            .fields()
-            .get(index)
-            .ok_or(Error::InvalidStoredValue(
-                "aggregate group descriptor is missing",
-            ))?;
-        fields.push((logical, field.value_type.clone()));
-        values.push(record.get_idx(index)?);
+        append(
+            &schema.group_key_fields[0],
+            group_by,
+            user_column_field(group_by),
+        )?;
     }
-
-    for output in &aggregate.aggregates {
-        let app_field = aggregate_output_app_field(&output.alias);
-        let internal_field = aggregate_output_field(&output.alias);
-        let index = record
-            .descriptor()
-            .field_index(&app_field)
-            .or_else(|| record.descriptor().field_index(&internal_field))
-            .ok_or(Error::InvalidStoredValue(
-                "aggregate record is missing aggregate output",
-            ))?;
-        let descriptor = record.descriptor();
-        let field = descriptor
-            .fields()
-            .get(index)
-            .ok_or(Error::InvalidStoredValue(
-                "aggregate output descriptor is missing",
-            ))?;
-        fields.push((app_field, field.value_type.clone()));
-        values.push(record.get_idx(index)?);
+    for (field, expression) in schema.value_fields.iter().zip(&aggregate.aggregates) {
+        append(
+            field,
+            &expression.alias,
+            user_column_field(&aggregate_output_field(&expression.alias)),
+        )?;
     }
-    let descriptor = RecordDescriptor::new(fields);
+    let descriptor = RecordDescriptor::new_with_fields(fields);
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
+    Ok(CurrentRow::new_with_publication_fields(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),
+        publication_fields,
     ))
 }
 
@@ -4082,6 +4123,7 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 /// may retain physical schema/provenance fields while resolving a row, whereas
 /// subscriptions are emitted from the public app-row terminal directly.
 fn normalize_public_current_rows(
+    query: &crate::query::Query,
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
@@ -4091,7 +4133,46 @@ fn normalize_public_current_rows(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     for row in rows {
-        *row = row.project(table, &columns)?;
+        *row = if let Some(aggregate) = &query.aggregate {
+            // A grouped source and an aggregate result may share a public name.
+            // Select each synthetic table column through its declared role before
+            // projecting; a public-name lookup alone loses that distinction.
+            let mut bindings = BTreeMap::new();
+            if let Some(group) = &aggregate.group_by {
+                let index = row
+                    .publication_fields
+                    .iter()
+                    .position(|field| {
+                        matches!(field, CurrentRowPublicationField::StoredColumn { .. })
+                            && field.application_name() == Some(group)
+                    })
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate group has no source publication binding",
+                    ))?;
+                bindings.insert(group.clone(), index);
+            }
+            for output in &aggregate.aggregates {
+                let index = row
+                    .publication_fields
+                    .iter()
+                    .position(|field| {
+                        matches!(
+                            field,
+                            CurrentRowPublicationField::ResultField {
+                                visibility: CurrentRowResultVisibility::ApplicationCell,
+                                ..
+                            }
+                        ) && field.application_name() == Some(output.alias.as_str())
+                    })
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate output has no result publication binding",
+                    ))?;
+                bindings.insert(aggregate_output_column(&output.alias), index);
+            }
+            row.project_with_column_binding(table, &columns, |name| bindings.get(name).copied())?
+        } else {
+            row.project(table, &columns)?
+        };
     }
     Ok(())
 }

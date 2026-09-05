@@ -11,7 +11,11 @@ import {
   decodeRecordValue,
   encodeNativeRowValues,
   assertTerminalRootDescriptorCompatible,
+  fieldIndex,
+  nativeRowDescriptorPublicName,
   readDescriptor,
+  readNativeRowDescriptor,
+  writeNativeRowDescriptor,
   storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
@@ -28,6 +32,40 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("resolves publication names from typed roles without exposing hidden metadata", () => {
+    const text = { tag: 8 } as const;
+
+    expect(
+      nativeRowDescriptorPublicName({
+        kind: "stored-column",
+        id: 7,
+        outputName: "title",
+        valueType: text,
+      }),
+    ).toBe("title");
+    expect(
+      nativeRowDescriptorPublicName({ kind: "result-field", name: "title", valueType: text }),
+    ).toBe("title");
+    // A private carrier may share a public name. Its role, rather than its raw
+    // spelling, prevents an observation from treating it as a publication.
+    expect(
+      nativeRowDescriptorPublicName({ kind: "hidden-metadata", name: "title", valueType: text }),
+    ).toBeUndefined();
+  });
+
+  it("pins explicit hidden metadata tag 2 and rejects unknown publication tags", () => {
+    const descriptor = [
+      { kind: "hidden-metadata" as const, name: "schema_version", valueType: { tag: 3 } },
+    ];
+    const writer = new PostcardWriter();
+    writeNativeRowDescriptor(writer, descriptor);
+    expect(Buffer.from(writer.finish()).toString("hex")).toBe(
+      "01020e736368656d615f76657273696f6e03",
+    );
+    expect(readNativeRowDescriptor(new PostcardReader(writer.finish()))).toEqual(descriptor);
+    expect(() => readNativeRowDescriptor(new PostcardReader(Uint8Array.from([1, 3])))).toThrow();
+  });
+
   it("round-trips sealed internal physical value types without exposing them as columns", () => {
     const descriptor = [
       { name: "raw_text", valueType: { tag: 10, internal: { tag: 0 } } },
@@ -108,8 +146,8 @@ describe("native row codec", () => {
     ];
     const currentRow = [
       { name: "row_uuid", valueType: { tag: 11 } },
-      { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
-      { name: "user_done", valueType: { tag: 15, inner: { tag: 7 } } },
+      { name: "_app_title", valueType: { tag: 15, inner: { tag: 8 } } },
+      { name: "_app_done", valueType: { tag: 15, inner: { tag: 7 } } },
       { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [
@@ -125,6 +163,19 @@ describe("native row codec", () => {
     );
     expect(() => assertTerminalRootDescriptorCompatible(reorderedCarriers, columns)).toThrow(
       "terminal root descriptor does not match the public projection",
+    );
+  });
+
+  it("does not infer _app_ aliases when resolving raw record field positions", () => {
+    const descriptor = [
+      { name: "_app_title", valueType: { tag: 8 } },
+      { name: "title", valueType: { tag: 8 } },
+    ];
+
+    expect(fieldIndex(descriptor, "_app_title")).toBe(0);
+    expect(fieldIndex(descriptor, "title")).toBe(1);
+    expect(() => fieldIndex([{ name: "_app_title", valueType: { tag: 8 } }], "title")).toThrow(
+      "missing title field",
     );
   });
 

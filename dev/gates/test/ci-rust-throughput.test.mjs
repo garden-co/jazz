@@ -1329,7 +1329,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ensure-correctness-artifacts.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
@@ -1722,7 +1722,10 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /native correctness-artifact producer[\s\S]*build:correctness-artifacts/);
+  assert.match(
+    localCi,
+    /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
+  );
   assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);

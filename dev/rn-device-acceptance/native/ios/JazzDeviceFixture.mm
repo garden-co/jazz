@@ -3,8 +3,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #include <limits.h>
 
-/** Development-build-only trusted fixture. Configuration is a compile-time
- * test fixture; JS is given only the opaque random admission capability. */
+/** Development-build-only trusted fixture. Native launch inputs carry the
+ * ephemeral session; JS is given only the opaque random admission capability. */
 @interface JazzDeviceFixture : NSObject <RCTBridgeModule>
 @property(nonatomic, nullable) NSData *capability;
 @end
@@ -34,6 +34,8 @@ static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
     @"relay-probe-failed",
     @"relay-cleanup-failed",
     @"foreground-byte-abi-failed",
+    @"foreground-abi-version-failed",
+    @"foreground-revocation-failed",
     @"foreground-install-failed",
     @"foreground-open-failed",
     @"foreground-probe-failed",
@@ -46,6 +48,8 @@ static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
     @"public-client-write-failed",
     @"public-client-read-failed",
     @"public-client-publish-failed",
+    @"public-client-core-observation-failed",
+    @"core-observation-cleartext-denied",
     @"public-client-shutdown-failed",
     @"public-client-relay-readback-failed",
     @"scope-isolation-failed",
@@ -96,32 +100,36 @@ static NSString *JazzDeviceExecutableSHA256(void) {
   return hex;
 }
 
-static NSDictionary *JazzDeviceScopeFixture(NSString *authScope) {
-  BOOL userB = [authScope isEqualToString:@"fixture-user-b"];
-  NSString *node = userB ? @"22222222-2222-4222-8222-222222222222"
-                         : @"11111111-1111-4111-8111-111111111111";
-  NSString *sqliteName = [NSString stringWithFormat:@"jazz-device-%@.sqlite", authScope];
-  return @{ @"scope": @{ @"app_namespace": @"jazz-device-acceptance",
-                            @"storage_namespace": @"acceptance-fixture",
-                            @"auth_scope": authScope },
-            // Auth scopes use distinct trusted storage paths. Neither path
-            // nor either fixture identity is selected by JavaScript.
-            @"sqlite_path": [NSTemporaryDirectory() stringByAppendingPathComponent:sqliteName],
-            @"schema_json": @"{\"tables\":{\"todos\":{\"columns\":[{\"name\":\"title\",\"column_type\":{\"type\":\"Text\"},\"nullable\":false}]}}}",
-            @"identity": @{ @"node": node,
-                             @"author": [NSString stringWithFormat:@"[\"https://jazz.device.test\",\"%@\"]", authScope] },
-            @"claims": @{} };
+/** Launch-only native inputs mirror Android's private-session contract. The
+ * fixture never hands endpoint, bearer or generic admission JSON to JS. */
+static NSString *JazzDeviceLaunchValue(NSString *key) {
+  NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+  NSUInteger index = [arguments indexOfObject:key];
+  return index != NSNotFound && index + 1 < arguments.count ? arguments[index + 1] : nil;
 }
 
-static NSData *JazzDeviceScopeJSON(NSString *authScope, NSError **error) {
-  return [NSJSONSerialization dataWithJSONObject:JazzDeviceScopeFixture(authScope) options:0 error:error];
+static NSData *JazzDeviceAdmitPrivateSession(BOOL userB, NSError **error) {
+  NSString *endpoint = JazzDeviceLaunchValue(@"-JazzDeviceEdgeEndpoint");
+  NSString *bearer = JazzDeviceLaunchValue(userB ? @"-JazzDeviceBearerB" : @"-JazzDeviceBearerA");
+  if ((! [endpoint hasPrefix:@"http://"] && ! [endpoint hasPrefix:@"https://"]) ||
+      bearer.length < 16 || bearer.length > 16384 ||
+      [bearer componentsSeparatedByString:@"."].count != 3) {
+    if (error != NULL) *error = [NSError errorWithDomain:@"JazzDeviceFixture" code:1
+      userInfo:@{NSLocalizedDescriptionKey: @"Missing or invalid private-session launch inputs"}];
+    return nil;
+  }
+  NSData *session = [JazzRelayTrustedAdmission beginPrivateSessionWithServerURL:endpoint
+      appID:@"jazz-device-acceptance" jwt:bearer error:error];
+  if (session == nil) return nil;
+  NSString *schema = @"{\"tables\":{\"scope_rows\":{\"columns\":[{\"column_type\":{\"type\":\"Text\"},\"name\":\"title\",\"nullable\":false},{\"column_type\":{\"type\":\"Text\"},\"name\":\"owner\",\"nullable\":false}],\"policies\":{\"delete\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":null},\"insert\":{\"using\":null,\"with_check\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}}},\"select\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":null},\"update\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}}}}},\"todos\":{\"columns\":[{\"column_type\":{\"type\":\"Text\"},\"name\":\"title\",\"nullable\":false}]}}}";
+  return [JazzRelayTrustedAdmission attachCanonicalSchemaJSON:[schema dataUsingEncoding:NSUTF8StringEncoding]
+      sessionCapability:session error:error];
 }
 
 RCT_REMAP_METHOD(admittedCapability, admittedCapabilityWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
   if (self.capability == nil) {
-    NSData *json = JazzDeviceScopeJSON(@"fixture-user-a", &error);
-    if (json != nil) self.capability = [JazzRelayTrustedAdmission admitScopeJSON:json error:&error];
+    self.capability = JazzDeviceAdmitPrivateSession(NO, &error);
   }
   if (self.capability == nil) { reject(@"E_JAZZ_DEVICE_FIXTURE", error.localizedDescription, error); return; }
   resolve([self.capability base64EncodedStringWithOptions:0]);
@@ -135,11 +143,41 @@ RCT_REMAP_METHOD(logout, logoutWithResolver:(RCTPromiseResolveBlock)resolve reje
 
 RCT_REMAP_METHOD(switchAuthScope, switchAuthScopeWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
-  NSData *json = JazzDeviceScopeJSON(@"fixture-user-b", &error);
-  NSData *replacement = json == nil ? nil : [JazzRelayTrustedAdmission replaceCapability:self.capability withScopeJSON:json error:&error];
+  if (self.capability != nil && ![JazzRelayTrustedAdmission revokeCapability:self.capability error:&error]) {
+    reject(@"E_JAZZ_DEVICE_FIXTURE", error.localizedDescription, error); return;
+  }
+  self.capability = nil;
+  NSData *replacement = JazzDeviceAdmitPrivateSession(YES, &error);
   if (replacement == nil) { reject(@"E_JAZZ_DEVICE_FIXTURE", error.localizedDescription, error); return; }
   self.capability = replacement;
   resolve([replacement base64EncodedStringWithOptions:0]);
+}
+
+/** Fixture-only synchronization; public RN write.wait remains local-only. */
+RCT_REMAP_METHOD(waitForCoreObservation, waitForCoreObservationWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSURL *endpoint = [NSURL URLWithString:JazzDeviceLaunchValue(@"-JazzDeviceCoreObservationEndpoint") ?: @""];
+  NSString *nonce = JazzDeviceLaunchValue(@"-JazzDeviceRunNonce");
+  NSString *device = JazzDeviceLaunchValue(@"-JazzDeviceDeviceIdentifier");
+  NSString *fingerprint = JazzDeviceExecutableSHA256();
+  if (endpoint == nil || nonce.length == 0 || device.length == 0 || fingerprint.length == 0) {
+    reject(@"E_JAZZ_DEVICE_CORE", @"Missing Core observation launch metadata", nil); return;
+  }
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint];
+  request.HTTPMethod = @"POST";
+  request.timeoutInterval = 65;
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{
+    @"platform": @"ios", @"runNonce": nonce, @"deviceIdentifier": device, @"buildFingerprint": fingerprint
+  } options:0 error:nil];
+  NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+  configuration.timeoutIntervalForResource = 65;
+  NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+  [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    if (error == nil && [response isKindOfClass:NSHTTPURLResponse.class] &&
+        ((NSHTTPURLResponse *)response).statusCode == 204) resolve(nil);
+    else reject(@"E_JAZZ_DEVICE_CORE", @"Core observation was not acknowledged", nil);
+    [session finishTasksAndInvalidate];
+  }] resume];
 }
 
 RCT_REMAP_METHOD(receiptContext, receiptContextWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {

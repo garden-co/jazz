@@ -35,6 +35,8 @@ use crate::authorization_scope::{
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
+#[cfg(test)]
+use crate::node::CurrentRowBindingRole;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
@@ -4310,6 +4312,8 @@ pub struct TerminalRootLayout {
 /// One public root field's immutable physical slot identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalRootPublicField {
+    /// Authoritative publication binding supplied by the compiler.
+    pub publication: crate::node::CurrentRowPublicationField,
     /// Public column name.
     pub name: String,
     /// Physical descriptor field name at `slot`.
@@ -5535,7 +5539,10 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+        let table = root.table().to_owned();
+        let publication_fields = root.publication_fields().to_vec();
+        *root =
+            CurrentRow::new_with_publication_fields(table, record.record()?, publication_fields);
     }
     Ok(())
 }
@@ -5635,13 +5642,76 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new(
+        row: CurrentRow::new_with_publication_fields(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
+            terminal_root_publication_fields(layout),
         ),
         previous_index,
         index,
     })
+}
+
+/// Derive the explicit producer provenance for every terminal descriptor slot.
+///
+/// Both terminal-delta decoding and local maintained-view reset snapshots use
+/// this exact mapping; treating a hybrid collector record as wholly logical
+/// loses the distinction between a physical `user_{column}` and a logical
+/// field with that same name.
+pub(crate) fn terminal_root_publication_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<crate::node::CurrentRowPublicationField> {
+    use crate::node::CurrentRowPublicationField;
+    let mut fields = layout
+        .root_descriptor
+        .fields()
+        .iter()
+        .map(|field| CurrentRowPublicationField::ResultField {
+            name: field.name.clone().expect("terminal fields are named"),
+            visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
+        })
+        .collect::<Vec<_>>();
+    for field in &layout.public_fields {
+        assert_eq!(
+            field.publication.public_name(),
+            Some(field.name.as_str()),
+            "terminal publication name must match its public slot mapping"
+        );
+        fields[field.slot] = field.publication.clone();
+    }
+    fields
+}
+
+#[cfg(test)]
+pub(crate) fn terminal_root_binding_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<CurrentRowBindingRole> {
+    let binding_for_carrier = |carrier| match carrier {
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingRole::PhysicalColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingRole::LogicalField,
+    };
+    let mut fields =
+        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        fields[field.slot] = binding_for_carrier(field.carrier);
+    }
+    fields
+}
+
+/// Public logical names for the same terminal descriptor slots.  A terminal
+/// projection can retain its source's `user_{column}` carrier name while its
+/// public output is simply `{column}`.  Native hosts must receive the latter
+/// without guessing from a prefix, while truly logical `user_*` fields remain
+/// untouched.
+#[cfg(test)]
+pub(crate) fn terminal_root_binding_field_names(
+    layout: &TerminalRootLayout,
+) -> Vec<Option<String>> {
+    let mut names = vec![None; layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        names[field.slot] = Some(field.name.clone());
+    }
+    names
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.

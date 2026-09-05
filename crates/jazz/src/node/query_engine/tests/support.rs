@@ -658,9 +658,9 @@ impl SourceGraphPreparer for FakeSourceResolver {
             let mut descriptor_fields = vec![
                 ("table", ValueType::String),
                 ("row_uuid", ValueType::Uuid),
-                ("user_title", ValueType::String),
-                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
-                ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
+                ("_app_title", ValueType::String),
+                ("_app_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("_app_tag", ValueType::Nullable(Box::new(ValueType::String))),
                 ("tx_time", ValueType::U64),
                 ("tx_node_id", ValueType::U64),
                 ("schema_version", ValueType::Uuid),
@@ -671,6 +671,10 @@ impl SourceGraphPreparer for FakeSourceResolver {
                 descriptor_fields.push(("branch_id", ValueType::Uuid));
             }
             Ok(ResolvedSource {
+                stored_column_ids: BTreeMap::from([
+                    ("title".to_owned(), crate::ids::PhysicalColumnId(1)),
+                    ("todo".to_owned(), crate::ids::PhysicalColumnId(2)),
+                ]),
                 table_schema: TableSchema::new(
                     request.source.table.clone(),
                     [ColumnSchema::new("title", ColumnType::String)],
@@ -809,15 +813,33 @@ impl SourceGraphPreparer for InlineCollectorResolver {
             let descriptor = RecordDescriptor::new([
                 ("row_uuid", ValueType::Uuid),
                 (
-                    "user_title",
+                    "_app_title",
                     ValueType::Nullable(Box::new(ValueType::String)),
                 ),
-                ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                ("_app_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
                 ("$createdAt", ValueType::U64),
                 ("$createdBy", ValueType::Uuid),
                 ("$updatedAt", ValueType::U64),
                 ("$updatedBy", ValueType::Uuid),
             ]);
+            // The resolver owns the mapping from storage carriers to application
+            // identities, just like the catalogue-backed production resolver.
+            let descriptor =
+                RecordDescriptor::new_with_fields(descriptor.fields().iter().map(|field| {
+                    let mut field = field.clone();
+                    match field.name.as_deref() {
+                        Some("_app_title") => {
+                            field.identity =
+                                Some(groove::records::FieldIdentity::Name("title".to_owned()))
+                        }
+                        Some("_app_todo") => {
+                            field.identity =
+                                Some(groove::records::FieldIdentity::Name("todo".to_owned()))
+                        }
+                        _ => {}
+                    }
+                    field
+                }));
             let parent = row(0xd1).0;
             let rows = match request.source.table.as_str() {
                 "todos" => self
@@ -910,6 +932,10 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                 other => panic!("unexpected inline collector source {other}"),
             };
             Ok(ResolvedSource {
+                stored_column_ids: BTreeMap::from([
+                    ("title".to_owned(), crate::ids::PhysicalColumnId(1)),
+                    ("todo".to_owned(), crate::ids::PhysicalColumnId(2)),
+                ]),
                 table_schema: TableSchema::new(
                     request.source.table.clone(),
                     [

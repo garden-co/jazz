@@ -3685,7 +3685,7 @@ pub(super) fn settled_result_value_storage_bytes(
     value_type: &records::ValueType,
 ) -> Result<Vec<u8>, Error> {
     let value_descriptor = records::RecordDescriptor::new([("value", value_type.clone())]);
-    let descriptor = records::encode_record_descriptor(&value_descriptor)?;
+    let descriptor = records::encode_persisted_record_descriptor(&value_descriptor)?;
     let value = value_descriptor.create(std::slice::from_ref(value))?;
     let layout = result_member_storage_layout();
     let encoded = layout
@@ -3717,7 +3717,7 @@ fn validate_settled_result_value_storage_bytes(encoded: &[u8]) -> Result<(), Err
             "settled result value encoding is invalid",
         ));
     };
-    let descriptor = records::decode_record_descriptor(descriptor)?;
+    let descriptor = records::decode_persisted_record_descriptor(descriptor)?;
     let [field] = descriptor.fields() else {
         return Err(Error::InvalidStoredValue(
             "settled result value descriptor is invalid",
@@ -4545,8 +4545,15 @@ fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
 }
 
 fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) -> Result<(), Error> {
-    let descriptor = records::decode_record_descriptor(&payload.descriptor)
-        .map_err(|_| Error::InvalidStoredValue("settled result payload descriptor is invalid"))?;
+    let (role, descriptor) =
+        super::descriptor_roles::decode_result_descriptor(&payload.descriptor)?;
+    if (role == super::descriptor_roles::ResultDescriptorRole::Aggregate)
+        != matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+    {
+        return Err(Error::InvalidStoredValue(
+            "result payload descriptor role differs from member",
+        ));
+    }
     if descriptor.fields().iter().any(|field| field.name.is_none()) {
         return Err(Error::InvalidStoredValue(
             "settled result payload descriptor field must be named",
@@ -4557,7 +4564,8 @@ fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) ->
         .to_values()
         .map_err(|_| Error::InvalidStoredValue("settled result payload record is invalid"))?;
     if descriptor.create(&values)? != payload.record
-        || records::encode_record_descriptor(&descriptor)? != payload.descriptor
+        || super::descriptor_roles::encode_result_descriptor(role, &descriptor)?
+            != payload.descriptor
     {
         return Err(Error::InvalidStoredValue(
             "settled result payload encoding is not canonical",
@@ -5981,22 +5989,30 @@ impl CurrentRowDescriptorCacheEntry {
 }
 
 fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
-    records::RecordDescriptor::new(
-        std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
-            .chain(table.columns.iter().map(|column| {
-                (
-                    user_column_field(&column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
-                )
-            }))
-            .chain([
+    records::RecordDescriptor::new_with_fields(
+        std::iter::once(records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        ))
+        .chain(table.columns.iter().map(|column| {
+            records::DescriptorField::new(
+                user_column_field(&column.name),
+                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+            )
+            .with_identity(records::FieldIdentity::Name(column.name.clone()))
+        }))
+        .chain(
+            [
                 ("$createdBy".to_owned(), records::ValueType::String),
                 ("$createdAt".to_owned(), records::ValueType::U64),
                 ("$updatedBy".to_owned(), records::ValueType::String),
                 ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),
-            ]),
+            ]
+            .into_iter()
+            .map(|(name, value_type)| records::DescriptorField::new(name, value_type)),
+        ),
     )
 }
 
@@ -6022,9 +6038,13 @@ pub(super) fn current_row_from_positional_cells(
         ));
     }
     let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
+    // This app-facing positional projection uses logical schema names, not
+    // private `user_{column}` storage carriers. Preserve that distinction for
+    // any later source re-encoding.
+    Ok(CurrentRow::new_with_binding_fields(
         table.name.clone(),
         OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingRole::LogicalField,
     ))
 }
 
@@ -6083,7 +6103,7 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", column.column_type.clone())])
+    records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))])
         .create(std::slice::from_ref(value))?;
     Ok(())
 }
@@ -6516,24 +6536,40 @@ mod authority_storage_codec_tests {
                 records::ValueType::Nullable(Box::new(records::ValueType::U64)),
             ),
         ]);
-        let descriptor_bytes = records::encode_record_descriptor(&descriptor).unwrap();
+        let descriptor_bytes = records::encode_persisted_record_descriptor(&descriptor).unwrap();
         assert_eq!(
             blake3::hash(&descriptor_bytes).to_hex().as_str(),
             "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
         );
-        let decoded_descriptor = records::decode_record_descriptor(&descriptor_bytes).unwrap();
+        let decoded_descriptor =
+            records::decode_persisted_record_descriptor(&descriptor_bytes).unwrap();
         assert_eq!(
-            records::encode_record_descriptor(&decoded_descriptor).unwrap(),
+            records::encode_persisted_record_descriptor(&decoded_descriptor).unwrap(),
             descriptor_bytes
         );
         let mut descriptor_trailing = descriptor_bytes.clone();
         descriptor_trailing.push(0);
-        assert!(records::decode_record_descriptor(&descriptor_trailing).is_err());
+        assert!(records::decode_persisted_record_descriptor(&descriptor_trailing).is_err());
 
+        let payload_descriptor = records::RecordDescriptor::new([
+            ("value/0/name", records::ValueType::String),
+            (
+                "value/1/labels",
+                records::ValueType::Array(Box::new(records::ValueType::String)),
+            ),
+            (
+                "value/2/optional_count",
+                records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+            ),
+        ]);
         let payload = ResultMemberPayloadEntry {
             member: fixture_member(),
-            descriptor: descriptor_bytes.clone(),
-            record: descriptor
+            descriptor: super::super::descriptor_roles::encode_result_descriptor(
+                super::super::descriptor_roles::ResultDescriptorRole::Aggregate,
+                &payload_descriptor,
+            )
+            .unwrap(),
+            record: payload_descriptor
                 .create(&[
                     Value::String("synth".to_owned()),
                     Value::Array(vec![Value::String("a".to_owned())]),
@@ -6545,7 +6581,7 @@ mod authority_storage_codec_tests {
             program_fact_storage_bytes(&ProgramFactEntry::ResultPayload(payload.clone())).unwrap();
         assert_eq!(
             blake3::hash(&encoded_fact).to_hex().as_str(),
-            "266952cded111efe3209e4a478835693924f09c52d18b01293057d5307b2e3c8"
+            "612a52116020e1219c5b75f67dd18d491485a9b1579a06cadf7d16c18a84631a"
         );
         let descriptor_offset = encoded_fact
             .windows(payload.descriptor.len())
