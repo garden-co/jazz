@@ -4363,12 +4363,20 @@ async fn run_native_relay_socket_worker(
                 return;
             }
             if let Err(error) = bridge_native_relay_wire_once(&lease.wire, &mut upstream) {
-                // A closed established socket can surface first as a failed
-                // bridge send, before its terminal future wins this select.
-                // It shares the retryable reconnect path below; pre-connect
-                // authentication and protocol admission failures remain
-                // terminal above.
-                if !matches!(error, RelayError::Closed) {
+                if matches!(error, RelayError::Closed) {
+                    // The outbound pump is closed only after its owner has
+                    // published the established transport terminal. That
+                    // terminal, rather than the private queue-close marker,
+                    // decides whether this outage is retryable.
+                    let terminal = terminal.await;
+                    if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) =
+                        terminal
+                    {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay socket terminated: {error}"
+                        )));
+                    }
+                } else {
                     (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
                         "native relay wire bridge failed: {error}"
                     )));
@@ -4384,7 +4392,9 @@ async fn run_native_relay_socket_worker(
                         "native relay owner pump failed: {error}"
                     )));
                 }
-                break;
+                // A closed relay means its owner/scope is gone, not merely
+                // that this socket needs replacement. Never resurrect it.
+                break 'reconnect;
             }
             tokio::select! {
                 terminal = &mut terminal => {
