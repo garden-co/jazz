@@ -2457,7 +2457,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(relationBytes).toBeDefined();
-    expect(relationBytes!.slice(-10)).toEqual([
+    expect(Array.from(relationBytes!.slice(-10))).toEqual([
       4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
     ]);
   });
