@@ -60,6 +60,7 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import type { BrowserPumpDiagnostic } from "./browser-worker-transport.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
@@ -765,7 +766,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
-  private peerTransportDiagnosticObserver: ((event: { event: string }) => void) | null = null;
+  private peerTransportDiagnosticObserver: ((event: BrowserPumpDiagnostic) => void) | null = null;
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
@@ -987,7 +988,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.notifyPeerTransportWork(true);
   }
 
-  setPeerTransportDiagnosticObserver(observer: ((event: { event: string }) => void) | null): void {
+  setPeerTransportDiagnosticObserver(
+    observer: ((event: BrowserPumpDiagnostic) => void) | null,
+  ): void {
     if (this !== this.ownerRuntime)
       return this.ownerRuntime.setPeerTransportDiagnosticObserver(observer);
     this.peerTransportDiagnosticObserver = observer;
