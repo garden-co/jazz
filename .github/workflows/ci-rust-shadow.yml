@@ -78,6 +78,13 @@ jobs:
           # Do not perform checkout's preliminary clean/reset. Tracked residue
           # is guarded above because checkout itself later forces its branch.
           clean: false
+      # The checkout is owned by the runner while this job's container executes
+      # the source-integrity diagnostics. Trust only this exact workspace before
+      # the first diagnostic Git command; setup-blacksmith repeats the same
+      # scoped configuration for later tool invocations.
+      - name: Trust checked-out workspace for Git diagnostics
+        shell: bash
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
       - name: Record checkout source state
         # Never repair an unexpected checkout and then attest to the repaired
         # tree: the next baseline step must fail closed for any tracked, index,
@@ -96,6 +103,8 @@ jobs:
         run: node dev/gates/rust-shadow-matrix.mjs clean-source-baseline "$RUST_SHADOW_SOURCE_BASELINE" "${{ github.sha }}"
       - uses: ./.github/actions/setup-blacksmith
       - name: Run exact-inventory Rust shadow shard
+        env:
+          RUST_SHADOW_SOURCE_BASELINE: ${{ runner.temp }}/rust-shadow-source.json
         run: node dev/gates/rust-shadow-matrix.mjs shard ${{ matrix.index }} 2 "target/rust-shadow/shard-${{ matrix.index }}.json"
       - name: Upload shadow shard receipt
         if: always()

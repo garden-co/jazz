@@ -711,11 +711,17 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const preCheckout = shard.steps.find(
     (step) => step.name === "Reject pre-checkout source residue",
   );
+  const safeDirectory = shard.steps.find(
+    (step) => step.name === "Trust checked-out workspace for Git diagnostics",
+  );
   const normalizeCheckout = shard.steps.find(
     (step) => step.name === "Record checkout source state",
   );
   const sealBaseline = shard.steps.find(
     (step) => step.name === "Seal clean checked-out source baseline",
+  );
+  const runShard = shard.steps.find(
+    (step) => step.name === "Run exact-inventory Rust shadow shard",
   );
   const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   assert.equal(
@@ -733,6 +739,17 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
     "pre-checkout inspection must run before actions/checkout",
   );
+  assert.ok(safeDirectory, "shadow must trust its exact container checkout before Git diagnostics");
+  assert.match(
+    safeDirectory.run,
+    /git config --global --add safe\.directory "\$\{GITHUB_WORKSPACE:\?GITHUB_WORKSPACE is required\}"/,
+    "the ownership exception must name only the Actions workspace",
+  );
+  assert.ok(
+    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory) &&
+      shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
+    "the safe-directory setup must follow checkout and precede the first Git diagnostic",
+  );
   assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
   assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);
   assert.doesNotMatch(normalizeCheckout.run, /git reset|git clean/);
@@ -749,6 +766,11 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
     "${{ runner.temp }}/rust-shadow-source.json",
     "the source baseline must resolve runner.temp at step scope",
+  );
+  assert.equal(
+    runShard?.env?.RUST_SHADOW_SOURCE_BASELINE,
+    "${{ runner.temp }}/rust-shadow-source.json",
+    "the exact partition producer must consume the sealed source baseline",
   );
   assert.match(
     rustShadowWorkflow,
@@ -788,6 +810,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     commit: "a".repeat(40),
     headTree: "b".repeat(40),
     indexTree: "b".repeat(40),
+    staged: "e".repeat(64),
     unstaged: "c".repeat(64),
     untracked: "d".repeat(64),
     dirty: false,
@@ -796,7 +819,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     crypto
       .createHash("sha256")
       .update(
-        ["headTree", "indexTree", "unstaged", "untracked"]
+        ["headTree", "indexTree", "staged", "unstaged", "untracked"]
           .map((field) => `${field}\0${value[field]}\0`)
           .join(""),
       )
@@ -927,6 +950,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       /maintained M3 seed 11/,
     ],
     [
+      "nested receipt staged source identity",
+      (shards) => {
+        shards[0].testReceipt.source.staged = "f".repeat(64);
+        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
+      },
+      /partition test receipt source staged does not match its inventory receipt/,
+    ],
+    [
       "nested receipt source identity",
       (shards) => {
         shards[0].testReceipt.source.untracked = "e".repeat(64);
@@ -959,6 +990,52 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       message,
       `planted ${name} mismatch must identify the violated binding`,
     );
+  }
+});
+
+test("a clean checkout seals a Rust shadow source baseline", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-shadow-source-"));
+  const receipt = path.join(
+    os.tmpdir(),
+    `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`,
+  );
+  try {
+    const gates = path.join(fixture, "dev/gates");
+    fs.mkdirSync(gates, { recursive: true });
+    for (const file of ["rust-shadow-matrix.mjs", "source-identity.mjs"])
+      fs.copyFileSync(path.join(root, "dev/gates", file), path.join(gates, file));
+    fs.writeFileSync(path.join(fixture, "synthetic-source.txt"), "committed fixture source\n");
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.email", "test@example.invalid"],
+      ["config", "user.name", "Test"],
+      ["add", "."],
+      ["commit", "--quiet", "-m", "fixture"],
+      ["rev-parse", "HEAD"],
+    ]) {
+      const result = spawnSync("git", args, { cwd: fixture, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      if (args[0] === "rev-parse") {
+        const baseline = spawnSync(
+          "node",
+          [
+            path.join(gates, "rust-shadow-matrix.mjs"),
+            "clean-source-baseline",
+            receipt,
+            result.stdout.trim(),
+          ],
+          { cwd: fixture, encoding: "utf8" },
+        );
+        assert.equal(baseline.status, 0, baseline.stderr);
+        const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
+        assert.equal(source.commit, result.stdout.trim());
+        assert.equal(source.dirty, false);
+        assert.match(source.staged, /^[0-9a-f]{64}$/);
+      }
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(receipt, { force: true });
   }
 });
 
