@@ -9,6 +9,7 @@ export {
   createRecord,
   decodeRecordBytes,
   fieldIndex,
+  nativeRowDescriptorPublicName,
   PostcardReader,
   PostcardWriter,
   readNativeSubscriptionDelta,

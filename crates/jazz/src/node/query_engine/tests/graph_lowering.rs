@@ -253,9 +253,9 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             limit: groove::ivm::TopByLimit::Finite(2),
         } if group_cols.is_empty()
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
-                field: groove::ivm::FieldRef::Name(field),
+                field: groove::ivm::FieldRef::StoredName(field),
                 direction: groove::ivm::TopByDirection::Asc,
-            }] if field == "user_title")
+            }] if field == "_app_title")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
             && matches!(
@@ -267,7 +267,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
                 } if matches!(
                     input.as_ref(),
                     GraphBuilder::Table { table, .. } if table == "resolved_todos"
-                ) && field == "user_title"
+                ) && field == "_app_title"
                     && value == &groove::ivm::LiteralValue::String("ship".to_owned())
             )
         )
@@ -430,7 +430,7 @@ fn current_nullable_field_comparison_preserves_declared_literal_depth() {
                 GraphBuilder::Filter {
                     predicate: groove::ivm::PredicateExpr::Eq { field, value },
                     ..
-                } if field == "user_todo"
+                } if field == "_app_todo"
                     && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
                         groove::ivm::LiteralValue::Uuid(row(0xa2).0),
                     )))
@@ -579,7 +579,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         && matches!(
                             right.as_ref(),
                             GraphBuilder::UnwrapNullable { input, field }
-                                if matches!(field, groove::ivm::FieldRef::Name(name) if name == "user_todo")
+                                if matches!(field, groove::ivm::FieldRef::Name(name) if name == "_app_todo")
                                     && matches!(
                                         input.as_ref(),
                                         GraphBuilder::Filter { input, predicate, .. }
@@ -589,7 +589,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                             ) && matches!(
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
-                                                    if field == "user_tag"
+                                                    if field == "_app_tag"
                                                         && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
                                                             groove::ivm::LiteralValue::String("ship".to_owned()),
                                                         )))
@@ -597,7 +597,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                     )
                         )
                         && matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "_app_todo")
                 )
     )));
 }
@@ -1043,14 +1043,14 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
                             [
                                 groove::ivm::FieldRef::Name(todo),
                                 groove::ivm::FieldRef::Name(tag)
-                            ] if todo == "user_todo" && tag == "user_tag"
+                            ] if todo == "_app_todo" && tag == "_app_tag"
                         )
                         && matches!(
                             right_on.as_slice(),
                             [
                                 groove::ivm::FieldRef::Name(row_uuid),
                                 groove::ivm::FieldRef::Name(tag)
-                            ] if row_uuid == "row_uuid" && tag == "user_tag"
+                            ] if row_uuid == "row_uuid" && tag == "_app_tag"
                         )
             )
     )));
@@ -1313,7 +1313,7 @@ fn correlated_path_projection_lowers_with_relation_fact_schemas() {
                         right_on,
                         ..
                     } if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                        && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "_app_todo")
                 )
     ));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
@@ -2364,4 +2364,139 @@ fn missing_claim_lowers_to_deny_predicate() {
     let graph = format!("{:?}", program.lowered.terminals[0].graph);
     assert!(graph.contains("Filter"), "{graph}");
     assert!(graph.contains("Or([])"), "{graph}");
+}
+
+// Internal compiler fixture: public query syntax cannot request distinct nullable
+// depths for two aliases of the same physical source carrier.
+#[test]
+fn review_same_source_projection_preserves_each_output_nullable_depth() {
+    for (source_field, base_type, include_raw, expected_rows) in [
+        ("title", ColumnType::String, true, 1),
+        ("todo", ColumnType::Uuid, false, 1),
+        ("todo", ColumnType::Uuid, true, 0),
+    ] {
+        for reverse in [false, true] {
+            for depth in [1, 2] {
+                let mut nullable_type = base_type.clone();
+                for _ in 0..depth {
+                    nullable_type = ColumnType::Nullable(Box::new(nullable_type));
+                }
+                let mut input = row_set_input(0xec);
+                let root = source("todos", SourceRole::Root);
+                let project = RowSetNodeId("review-duplicate-source-project".to_owned());
+                let mut columns = vec![RowProjection {
+                    output: TypedOutputField {
+                        name: "row_uuid".to_owned(),
+                        ty: ColumnType::Uuid,
+                    },
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(root.clone())),
+                }];
+                for (name, ty) in [
+                    ("raw_title", base_type.clone()),
+                    ("nullable_title", nullable_type.clone()),
+                ] {
+                    if name == "raw_title" && !include_raw {
+                        continue;
+                    }
+                    columns.push(RowProjection {
+                        output: TypedOutputField {
+                            name: name.to_owned(),
+                            ty,
+                        },
+                        value: NormalizedValueRef::SourceField {
+                            source: root.clone(),
+                            field: source_field.to_owned(),
+                        },
+                    });
+                }
+                if reverse {
+                    columns.reverse();
+                }
+                input.shape.nodes.insert(
+                    project.clone(),
+                    RowSetExpr::Project {
+                        input: input.shape.root.clone(),
+                        columns,
+                    },
+                );
+                input.shape.root = project;
+                let request = QueryProgramRequest {
+                    authorization_mode: QueryAuthorizationMode::TrustedServing,
+                    reads: QueryReadSet::primary(current_read_view()),
+                    policy: system_policy_context(),
+                    input,
+                    output: row_set_output(BTreeSet::new()),
+                };
+                if source_field == "title" && include_raw {
+                    let mut resolver = InlineCollectorResolver::new(None);
+                    let mut sources = BTreeMap::new();
+                    for source_request in query_program_source_requests(&request).unwrap() {
+                        let source = resolver
+                            .prepare_source_graph(&source_request)
+                            .resolve()
+                            .unwrap();
+                        sources.insert(source_request.source, source);
+                    }
+                    let (graph, depths) = retained_projection_graph_for_test(&request, &sources);
+                    let mut database =
+                        Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+                            .unwrap();
+                    let retained = database.query_graph(graph).unwrap();
+                    let index = retained
+                        .descriptor
+                        .fields()
+                        .iter()
+                        .position(|field| field.name.as_deref() == Some("_app_title"))
+                        .expect("retained source carrier");
+                    assert_eq!(depths.get("_app_title"), Some(&1));
+                    assert_eq!(
+                        retained.descriptor.fields()[index].value_type,
+                        ValueType::Nullable(Box::new(ValueType::String)),
+                        "retained source carrier must preserve the nullable depth advertised to contributor equality"
+                    );
+                }
+                let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+                    .expect("duplicate source projection lowers");
+                let selected = std::cell::RefCell::new(None);
+                for terminal in &program.lowered.terminals {
+                    graph_any(&terminal.graph, &|graph| {
+                        if let GraphBuilder::Project { fields, .. } = graph {
+                            if fields
+                                .iter()
+                                .any(|field| field.output_name == "nullable_title")
+                            {
+                                *selected.borrow_mut() = Some(graph.clone());
+                                return true;
+                            }
+                        }
+                        false
+                    });
+                }
+                let graph = selected.into_inner().expect("requested projection exists");
+                let mut database =
+                    Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+                        .unwrap();
+                let rows = database.query_graph(graph).expect("execute projection");
+                let index = rows.descriptor.field_index("nullable_title").unwrap();
+                assert_eq!(
+                    rows.descriptor.fields()[index].value_type,
+                    nullable_type.clone(),
+                    "one alias requiring a raw value must not unwrap the nullable alias"
+                );
+                let values = rows.to_values().unwrap();
+                assert_eq!(values.len(), expected_rows);
+                if expected_rows == 1 {
+                    let mut expected = if source_field == "title" {
+                        Value::Nullable(Some(Box::new(Value::String("parent".to_owned()))))
+                    } else {
+                        Value::Nullable(None)
+                    };
+                    for _ in 1..depth {
+                        expected = Value::Nullable(Some(Box::new(expected)));
+                    }
+                    assert_eq!(values[0].0[index], expected);
+                }
+            }
+        }
+    }
 }

@@ -285,6 +285,104 @@ describe("websocket include subscriptions", () => {
       true,
     );
   }, 60_000);
+
+  it("keeps overlapping forward-include carriers canonical after a live global insert", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("overlapping-forward-include-carriers"),
+    );
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const sharedSecret = generateAuthSecret();
+    const authority = await openDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "overlapping-forward-include-authority",
+      sharedSecret,
+    );
+    const browser = await openDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "overlapping-forward-include-browser",
+      sharedSecret,
+    );
+    await ensureNativeRuntimeAdapterReady(authority);
+    await ensureNativeRuntimeAdapterReady(browser);
+
+    const org = await authority
+      .insert(app.orgs, { name: "overlap parent" })
+      .wait({ tier: "global" });
+    const todo = await authority
+      .insert(app.todos, { title: "unrelated browser read", org_id: org.id })
+      .wait({ tier: "global" });
+    const userCheck = await authority
+      .insert(app.user_checks, { org_id: org.id, todo_id: todo.id })
+      .wait({ tier: "global" });
+
+    const includingSnapshots: Array<
+      Array<{ id: string; org?: { id: string }; user_check?: { id: string } }>
+    > = [];
+    const refFilteredSnapshots: Array<Array<{ id: string }>> = [];
+    const including = ctx.trackSubscription(
+      browser.subscribe(
+        app.check_notes
+          .where({ org_id: org.id })
+          .include({ org: true, user_check: true })
+          .requireIncludes(),
+        (rows) => includingSnapshots.push(rows as (typeof includingSnapshots)[number]),
+        { tier: "global" },
+      ),
+    );
+    const refFiltered = ctx.trackSubscription(
+      browser.subscribe(
+        app.check_notes.where({ user_check_id: userCheck.id }),
+        (rows) => refFilteredSnapshots.push(rows as (typeof refFilteredSnapshots)[number]),
+        { tier: "global" },
+      ),
+    );
+    await waitForCondition(
+      async () => includingSnapshots.length > 0 && refFilteredSnapshots.length > 0,
+      10_000,
+      "fresh browser replica did not hydrate both overlapping subscriptions",
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+    const note = await withTimeout(
+      authority
+        .insert(app.check_notes, {
+          body: "live authoritative overlap",
+          org_id: org.id,
+          user_check_id: userCheck.id,
+        })
+        .wait({ tier: "global" }),
+      10_000,
+      "authoritative insert did not settle globally",
+    );
+    await waitForCondition(
+      async () =>
+        includingSnapshots.some(
+          (rows) =>
+            rows.length === 1 &&
+            rows[0]?.id === note.id &&
+            rows[0]?.org?.id === org.id &&
+            rows[0]?.user_check?.id === userCheck.id,
+        ) && refFilteredSnapshots.some((rows) => rows.length === 1 && rows[0]?.id === note.id),
+      15_000,
+      `overlapping include/ref carriers did not project the live row exactly once; including=${JSON.stringify(
+        includingSnapshots.slice(-4),
+      )}; refFiltered=${JSON.stringify(refFilteredSnapshots.slice(-4))}`,
+    );
+
+    expect(
+      includingSnapshots.filter((rows) => rows.length === 1 && rows[0]?.id === note.id),
+    ).toHaveLength(1);
+    expect(
+      refFilteredSnapshots.filter((rows) => rows.length === 1 && rows[0]?.id === note.id),
+    ).toHaveLength(1);
+    including();
+    refFiltered();
+  }, 60_000);
 });
 
 async function openDb(

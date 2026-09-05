@@ -1,7 +1,8 @@
 use super::ClaimPath;
 use crate::schema::TableSchema;
+use groove::records::DescriptorField;
 
-pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
+pub(crate) use crate::schema::APP_COLUMN_PREFIX as USER_COLUMN_PREFIX;
 /// Physical namespace for aggregate result values.
 ///
 /// Aggregate aliases are public-facing names and can legally collide with a
@@ -16,7 +17,7 @@ const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 
 pub(crate) fn user_column_field(column: &str) -> String {
-    format!("{USER_COLUMN_PREFIX}{column}")
+    crate::schema::app_storage_column_name(column)
 }
 
 /// Canonical physical `CurrentRow` field order. Query readers and public
@@ -42,10 +43,6 @@ pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-pub(crate) fn logical_user_column(field: &str) -> &str {
-    field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field)
-}
-
 pub(crate) fn aggregate_output_field(output: &str) -> String {
     aggregate_output_column(output)
 }
@@ -68,6 +65,39 @@ pub(crate) fn aggregate_output_column(output: &str) -> String {
 
 pub(crate) fn aggregate_output_logical_name(column: &str) -> Option<&str> {
     column.strip_prefix(AGGREGATE_OUTPUT_PREFIX)
+}
+
+/// A typed application identity may use the spelling of an engine field.
+/// Only unchanged engine carriers are private; an explicit different identity
+/// must retain its application name.
+pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
+    let name = field.logical_name()?;
+    if field.name.as_deref() != Some(name) {
+        return Some(name);
+    }
+    if matches!(
+        name,
+        "$createdBy"
+            | "$createdAt"
+            | "$updatedBy"
+            | "$updatedAt"
+            | "created_by"
+            | "created_at"
+            | "updated_by"
+            | "updated_at"
+            | "branch_key"
+            | "row_uuid"
+            | "tx_time"
+            | "tx_node_id"
+            | "schema_version"
+            | "parents"
+            | "authored_columns"
+            | "global_time"
+            | "settle_position"
+    ) {
+        return None;
+    }
+    aggregate_output_logical_name(name).or_else(|| (!name.starts_with("__jazz_")).then_some(name))
 }
 
 pub(crate) fn join_field(prefix: &str, field: &str) -> String {
@@ -135,7 +165,7 @@ pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
 }
 
 pub(crate) fn table_user_column_field(table: &str, column: &str) -> String {
-    format!("user__{table}__{column}")
+    format!("{USER_COLUMN_PREFIX}_{table}__{column}")
 }
 
 #[cfg(test)]

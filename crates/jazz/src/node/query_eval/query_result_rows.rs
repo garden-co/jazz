@@ -1,5 +1,6 @@
 //! Aggregate result shaping and ordering for query evaluation.
 
+use crate::node::query_engine::{AggregateResultSchema, AppRowTerminal};
 use std::cmp::Ordering;
 
 use groove::records::BorrowedRecord;
@@ -7,8 +8,8 @@ use groove::schema::ColumnType;
 
 use super::{
     Aggregate, AggregateFunction, ColumnSchema, CurrentRow, Error, ResultMemberEntry, RowUuid,
-    SyntheticReplacementToken, TableSchema, Value, aggregate_output_app_field,
-    aggregate_output_column, aggregate_result_member_row_uuid, nullable_value, user_column_field,
+    SyntheticReplacementToken, TableSchema, Value, aggregate_output_column,
+    aggregate_result_member_row_uuid,
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
@@ -20,30 +21,66 @@ pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>)
     }
 }
 
-pub(super) fn aggregate_row_cell(
-    row: &CurrentRow,
+fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Result<Option<Value>, Error> {
+    let idx = row
+        .application_column_index_by_name(column)
+        .ok_or(Error::InvalidStoredValue(
+            "aggregate ordering field has no publication binding",
+        ))?;
+    Ok(match row.record.borrowed().get_idx(idx)? {
+        Value::Nullable(value) => value.map(|value| *value),
+        value => Some(value),
+    })
+}
+
+/// Decode ordering keys before sorting so malformed rows fail instead of
+/// becoming null keys. Aggregate terminals can emit raw scalars while projected
+/// current rows wrap the same values in Nullable; both have identical order.
+pub(super) fn sort_aggregate_rows<T>(
     query: &crate::query::Query,
-    column: &str,
-) -> Option<Value> {
-    let field = if query
-        .aggregate
-        .as_ref()
-        .and_then(|aggregate| aggregate.group_by.as_deref())
-        == Some(column)
-    {
-        user_column_field(column)
-    } else if query.aggregate.as_ref().is_some_and(|aggregate| {
-        aggregate
-            .aggregates
-            .iter()
-            .any(|aggregate| aggregate.alias == column)
-    }) {
-        aggregate_output_app_field(column)
-    } else {
-        user_column_field(column)
-    };
-    let idx = row.record.descriptor().field_index(&field)?;
-    nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
+    rows: &mut [T],
+    row: impl Fn(&T) -> &CurrentRow,
+    tie_break: impl Fn(&T, &T) -> Ordering,
+) -> Result<(), Error> {
+    let mut keys = rows
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let values = query
+                .order_by
+                .iter()
+                .map(|order| aggregate_row_cell(row(item), &order.column))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((index, values))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    keys.sort_by(|(left_index, left), (right_index, right)| {
+        for ((left, right), order) in left.iter().zip(right).zip(&query.order_by) {
+            let ordering = compare_optional_values(left.clone(), right.clone());
+            let ordering = match order.direction {
+                crate::query::OrderDirection::Asc => ordering,
+                crate::query::OrderDirection::Desc => ordering.reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        tie_break(&rows[*left_index], &rows[*right_index])
+    });
+    // Apply the sorted permutation without cloning rows or separating a
+    // maintained row from its occurrence sidecar.
+    let mut destinations = vec![0; rows.len()];
+    for (destination, (source, _)) in keys.into_iter().enumerate() {
+        destinations[source] = destination;
+    }
+    for source in 0..rows.len() {
+        while destinations[source] != source {
+            let destination = destinations[source];
+            rows.swap(source, destination);
+            destinations.swap(source, destination);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn aggregate_result_table(
@@ -103,34 +140,49 @@ fn aggregate_result_column_type(
 /// Use the same stable identity for direct aggregate reads and maintained
 /// aggregate delivery. A global aggregate is keyed by `"global"`; grouped
 /// aggregates are keyed by their lowered group value.
+pub(super) fn aggregate_output_schema(
+    output: &super::AppRowSchema,
+) -> Result<&AggregateResultSchema, Error> {
+    match &output.terminal {
+        AppRowTerminal::Aggregate(schema) => Ok(schema),
+        _ => Err(Error::InvalidStoredValue(
+            "aggregate materialization has no lowered aggregate schema",
+        )),
+    }
+}
+
+pub(super) fn aggregate_record_field_index(
+    record: &BorrowedRecord<'_>,
+    field: &groove::records::DescriptorField,
+) -> Result<usize, Error> {
+    let identity = field.identity.as_ref().ok_or(Error::InvalidStoredValue(
+        "lowered aggregate field has no identity",
+    ))?;
+    let descriptor = record.descriptor();
+    let index = descriptor
+        .field_index_by_identity(identity)
+        .ok_or(Error::InvalidStoredValue(
+            "aggregate output is missing its lowered field identity",
+        ))?;
+    Ok(index)
+}
+
 pub(super) fn aggregate_query_row_uuid(
-    query: &crate::query::Query,
+    output: &super::AppRowSchema,
     record: &BorrowedRecord<'_>,
 ) -> Result<RowUuid, Error> {
-    let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
-        "aggregate query missing aggregate",
-    ))?;
-    let (row_value, row_type) = match &aggregate.group_by {
-        Some(group_by) => {
-            let field = user_column_field(group_by);
-            let index = record
-                .descriptor()
-                .field_index(&field)
-                .or_else(|| record.descriptor().field_index(group_by))
-                .ok_or(Error::InvalidStoredValue(
-                    "aggregate record is missing group identity",
-                ))?;
+    let aggregate = aggregate_output_schema(output)?;
+    if aggregate.group_key_fields.len() > 1 {
+        return Err(Error::InvalidStoredValue(
+            "aggregate row identity requires one lowered group field",
+        ));
+    }
+    let (row_value, row_type) = match aggregate.group_key_fields.first() {
+        Some(group) => {
+            let index = aggregate_record_field_index(record, group)?;
             (
                 record.get_idx(index)?,
-                record
-                    .descriptor()
-                    .fields()
-                    .get(index)
-                    .ok_or(Error::InvalidStoredValue(
-                        "aggregate group identity field is missing from descriptor",
-                    ))?
-                    .value_type
-                    .clone(),
+                record.descriptor().fields()[index].value_type.clone(),
             )
         }
         None => (

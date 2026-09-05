@@ -509,6 +509,56 @@ field-semantic order for raw nested record bytes; this is a rejection rule, not
 an invitation to use their byte layout as an ordered key. Arrangement-key
 rejection is the graph-validation rule in ch. 3.
 
+### Canonical persisted descriptor values
+
+The existing v1 persisted descriptor contract is an ordinary Groove record with
+one field `nodes: Array<Record<Node>>`. In declaration order `Node` contains
+`tag: U8`, `name: Nullable<RawString>`, `registry_id: U64`, `children: U32`, and
+`strings: Array<RawString>`. Raw-string, array, nullable and record framing are
+exactly §2.7; there is no serializer-defined payload. The enclosing durable
+value/key contract selects this v1 grammar; it has no additional magic or version
+byte and must not be replaced in place with a different node layout.
+
+Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
+
+| Tag    | Meaning                                  |
+| ------ | ---------------------------------------- |
+| 0, 1   | Descriptor, field                        |
+| 2–9    | U8, U16, U32, U64, I32, I64, F64, Bool   |
+| 10–13  | String, Bytes, RawString, RawBytes       |
+| 14–16  | Stored Bytes, Stored String, Stored JSON |
+| 17, 18 | UUID, scalar enum                        |
+| 19–22  | Tuple, Array, Nullable, Record           |
+| 23, 24 | Payload enum, enum case                  |
+
+A descriptor declares its field count; each field retains its exact optional
+name and one type child. Tuple nodes declare their type-child count; Array and
+Nullable have one type child, Record one descriptor child. Payload enums retain
+their name, registry identity and ordered case children; each named case has one
+descriptor child. Scalar enums retain name, registry identity and ordered variant
+names in `strings`. Unused names are absent, unused registry/count fields are
+zero, and unused string arrays are empty. The reader rejects inconsistent
+metadata, trailing nodes/bytes, invalid types, and any tree whose canonical
+re-encoding differs.
+
+`encode_persisted_record_descriptor` and its matching reader implement this
+contract. They preserve exact durable field names and nested enum registry
+identities. They do not serialize experimental execution `Name`, `Slot`, or
+`NamedSlot` bindings, infer public names, or strip carrier prefixes. A caller
+must supply the authoritative value schema; an execution descriptor is not
+implicitly that schema. When a record is reconstructed, nested values use the
+reconstructed child descriptors; raw child bytes alone do not retain executable
+bindings. Jazz reconstructs physical bindings from its catalogue and selected
+query/schema context.
+
+Jazz's all-in typed format applies this boundary to immutable-version rows,
+role-specific result payloads, synthetic value identities, tuple revisions, and
+root publication hashes. Jazz SPEC 16 owns the enclosing role grammars and exact
+schema validation before runtime rebinding. The [durable role receipts](../../../dev/proofs/typed-identity-durable-roles.md)
+distinguish persisted bytes from diagnostic fixture rendering. The earlier
+[compatibility proof](../../../dev/proofs/typed-identity-storage-compatibility.md)
+remains a historical comparison, not a compatibility promise for this format.
+
 ### 2.3 Tables
 
 A **table** is a managed record store named by `TableSchema::name`. Each row is

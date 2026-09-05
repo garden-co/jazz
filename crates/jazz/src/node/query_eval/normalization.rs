@@ -1087,7 +1087,7 @@ fn normalized_aggregate_outputs(
         .map(|aggregate| {
             Ok(NormalizedAggregateExpr {
                 output: typed_output_field(
-                    aggregate_output_field(&aggregate.alias),
+                    aggregate.alias.clone(),
                     normalized_aggregate_output_type(aggregate),
                 ),
                 function: normalized_aggregate_function(aggregate.function),

@@ -1,5 +1,34 @@
 use super::*;
 
+fn resolved_source_field_index_by_name(source: &ResolvedSource, field: &str) -> Option<usize> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .position(|candidate| candidate.name.as_deref() == Some(field))
+}
+
+fn resolved_source_field_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .field_index(field)
+        .and_then(|index| source.row_shape.descriptor.fields().get(index))
+        .and_then(|field| field.name.clone())
+}
+
+fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
+    source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some(field))
+        .and_then(crate::node::query_engine::descriptor_public_name)
+        .map(str::to_owned)
+}
+
 pub(super) fn collect_layout(
     projection: &AppProjectionTree,
     plan: &AnalyzedQueryPlan,
@@ -49,6 +78,9 @@ pub(super) fn collect_layout(
                     field.value_type.clone()
                 },
                 source_field: Some(name.clone()),
+                source_public_name: crate::node::query_engine::descriptor_public_name(field)
+                    .map(str::to_owned),
+                origin: CollectFieldOrigin::SourceRow,
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
                 is_output: selected_root.contains(name),
@@ -66,6 +98,8 @@ pub(super) fn collect_layout(
                 value_type: value_type.clone(),
                 output_value_type: value_type,
                 source_field: Some(name),
+                source_public_name: None,
+                origin: CollectFieldOrigin::Derived,
                 is_row_id: false,
                 is_presence: false,
                 is_output: false,
@@ -97,6 +131,8 @@ pub(super) fn collect_layout(
             value_type: value_type.clone(),
             output_value_type: value_type,
             source_field: Some(route_field.clone()),
+            source_public_name: Some(route_field.clone()),
+            origin: CollectFieldOrigin::Derived,
             is_row_id: false,
             is_presence: false,
             is_output: true,
@@ -123,7 +159,8 @@ fn collect_unwrapped_output_type(
     if source_field == source.row_shape.row_uuid_field {
         return fallback.clone();
     }
-    let logical = logical_user_column(source_field);
+    let logical = resolved_source_public_name(source, source_field)
+        .unwrap_or_else(|| source_field.to_owned());
     source
         .table_schema
         .columns
@@ -211,10 +248,14 @@ fn collect_slot_layouts(
                         output: if is_row_id {
                             source_field.clone()
                         } else {
-                            collect_nested_projection_output_field(&source_field)
+                            collect_nested_projection_output_field(source, &source_field)
                         },
                         value_type,
                         output_value_type,
+                        source_public_name: (!is_row_id)
+                            .then(|| resolved_source_public_name(source, &source_field))
+                            .flatten(),
+                        origin: CollectFieldOrigin::SourceRow,
                         source_field: Some(source_field),
                         is_row_id,
                         is_presence: false,
@@ -246,10 +287,10 @@ fn collect_slot_layouts(
         .collect()
 }
 
-fn collect_projection_source_field(_source: &ResolvedSource, field: &str) -> String {
+fn collect_projection_source_field(source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
-        _ => user_column_field(field),
+        _ => resolved_source_field_name(source, field).unwrap_or_else(|| user_column_field(field)),
     }
 }
 
@@ -269,7 +310,7 @@ fn collect_projection_output_field(field: &str) -> String {
     }
 }
 
-fn collect_nested_projection_output_field(field: &str) -> String {
+fn collect_nested_projection_output_field(source: &ResolvedSource, field: &str) -> String {
     match field {
         "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
         "created_at" => "$createdAt".to_owned(),
@@ -278,12 +319,34 @@ fn collect_nested_projection_output_field(field: &str) -> String {
         "updated_by" => "$updatedBy".to_owned(),
         // Nested records are public tree payloads rather than CurrentRow codec
         // records, so their user columns retain the logical schema names.
-        _ => logical_user_column(field).to_owned(),
+        _ => resolved_source_public_name(source, field).unwrap_or_else(|| field.to_owned()),
+    }
+}
+
+fn collect_root_field_projection(
+    source: &ResolvedSource,
+    field: &CollectFlatField,
+    output: &str,
+) -> ProjectField {
+    let source_field = field
+        .source_field
+        .as_ref()
+        .expect("root collector fields retain their source field");
+    match field.origin {
+        CollectFieldOrigin::SourceRow => {
+            let source_idx = resolved_source_field_index_by_name(source, source_field)
+                .expect("source-row collector fields are present in the source descriptor");
+            ProjectField::renamed_resolved(source_idx, output)
+        }
+        // Route parameters and occurrence keys are appended by graph lowering;
+        // they are not positions in the original source-row descriptor.
+        CollectFieldOrigin::Derived => ProjectField::renamed(source_field, output),
     }
 }
 
 pub(super) fn root_collect_context_graph(
     graph: GraphBuilder,
+    source: &ResolvedSource,
     layout: &CollectLayout,
 ) -> CapabilityResult<GraphBuilder> {
     let fields = layout
@@ -295,8 +358,8 @@ pub(super) fn root_collect_context_graph(
                 .as_ref()
                 .expect("root collector fields retain their source field");
             [
-                ProjectField::named(source_field),
-                ProjectField::renamed(source_field, &field.input),
+                collect_root_field_projection(source, field, source_field),
+                collect_root_field_projection(source, field, &field.input),
             ]
         })
         .collect::<Vec<_>>();
@@ -305,9 +368,15 @@ pub(super) fn root_collect_context_graph(
 
 pub(super) fn collect_anchor_graph(
     graph: GraphBuilder,
+    root_source: &ResolvedSource,
     layout: &CollectLayout,
 ) -> CapabilityResult<GraphBuilder> {
-    Ok(graph.project_fields(collect_flat_projection(layout, None, &BTreeSet::new())?))
+    Ok(graph.project_fields(collect_flat_projection(
+        layout,
+        None,
+        &BTreeSet::new(),
+        Some(root_source),
+    )?))
 }
 
 pub(super) fn lower_collect_slot_graphs(
@@ -335,6 +404,7 @@ pub(super) fn lower_collect_slot_graphs(
         layout,
         Some(slot),
         inherited_flat_fields,
+        None,
     )?);
     let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
         single_gap_report(UnsupportedReason::Runtime(format!(
@@ -378,19 +448,17 @@ fn collect_flat_projection(
     layout: &CollectLayout,
     current_slot: Option<&CollectSlotLayout>,
     inherited_flat_fields: &BTreeSet<String>,
+    root_source: Option<&ResolvedSource>,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let mut fields = layout
         .root_fields
         .iter()
         .map(|field| match current_slot {
             Some(_) => ProjectField::renamed(left_field(&field.input), &field.input),
-            None => ProjectField::renamed(
-                field
-                    .source_field
-                    .as_ref()
-                    .expect("root collector fields retain their source field"),
-                &field.input,
-            ),
+            None => {
+                let source = root_source.expect("root projection carries its source descriptor");
+                collect_root_field_projection(source, field, &field.input)
+            }
         })
         .collect::<Vec<_>>();
     for slot in collect_all_slots(&layout.slots) {
@@ -457,6 +525,7 @@ fn collect_child_context_projection(
         layout,
         Some(current_slot),
         inherited_flat_fields,
+        None,
     )?);
     Ok(fields)
 }

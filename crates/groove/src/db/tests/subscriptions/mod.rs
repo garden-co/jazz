@@ -2023,6 +2023,7 @@ async fn input_source_ungrouped_aggregate_seeds_and_restores_its_empty_identity(
             expression: None,
             distinct: false,
             output_name: Some("count".to_owned()),
+            output_identity: None,
         }],
     );
     let subscription = database.subscribe_one_sink(graph).await.unwrap();
@@ -2094,6 +2095,7 @@ async fn input_source_grouped_aggregate_has_no_empty_group() {
             expression: None,
             distinct: false,
             output_name: Some("count".to_owned()),
+            output_identity: None,
         }],
     );
     let subscription = database.subscribe_one_sink(graph).await.unwrap();

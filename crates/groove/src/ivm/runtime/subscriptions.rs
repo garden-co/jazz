@@ -2,6 +2,15 @@
 
 use super::evaluation_session::EvaluationInputs;
 use super::*;
+
+fn resolved_record_value(
+    record: BorrowedRecord<'_>,
+    field: &str,
+) -> Result<Value, IvmRuntimeError> {
+    let index = super::record_projection::resolve_field_name(&record.descriptor(), field)
+        .ok_or_else(|| records::Error::FieldNotFound(field.to_owned()))?;
+    record.get_idx(index).map_err(Into::into)
+}
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -98,6 +107,7 @@ pub struct RoutedMultisinkTerminal {
     pub route_fields: Vec<String>,
     /// Binding descriptor positions paired with `route_fields`.
     pub route_value_indices: Vec<usize>,
+    /// Exact physical carrier names in the terminal output descriptor.
     pub public_fields: Vec<String>,
 }
 
@@ -441,7 +451,7 @@ impl PredicateExpr {
                 Self::LtEq { field, value } => (field, value, std::cmp::Ordering::is_le),
                 _ => return Ok(None),
             };
-        let actual = record.get(field)?;
+        let actual = resolved_record_value(record, field)?;
         let actual = match actual {
             Value::Nullable(Some(value)) => *value,
             value => value,
@@ -535,14 +545,16 @@ impl PredicateExpr {
             Self::LtEq { field, value } => {
                 compare_record_field(record, field, value, |ord| ord.is_le(), comparison)
             }
-            Self::IsNull { field } => Ok(is_sql_null_value(&record.get(field)?)),
-            Self::IsNotNull { field } => Ok(!is_sql_null_value(&record.get(field)?)),
+            Self::IsNull { field } => Ok(is_sql_null_value(&resolved_record_value(record, field)?)),
+            Self::IsNotNull { field } => {
+                Ok(!is_sql_null_value(&resolved_record_value(record, field)?))
+            }
             Self::EnumMatch {
                 field,
                 case_tag,
                 payload,
             } => {
-                let value = record.get(field)?;
+                let value = resolved_record_value(record, field)?;
                 let value = match value {
                     Value::Nullable(Some(value)) => *value,
                     value => value,
@@ -1365,12 +1377,23 @@ fn validate_public_output_fields(
 ) -> Result<(), IvmRuntimeError> {
     for field in public_output.fields() {
         let name = field
-            .name
-            .as_ref()
+            .logical_name()
+            .or(field.name.as_deref())
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-        let index = source
-            .field_index(name)
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
+        let index = field
+            .identity
+            .as_ref()
+            .and_then(|identity| source.field_index_by_identity(identity))
+            .or_else(|| source.field_index(name))
+            .or_else(|| {
+                field.name.as_ref().and_then(|raw_name| {
+                    source
+                        .fields()
+                        .iter()
+                        .position(|candidate| candidate.name.as_deref() == Some(raw_name.as_str()))
+                })
+            })
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
         let source_field = source
             .fields()
             .get(index)
@@ -1400,7 +1423,8 @@ fn validate_public_output_for_shape(
 fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
-) -> GraphBuilder {
+    output: &RecordDescriptor,
+) -> Result<GraphBuilder, IvmRuntimeError> {
     let predicates = terminal
         .route_fields
         .iter()
@@ -1431,15 +1455,32 @@ fn bound_routed_multisink_graph(
         let input = predicate
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
-        return GraphBuilder::CollectBy {
+        return Ok(GraphBuilder::CollectBy {
             input: Arc::new(input),
             collect: Box::new(collect),
-        };
+        });
     }
     let graph = predicate
         .map(|predicate| terminal.graph.clone().filter(predicate))
         .unwrap_or_else(|| terminal.graph.clone());
-    graph.project(terminal.public_fields.clone())
+    let fields = terminal
+        .public_fields
+        .iter()
+        .map(|name| {
+            let source = FieldRef::stored_name(name.clone());
+            let index = resolve_field_ref(output, &source)?;
+            let field = &output.fields()[index];
+            Ok(ProjectField {
+                expression: ProjectExpr::Field(source),
+                output_name: name.clone(),
+                output_identity: field
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| records::FieldIdentity::Name(name.clone())),
+            })
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    Ok(graph.project_fields(fields))
 }
 
 /// A routed terminal is compiled once but a bound subscription executes one
@@ -2021,6 +2062,53 @@ fn project_source_from_joined_filter_input(
     Ok(format!("left.{}", field_ref_name(input_output, source)?))
 }
 
+fn rewritten_projection_source(
+    original_output: &RecordDescriptor,
+    rewritten_output: &RecordDescriptor,
+    field_ref: &FieldRef,
+) -> Result<String, IvmRuntimeError> {
+    let original_idx = resolve_field_ref(original_output, field_ref)?;
+    let original_field = original_output
+        .fields()
+        .get(original_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(original_idx))?;
+    let rewritten_idx = original_field
+        .identity
+        .as_ref()
+        .and_then(|identity| rewritten_output.field_index_by_identity(identity))
+        .or_else(|| {
+            original_field
+                .logical_name()
+                .and_then(|name| rewritten_output.field_index(name))
+        })
+        .or_else(|| {
+            original_field.name.as_ref().and_then(|name| {
+                rewritten_output
+                    .fields()
+                    .iter()
+                    .position(|candidate| candidate.name.as_deref() == Some(name.as_str()))
+            })
+        })
+        .ok_or_else(|| {
+            IvmRuntimeError::GraphFieldNotFound(
+                original_field
+                    .logical_name()
+                    .or(original_field.name.as_deref())
+                    .unwrap_or("<unnamed>")
+                    .to_owned(),
+            )
+        })?;
+    let rewritten_field = rewritten_output
+        .fields()
+        .get(rewritten_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(rewritten_idx))?;
+    Ok(rewritten_field
+        .logical_name()
+        .or(rewritten_field.name.as_deref())
+        .unwrap_or("<unnamed>")
+        .to_owned())
+}
+
 fn project_fields_against_rewritten_input(
     runtime: &IvmRuntime,
     original_input: &GraphBuilder,
@@ -2037,10 +2125,8 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
                 ProjectExpr::EnumTagRemap { source, tags } => {
-                    let source = field_ref_name(&original_output, source)?;
-                    if rewritten_output.field_index(&source).is_none() {
-                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
-                    }
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
                     return Ok(ProjectField::enum_tag_remap(
                         source,
                         field.output_name.clone(),
@@ -2048,10 +2134,8 @@ fn project_fields_against_rewritten_input(
                     ));
                 }
                 ProjectExpr::EnumRemap { source, tags } => {
-                    let source = field_ref_name(&original_output, source)?;
-                    if rewritten_output.field_index(&source).is_none() {
-                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
-                    }
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
                     return Ok(ProjectField::enum_remap(
                         source,
                         field.output_name.clone(),
@@ -2064,10 +2148,8 @@ fn project_fields_against_rewritten_input(
                     remaps,
                     omit_unrepresentable,
                 } => {
-                    let source = field_ref_name(&original_output, source)?;
-                    if rewritten_output.field_index(&source).is_none() {
-                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
-                    }
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
                     return Ok(if *omit_unrepresentable {
                         ProjectField::recursive_enum_remap_omitting_unrepresentable(
                             source,
@@ -2088,17 +2170,24 @@ fn project_fields_against_rewritten_input(
                 | ProjectExpr::TypedLiteral { .. }
                 | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
-            let source = field_ref_name(&original_output, field_ref)?;
-            if rewritten_output.field_index(&source).is_none() {
-                return Err(IvmRuntimeError::GraphFieldNotFound(source));
-            }
+            let source =
+                rewritten_projection_source(&original_output, &rewritten_output, field_ref)?;
             match nullable_projection {
-                None => Ok(ProjectField::renamed(source, field.output_name.clone())),
-                Some(false) => Ok(ProjectField::nullable(source, field.output_name.clone())),
-                Some(true) => Ok(ProjectField::nullable_flat(
-                    source,
-                    field.output_name.clone(),
-                )),
+                None => Ok(ProjectField {
+                    expression: ProjectExpr::Field(FieldRef::name(source)),
+                    output_name: field.output_name.clone(),
+                    output_identity: field.output_identity.clone(),
+                }),
+                Some(false) => Ok(ProjectField {
+                    expression: ProjectExpr::Nullable(FieldRef::name(source)),
+                    output_name: field.output_name.clone(),
+                    output_identity: field.output_identity.clone(),
+                }),
+                Some(true) => Ok(ProjectField {
+                    expression: ProjectExpr::NullableFlat(FieldRef::name(source)),
+                    output_name: field.output_name.clone(),
+                    output_identity: field.output_identity.clone(),
+                }),
             }
         })
         .collect()
@@ -2119,10 +2208,19 @@ fn project_to_output_with_binding(
                 .name
                 .clone()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            if lifted_output.field_index(&name).is_none() {
-                return Err(IvmRuntimeError::GraphFieldNotFound(name));
-            }
-            Ok(ProjectField::renamed(name.clone(), name))
+            let source = rewritten_projection_source(
+                original_output,
+                &lifted_output,
+                &FieldRef::name(name.clone()),
+            )?;
+            Ok(ProjectField {
+                expression: ProjectExpr::Field(FieldRef::name(source)),
+                output_name: name.clone(),
+                output_identity: field
+                    .identity
+                    .clone()
+                    .unwrap_or(crate::records::FieldIdentity::Name(name)),
+            })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
     append_binding_project_field(
@@ -3150,10 +3248,13 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
             }
             let output = self.infer_builder_output(&terminal.graph)?;
-            for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
+            for field in &terminal.route_fields {
                 if output.field_index(field).is_none() {
                     return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
                 }
+            }
+            for field in &terminal.public_fields {
+                resolve_field_ref(&output, &FieldRef::stored_name(field.clone()))?;
             }
         }
         self.logical_nodes_requested += terminals
@@ -3282,12 +3383,16 @@ impl IvmRuntime {
                 .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
                 .sum::<usize>() as u64;
             let mut outputs = BTreeMap::new();
-            for (sink, terminal) in &shape.terminals {
-                let mut terminal = terminal.terminal.clone();
+            for (sink, prepared_terminal) in &shape.terminals {
+                let mut terminal = prepared_terminal.terminal.clone();
                 if let Some(fields) = public_fields.get(sink) {
                     terminal.public_fields = fields.clone();
                 }
-                let graph = bound_routed_multisink_graph(&terminal, binding_values);
+                let graph = bound_routed_multisink_graph(
+                    &terminal,
+                    binding_values,
+                    &prepared_terminal.output.output,
+                )?;
                 let output = runtime.add_dedup_graph(&graph)?;
                 outputs.insert(sink.clone(), output);
             }
@@ -3739,7 +3844,7 @@ impl IvmRuntime {
         }))
     }
 
-    fn infer_builder_output(
+    pub(crate) fn infer_builder_output(
         &self,
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {

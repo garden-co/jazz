@@ -42,6 +42,7 @@ import {
   PostcardReader,
   PostcardWriter,
   openConfig,
+  nativeRowDescriptorPublicName,
   queryWithPredicates,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
@@ -6097,33 +6098,26 @@ function nativeRowFieldPlans(
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
-    const fieldName = batch.descriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
+    const field = batch.descriptor[index];
+    const fieldName = field && nativeRowDescriptorPublicName(field);
+    if (!fieldName) {
+      continue;
+    }
 
-    const name = publicFieldName(fieldName);
-    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
+    const type = magicColumnType(fieldName) ?? columnsByName.get(fieldName)?.column_type;
     plans.push({
-      name,
+      name: fieldName,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
       includeInValues:
-        !isHiddenIncludeColumn(name) &&
-        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
+        !isHiddenIncludeColumn(fieldName) &&
+        (!isProvenanceMagicColumn(fieldName) || projectedNames?.has(fieldName) === true),
     });
   }
 
   if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
-}
-
-// These fields are provenance retained by settled/materializer read paths.
-// They are never Jazz application columns (user columns use the `user_`
-// descriptor namespace) and must not cross the public native row boundary.
-function isCurrentRowPhysicalField(fieldName: string): boolean {
-  return (
-    fieldName === "schema_version" || fieldName === "parents" || fieldName === "authored_columns"
-  );
 }
 
 function rowsFromRelationSnapshot(
@@ -7111,21 +7105,6 @@ function canonicalJson(value: unknown): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function publicFieldName(name: string): string {
-  return name.startsWith("user_") ? name.slice("user_".length) : name;
-}
-
-function isInternalField(name?: string): boolean {
-  return (
-    name === "row_uuid" ||
-    name === "tx_node_id" ||
-    name === "tx_time" ||
-    name === "schema_version" ||
-    name === "parents" ||
-    name === "authored_columns"
-  );
 }
 
 function isHiddenIncludeColumn(name: string): boolean {

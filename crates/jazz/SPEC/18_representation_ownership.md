@@ -106,6 +106,19 @@ enum discriminants in nested descriptors, and raw Groove record bytes are
 frozen once emitted: future ABI evolution requires a new explicitly versioned
 envelope, never a reordered field, permissive fallback, or in-place migration.
 
+Named-cell input has the explicit v1 postcard field order `descriptor, raw`.
+Its descriptor is an ordered vector of `name: Option<String>, value_type`;
+recursive records and enum case payloads use that same name/type grammar.
+It never includes `FieldIdentity`, a compiler slot, or a local physical ID.
+The NAPI and WASM adapters call the same `binding_codec::decode_named_cells`
+reader. Before installing logical name bindings it rejects trailing or
+noncanonical framing, noncanonical packed rows, duplicate or absent top-level
+names, unknown types, more than 1024 type/case nodes, and depth 128 or greater.
+Scalar type discriminants match the output type grammar; internal scalar tags
+retain their existing encoding and remain subject to the owning schema's
+validation. This input role is independent of the immutable peer-version
+`JVRR` envelope described in chapter 16.
+
 `binding_codec_golden.json` is the frozen cross-language corpus for this v1
 binding layout. Rust creates the hard-coded semantic cases and exact bytes;
 the TypeScript reader independently decodes them, and the generated NAPI and

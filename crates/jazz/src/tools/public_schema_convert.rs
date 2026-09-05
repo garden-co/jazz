@@ -3409,7 +3409,7 @@ mod tests {
             .map(|field| sample_groove_value(&field.value_type))
             .collect::<Vec<_>>();
         let record = descriptor.create(&values).unwrap();
-        let score_idx = descriptor.field_index("user_score").unwrap();
+        let score_idx = descriptor.field_index("_app_score").unwrap();
         let score_span = descriptor.field_span(&record, score_idx).unwrap();
 
         assert_eq!(
