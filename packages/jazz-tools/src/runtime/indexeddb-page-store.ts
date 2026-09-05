@@ -193,29 +193,25 @@ export class IndexedDbPageStore {
     return () => this.invalidationListeners.delete(listener);
   }
 
+  private startDiagnosticOperation(
+    operation: IndexedDbPageStoreDiagnostic["operation"],
+  ): number | undefined {
+    if (!this.diagnostic) return undefined;
+    const operationId = this.nextDiagnosticOperationId++;
+    this.recordDiagnosticOperation(operation, "call-start", operationId);
+    return operationId;
+  }
+
   private recordDiagnosticOperation(
     operation: IndexedDbPageStoreDiagnostic["operation"],
     phase: IndexedDbPageStoreDiagnostic["phase"],
-    operationId: number,
+    operationId: number | undefined,
   ): void {
+    if (operationId === undefined) return;
     try {
       this.diagnostic?.({ operation, phase, operationId });
     } catch {
       // Receipt observation must never change IndexedDB progress.
-    }
-  }
-
-  private async observeDiagnosticOperation<T>(
-    operation: IndexedDbPageStoreDiagnostic["operation"],
-    work: (operationId: number) => Promise<T>,
-  ): Promise<T> {
-    const operationId = this.nextDiagnosticOperationId++;
-    this.recordDiagnosticOperation(operation, "call-start", operationId);
-    try {
-      return await work(operationId);
-    } catch (error) {
-      this.recordDiagnosticOperation(operation, "error", operationId);
-      throw error;
     }
   }
 
@@ -411,7 +407,8 @@ export class IndexedDbPageStore {
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
-    return await this.observeDiagnosticOperation("metadata", async (operationId) => {
+    const operationId = this.startDiagnosticOperation("metadata");
+    try {
       this.assertValid();
       const tx = this.db.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
       const done = transactionDone(tx);
@@ -424,7 +421,10 @@ export class IndexedDbPageStore {
       if (value === undefined) return null;
       assertMetadata(value);
       return value;
-    });
+    } catch (error) {
+      this.recordDiagnosticOperation("metadata", "error", operationId);
+      throw error;
+    }
   }
 
   /** Read-only physical-open gate. It always runs before a caller gets a handle. */
@@ -521,7 +521,8 @@ export class IndexedDbPageStore {
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
-    return await this.observeDiagnosticOperation("read-page", async (operationId) => {
+    const operationId = this.startDiagnosticOperation("read-page");
+    try {
       this.assertValid();
       assertPageId(pageId);
       const tx = this.db.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
@@ -539,72 +540,82 @@ export class IndexedDbPageStore {
           ? new Uint8Array(value)
           : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       return bytes.slice();
-    });
+    } catch (error) {
+      this.recordDiagnosticOperation("read-page", "error", operationId);
+      throw error;
+    }
   }
 
   async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
-    return await this.observeDiagnosticOperation("commit-pages", async (operationId) => {
-      this.assertValid();
-      assertCommit(commit);
-      const tx = relaxedReadWriteTransaction(this.db, [
-        INDEXEDDB_BTREE_PAGES_STORE,
-        INDEXEDDB_BTREE_METADATA_STORE,
-      ]);
-      const done = transactionDone(tx);
-      const pages = tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE);
-      const metadataStore = tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE);
-      const currentValue = await requestResult(metadataStore.get(CURRENT_METADATA_KEY));
+    const operationId = this.startDiagnosticOperation("commit-pages");
+    this.assertValid();
+    assertCommit(commit);
+    const tx = relaxedReadWriteTransaction(this.db, [
+      INDEXEDDB_BTREE_PAGES_STORE,
+      INDEXEDDB_BTREE_METADATA_STORE,
+    ]);
+    const done = transactionDone(tx);
+    const pages = tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    const metadataStore = tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE);
+    let currentValue: unknown;
+    try {
+      currentValue = await requestResult(metadataStore.get(CURRENT_METADATA_KEY));
       this.recordDiagnosticOperation("commit-pages", "request-settled", operationId);
-      const currentGeneration = currentValue === undefined ? 0 : metadataGeneration(currentValue);
+    } catch (error) {
+      this.recordDiagnosticOperation("commit-pages", "error", operationId);
+      throw error;
+    }
+    const currentGeneration = currentValue === undefined ? 0 : metadataGeneration(currentValue);
 
-      if (currentGeneration !== commit.expectedGeneration) {
-        tx.abort();
-        await done.catch(() => undefined);
-        throw new Error(
-          `IndexedDB B-tree generation changed: expected ${commit.expectedGeneration}, found ${currentGeneration}`,
-        );
+    if (currentGeneration !== commit.expectedGeneration) {
+      tx.abort();
+      await done.catch(() => undefined);
+      this.recordDiagnosticOperation("commit-pages", "error", operationId);
+      throw new Error(
+        `IndexedDB B-tree generation changed: expected ${commit.expectedGeneration}, found ${currentGeneration}`,
+      );
+    }
+
+    const metadata: IndexedDbBtreeMetadata = {
+      ...commit.metadata,
+      formatMagic: INDEXEDDB_BTREE_FORMAT_MAGIC,
+      formatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
+      generation: currentGeneration + 1,
+    };
+    // Validate the exact metadata to be published before queuing a mutation.
+    assertMetadata(metadata);
+
+    try {
+      if (metadata.rootPageId !== null && !commit.pages.has(metadata.rootPageId)) {
+        const publishedRoot = await requestResult(pages.get(metadata.rootPageId));
+        this.recordDiagnosticOperation("commit-pages", "request-settled", operationId);
+        if (publishedRoot === undefined) {
+          throw new Error(`IndexedDB B-tree root page ${metadata.rootPageId} is missing`);
+        }
       }
-
-      const metadata: IndexedDbBtreeMetadata = {
-        ...commit.metadata,
-        formatMagic: INDEXEDDB_BTREE_FORMAT_MAGIC,
-        formatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
-        generation: currentGeneration + 1,
-      };
-      // Validate the exact metadata to be published before queuing a mutation.
-      assertMetadata(metadata);
-
+      for (const [pageId, bytes] of commit.pages) {
+        if (bytes.byteLength > metadata.pageSize) {
+          throw new Error(`IndexedDB B-tree page ${pageId} exceeds configured page size`);
+        }
+        pages.put(bytes.slice().buffer, pageId);
+      }
+      for (const pageId of commit.deletedPageIds ?? []) {
+        pages.delete(pageId);
+      }
+      metadataStore.put(metadata, CURRENT_METADATA_KEY);
+      await done;
+      this.recordDiagnosticOperation("commit-pages", "transaction-settled", operationId);
+      return metadata;
+    } catch (error) {
       try {
-        if (metadata.rootPageId !== null && !commit.pages.has(metadata.rootPageId)) {
-          const publishedRoot = await requestResult(pages.get(metadata.rootPageId));
-          this.recordDiagnosticOperation("commit-pages", "request-settled", operationId);
-          if (publishedRoot === undefined) {
-            throw new Error(`IndexedDB B-tree root page ${metadata.rootPageId} is missing`);
-          }
-        }
-        for (const [pageId, bytes] of commit.pages) {
-          if (bytes.byteLength > metadata.pageSize) {
-            throw new Error(`IndexedDB B-tree page ${pageId} exceeds configured page size`);
-          }
-          pages.put(bytes.slice().buffer, pageId);
-        }
-        for (const pageId of commit.deletedPageIds ?? []) {
-          pages.delete(pageId);
-        }
-        metadataStore.put(metadata, CURRENT_METADATA_KEY);
-        await done;
-        this.recordDiagnosticOperation("commit-pages", "transaction-settled", operationId);
-        return metadata;
-      } catch (error) {
-        try {
-          tx.abort();
-        } catch {
-          // The transaction may already have aborted because an IDB request failed.
-        }
-        await done.catch(() => undefined);
-        throw error;
+        tx.abort();
+      } catch {
+        // The transaction may already have aborted because an IDB request failed.
       }
-    });
+      await done.catch(() => undefined);
+      this.recordDiagnosticOperation("commit-pages", "error", operationId);
+      throw error;
+    }
   }
 
   /** Narrow bridge used by wasm without serializing page bytes through serde. */

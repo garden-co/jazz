@@ -81,6 +81,51 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
+  it("keeps IndexedDB operations intact when a receipt observer throws", async () => {
+    const store = await IndexedDbPageStore.open(databaseName(), {
+      diagnostic: () => {
+        throw new Error("observer failure must be ignored");
+      },
+    });
+
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, new Uint8Array([7])]]),
+    });
+    await expect(store.metadata()).resolves.toMatchObject({ generation: 1, rootPageId: 1 });
+    await expect(store.readPage(1)).resolves.toEqual(new Uint8Array([7]));
+    store.close();
+  });
+
+  it("marks a generation conflict without claiming an IndexedDB transaction settled", async () => {
+    const diagnostics: IndexedDbPageStoreDiagnostic[] = [];
+    const store = await IndexedDbPageStore.open(databaseName(), {
+      diagnostic: (event) => diagnostics.push(event),
+    });
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, new Uint8Array([7])]]),
+    });
+    diagnostics.length = 0;
+
+    await expect(
+      store.commit({
+        expectedGeneration: 0,
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 2, nextPageId: 3 },
+        pages: new Map([[2, new Uint8Array([8])]]),
+      }),
+    ).rejects.toThrow("expected 0, found 1");
+
+    expect(diagnostics).toEqual([
+      { operation: "commit-pages", phase: "call-start", operationId: 2 },
+      { operation: "commit-pages", phase: "request-settled", operationId: 2 },
+      { operation: "commit-pages", phase: "error", operationId: 2 },
+    ]);
+    store.close();
+  });
+
   it("pins an explicit browser owner across release/reopen and rejects another owner before mutation", async () => {
     const name = databaseName();
     const alice = await IndexedDbPageStore.open(name, { owner: "app:alice" });
