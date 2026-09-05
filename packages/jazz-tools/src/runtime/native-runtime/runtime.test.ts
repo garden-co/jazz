@@ -2457,7 +2457,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(relationBytes).toBeDefined();
-    expect([...relationBytes!.slice(-9)]).toEqual([5, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f]);
+    expect(relationBytes!.slice(-10)).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    ]);
   });
 
   it("lowers simple Project relation IR while preparing the original subscription query", () => {

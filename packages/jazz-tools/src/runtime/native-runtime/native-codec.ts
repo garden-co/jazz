@@ -367,7 +367,7 @@ export function queryWithPredicates(
   if (relation == null) writer.none();
   else
     writer.some((relationWriter) =>
-      relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr)),
+      relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr), false),
     );
   return writer.finish();
 }

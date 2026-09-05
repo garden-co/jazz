@@ -663,9 +663,12 @@ fn relation_expr(value: WireRelationExpr) -> WireResult<RelationExpr> {
 }
 
 pub(crate) fn relation_query_to_wire(value: &RelationQuery) -> WireResult<WireRelationQuery> {
-    WireRelationQuery::try_from(value)
+    let wire = WireRelationQuery::try_from(value)?;
+    validate_wire(&wire)?;
+    Ok(wire)
 }
 pub(crate) fn relation_query_from_wire(value: WireRelationQuery) -> WireResult<RelationQuery> {
+    validate_wire(&value)?;
     RelationQuery::try_from(value)
 }
 /// Encode the typed relation-query Postcard payload used by direct native reads.
@@ -675,7 +678,6 @@ pub fn encode_relation_query_postcard(value: &RelationQuery) -> WireResult<Vec<u
     if bytes.len() > MAX_RELATION_BYTES {
         return Err(RelationWireError::TooLarge);
     }
-    validate_wire(&wire)?;
     Ok(bytes)
 }
 /// Decode a typed relation-query Postcard payload used by direct native reads.
@@ -683,85 +685,309 @@ pub fn decode_relation_query_postcard(bytes: &[u8]) -> WireResult<RelationQuery>
     if bytes.len() > MAX_RELATION_BYTES {
         return Err(RelationWireError::TooLarge);
     }
-    let wire: WireRelationQuery = postcard::from_bytes(bytes)?;
-    validate_wire(&wire)?;
+    let wire = crate::wire::decode_postcard_exact::<WireRelationQuery>(bytes)?;
     relation_query_from_wire(wire)
 }
 fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
-    fn text(value: &str, total: &mut usize) -> WireResult<()> {
-        if value.len() > MAX_RELATION_STRING_BYTES {
-            return Err(RelationWireError::Invalid("string exceeds limit"));
-        }
-        *total = total
-            .checked_add(value.len())
-            .ok_or(RelationWireError::TooLarge)?;
-        if *total > MAX_RELATION_BYTES {
-            return Err(RelationWireError::TooLarge);
-        }
-        Ok(())
+    struct Validator {
+        nodes: usize,
+        strings: usize,
     }
-    fn expr(
-        value: &WireRelationExpr,
-        depth: usize,
-        nodes: &mut usize,
-        strings: &mut usize,
-    ) -> WireResult<()> {
-        if depth > MAX_RELATION_DEPTH {
-            return Err(RelationWireError::Invalid("depth exceeds limit"));
-        }
-        *nodes += 1;
-        if *nodes > MAX_RELATION_ITEMS {
-            return Err(RelationWireError::Invalid("node count exceeds limit"));
-        }
-        match value {
-            WireRelationExpr::TableScan { table, alias } => {
-                text(table, strings)?;
-                if let Some(alias) = alias {
-                    text(alias, strings)?
-                }
+    impl Validator {
+        fn node(&mut self) -> WireResult<()> {
+            self.nodes = self
+                .nodes
+                .checked_add(1)
+                .ok_or(RelationWireError::TooLarge)?;
+            if self.nodes > MAX_RELATION_ITEMS {
+                return Err(RelationWireError::Invalid("node count exceeds limit"));
             }
-            WireRelationExpr::Filter { input, .. }
-            | WireRelationExpr::Project { input, .. }
-            | WireRelationExpr::Distinct { input, .. }
-            | WireRelationExpr::OrderBy { input, .. }
-            | WireRelationExpr::Offset { input, .. }
-            | WireRelationExpr::Limit { input, .. } => expr(input, depth + 1, nodes, strings)?,
-            WireRelationExpr::Union { inputs } => {
-                if inputs.len() > MAX_RELATION_ITEMS {
-                    return Err(RelationWireError::Invalid("collection exceeds limit"));
-                }
-                let mut labels = BTreeSet::new();
-                for arm in inputs {
-                    text(&arm.label, strings)?;
-                    if arm.label.is_empty()
-                        || arm.label.len() > 4096
-                        || arm.label.contains('\0')
-                        || !labels.insert(&arm.label)
-                    {
-                        return Err(RelationWireError::Invalid("invalid union label"));
+            Ok(())
+        }
+        fn collection(&self, len: usize) -> WireResult<()> {
+            if len > MAX_RELATION_ITEMS {
+                Err(RelationWireError::Invalid("collection exceeds limit"))
+            } else {
+                Ok(())
+            }
+        }
+        fn text(&mut self, value: &str) -> WireResult<()> {
+            if value.len() > MAX_RELATION_STRING_BYTES {
+                return Err(RelationWireError::Invalid("string exceeds limit"));
+            }
+            self.strings = self
+                .strings
+                .checked_add(value.len())
+                .ok_or(RelationWireError::TooLarge)?;
+            if self.strings > MAX_RELATION_BYTES {
+                Err(RelationWireError::TooLarge)
+            } else {
+                Ok(())
+            }
+        }
+        fn column(&mut self, value: &WireRelationColumnRef) -> WireResult<()> {
+            if let Some(scope) = &value.scope {
+                self.text(scope)?;
+            }
+            self.text(&value.column)
+        }
+        fn key(&mut self, value: &WireRelationKeyRef) -> WireResult<()> {
+            self.node()?;
+            match value {
+                WireRelationKeyRef::Column(column) => self.column(column),
+                WireRelationKeyRef::RowId(_) => Ok(()),
+            }
+        }
+        fn value(&mut self, value: &WireRelationValueRef, depth: usize) -> WireResult<()> {
+            self.node()?;
+            match value {
+                WireRelationValueRef::Literal(value) => self.json(value, depth + 1),
+                WireRelationValueRef::Param(value) => self.text(value),
+                WireRelationValueRef::SessionRef(values) => {
+                    self.collection(values.len())?;
+                    for value in values {
+                        self.text(value)?;
                     }
-                    expr(&arm.input, depth + 1, nodes, strings)?
+                    Ok(())
                 }
-            }
-            WireRelationExpr::Join { left, right, .. } => {
-                expr(left, depth + 1, nodes, strings)?;
-                expr(right, depth + 1, nodes, strings)?
-            }
-            WireRelationExpr::Gather { seed, step, .. } => {
-                expr(seed, depth + 1, nodes, strings)?;
-                expr(step, depth + 1, nodes, strings)?
+                WireRelationValueRef::OuterColumn(value)
+                | WireRelationValueRef::FrontierColumn(value) => self.column(value),
+                WireRelationValueRef::RowId(_) => Ok(()),
             }
         }
-        Ok(())
+        fn json(&mut self, value: &WireJson, depth: usize) -> WireResult<()> {
+            if depth > MAX_RELATION_DEPTH {
+                return Err(RelationWireError::Invalid("depth exceeds limit"));
+            }
+            self.node()?;
+            match value {
+                WireJson::F64(bits) if !f64::from_bits(*bits).is_finite() => {
+                    Err(RelationWireError::NonFiniteNumber)
+                }
+                WireJson::String(value) => self.text(value),
+                WireJson::Array(values) => {
+                    self.collection(values.len())?;
+                    for value in values {
+                        self.json(value, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                WireJson::Object(entries) => {
+                    self.collection(entries.len())?;
+                    let mut previous: Option<&str> = None;
+                    for (key, value) in entries {
+                        self.text(key)?;
+                        if previous.is_some_and(|previous| previous >= key.as_str()) {
+                            return Err(RelationWireError::Invalid(
+                                "object keys are not canonical",
+                            ));
+                        }
+                        previous = Some(key);
+                        self.json(value, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+        fn predicate(&mut self, value: &WireRelationPredicate, depth: usize) -> WireResult<()> {
+            if depth > MAX_RELATION_DEPTH {
+                return Err(RelationWireError::Invalid("depth exceeds limit"));
+            }
+            self.node()?;
+            match value {
+                WireRelationPredicate::Cmp { left, right, .. } => {
+                    self.column(left)?;
+                    self.value(right, depth + 1)
+                }
+                WireRelationPredicate::IsNull { column }
+                | WireRelationPredicate::IsNotNull { column } => self.column(column),
+                WireRelationPredicate::In { left, values } => {
+                    self.column(left)?;
+                    self.collection(values.len())?;
+                    for value in values {
+                        self.value(value, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                WireRelationPredicate::Contains { left, right } => {
+                    self.column(left)?;
+                    self.value(right, depth + 1)
+                }
+                WireRelationPredicate::EnumMatch {
+                    column,
+                    case,
+                    payload,
+                } => {
+                    self.column(column)?;
+                    self.text(case)?;
+                    self.predicate(payload, depth + 1)
+                }
+                WireRelationPredicate::And(values) | WireRelationPredicate::Or(values) => {
+                    self.collection(values.len())?;
+                    for value in values {
+                        self.predicate(value, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                WireRelationPredicate::Not(value) => self.predicate(value, depth + 1),
+                WireRelationPredicate::True | WireRelationPredicate::False => Ok(()),
+            }
+        }
+        fn expr(&mut self, value: &WireRelationExpr, depth: usize) -> WireResult<()> {
+            if depth > MAX_RELATION_DEPTH {
+                return Err(RelationWireError::Invalid("depth exceeds limit"));
+            }
+            self.node()?;
+            match value {
+                WireRelationExpr::TableScan { table, alias } => {
+                    self.text(table)?;
+                    if let Some(alias) = alias {
+                        self.text(alias)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Filter { input, predicate } => {
+                    self.expr(input, depth + 1)?;
+                    self.predicate(predicate, depth + 1)
+                }
+                WireRelationExpr::Union { inputs } => {
+                    self.collection(inputs.len())?;
+                    let mut labels = BTreeSet::new();
+                    for arm in inputs {
+                        self.text(&arm.label)?;
+                        if arm.label.is_empty()
+                            || arm.label.len() > 4096
+                            || arm.label.contains('\0')
+                            || !labels.insert(&arm.label)
+                        {
+                            return Err(RelationWireError::Invalid("invalid union label"));
+                        }
+                        self.expr(&arm.input, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Join {
+                    left, right, on, ..
+                } => {
+                    self.expr(left, depth + 1)?;
+                    self.expr(right, depth + 1)?;
+                    self.collection(on.len())?;
+                    for condition in on {
+                        self.node()?;
+                        self.column(&condition.left)?;
+                        self.column(&condition.right)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Project { input, columns } => {
+                    self.expr(input, depth + 1)?;
+                    self.collection(columns.len())?;
+                    for column in columns {
+                        self.node()?;
+                        self.text(&column.alias)?;
+                        match &column.expr {
+                            WireRelationProjectExpr::Column(value) => self.column(value)?,
+                            WireRelationProjectExpr::RowId(_) => {}
+                        }
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Gather {
+                    seed,
+                    step,
+                    frontier_key,
+                    dedupe_key,
+                    ..
+                } => {
+                    self.expr(seed, depth + 1)?;
+                    self.expr(step, depth + 1)?;
+                    self.key(frontier_key)?;
+                    self.collection(dedupe_key.len())?;
+                    for key in dedupe_key {
+                        self.key(key)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Distinct { input, key } => {
+                    self.expr(input, depth + 1)?;
+                    self.collection(key.len())?;
+                    for key in key {
+                        self.key(key)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::OrderBy { input, terms } => {
+                    self.expr(input, depth + 1)?;
+                    self.collection(terms.len())?;
+                    for term in terms {
+                        self.node()?;
+                        self.column(&term.column)?;
+                    }
+                    Ok(())
+                }
+                WireRelationExpr::Offset { input, .. } | WireRelationExpr::Limit { input, .. } => {
+                    self.expr(input, depth + 1)
+                }
+            }
+        }
     }
-    let mut nodes = 0;
-    let mut strings = 0;
-    expr(&value.rel, 0, &mut nodes, &mut strings)
+    let mut validator = Validator {
+        nodes: 0,
+        strings: 0,
+    };
+    validator.expr(&value.rel, 0)
 }
-
 #[cfg(test)]
 mod relation_postcard_tests {
     use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Corpus {
+        cases: Vec<CorpusCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct CorpusCase {
+        name: String,
+        relation: serde_json::Value,
+        postcard_hex: String,
+    }
+
+    #[test]
+    fn typed_postcard_corpus_is_current() {
+        let source = include_str!("../../fixtures/relation_query_postcard.json");
+        let corpus: Corpus = serde_json::from_str(source).unwrap();
+        if std::env::var_os("JAZZ_UPDATE_RELATION_POSTCARD_CORPUS").is_some() {
+            let mut updated = source.to_owned();
+            for case in corpus.cases {
+                let query: RelationQuery = serde_json::from_value(case.relation).unwrap();
+                let actual = hex::encode(encode_relation_query_postcard(&query).unwrap());
+                updated = updated.replacen(
+                    &format!(r#""postcard_hex": "{}""#, case.postcard_hex),
+                    &format!(r#""postcard_hex": "{}""#, actual),
+                    1,
+                );
+            }
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/relation_query_postcard.json"
+                ),
+                updated,
+            )
+            .unwrap();
+            return;
+        }
+        for case in corpus.cases {
+            let query: RelationQuery = serde_json::from_value(case.relation).unwrap();
+            assert_eq!(
+                hex::encode(encode_relation_query_postcard(&query).unwrap()),
+                case.postcard_hex,
+                "{}",
+                case.name
+            );
+        }
+    }
 
     #[test]
     fn typed_postcard_relation_round_trips_literal_kinds() {
@@ -785,7 +1011,54 @@ mod relation_postcard_tests {
             },
         };
         let bytes = encode_relation_query_postcard(&query).unwrap();
-        assert_ne!(&bytes[..bytes.len().min(4)], b"JRQ\x01");
+        assert_ne!(&bytes[..bytes.len().min(4)], b"custom relation header");
         assert_eq!(decode_relation_query_postcard(&bytes).unwrap(), query);
+    }
+
+    #[test]
+    fn typed_postcard_rejects_trailing_or_noncanonical_payloads() {
+        let query = RelationQuery {
+            rel: RelationExpr::TableScan {
+                table: "rows".into(),
+                alias: None,
+            },
+        };
+        let mut bytes = encode_relation_query_postcard(&query).unwrap();
+        bytes.push(0);
+        assert!(decode_relation_query_postcard(&bytes).is_err());
+    }
+
+    #[test]
+    fn query_and_shape_carry_relation_postcard_recursively() {
+        let relation = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "rows".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "value".into(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::json!(1.5)),
+                },
+            },
+        };
+        let mut query = Query::from("rows");
+        query.relation = Some(relation.clone());
+        let query_bytes = postcard::to_allocvec(&query).unwrap();
+        assert_eq!(postcard::from_bytes::<Query>(&query_bytes).unwrap(), query);
+
+        let shape = crate::protocol::ShapeAst::new_relation(
+            relation,
+            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
+        );
+        let shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
+            shape
+        );
     }
 }

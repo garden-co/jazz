@@ -477,9 +477,8 @@ snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
 event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 
-`AllRelationQuery` accepts JRQ v1 `query_bytes`, the explicit bounded binary
-relation grammar, and uses the core relation resolver plus asynchronous canonical
-query preparation.
+`AllRelationQuery` accepts the bounded typed Postcard relation-query payload and
+uses the core relation resolver plus asynchronous canonical query preparation.
 
 ### Relation-query Postcard carrier
 
@@ -497,6 +496,20 @@ at 4,096, strings at 65,536 UTF-8 bytes, and semantic dimensions at `u32::MAX`.
 Union labels remain unique, UTF-8, NUL-free, and 1 through 4,096 bytes. Rows,
 cells, snapshots, and subscription deltas retain their existing native binding
 encodings; only the relation-query AST carrier changes.
+
+The standalone direct-read payload is `WireRelationQuery { rel }`. Within a
+`Query.relation` option and a `ShapeBody::Relation` variant, that same struct is
+nested directly in the enclosing Postcard value; it is never length-wrapped as a
+byte vector. Postcard enum ordinals follow the declared Rust order: relation
+expressions are `TableScan`, `Filter`, `Union`, `Join`, `Project`, `Gather`,
+`Distinct`, `OrderBy`, `Offset`, `Limit`; predicates are `Cmp`, `IsNull`,
+`IsNotNull`, `In`, `Contains`, `EnumMatch`, `And`, `Or`, `Not`, `True`, `False`;
+and value references are `Literal`, `Param`, `SessionRef`, `OuterColumn`,
+`FrontierColumn`, `RowId`. Struct fields use declaration order. Literal ordinals
+are `Null`, `Bool`, `I64`, `U64`, `F64(bits)`, `String`, `Array`, and `Object`.
+Objects contain sorted, unique UTF-8 keys; `F64` carries raw IEEE-754 bits, so
+negative zero is preserved. A receiver requires an exact canonical Postcard
+payload with no trailing bytes or overlong alternative spelling.
 
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
