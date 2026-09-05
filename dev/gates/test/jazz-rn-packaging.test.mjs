@@ -169,6 +169,7 @@ const relayJsExports = new Set([
   "NativeForegroundRuntimeFactory",
   "NativeForegroundRuntime",
   "NativeForegroundCommand",
+  "NativeForegroundPermissionAdviceAction",
   "NativeForegroundTransactionKind",
   "NativeForegroundResponse",
   "NativeForegroundSubscriptionEvent",
@@ -405,6 +406,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
       "NativeForegroundRuntimeFactory",
       "NativeForegroundRuntime",
       "NativeForegroundCommand",
+      "NativeForegroundPermissionAdviceAction",
       "NativeForegroundTransactionKind",
       "NativeForegroundResponse",
       "NativeForegroundSubscriptionEvent",
@@ -414,7 +416,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
       "executeNativeRelayCommand",
     ]),
   );
-  assert.equal(relayExports.length, 12, "relay must expose exactly its fixed ABI declarations");
+  assert.equal(relayExports.length, 13, "relay must expose exactly its fixed ABI declarations");
 
   assert.equal(
     indexExports.length,

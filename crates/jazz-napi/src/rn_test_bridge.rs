@@ -188,6 +188,35 @@ impl RnTestForeground {
         })
     }
 
+    pub fn is_closed(&self) -> Result<bool> {
+        if self.closed {
+            return Ok(true);
+        }
+        let host = self.host()?;
+        // Canonical V1 Probe. Liveness is a typed C ABI status, not an
+        // interpretation of an exception message or a metadata decoder error.
+        let request = [0_u8];
+        let mut response = JazzNativeRelayBytes {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        let status = unsafe {
+            jazz_native_relay_host_lease_execute_foreground(
+                host.lease,
+                self.handle,
+                request.as_ptr(),
+                request.len(),
+                &mut response,
+            )
+        };
+        unsafe { jazz_native_relay_bytes_free(&mut response) };
+        if status == JazzNativeRelayStatus::InvalidHandle {
+            return Ok(true);
+        }
+        check(status)?;
+        Ok(false)
+    }
+
     pub fn tick(&self) -> Result<()> {
         let host = self.host()?;
         check(unsafe {
@@ -304,4 +333,59 @@ pub fn host_attach_canonical_schema(
 #[napi(js_name = "__testRnHostRevoke", skip_typescript)]
 pub fn host_revoke(host: &External<RnTestHost>, capability: Uint8Array) -> Result<()> {
     host.revoke(capability)
+}
+
+/// Inspect the real Rust request type without executing a database operation.
+/// This test-only seam detects TS ordinal/field drift across the language boundary.
+#[napi(js_name = "__testRnDecodeForegroundCommand", skip_typescript)]
+pub fn decode_foreground_command(command: Uint8Array) -> Result<String> {
+    let (decoded, remainder) = postcard::take_from_bytes::<ForegroundDbCommandRequest>(&command)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    let canonical =
+        postcard::to_allocvec(&decoded).map_err(|error| Error::from_reason(error.to_string()))?;
+    if !remainder.is_empty() || canonical.as_slice() != command.as_ref() {
+        return Err(Error::from_reason("non-canonical foreground command"));
+    }
+    serde_json::to_string(&decoded).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Rust-produced response bytes, consumed by the ordinary RN TS decoder.
+#[napi(js_name = "__testRnForegroundResponseCorpus", skip_typescript)]
+pub fn foreground_response_corpus() -> Result<String> {
+    let responses = [
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Allowed,
+        },
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Denied,
+        },
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Unknown,
+        },
+        ForegroundDbCommandResponse::Pending { operation: 256 },
+        ForegroundDbCommandResponse::OperationError {
+            reason: "codec boundary: λ".into(),
+        },
+        ForegroundDbCommandResponse::TransactionSettled { tx_id: [7; 16] },
+        ForegroundDbCommandResponse::NativeConnectionStatus {
+            configured: true,
+            explicitly_offline: false,
+            connected: true,
+        },
+        ForegroundDbCommandResponse::NativeSessionMetadata {
+            issuer: "fixture-issuer".into(),
+            user_id: "fixture-user".into(),
+        },
+    ];
+    let bytes = responses
+        .iter()
+        .map(postcard::to_allocvec)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    serde_json::to_string(&bytes).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+#[napi(js_name = "__testRnForegroundIsClosed", skip_typescript)]
+pub fn foreground_is_closed(foreground: &External<RnTestForeground>) -> Result<bool> {
+    foreground.is_closed()
 }

@@ -16,7 +16,7 @@ export default defineConfig({
   test: {
     environment: "node",
     pool: "forks",
-    include: ["tests/react-native/**/*.test.ts"],
+    include: ["tests/react-native/**/*.test.{ts,tsx}"],
     testTimeout: 15000,
   },
 });
