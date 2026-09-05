@@ -359,7 +359,8 @@ mod tests {
                 .unwrap(),
             descriptor,
         );
-        let cells = decode_named_cells(&encode_named_cells(&record).unwrap()).unwrap();
+        let encoded = encode_named_cells(&record).unwrap();
+        let cells = decode_named_cells(&encoded).unwrap();
         let Some(Value::Array(items)) = cells.get("payload") else {
             panic!("array payload")
         };
@@ -370,6 +371,22 @@ mod tests {
         assert_eq!(
             inner.descriptor().fields()[0].identity,
             Some(FieldIdentity::Name("literal".to_owned()))
+        );
+
+        // The recursive descriptor grammar must reject a non-minimal varint
+        // below the outer envelope as well. A top-level round-trip alone would
+        // not prove that a nested field name cannot smuggle alternate bytes.
+        let nested_name = b"literal";
+        let name_start = encoded
+            .windows(nested_name.len())
+            .position(|window| window == nested_name)
+            .expect("nested descriptor contains its field name");
+        assert_eq!(encoded[name_start - 1], nested_name.len() as u8);
+        let mut nested_nonminimal = encoded;
+        nested_nonminimal.splice(name_start - 1..name_start, [0x87, 0x00]);
+        assert!(
+            decode_named_cells(&nested_nonminimal).is_err(),
+            "nested descriptor lengths must use their canonical minimal encoding"
         );
     }
 
