@@ -39,7 +39,9 @@ use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportError, NativeTransportRequest, NativeTransportTerminal,
+};
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
@@ -3967,6 +3969,30 @@ impl NativeRelayWire {
             .transpose()?;
         Ok((owner, connection))
     }
+
+    /// A retired connection is a transient transport condition: its owner may
+    /// still be detaching the old peer or installing its replacement. Keep the
+    /// owner and connection liveness domains separate so core retains outbound
+    /// work until the replacement has been installed.
+    fn enter_queue_transport(&self) -> Result<WireLivenessGuards<'_>, TransportError> {
+        let owner = self
+            .liveness
+            .as_ref()
+            .map(|l| l.enter())
+            .transpose()
+            .map_err(transport_queue_error)?;
+        let connection = match self
+            .connection_liveness
+            .as_ref()
+            .map(|l| l.enter())
+            .transpose()
+        {
+            Ok(connection) => connection,
+            Err(RelayError::Closed) => return Err(TransportError::Backpressure),
+            Err(error) => return Err(transport_queue_error(error)),
+        };
+        Ok((owner, connection))
+    }
     fn retire_connection(&self) {
         if let Some(liveness) = &self.connection_liveness {
             let _guard = liveness
@@ -4068,27 +4094,61 @@ impl NativeRelayWire {
 /// relay's ordinary pump. Keeping the bridge generic makes the production
 /// `WebSocketTransport` path and deterministic edge fixtures exercise exactly
 /// the same framing boundary.
-pub fn bridge_native_relay_wire_once<T: WireTransport>(
+enum NativeRelayWireBridgeError {
+    Relay(RelayError),
+    /// `WebSocketTransport` closed its outbound receiver after choosing an
+    /// established transport terminal. This is deliberately distinct from a
+    /// relay/wire liveness closure, which means the owner is gone.
+    SocketPumpClosed,
+}
+
+fn bridge_native_relay_wire_once_classified<T: WireTransport>(
     relay_wire: &NativeRelayWire,
     upstream: &mut jazz::db::WireTransportAdapter<T>,
-) -> Result<bool, RelayError> {
+) -> Result<bool, NativeRelayWireBridgeError> {
     let mut progressed = false;
-    for message in relay_wire.take_outbound()? {
-        let _live_connection = relay_wire.enter()?;
-        upstream.send(message).map_err(|error| {
-            RelayError::ForegroundCommand(format!("native upstream send: {error:?}"))
+    for message in relay_wire
+        .take_outbound()
+        .map_err(NativeRelayWireBridgeError::Relay)?
+    {
+        let _live_connection = relay_wire
+            .enter()
+            .map_err(NativeRelayWireBridgeError::Relay)?;
+        upstream.send(message).map_err(|error| match error {
+            // `WebSocketTransport` exposes an already-retired peer through
+            // this concrete transport state. Its terminal future decides
+            // whether the socket worker reconnects; every other send error
+            // remains a terminal foreground error.
+            TransportError::Failed(message) if message == "websocket pump is closed" => {
+                NativeRelayWireBridgeError::SocketPumpClosed
+            }
+            error => NativeRelayWireBridgeError::Relay(RelayError::ForegroundCommand(format!(
+                "native upstream send: {error:?}"
+            ))),
         })?;
         progressed = true;
     }
     loop {
         match upstream.try_recv() {
             Some(message) => {
-                relay_wire.push_inbound(message)?;
+                relay_wire
+                    .push_inbound(message)
+                    .map_err(NativeRelayWireBridgeError::Relay)?;
                 progressed = true;
             }
             None => return Ok(progressed),
         }
     }
+}
+
+pub fn bridge_native_relay_wire_once<T: WireTransport>(
+    relay_wire: &NativeRelayWire,
+    upstream: &mut jazz::db::WireTransportAdapter<T>,
+) -> Result<bool, RelayError> {
+    bridge_native_relay_wire_once_classified(relay_wire, upstream).map_err(|error| match error {
+        NativeRelayWireBridgeError::Relay(error) => error,
+        NativeRelayWireBridgeError::SocketPumpClosed => RelayError::Closed,
+    })
 }
 
 /// Native-owned socket lifecycle for one untrusted foreground relay scope.
@@ -4331,7 +4391,19 @@ async fn run_native_relay_socket_worker(
             }) {
                 Ok(true) => break,
                 Ok(false) | Err(RelayError::OwnerQueueFull) => {}
-                Err(_) => continue 'reconnect,
+                Err(error) => {
+                    // The socket may retry a peer transport loss, but it must
+                    // never replace a dead or failed relay owner. In
+                    // particular, preserving a poisoned storage/Db error as a
+                    // reconnect would strand strict foreground operations
+                    // without a lifecycle failure.
+                    if !cancelled.load(Ordering::Acquire) {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay upstream transition failed: {error}"
+                        )));
+                    }
+                    break 'reconnect;
+                }
             }
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {},
@@ -4353,23 +4425,69 @@ async fn run_native_relay_socket_worker(
                 (config.on_event)(NativeRelaySocketEvent::Stopped);
                 return;
             }
-            if let Err(error) = bridge_native_relay_wire_once(&lease.wire, &mut upstream) {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay wire bridge failed: {error}"
-                )));
-                break;
+            match bridge_native_relay_wire_once_classified(&lease.wire, &mut upstream) {
+                Ok(_) => {}
+                Err(NativeRelayWireBridgeError::SocketPumpClosed) => {
+                    // The outbound pump is closed only after its owner has
+                    // published the established transport terminal. That
+                    // terminal, rather than the private queue-close marker,
+                    // decides whether this outage is retryable.
+                    let terminal = loop {
+                        if cancelled.load(Ordering::Acquire) {
+                            break 'reconnect;
+                        }
+                        tokio::select! {
+                            terminal = &mut terminal => break terminal,
+                            _ = wake.notified() => {},
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+                        }
+                    };
+                    if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) =
+                        terminal
+                    {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay socket terminated: {error}"
+                        )));
+                    }
+                    break;
+                }
+                Err(NativeRelayWireBridgeError::Relay(error)) => {
+                    if !cancelled.load(Ordering::Acquire) {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay wire bridge failed: {error}"
+                        )));
+                    }
+                    break 'reconnect;
+                }
             }
             if let Err(error) = relay.pump() {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay owner pump failed: {error}"
-                )));
-                break;
+                // Relay closure is an owner/scope lifetime boundary. It is
+                // distinct from the connection-local closure above: report it
+                // to foreground work, then stop rather than resurrecting a
+                // relay whose owner has gone away. Cancellation may race this
+                // path during intentional host teardown, for which Stopped is
+                // the only lifecycle event.
+                if !cancelled.load(Ordering::Acquire) {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay owner pump failed: {error}"
+                    )));
+                }
+                // A closed relay means its owner/scope is gone, not merely
+                // that this socket needs replacement. Never resurrect it.
+                break 'reconnect;
             }
             tokio::select! {
                 terminal = &mut terminal => {
-                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                        "native relay socket terminated: {terminal:?}"
-                    )));
+                    // An established peer loss is retryable transport state:
+                    // the ClientDb retains local work and its existing recovery
+                    // driver parks strict remote operations until replacement.
+                    // Do not poison the foreground host, which would turn a
+                    // network outage into a local SQLite failure.
+                    if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) = terminal {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay socket terminated: {error}"
+                        )));
+                    }
                     break;
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
@@ -4398,7 +4516,7 @@ impl Transport for QueueTransport {
         self.session_context
     }
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let _terminal = self.wire.enter().map_err(transport_queue_error)?;
+        let _terminal = self.wire.enter_queue_transport()?;
         self.wire
             .outbound
             .lock()
@@ -6764,6 +6882,102 @@ mod tests {
         }
     }
 
+    struct ClosedPumpWire;
+
+    impl WireTransport for ClosedPumpWire {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+            // This is the private WebSocketTransport signal that its outbound
+            // pump has already selected a terminal result.
+            Err(TransportError::Failed(
+                "websocket pump is closed".to_owned(),
+            ))
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct ClosedPumpTestConnector {
+        calls: AtomicUsize,
+        first_terminal: Arc<Mutex<Option<tokio::sync::oneshot::Sender<NativeTransportTerminal>>>>,
+    }
+
+    impl NativeTransportConnector for ClosedPumpTestConnector {
+        fn connect(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            let first_terminal = Arc::clone(&self.first_terminal);
+            Box::pin(async move {
+                let terminal: jazz::tools::native_transport_connector::NativeTransportTerminalFuture =
+                    if call == 0 {
+                        let (sender, receiver) = tokio::sync::oneshot::channel();
+                        *first_terminal.lock().unwrap() = Some(sender);
+                        Box::pin(async move {
+                        receiver.await.unwrap_or(NativeTransportTerminal::OwnerDropped)
+                    })
+                    } else {
+                        Box::pin(std::future::pending())
+                    };
+                Ok(
+                    jazz::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: if call == 0 {
+                            Box::new(ClosedPumpWire)
+                        } else {
+                            Box::new(IdleWire)
+                        },
+                        protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                        features: jazz::wire::current_wire_features(),
+                        session_context: None,
+                        permits_delegated_sessions: false,
+                        terminal,
+                    },
+                )
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
+        }
+    }
+
+    struct PendingTestConnector {
+        calls: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for PendingTestConnector {
+        fn connect(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async {
+                Ok(
+                    jazz::tools::native_transport_connector::ConnectedNativeTransport {
+                        transport: Box::new(IdleWire),
+                        protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                        features: jazz::wire::current_wire_features(),
+                        session_context: None,
+                        permits_delegated_sessions: false,
+                        terminal: Box::pin(std::future::pending()),
+                    },
+                )
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+            Box::pin(async { panic!("ordinary relay socket must not bootstrap as Edge") })
+        }
+    }
+
     fn schema() -> JazzSchema {
         JazzSchema::new(
             &SchemaBuilder::new()
@@ -8815,6 +9029,33 @@ mod tests {
             ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
         ));
         client.close().unwrap();
+    }
+
+    #[test]
+    fn retired_connection_backpressures_but_owner_close_stays_terminal() {
+        let owner = Arc::new(RelayLiveness::new());
+        let wire = NativeRelayWire::for_owner(Arc::clone(&owner));
+        let mut transport = QueueTransport {
+            wire: wire.clone(),
+            session_context: None,
+        };
+        let message = SyncMessage::SessionClaims {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        };
+
+        wire.retire_connection();
+        assert!(matches!(
+            transport.send(message.clone()),
+            Err(TransportError::Backpressure)
+        ));
+        assert!(matches!(wire.take_outbound(), Err(RelayError::Closed)));
+
+        owner.mark_terminal();
+        assert!(matches!(
+            transport.send(message),
+            Err(TransportError::Failed(error)) if error.contains("native relay is closed")
+        ));
     }
 
     #[test]
@@ -11575,6 +11816,197 @@ mod tests {
     }
 
     #[test]
+    fn closed_bridge_uses_its_owned_terminal_before_reconnecting() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("closed-bridge.sqlite"),
+            Some("closed-bridge"),
+        ))
+        .unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let connector = Arc::new(ClosedPumpTestConnector {
+            calls: AtomicUsize::new(0),
+            first_terminal: Arc::new(Mutex::new(None)),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay.clone(),
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".into(),
+                app_id: AppId::from_name("closed-bridge"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".into()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::ZERO,
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        relay
+            .run(|worker| {
+                worker
+                    .socket_wire
+                    .as_ref()
+                    .expect("first socket is installed")
+                    .outbound
+                    .lock()
+                    .unwrap()
+                    .push(
+                        SyncMessage::SessionClaims {
+                            identity: AuthorSubject::SYSTEM,
+                            claims: BTreeMap::new(),
+                        },
+                        "test closed bridge",
+                    )
+            })
+            .unwrap();
+        let terminal = connector
+            .first_terminal
+            .lock()
+            .unwrap()
+            .take()
+            .expect("first connector published its terminal sender");
+        terminal
+            .send(NativeTransportTerminal::Failed(
+                NativeTransportError::Terminal("malformed peer wire batch".into()),
+            ))
+            .unwrap();
+        assert!(matches!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::TerminalError(error)
+                if error.contains("malformed peer wire batch")
+        ));
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Reconnecting
+        );
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        worker.cancel();
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Stopped
+        );
+    }
+
+    #[test]
+    fn cancellation_does_not_wait_for_a_closed_bridge_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("closed-bridge-cancel.sqlite"),
+            Some("closed-bridge-cancel"),
+        ))
+        .unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let connector = Arc::new(ClosedPumpTestConnector {
+            calls: AtomicUsize::new(0),
+            first_terminal: Arc::new(Mutex::new(None)),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay.clone(),
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".into(),
+                app_id: AppId::from_name("closed-bridge-cancel"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".into()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::ZERO,
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector,
+        )
+        .unwrap();
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        relay
+            .run(|worker| {
+                worker
+                    .socket_wire
+                    .as_ref()
+                    .expect("first socket is installed")
+                    .outbound
+                    .lock()
+                    .unwrap()
+                    .push(
+                        SyncMessage::SessionClaims {
+                            identity: AuthorSubject::SYSTEM,
+                            claims: BTreeMap::new(),
+                        },
+                        "test closed bridge cancellation",
+                    )
+            })
+            .unwrap();
+        worker.cancel();
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Stopped
+        );
+    }
+
+    #[test]
+    fn owner_close_is_terminal_and_never_resurrects_the_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("owner-close.sqlite"),
+            Some("owner-close"),
+        ))
+        .unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        let connector = Arc::new(PendingTestConnector {
+            calls: AtomicUsize::new(0),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay.clone(),
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".into(),
+                app_id: AppId::from_name("owner-close"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".into()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::ZERO,
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Connected
+        );
+        relay.inner.shutdown().unwrap();
+        assert!(matches!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::TerminalError(error) if error.contains("native relay is closed")
+        ));
+        assert_eq!(
+            events_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            NativeRelaySocketEvent::Stopped
+        );
+        assert_eq!(connector.calls.load(Ordering::Acquire), 1);
+        drop(worker);
+    }
+
+    #[test]
     fn native_socket_worker_reauthenticates_on_reconnect_and_cancels_cleanly() {
         let directory = tempfile::tempdir().unwrap();
         let relay =
@@ -11610,15 +12042,6 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .unwrap(),
             NativeRelaySocketEvent::Connected
-        );
-        assert_eq!(
-            events_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap(),
-            NativeRelaySocketEvent::TerminalError(
-                "native relay socket terminated: PeerClosed(\"test close\")".to_owned()
-            ),
-            "a terminal adapter result is surfaced before retry rather than discarded"
         );
         assert_eq!(
             events_rx
