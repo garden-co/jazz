@@ -99,10 +99,10 @@ function assertAndroidRelayAssemblyAbiContract(libraryBuild, workflow) {
   );
 }
 
-function assertAndroidHarnessStartupContract(driver) {
-  const build = driver.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
-  const spawn = driver.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
-  const readinessTimeout = driver.indexOf("60_000");
+function assertAndroidHarnessStartupContract(driver, harness) {
+  const build = harness.indexOf('execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]');
+  const spawn = harness.indexOf('spawn("cargo", ["run", "--quiet", ...harnessCargoArgs]');
+  const readinessTimeout = harness.indexOf("60_000");
   assert.ok(build >= 0, "the local Edge/Core harness must be built before it is started");
   assert.ok(spawn > build, "the readiness process must start only after its Cargo build succeeds");
   assert.ok(
@@ -110,19 +110,19 @@ function assertAndroidHarnessStartupContract(driver) {
     "the 60-second readiness allowance must not include cold Cargo compilation",
   );
   assert.match(
-    driver,
+    harness,
     /stdio: \["ignore", "pipe", "pipe"\]/,
     "harness stdout and stderr must both be retained for a bounded failure diagnostic",
   );
-  assert.match(driver, /child\.once\("exit", \(code, signal\) =>/);
+  assert.match(harness, /child\.once\("exit", \(code, signal\) =>/);
   assert.match(driver, /import \{ adb \} from "\.\/android-adb\.mjs"/);
   assert.match(driver, /const androidAdb = \(args\) => adb\(args, \{ serial \}\)/);
   assert.doesNotMatch(driver, /execFileSync\("adb"/);
   assert.match(driver, /androidAdb\(\["get-state"\]\)/);
-  assert.match(driver, /retainHarnessOutput\(stdout, chunk\)/);
-  assert.match(driver, /retainHarnessOutput\(stderr, chunk\)/);
-  assert.match(driver, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
-  assert.match(driver, /\[redacted-token\]/);
+  assert.match(harness, /retainHarnessOutput\(stdout, chunk\)/);
+  assert.match(harness, /retainHarnessOutput\(stderr, chunk\)/);
+  assert.match(harness, /JAZZ_RN_EDGE_SESSION \[redacted\]/);
+  assert.match(harness, /\[redacted-token\]/);
 }
 
 function assertPackedJvmAdmissionWorkflowContract(workflow, packagingReceipt) {
@@ -285,7 +285,7 @@ function swapSubscriptionWriteStages(fixture) {
 }
 
 function assertPublicClientSeedStages(source) {
-  const stages = ["open", "subscribe", "write", "read", "publish", "shutdown"];
+  const stages = ["open", "subscribe", "write", "read", "publish", "core-observation", "shutdown"];
   let previous = -1;
   for (const stage of stages) {
     const marker = `markFailure("public-client-${stage}-failed")`;
@@ -300,6 +300,7 @@ function assertPublicClientSeedStages(source) {
     /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
+    /markFailure\("public-client-core-observation-failed"\);\s*boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);/,
     /if \(completed && !failed\) markFailure\("public-client-shutdown-failed"\);\s*await finishSeedClient/,
   ]) {
     assert.match(source, pattern, "public client seed stage moved away from its native boundary");
@@ -370,10 +371,10 @@ function assertPublicClientRelayReadback(source) {
   const statements = fn.body.statements;
   assert.equal(
     statements.length,
-    2,
-    "relay readback function body must contain exactly client creation then try/finally",
+    3,
+    "relay readback function body must contain client creation, unsubscribe state, then try/finally",
   );
-  const [clientStatement, lifecycle] = statements;
+  const [clientStatement, unsubscribeStatement, lifecycle] = statements;
   assert.ok(
     ts.isVariableStatement(clientStatement) &&
       (clientStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
@@ -393,24 +394,84 @@ function assertPublicClientRelayReadback(source) {
       isIdentifier(create.arguments[0].arguments[0], "capability"),
     "relay readback must await createJazzClient(clientConfig(capability))",
   );
+  assert.ok(
+    ts.isVariableStatement(unsubscribeStatement) &&
+      (unsubscribeStatement.declarationList.flags & ts.NodeFlags.Let) !== 0 &&
+      variableDeclaration(unsubscribeStatement, "unsubscribe")?.initializer,
+    "relay readback must retain a subscription teardown before its lifecycle",
+  );
 
   assert.ok(
     ts.isTryStatement(lifecycle),
     "relay readback must use try/finally after client creation",
   );
-  assert.equal(
-    lifecycle.catchClause,
-    undefined,
-    "relay readback must not swallow lifecycle failures",
+  const catchStatements = lifecycle.catchClause?.block.statements;
+  assert.ok(
+    lifecycle.catchClause &&
+      lifecycle.catchClause.variableDeclaration &&
+      isIdentifier(lifecycle.catchClause.variableDeclaration.name, "error") &&
+      catchStatements?.length === 2 &&
+      ts.isExpressionStatement(catchStatements[0]) &&
+      ts.isBinaryExpression(catchStatements[0].expression) &&
+      isIdentifier(catchStatements[0].expression.left, "failed") &&
+      catchStatements[0].expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      catchStatements[0].expression.right.kind === ts.SyntaxKind.TrueKeyword &&
+      ts.isThrowStatement(catchStatements[1]) &&
+      isIdentifier(catchStatements[1].expression, "error"),
+    "relay readback must mark and rethrow lifecycle failures before cleanup",
   );
   assert.ok(lifecycle.finallyBlock, "relay readback must shut down in finally");
   const tryStatements = lifecycle.tryBlock.statements;
   assert.equal(
     tryStatements.length,
-    2,
-    "relay readback try block must contain exactly public read then persisted-title assertion",
+    6,
+    "relay readback must subscribe, await initial publication, then read and assert",
   );
-  const [rowsStatement, assertionStatement] = tryStatements;
+  const [
+    titleStatement,
+    observedStatement,
+    subscribeStatement,
+    publicationStatement,
+    rowsStatement,
+    assertionStatement,
+  ] = tryStatements;
+  assert.ok(
+    ts.isVariableStatement(titleStatement) &&
+      variableDeclaration(titleStatement, "title")?.initializer &&
+      ts.isCallExpression(variableDeclaration(titleStatement, "title").initializer) &&
+      isIdentifier(
+        variableDeclaration(titleStatement, "title").initializer.expression,
+        "persistedTitleForRun",
+      ),
+    "relay readback must derive the exact run-bound title before subscribing",
+  );
+  assert.ok(
+    ts.isVariableStatement(observedStatement) &&
+      (observedStatement.declarationList.flags & ts.NodeFlags.Let) !== 0 &&
+      variableDeclaration(observedStatement, "observed")?.initializer?.kind ===
+        ts.SyntaxKind.FalseKeyword,
+    "relay readback must begin with an unobserved publication marker",
+  );
+  assert.ok(
+    ts.isExpressionStatement(subscribeStatement) &&
+      ts.isBinaryExpression(subscribeStatement.expression) &&
+      subscribeStatement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isIdentifier(subscribeStatement.expression.left, "unsubscribe") &&
+      ts.isCallExpression(subscribeStatement.expression.right) &&
+      ts.isPropertyAccessExpression(subscribeStatement.expression.right.expression) &&
+      subscribeStatement.expression.right.expression.name.text === "subscribe" &&
+      isPropertyAccess(subscribeStatement.expression.right.expression.expression, "client", "db"),
+    "relay readback must assign its public subscription teardown",
+  );
+  assert.match(
+    relayReadbackSlice(source),
+    /unsubscribe = client\.db\.subscribe\(app\.todos, \(todos\) => \{\s*observed \|\|= todos\.some\(\(todo\) => todo\.title === title\);\s*\}\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
+    "relay readback must await the exact run-bound subscription publication before reading",
+  );
+  assert.ok(
+    ts.isIfStatement(publicationStatement),
+    "relay readback must reject a missing bounded publication",
+  );
   assert.ok(
     ts.isVariableStatement(rowsStatement) &&
       (rowsStatement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
@@ -459,18 +520,25 @@ function assertPublicClientRelayReadback(source) {
   assert.equal(
     lifecycle.finallyBlock.statements.length,
     1,
-    "relay readback finally must contain only client shutdown",
+    "relay readback finally must preserve failures while retiring its subscription and client",
   );
-  const [shutdown] = lifecycle.finallyBlock.statements;
+  const [cleanup] = lifecycle.finallyBlock.statements;
   assert.ok(
-    ts.isExpressionStatement(shutdown) &&
-      awaitCall(shutdown.expression)?.arguments.length === 0 &&
-      isPropertyAccess(awaitCall(shutdown.expression)?.expression, "client", "shutdown"),
-    "relay readback must await client.shutdown() in finally",
+    ts.isExpressionStatement(cleanup) &&
+      awaitCall(cleanup.expression)?.arguments.length === 3 &&
+      isIdentifier(awaitCall(cleanup.expression)?.expression, "finishSeedClient") &&
+      isIdentifier(awaitCall(cleanup.expression)?.arguments[0], "unsubscribe") &&
+      ts.isArrowFunction(awaitCall(cleanup.expression)?.arguments[1]) &&
+      isIdentifier(awaitCall(cleanup.expression)?.arguments[2], "failed"),
+    "relay readback must await failure-preserving subscription and client cleanup",
   );
-  assert.ok(client.pos < rows.pos, "public client creation must precede its public read");
+  assert.ok(
+    client.pos < subscribeStatement.pos,
+    "public client creation must precede subscription",
+  );
+  assert.ok(subscribeStatement.pos < rows.pos, "subscription publication must precede public read");
   assert.ok(rows.pos < assertion.pos, "public read must precede the persisted-title assertion");
-  assert.ok(assertion.pos < shutdown.pos, "persisted-title assertion must precede final shutdown");
+  assert.ok(assertion.pos < cleanup.pos, "persisted-title assertion must precede final cleanup");
 }
 
 test("Android fixture BuildConfig fields and package registration remain compile-shaped", () => {
@@ -599,7 +667,8 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
 test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
   const driver = read("scripts/run-android.mjs");
   const fixture = read("native/android/JazzDeviceFixtureModule.kt");
-  assertAndroidHarnessStartupContract(driver);
+  const harness = read("scripts/edge-session-harness.mjs");
+  assertAndroidHarnessStartupContract(driver, harness);
   // A planted return to `cargo run` in place of the explicit build puts cold
   // compilation back inside the quiet readiness window. The structural receipt
   // must reject that regression before an Android runner spends a minute with
@@ -607,15 +676,17 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   assert.throws(
     () =>
       assertAndroidHarnessStartupContract(
-        driver.replace(
+        driver,
+        harness.replace(
           'execFileSync("cargo", ["build", "--quiet", ...harnessCargoArgs]',
           'execFileSync("cargo", ["run", "--quiet", ...harnessCargoArgs]',
         ),
       ),
     /must be built before it is started/,
   );
-  assert.match(driver, /rn_edge_session_harness/);
-  assert.match(driver, /http:\/\/10\.0\.2\.2:\$\{session\.edge_port\}/);
+  assert.match(harness, /rn_edge_session_harness/);
+  assert.match(driver, /host: "10\.0\.2\.2"/);
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.edge_port\}/);
   for (const input of ["jazzDeviceEdgeEndpoint", "jazzDeviceBearerA", "jazzDeviceBearerB"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
@@ -901,7 +972,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce, markFailure\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA\.capability,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim
@@ -939,7 +1010,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     );
     assert.throws(
       () => assertPublicClientRelayReadback(maskedReadback),
-      /client\.db\.all|try block must contain exactly/,
+      /client\.db\.all|subscribe, await initial publication, then read and assert/,
       `masked relay readback must not accept ${decoy}`,
     );
   }
@@ -957,7 +1028,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     );
     assert.throws(
       () => assertPublicClientRelayReadback(mutatedRows),
-      /try block must contain exactly/,
+      /subscribe, await initial publication, then read and assert/,
       `relay readback must reject an intervening rows mutation: ${mutation}`,
     );
   }
@@ -970,7 +1041,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.throws(
     () => assertPublicClientRelayReadback(preTryMutation),
-    /function body must contain exactly/,
+    /function body must contain client creation, unsubscribe state, then try\/finally/,
     "relay readback must reject a fake public-read mutation before try",
   );
   const postTryMutation = highLevelForeground.replace(
@@ -979,20 +1050,40 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.throws(
     () => assertPublicClientRelayReadback(postTryMutation),
-    /function body must contain exactly/,
+    /function body must contain client creation, unsubscribe state, then try\/finally/,
     "relay readback must reject even a post-try no-op",
   );
   const swallowedFailure = highLevelForeground.replace(
     relayReadback,
-    relayReadback.replace("} finally {", "} catch { } finally {"),
+    relayReadback.replace("    failed = true;\n    throw error;", ""),
   );
   assert.throws(
     () => assertPublicClientRelayReadback(swallowedFailure),
-    /must not swallow lifecycle failures/,
+    /must mark and rethrow lifecycle failures before cleanup/,
     "relay readback must reject an empty catch that hides read or assertion failures",
   );
+  const leakedSubscription = highLevelForeground.replace(
+    relayReadback,
+    relayReadback.replace(
+      "    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);",
+      "    await client.shutdown();",
+    ),
+  );
+  assert.throws(
+    () => assertPublicClientRelayReadback(leakedSubscription),
+    /failure-preserving subscription and client cleanup/,
+    "relay readback must retire its propagation subscription after failure or success",
+  );
   assertPublicClientSeedStages(highLevelForeground);
-  for (const stage of ["open", "subscribe", "write", "read", "publish", "shutdown"]) {
+  for (const stage of [
+    "open",
+    "subscribe",
+    "write",
+    "read",
+    "publish",
+    "core-observation",
+    "shutdown",
+  ]) {
     assert.throws(
       () =>
         assertPublicClientSeedStages(
@@ -1279,19 +1370,26 @@ test("checksum pin rejects a planted corrupt cache archive", () => {
 test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", () => {
   const fixture = read("native/ios/JazzDeviceFixture.mm");
   const checkedInFixture = read("ios/JazzDeviceFixture.mm");
-  assert.match(fixture, /JazzRelayTrustedAdmission admitScopeJSON/);
-  assert.match(fixture, /replaceCapability:self\.capability withScopeJSON/);
-  assert.match(fixture, /JazzDeviceScopeFixture\(NSString \*authScope\)/);
+  assert.match(fixture, /JazzRelayTrustedAdmission beginPrivateSessionWithServerURL:endpoint/);
+  assert.match(fixture, /JazzRelayTrustedAdmission attachCanonicalSchemaJSON/);
+  assert.match(fixture, /sessionCapability:session error:error/);
+  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(NO, &error\)/);
+  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(YES, &error\)/);
+  assert.match(fixture, /appID:@"jazz-device-acceptance" jwt:bearer/);
   assert.match(fixture, /RCT_REMAP_METHOD\(receiptContext/);
-  assert.match(fixture, /@"schema_json": @"\{\\"tables\\":\{\\"todos\\":/);
-  assert.match(fixture, /\\"column_type\\":\{\\"type\\":\\"Text\\"\}/);
-  assert.doesNotMatch(fixture, /@"schema_json": @"\{\\"tables\\":\{\}\}"/);
-  assert.match(fixture, /11111111-1111-4111-8111-111111111111/);
-  assert.match(fixture, /fixture-user-a/);
-  assert.match(fixture, /fixture-user-b/);
-  assert.match(fixture, /22222222-2222-4222-8222-222222222222/);
-  assert.match(fixture, /jazz-device-%@\.sqlite/);
-  assert.match(fixture, /@"claims": @\{\}/);
+  assert.doesNotMatch(fixture, /admitScopeJSON|withScopeJSON|sqlite_path|@"claims"/);
+  for (const input of ["-JazzDeviceEdgeEndpoint", "-JazzDeviceBearerA", "-JazzDeviceBearerB"]) {
+    assert.ok(fixture.includes(input));
+    assert.ok(read("scripts/run-ios.mjs").includes(input));
+  }
+  const switchBody = fixture.slice(
+    fixture.indexOf("RCT_REMAP_METHOD(switchAuthScope"),
+    fixture.indexOf("RCT_REMAP_METHOD(receiptContext"),
+  );
+  assert.ok(
+    switchBody.indexOf("revokeCapability:self.capability") <
+      switchBody.indexOf("JazzDeviceAdmitPrivateSession(YES"),
+  );
   for (const key of ["-JazzDeviceRunNonce", "-JazzDeviceDeviceIdentifier"]) {
     assert.match(fixture, new RegExp(key));
   }
@@ -1377,5 +1475,37 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
       app.indexOf("await diagnostic.clear()") &&
       app.indexOf("await diagnostic.clear()") < app.indexOf("await recordDeviceReceipt"),
     "the native receipt sink must run only after the complete JS relay lifecycle proof",
+  );
+});
+
+test("Android validates the synchronous boundary sink before awaiting native Core acknowledgement", () => {
+  const foreground = read("src/high-level-foreground.ts");
+  assert.match(
+    foreground,
+    /boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);\s*boundary\?\.\("js-core-await-returned"\)/,
+  );
+  const android = read("native/android/JazzDeviceFixtureModule.kt");
+  assert.match(
+    android,
+    /@ReactMethod\(isBlockingSynchronousMethod = true\)\s*fun recordSeedBoundary/,
+  );
+  assert.match(android, /setOf\("js-before-core-await"/);
+});
+
+test("both native platforms admit the Rust-generated owner-policy schema", () => {
+  const fixture = JSON.parse(read("native/device-fixture.json"));
+  for (const file of ["native/ios/JazzDeviceFixture.mm", "ios/JazzDeviceFixture.mm"]) {
+    const literal = /NSString \*schema = @(.*);/.exec(read(file))?.[1];
+    assert.ok(literal);
+    assert.deepEqual(JSON.parse(JSON.parse(literal)), fixture.schema);
+  }
+  const literal = /buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", (.*)/.exec(
+    read("android/app/build.gradle"),
+  )?.[1];
+  assert.ok(literal);
+  assert.deepEqual(JSON.parse(JSON.parse(JSON.parse(literal))), fixture.schema);
+  assert.match(
+    read("plugins/with-jazz-device-fixture.cjs"),
+    /require\("\.\.\/native\/device-fixture.json"\)\.schema/,
   );
 });
