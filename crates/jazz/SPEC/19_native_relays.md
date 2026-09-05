@@ -409,16 +409,16 @@ The following ordinals are reserved for the coordinated V1 continuation.
 Reservation alone does not imply that a native artifact implements a handler;
 unsupported operations must fail closed until their acceptance gates pass.
 
-| Request ordinal | Reserved request                                         | Response ordinal / payload                              |
-| --------------- | -------------------------------------------------------- | ------------------------------------------------------- |
-| 26              | NativeSessionMetadata (no fields)                        | 18 NativeSessionMetadata: issuer string, user_id string |
-| 27              | WriteState: tx_id 16 raw bytes                           | 19 WriteState: state_json string                        |
-| 28              | DrainMutationErrors (no fields)                          | 20 MutationErrors: events_json string                   |
-| 29              | BeginStreamingMutation                                   | 21 StreamingMutationOpened: upload u64                  |
-| 30              | PushStreamingMutation: upload u64, chunk byte vector     | 22 StreamingMutationPushed (no fields)                  |
-| 31              | FinishStreamingMutation: upload u64                      | existing 14 TransactionCommitted                        |
-| 32              | AbortStreamingMutation: upload u64                       | 23 StreamingMutationAborted: aborted bool               |
-| 33              | AllRelationQuery: query_json string, options_json string | existing 3 Rows                                         |
+| Request ordinal | Reserved request                                               | Response ordinal / payload                              |
+| --------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
+| 26              | NativeSessionMetadata (no fields)                              | 18 NativeSessionMetadata: issuer string, user_id string |
+| 27              | WriteState: tx_id 16 raw bytes                                 | 19 WriteState: state_json string                        |
+| 28              | DrainMutationErrors (no fields)                                | 20 MutationErrors: events_json string                   |
+| 29              | BeginStreamingMutation                                         | 21 StreamingMutationOpened: upload u64                  |
+| 30              | PushStreamingMutation: upload u64, chunk byte vector           | 22 StreamingMutationPushed (no fields)                  |
+| 31              | FinishStreamingMutation: upload u64                            | existing 14 TransactionCommitted                        |
+| 32              | AbortStreamingMutation: upload u64                             | 23 StreamingMutationAborted: aborted bool               |
+| 33              | AllRelationQuery: query_bytes byte vector, options_json string | existing 3 Rows                                         |
 
 BeginStreamingMutation has ordered fields mutation enum, table string,
 row_id 16 raw bytes, cells byte vector, column string, options_json string.
@@ -427,7 +427,7 @@ is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
 u64; its response is existing 14 TransactionCommitted. The continuation bytes
 are pinned by `foreground_continuation_v1_byte_contract`.
-Request 37 is SubscribeRelationQuery: query_json string, options_json string;
+Request 37 is SubscribeRelationQuery: query_bytes byte vector, options_json string;
 its response is existing 4 Subscribed. It uses the same asynchronous canonical
 relation preparation as request 33, then the ordinary deferred subscription
 opener and event codec. It requires the default read view.
@@ -477,8 +477,9 @@ snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
 event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 
-`AllRelationQuery` accepts the existing native `relation_ir` JSON wrapper and
-uses the core relation resolver plus asynchronous canonical query preparation.
+`AllRelationQuery` accepts JRQ v1 `query_bytes`, the explicit bounded binary
+relation grammar, and uses the core relation resolver plus asynchronous canonical
+query preparation.
 It shares the same coverage, row hydration, pending-operation, and cleanup path
 as ordinary option-bearing reads. As on the other native bindings, raw
 relation-IR one-shot reads require the default read view; transaction-local

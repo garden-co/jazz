@@ -39,8 +39,17 @@ const cases: [string, unknown, unknown][] = [
   ],
   [
     "relation subscription",
-    { type: "subscribeRelationQuery", queryJson: "{}", optionsJson },
-    { SubscribeRelationQuery: { query_json: "{}", options_json: optionsJson } },
+    {
+      type: "subscribeRelationQuery",
+      queryBytes: Uint8Array.of(0x4a, 0x52, 0x51, 0x01, 0x00),
+      optionsJson,
+    },
+    {
+      SubscribeRelationQuery: {
+        query_bytes: [0x4a, 0x52, 0x51, 0x01, 0x00],
+        options_json: optionsJson,
+      },
+    },
   ],
 
   ["probe", "probe", "Probe"],
