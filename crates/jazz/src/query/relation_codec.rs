@@ -422,7 +422,7 @@ enum WireJson {
     F64(u64),
     String(#[serde(deserialize_with = "deserialize_bounded_string")] String),
     Array(#[serde(deserialize_with = "deserialize_json_vec")] Vec<WireJson>),
-    Object(Vec<(String, WireJson)>),
+    Object(#[serde(deserialize_with = "deserialize_json_object")] Vec<(String, WireJson)>),
 }
 
 fn deserialize_predicate<'de, D: de::Deserializer<'de>>(
@@ -504,6 +504,66 @@ fn deserialize_json_vec<'de, D: de::Deserializer<'de>>(
         }
     }
     deserializer.deserialize_seq(Values)
+}
+
+fn deserialize_json_object<'de, D: de::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<(String, WireJson)>, D::Error> {
+    struct StringSeed;
+    impl<'de> DeserializeSeed<'de> for StringSeed {
+        type Value = String;
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            deserialize_bounded_string(d)
+        }
+    }
+    struct JsonSeed;
+    impl<'de> DeserializeSeed<'de> for JsonSeed {
+        type Value = WireJson;
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            deserialize_json(d)
+        }
+    }
+    struct Entry;
+    impl<'de> DeserializeSeed<'de> for Entry {
+        type Value = (String, WireJson);
+        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            struct Tuple;
+            impl<'de> Visitor<'de> for Tuple {
+                type Value = (String, WireJson);
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON object entry")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+                    let key = s
+                        .next_element_seed(StringSeed)?
+                        .ok_or_else(|| de::Error::custom("object key"))?;
+                    let value = s
+                        .next_element_seed(JsonSeed)?
+                        .ok_or_else(|| de::Error::custom("object value"))?;
+                    Ok((key, value))
+                }
+            }
+            d.deserialize_tuple(2, Tuple)
+        }
+    }
+    struct Entries;
+    impl<'de> Visitor<'de> for Entries {
+        type Value = Vec<(String, WireJson)>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("bounded JSON object")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = s.next_element_seed(Entry)? {
+                if values.len() == MAX_RELATION_ITEMS {
+                    return Err(de::Error::custom("relation-query collection limit"));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Entries)
 }
 
 impl TryFrom<&RelationQuery> for WireRelationQuery {

@@ -2803,7 +2803,7 @@ impl NapiDb {
 
     #[napi(js_name = "prepareQuery")]
     pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
-        let query: CoreQuery = postcard::from_bytes(&query)
+        let query: CoreQuery = jazz::wire::decode_postcard_exact(&query)
             .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
         let db = self.inner.borrow();
         let db = db
@@ -2830,7 +2830,7 @@ impl NapiDb {
                 Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?))
             })
             .transpose()?;
-        let query: CoreQuery = postcard::from_bytes(&query)
+        let query: CoreQuery = jazz::wire::decode_postcard_exact(&query)
             .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
         let db = self.inner.borrow();
         let db = db

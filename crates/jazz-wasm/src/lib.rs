@@ -2048,7 +2048,7 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = prepareQuery)]
     pub fn prepare_query(&self, query: Vec<u8>) -> Result<WasmPreparedQuery, JsValue> {
-        let query: Query = postcard::from_bytes(&query)
+        let query: Query = jazz::wire::decode_postcard_exact(&query)
             .map_err(|err| to_js_error(format!("decode query: {err}")))?;
         Ok(WasmPreparedQuery {
             inner: self
@@ -2071,7 +2071,7 @@ impl WasmDb {
                 Ok::<_, JsValue>((author, claims_from_js(author, claims)?))
             })
             .transpose()?;
-        let query: Query = postcard::from_bytes(&query)
+        let query: Query = jazz::wire::decode_postcard_exact(&query)
             .map_err(|err| to_js_error(format!("decode query: {err}")))?;
         let db = self.open_inner()?;
         Ok(WasmPendingPreparation {

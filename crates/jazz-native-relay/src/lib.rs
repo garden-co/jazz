@@ -5367,7 +5367,7 @@ impl RelayWorker {
     }
 
     fn prepare_foreground_query(&mut self, client: u64, query: Vec<u8>) -> Result<u64, RelayError> {
-        let query = postcard::from_bytes::<Query>(&query).map_err(|error| {
+        let query = jazz::wire::decode_postcard_exact::<Query>(&query).map_err(|error| {
             RelayError::ForegroundCommand(format!("decode canonical query: {error}"))
         })?;
         let waker = Waker::from(Arc::clone(&self.wake));
