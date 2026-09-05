@@ -20,6 +20,10 @@ describe("encodeRelationQueryV1", () => {
       0x4a, 0x52, 0x51, 0x01, 1, 0, 1, 0x74, 0, 0, 0, 1, 0x63, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0xf8,
       0x3f,
     ]);
+    expect([...encodeRelationQueryV1(filter({ 猫: null, é: null }))]).toEqual([
+      0x4a, 0x52, 0x51, 0x01, 1, 0, 1, 0x74, 0, 0, 0, 1, 0x63, 0, 0, 8, 2, 2, 0xc3, 0xa9, 0, 3,
+      0xe7, 0x8c, 0xab, 0,
+    ]);
   });
 
   test("rejects ambiguous and unknown public relation variants", () => {

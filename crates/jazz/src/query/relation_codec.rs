@@ -1156,6 +1156,27 @@ mod relation_codec_tests {
     }
 
     #[test]
+    fn jrq_v1_uses_utf8_byte_order_for_literal_object_keys() {
+        let query = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "c".into(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::json!({"猫": null, "é": null})),
+                },
+            },
+        };
+        assert_eq!(encode_relation_query_v1(&query).unwrap(), b"JRQ\x01\x01\x00\x01t\x00\x00\x00\x01c\x00\x00\x08\x02\x02\xc3\xa9\x00\x03\xe7\x8c\xab\x00");
+    }
+
+    #[test]
     fn jrq_v1_rejects_project_growth_before_exceeding_the_byte_budget() {
         let columns = vec![
             RelationProjectColumn {
