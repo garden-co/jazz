@@ -1469,6 +1469,27 @@ mod tests {
         assert_eq!(relay.credential, WebSocketCredential::Admin);
         assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
 
+        let admin_scope_request = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admin authentication ignores the client-only scope request");
+        assert_eq!(
+            admin_scope_request.requested_link,
+            RequestedWebSocketLink::OrdinarySession,
+            "admin credentials must not select scope-isolated client admission"
+        );
+
         let bootstrap = ws_admission(
             WebSocketPrelude {
                 peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
@@ -2077,12 +2098,66 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            expect_ws_server_hello(
-                &mut ws,
+            let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+                | FEATURE_STRUCTURED_ERRORS
+                | if entry["requested_link"] == "scope_isolated_client_relay" {
+                    jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+                } else {
+                    0
+                };
+            expect_ws_server_hello(&mut ws, features).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_scope_isolated_prelude_requires_negotiated_scope_feature() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let fixture = websocket_prelude_v1_fixture();
+        let scope_fixture = fixture["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .find(|entry| entry["name"] == "typescript_scope_isolated_session")
+            .expect("scope-isolated TypeScript fixture");
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Text(
+            scope_fixture["json"]
+                .as_str()
+                .expect("scope fixture JSON")
+                .to_owned()
+                .into(),
+        ))
+        .await
+        .expect("send scope-isolated prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(
                 FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
             )
-            .await;
-        }
+            .into(),
+        ))
+        .await
+        .expect("send client hello without scope feature");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("server must reject unnegotiated scope request")
+            .expect("server rejection frame")
+            .expect("server websocket result");
+        let WsMessage::Binary(response) = response else {
+            panic!("expected structured wire error, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&response).expect("decode error batch");
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("decode error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::UnsupportedFeature,
+                retry: WireRetry::Never,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

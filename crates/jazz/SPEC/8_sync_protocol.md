@@ -346,7 +346,11 @@ The prelude object has these server-owned fields:
 - `bootstrap_catalogue`: optional boolean; omission means `false`.
 - `requested_link`: optional string enum; omission means `ordinary_session`.
   The only admitted values are `ordinary_session` and
-  `scope_isolated_client_relay`.
+  `scope_isolated_client_relay`. The latter produces its scoped-link admission
+  only for an authenticated session that negotiated
+  `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`; a session missing that feature
+  receives `UnsupportedFeature/Never`. Admin and backend credentials retain
+  their ordinary-link admission when they send this client-only request.
 
 The JSON object is an evolution envelope, not an authority grant. Unknown
 top-level fields and unknown fields nested in `auth` are ignored. An unknown

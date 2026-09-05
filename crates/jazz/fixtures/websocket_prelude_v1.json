@@ -6,7 +6,9 @@
       "name": "native_admin_default_link",
       "writer": "rust-native",
       "peer_identity": "[\"urn:jazz:system\",\"system\"]",
-      "auth": { "admin_secret": "admin-secret" },
+      "auth": {
+        "admin_secret": "admin-secret"
+      },
       "bootstrap_catalogue": false,
       "requested_link": "ordinary_session",
       "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":null,\"admin_secret\":\"admin-secret\",\"backend_session\":null}}"
@@ -15,7 +17,9 @@
       "name": "native_admin_catalogue_bootstrap",
       "writer": "rust-native",
       "peer_identity": "[\"urn:jazz:system\",\"system\"]",
-      "auth": { "admin_secret": "admin-secret" },
+      "auth": {
+        "admin_secret": "admin-secret"
+      },
       "bootstrap_catalogue": true,
       "requested_link": "ordinary_session",
       "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":null,\"admin_secret\":\"admin-secret\",\"backend_session\":null},\"bootstrap_catalogue\":true}"
@@ -28,6 +32,15 @@
       "bootstrap_catalogue": false,
       "requested_link": "ordinary_session",
       "json": "{\"peer_identity\":\"[\\\"urn:jazz:system\\\",\\\"system\\\"]\",\"admin_secret\":\"admin-secret\",\"auth\":{\"admin_secret\":\"admin-secret\",\"sub\":\"system\"},\"sub\":\"system\"}"
+    },
+    {
+      "name": "typescript_scope_isolated_session",
+      "writer": "typescript-native-runtime",
+      "peer_identity": "[\"https://fixture.example\",\"scope-user\"]",
+      "auth_json": "{\"backend_secret\":\"backend-secret\",\"backend_session\":{\"issuer\":\"https://fixture.example\",\"user_id\":\"scope-user\",\"claims\":{},\"authMode\":\"external\"}}",
+      "bootstrap_catalogue": false,
+      "requested_link": "scope_isolated_client_relay",
+      "json": "{\"peer_identity\":\"[\\\"https://fixture.example\\\",\\\"scope-user\\\"]\",\"backend_secret\":\"backend-secret\",\"backend_session\":{\"issuer\":\"https://fixture.example\",\"user_id\":\"scope-user\",\"claims\":{},\"authMode\":\"external\"},\"auth\":{\"backend_secret\":\"backend-secret\",\"backend_session\":{\"issuer\":\"https://fixture.example\",\"user_id\":\"scope-user\",\"claims\":{},\"authMode\":\"external\"},\"sub\":\"scope-user\"},\"sub\":\"scope-user\",\"requested_link\":\"scope_isolated_client_relay\"}"
     }
   ]
 }
