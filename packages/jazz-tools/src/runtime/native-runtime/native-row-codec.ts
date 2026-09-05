@@ -217,7 +217,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
   cursor += joined * 16;
   const discriminators = readU32(cursor);
   cursor += 4;
-  if (discriminators > joined) return false;
+  if (discriminators > joined + 1) return false;
   let previousPosition = -1;
   for (let index = 0; index < discriminators; index++) {
     if (cursor + 8 > bytes.length) return false;
@@ -225,7 +225,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     const length = readU32(cursor + 4);
     cursor += 8;
     if (
-      position >= joined ||
+      position > joined ||
       position <= previousPosition ||
       length === 0 ||
       length > 4096 ||

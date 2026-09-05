@@ -122,7 +122,7 @@ impl OutputOccurrenceId {
         union_arms.sort_by_key(|(position, _)| *position);
         let valid = union_arms
             .iter()
-            .all(|(position, label)| *position < joined.len() && !label.is_empty())
+            .all(|(position, label)| *position <= joined.len() && !label.is_empty())
             && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
         valid.then_some(Self {
             root,
@@ -271,7 +271,7 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
     }
     let discriminator_count =
         u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
-    if discriminator_count > joined_count {
+    if discriminator_count > joined_count.checked_add(1)? {
         return None;
     }
     let mut union_arms = Vec::with_capacity(discriminator_count);
@@ -284,8 +284,7 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         {
             return None;
         }
-        if position >= joined_count
-            || previous_position.is_some_and(|previous| position <= previous)
+        if position > joined_count || previous_position.is_some_and(|previous| position <= previous)
         {
             return None;
         }
@@ -504,6 +503,7 @@ mod tests {
         let mut zero_arm = vec![RESULT_KEY_WIRE_VERSION];
         zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
         zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
+        zero_arm.truncate(41);
         assert_eq!(
             serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm))
                 .expect("ordinary joined V1 is valid"),
@@ -566,5 +566,21 @@ mod tests {
         assert_eq!(maintained.len(), 2, "UNION ALL arms retain multiplicity");
         assert!(maintained.remove(&direct));
         assert_eq!(maintained, std::collections::BTreeSet::from([inherited]));
+    }
+
+    #[test]
+    fn union_arm_can_discriminate_the_root_source_position() {
+        let root = ObjectId::from_uuid(Uuid::from_u128(1));
+        let occurrence = OutputOccurrenceId::with_union_arms(
+            root,
+            std::iter::empty(),
+            [(0, "direct".to_owned())],
+        )
+        .expect("root source position is addressable");
+        let key = ResultKey::from_occurrence(occurrence);
+        assert_eq!(
+            serde_json::from_slice::<ResultKey>(&serde_json::to_vec(&key).unwrap()).unwrap(),
+            key
+        );
     }
 }

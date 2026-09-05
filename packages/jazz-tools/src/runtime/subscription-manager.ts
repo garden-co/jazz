@@ -689,7 +689,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   });
   const discriminatorCount = readU32Be(sidecar, cursor);
   cursor += 4;
-  if (discriminatorCount > joinedCount) return undefined;
+  if (discriminatorCount > joinedCount + 1) return undefined;
   const arms = new Map<number, Uint8Array>();
   let previousPosition = -1;
   for (let index = 0; index < discriminatorCount; index += 1) {
@@ -698,7 +698,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     const length = readU32Be(sidecar, cursor + 4);
     cursor += 8;
     if (
-      position >= joinedCount ||
+      position > joinedCount ||
       position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
@@ -713,9 +713,12 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   }
   if (cursor !== sidecar.byteLength) return undefined;
 
-  const ordered: number[] = [10, ...root];
+  const ordered: number[] = [];
+  const rootArm = arms.get(0);
+  if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
+  ordered.push(10, ...root);
   for (const [index, uuid] of joined.entries()) {
-    const arm = arms.get(index);
+    const arm = arms.get(index + 1);
     if (arm) {
       ordered.push(6, ...orderedBytes(arm));
     }
