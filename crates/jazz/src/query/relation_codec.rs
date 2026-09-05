@@ -1604,7 +1604,8 @@ mod relation_postcard_tests {
                     .collect(),
             },
         };
-        assert!(encode_relation_query_postcard(&union).is_ok());
+        let union_bytes = encode_relation_query_postcard(&union).unwrap();
+        assert_eq!(decode_relation_query_postcard(&union_bytes).unwrap(), union);
 
         let values = RelationQuery {
             rel: RelationExpr::Filter {
@@ -1625,7 +1626,51 @@ mod relation_postcard_tests {
                 },
             },
         };
-        assert!(encode_relation_query_postcard(&values).is_ok());
+        let value_bytes = encode_relation_query_postcard(&values).unwrap();
+        assert_eq!(
+            decode_relation_query_postcard(&value_bytes).unwrap(),
+            values
+        );
+
+        let over_union = WireRelationQuery {
+            rel: WireRelationExpr::Union {
+                inputs: (0..MAX_RELATION_ITEMS)
+                    .map(|index| WireRelationUnionArm {
+                        label: format!("x{index}"),
+                        input: WireRelationExpr::TableScan {
+                            table: "t".into(),
+                            alias: None,
+                        },
+                    })
+                    .collect(),
+            },
+        };
+        assert!(
+            decode_relation_query_postcard(&postcard::to_allocvec(&over_union).unwrap()).is_err()
+        );
+
+        let over_values = WireRelationQuery {
+            rel: WireRelationExpr::Filter {
+                input: Box::new(WireRelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                }),
+                predicate: WireRelationPredicate::In {
+                    left: WireRelationColumnRef {
+                        scope: None,
+                        column: "c".into(),
+                    },
+                    values: std::iter::repeat_n(
+                        WireRelationValueRef::RowId(WireRelationRowIdRef::Current),
+                        MAX_RELATION_ITEMS - 2,
+                    )
+                    .collect(),
+                },
+            },
+        };
+        assert!(
+            decode_relation_query_postcard(&postcard::to_allocvec(&over_values).unwrap()).is_err()
+        );
     }
 
     #[test]
