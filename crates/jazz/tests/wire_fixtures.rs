@@ -1729,7 +1729,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
         ],
         subscription_deltas: vec![BindingCodecGoldenBinaryCase {
-            name: "added_updated_removed_with_v1_and_v2_occurrence_keys".to_owned(),
+            name: "added_updated_removed_with_complete_v1_occurrence_keys".to_owned(),
             payload_hex: hex(&postcard::to_allocvec(&delta).expect("subscription delta encodes")),
         }],
         terminal: BindingCodecGoldenTerminal {

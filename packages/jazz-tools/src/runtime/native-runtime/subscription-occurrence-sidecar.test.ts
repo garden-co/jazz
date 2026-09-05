@@ -34,7 +34,7 @@ it("preserves typed occurrence keys in the native subscription wire sidecar", ()
   const typedKey = (label: string) => {
     const labelBytes = new TextEncoder().encode(label);
     const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 2;
+    key[0] = 1;
     key.fill(1, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(2, 21, 37);
@@ -80,11 +80,11 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removedOccurrenceKeys: [Uint8Array.from([2, 0])],
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
-    "malformed v2 ResultKey",
+    "malformed ResultKey v1",
   );
 
   const zeroArm = new Uint8Array(41);
-  zeroArm[0] = 2;
+  zeroArm[0] = 1;
   zeroArm.fill(1, 1, 17);
   new DataView(zeroArm.buffer).setUint32(17, 1);
   zeroArm.fill(2, 21, 37);
@@ -94,12 +94,10 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removed: [{ table: "todos", rowId: new Uint8Array(16) }],
     removedOccurrenceKeys: [zeroArm],
   });
-  expect(() => readNativeSubscriptionDelta(new PostcardReader(aliasedV1))).toThrow(
-    "malformed v2 ResultKey",
-  );
+  expect(() => readNativeSubscriptionDelta(new PostcardReader(aliasedV1))).not.toThrow();
 
   const invalidUtf8 = new Uint8Array(50);
-  invalidUtf8[0] = 2;
+  invalidUtf8[0] = 1;
   invalidUtf8.fill(1, 1, 17);
   new DataView(invalidUtf8.buffer).setUint32(17, 1);
   invalidUtf8.fill(2, 21, 37);
@@ -114,6 +112,6 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removedOccurrenceKeys: [invalidUtf8],
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformedLabel))).toThrow(
-    "malformed v2 ResultKey",
+    "malformed ResultKey v1",
   );
 });

@@ -287,8 +287,8 @@ unknown epoch (`INV-STORAGE-31`). The shared epoch manifest specifies the
 cross-adapter fields; this section freezes the native adapter descriptors that
 it carries.
 
-RocksDB v3 uses the internal `__groove_storage_internal_v3` column family and
-the `value-format` key with raw value `raw-v3`. Its Jazz/Groove-owned families
+RocksDB V1 uses the internal `__groove_storage_internal_v1` column family and
+the `value-format` key with raw value `raw-v1`. Its Jazz/Groove-owned families
 are `__groove_class_history`, `__groove_class_register`,
 `__groove_class_global_current`, `__groove_class_ahead_current`,
 `__groove_class_changes`, `__groove_class_indices`, and

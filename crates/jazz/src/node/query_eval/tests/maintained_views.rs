@@ -775,7 +775,9 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     let mut occurrences = (1..=4).map(occurrence).collect::<Vec<_>>();
     let query = Query::from("todos")
         .count()
-        .order_by("count", OrderDirection::Desc);
+        .order_by("count", OrderDirection::Desc)
+        .offset(1)
+        .limit(1);
     NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
         &query,
         None,
@@ -785,9 +787,30 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     .unwrap();
     assert_eq!(
         rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
-        [1, 3, 2, 4].map(row)
+        [1, 3, 2, 4].map(row),
+        "aggregate ordering must retain its complete deterministic order before windowing",
     );
-    assert_eq!(occurrences, [1, 3, 2, 4].map(occurrence));
+    assert_eq!(
+        occurrences,
+        [1, 3, 2, 4].map(occurrence),
+        "aggregate ordering must keep occurrence identities paired before windowing",
+    );
+    let mut windowed_rows = rows.clone();
+    let mut windowed_occurrences = occurrences.clone();
+    NodeState::<RocksDbStorage>::apply_aggregate_window_with_occurrences(
+        &query,
+        &mut windowed_rows,
+        &mut windowed_occurrences,
+    )
+    .unwrap();
+    assert_eq!(
+        windowed_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        [3].map(row)
+    );
+    assert_eq!(windowed_occurrences, [3].map(occurrence));
 
     let mut malformed = make_row(5, Value::U64(9), ValueType::U64);
     malformed.record =
