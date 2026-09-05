@@ -1,5 +1,9 @@
 # Typed field identity compatibility evidence (#2558)
 
+Historical experiment record: the governing decision is now the all-in typed
+format. See Jazz SPEC 16 and [durable role receipts](typed-identity-durable-roles.md)
+for the current boundary; the comparisons below do not impose a compatibility goal.
+
 Comparison: contained `4c6eafaef5ad038a71b4583f650b22ccfd7b71db` and typed
 `24d6c5b2d1dfcadcda9e150d8896199d33955354`. These revisions are **not storage
 compatible**. This document and the test-only codec snapshot change no

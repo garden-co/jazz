@@ -46,9 +46,9 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "cd2eed57320d8d18bd99b2be552fb7de1ac4e35588c63dcb729fc2915de9105a";
+    "2acca4b24d4d4128f7d18e13c14df973a93cb0aa3d65a9287bc9eb6543b584b3";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "2dc874a93eacd1d9552e7455508b073740529664511c0f3b3f5db1022c684e82";
+    "c4dca94039cd5b9417f5a5e30dfcac3486bcbeb2fee2f539fa639ee756e9cb15";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -62,10 +62,10 @@ const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
-    /// Exact raw primary-key/value pairs in canonical scan order, grouped by
-    /// logical Jazz store.  This is backend-neutral and makes a later binary
-    /// fixture reviewable even though SQLite pages and RocksDB SSTs are not an
-    /// interchange format.
+    /// Table entries retain raw primary-key/value bytes in canonical scan order.
+    /// Direct-store entries encode decoded semantic Values for this test pack;
+    /// their postcard representation is not the authoritative storage format.
+    /// SQLite pages and RocksDB SSTs remain separate physical fixture artifacts.
     stores: BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>,
 }
 

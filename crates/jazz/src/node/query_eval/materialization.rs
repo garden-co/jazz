@@ -345,13 +345,21 @@ where
                     "flat joined result member is missing its tuple payload",
                 ))?;
             return self
-                .current_row_from_result_payload(&table, payload)
+                .current_row_from_result_payload(
+                    &table,
+                    payload,
+                    local.terminal_schemas.current_payload_schema()?,
+                )
                 .map(Some);
         }
         if local.result_select.is_some()
             && let Some(payload) = local.result_payloads.get(member)
         {
-            let mut row = self.current_row_from_result_payload(&table, payload)?;
+            let mut row = self.current_row_from_result_payload(
+                &table,
+                payload,
+                local.terminal_schemas.current_payload_schema()?,
+            )?;
             if let Some(columns) = &local.result_select {
                 row = row.project(&table, columns)?;
             }
@@ -465,7 +473,11 @@ where
                     "flat joined result member is missing its tuple payload",
                 ))?;
             return self
-                .current_row_from_result_payload(&table, payload)
+                .current_row_from_result_payload(
+                    &table,
+                    payload,
+                    local.terminal_schemas.current_payload_schema()?,
+                )
                 .map(Some);
         }
         let tx_versions = self
@@ -673,18 +685,11 @@ where
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
-        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
-            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        if payload_descriptor
-            .fields()
-            .iter()
-            .any(|field| field.name.is_none())
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload descriptor field must be named",
-            ));
-        }
-        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
+        let decoded = crate::node::descriptor_roles::decode_aggregate_payload_record(
+            payload,
+            aggregate_output_schema(output)?,
+        )?;
+        let payload_record = decoded.borrowed();
         let mut row = aggregate_current_row_from_record(
             query,
             output,
@@ -699,45 +704,9 @@ where
         &mut self,
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,
+        schema: &crate::node::query_engine::ResultMembershipSchema,
     ) -> Result<CurrentRow, Error> {
-        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
-            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        if payload_descriptor
-            .fields()
-            .iter()
-            .any(|field| field.name.is_none())
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload descriptor field must be named",
-            ));
-        }
-        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
-        let row_uuid_idx = payload_descriptor
-            .field_index("row_uuid")
-            .or_else(|| payload_descriptor.field_index("id"))
-            .ok_or(Error::InvalidStoredValue(
-                "result payload is missing row identity",
-            ))?;
-        let row_uuid = payload_record.get_uuid(row_uuid_idx)?;
-        let mut descriptor_fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
-        let mut values = vec![Value::Uuid(row_uuid)];
-        for (index, field) in payload_descriptor.fields().iter().enumerate() {
-            let Some(name) = &field.name else {
-                continue;
-            };
-            if name == "row_uuid" || name == "id" {
-                continue;
-            }
-            descriptor_fields.push((name.clone(), field.value_type.clone()));
-            values.push(payload_record.get_idx(index)?);
-        }
-        let descriptor = RecordDescriptor::new(descriptor_fields);
-        let raw = descriptor.create(&values)?;
-        let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
-        if row.raw_field("__flat_join_row_1").is_some() {
-            return Ok(row);
-        }
-        self.materialize_current_row(table, row)
+        crate::node::descriptor_roles::decode_current_payload_record(&table.name, payload, schema)
     }
 
     pub(super) async fn materialize_relation_snapshot_from_query_engine(

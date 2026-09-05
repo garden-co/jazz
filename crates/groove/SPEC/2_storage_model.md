@@ -551,11 +551,13 @@ reconstructed child descriptors; raw child bytes alone do not retain executable
 bindings. Jazz reconstructs physical bindings from its catalogue and selected
 query/schema context.
 
-The typed-identity experiment currently applies this explicit boundary to Jazz
-synthetic value identities and flat-join revision preimages only. Its remaining
-result-payload and root-layout producers have not established complete parity;
-[the compatibility proof](../../../dev/proofs/typed-identity-storage-compatibility.md)
-records the exact scope and unproven bidirectional reopen/replication receipts.
+Jazz's all-in typed format applies this boundary to immutable-version rows,
+role-specific result payloads, synthetic value identities, tuple revisions, and
+root publication hashes. Jazz SPEC 16 owns the enclosing role grammars and exact
+schema validation before runtime rebinding. The [durable role receipts](../../../dev/proofs/typed-identity-durable-roles.md)
+distinguish persisted bytes from diagnostic fixture rendering. The earlier
+[compatibility proof](../../../dev/proofs/typed-identity-storage-compatibility.md)
+remains a historical comparison, not a compatibility promise for this format.
 
 ### 2.3 Tables
 

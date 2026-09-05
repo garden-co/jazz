@@ -313,6 +313,7 @@ mod catalogue_ingest;
 mod codec;
 mod currency;
 mod database_slot;
+mod descriptor_roles;
 mod eviction;
 mod global_state;
 mod ingest;

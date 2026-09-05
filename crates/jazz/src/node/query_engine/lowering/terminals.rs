@@ -2278,6 +2278,30 @@ fn fact_output_with_terminal(
                 row_field: source.row_shape.row_uuid_field.clone(),
                 occurrence_id_fields,
                 occurrence_union_arm_fields,
+                payload_publication_fields: payload_fields
+                    .iter()
+                    .map(|field| {
+                        let binding = if !flat_join_payload.is_empty() {
+                            CurrentRowPublicationField::ResultField {
+                                name: field.name.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
+                            }
+                        } else if let Some(name) = resolved_source_public_name(source, &field.name)
+                        {
+                            source_publication_field(source, name)
+                        } else {
+                            CurrentRowPublicationField::ResultField {
+                                name: field.name.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                        &field.name,
+                                    ),
+                            }
+                        };
+                        (field.name.clone(), binding)
+                    })
+                    .collect(),
                 payload_fields,
                 // Version witnesses may carry either a legacy physical prefix
                 // or a branch key. Only view-relative sources use that field
@@ -3162,7 +3186,9 @@ fn aggregate_app_row_descriptor(
             })?;
         fields.push(DescriptorField {
             name: Some(field),
-            value_type: descriptor_field.value_type,
+            // lower_aggregate removes the source cell-presence wrapper once
+            // before grouping. Its output schema must describe that graph.
+            value_type: aggregate_unwrapped_input_type(descriptor_field.value_type),
             identity: descriptor_field.identity,
         });
     }
@@ -3186,7 +3212,7 @@ fn aggregate_result_schema(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<AggregateResultSchema> {
-    let (group_by, _) = root_aggregate_step(plan).ok_or_else(|| {
+    let (group_by, outputs) = root_aggregate_step(plan).ok_or_else(|| {
         Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Runtime(
                 "aggregate result schema requested for non-aggregate plan".to_owned(),
@@ -3206,7 +3232,26 @@ fn aggregate_result_schema(
             routing_param_fields: routing_param_fields.clone(),
         },
         group_key_fields: group_key_fields.to_vec(),
+        group_names: group_by
+            .iter()
+            .map(|group| {
+                let carrier = aggregate_source_field_name(group, source)?;
+                if matches!(group, NormalizedValueRef::RowId(_)) {
+                    Ok("id".to_owned())
+                } else {
+                    resolved_source_public_name(source, &carrier).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "aggregate group has no declared logical name".to_owned(),
+                        ))
+                    })
+                }
+            })
+            .collect::<CapabilityResult<Vec<_>>>()?,
         value_fields: value_fields.to_vec(),
+        value_names: outputs
+            .iter()
+            .map(|output| output.output.name.clone())
+            .collect(),
         routing_param_fields,
     })
 }
@@ -3294,6 +3339,13 @@ fn aggregate_result_membership_fields(
     Ok(fields)
 }
 
+fn aggregate_unwrapped_input_type(value_type: ValueType) -> ValueType {
+    match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    }
+}
+
 fn aggregate_output_value_type(
     output: &AggregateExpr,
     source: &ResolvedSource,
@@ -3321,7 +3373,7 @@ fn aggregate_output_value_type(
                         explain: ExplainPlan::default(),
                     })
                 })?;
-            Ok(match value_type {
+            Ok(match aggregate_unwrapped_input_type(value_type) {
                 ValueType::Nullable(inner) => ValueType::Nullable(inner),
                 value_type => ValueType::Nullable(Box::new(value_type)),
             })

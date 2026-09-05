@@ -132,20 +132,23 @@ fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
         ),
         ("event", ValueType::Enum(Box::new(event))),
     ]);
-    let encoded = encode_record_descriptor(&descriptor).unwrap();
+    let encoded = encode_persisted_record_descriptor(&descriptor).unwrap();
     assert_eq!(
         blake3::hash(&encoded).to_hex().as_str(),
         "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
     );
-    let decoded = decode_record_descriptor(&encoded).unwrap();
-    assert_eq!(encode_record_descriptor(&decoded).unwrap(), encoded);
+    let decoded = decode_persisted_record_descriptor(&encoded).unwrap();
+    assert_eq!(
+        encode_persisted_record_descriptor(&decoded).unwrap(),
+        encoded
+    );
 
     let mut trailing = encoded.clone();
     trailing.push(0);
-    assert!(decode_record_descriptor(&trailing).is_err());
+    assert!(decode_persisted_record_descriptor(&trailing).is_err());
     let mut corrupt = encoded;
     corrupt[0] ^= 1;
-    assert!(decode_record_descriptor(&corrupt).is_err());
+    assert!(decode_persisted_record_descriptor(&corrupt).is_err());
 }
 
 #[test]

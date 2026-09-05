@@ -1,0 +1,111 @@
+# Typed identity durable role receipts
+
+The governing all-in format is Jazz SPEC 16, “Typed identity descriptor roles.”
+Compatibility with the retired contained experiment is not a goal. This record
+separates actual durable byte changes from changes to diagnostic test rendering.
+
+## Explicit codecs and identity ownership
+
+- `protocol::version_record_wire_row` owns the `JVRR` v1 row blob. The outer
+  immutable receipt keeps schema UUID, logical table, branch, and authored
+  column identity. Its nested descriptor never serializes compiler slots.
+- `node::descriptor_roles` owns `JRPD` v1 current and aggregate role schemas.
+  Readers compare complete canonical role/name/type trees against the compiled
+  schema before installing runtime identities, and compare row/group/replacement
+  values with their member identity. Equal-width type substitutions are rejected.
+- `terminal_root_layout` hashes the new `jazz terminal root publication v1`
+  domain. Public names and source/result/provenance roles affect the hash;
+  compiler allocations and node-local physical-column aliases do not.
+- Group and aggregate aliases can both be `count`: independent role ordinals
+  retain both values. A reader with different compiler slots or local column
+  IDs rebinds only after canonical schema equality. Schema evolution that changes
+  a logical name or value type requires the matching compiled schema; it cannot
+  reinterpret a previous payload merely because its row width is unchanged.
+
+The codec tests pin these deterministic BLAKE3 fixtures:
+
+| Fixture                                      | Hash                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| `JVRR` nested immutable row                  | `49f95ea224a6eb504d45a80ec11f003fa4717998d4d477198716237c865d0875` |
+| `JRPD` duplicate group/value name descriptor | `89fb1b80e90645fc68aaeccf9fbcd4082bcefdd2b606c8ed859827bd99465fff` |
+| Enclosing aggregate `JPFK` payload fixture   | `612a52116020e1219c5b75f67dd18d491485a9b1579a06cadf7d16c18a84631a` |
+| Root publication layout fixture              | `0d6d813bb94f2ded6db0616b3a2d55d7e9c8bd8173ebc6395f766a18ca7d114f` |
+
+The aggregate row fixture is exactly
+`01000000000000000200000000000000`: two declared little-endian U64 values,
+independently selected through their compiled identities. Unknown role/version,
+trailing bytes, changed logical identity, changed role, and same-width changed
+type are rejected. Recursive descriptor framing and its 1024-node bound are
+owned by Groove's persisted-descriptor grammar, not a parallel Jazz type codec.
+
+## Native producer pack: diagnostic serde change, identical policy-store bytes
+
+The current-producer pack was introduced by `ef66e8ffd3`. The later
+`1077bafaa3` added `DescriptorField.identity` and default logical identities.
+`native_corpus_receipt` retains raw table bytes, but renders **decoded direct-store
+Values with postcard**. That rendering includes nested `OwnedRecord`
+descriptors in `jazz_authority_policy_bindings`. It is a diagnostic semantic
+fixture, not the raw direct-store format.
+
+The producer under compiler checkpoint `2d666d2237` independently reproduced the
+new pack before this durable-codec change. A reversible diagnostic mutation that
+skipped only `DescriptorField.identity` in serde reproduced the previous pack
+exactly. The mutation was restored before normal tests; it is not production
+compatibility code.
+
+| Producer rendering        | Complete pack SHA256                                               | Policy semantic value bytes |
+| ------------------------- | ------------------------------------------------------------------ | --------------------------- |
+| Previous descriptor serde | `cd2eed57320d8d18bd99b2be552fb7de1ac4e35588c63dcb729fc2915de9105a` | 490                         |
+| Typed descriptor serde    | `2acca4b24d4d4128f7d18e13c14df973a93cb0aa3d65a9287bc9eb6543b584b3` | 619                         |
+
+Only the policy-directory semantic entry differs. Its key and interpreted
+subject/claims remain the same. Both exported SQLite candidates contain exactly
+one policy-directory raw entry in `__groove_class_meta`; its key and value are
+byte-identical across the diagnostic mutation:
+
+- Physical key: 70 bytes; SHA256
+  `a275172acda1b552c0715e2d0c98bdff0aa366409d32dbd67df8bc780ded21e3`.
+- Raw value: 75 bytes; SHA256
+  `28a54fa95df3176f94b5a7d6da464a6e300226f15018fed64524bd363444f234`.
+
+All other raw KV entries also agree except the backend-owned encrypted chunk
+payload, whose physical encryption bytes are not this interchange receipt.
+The direct-store writer still creates the declared Groove record and writes its
+raw bytes; the extra descriptor identity metadata occurs only in test-pack
+postcard rendering.
+
+Generation uses the guarded existing producer path, including RocksDB and SQLite
+reopen, mixed writes, fresh reopen, exact semantic assertions, backend equality,
+and staged no-overwrite candidate publication:
+
+```sh
+ulimit -n 65536
+RUST_MIN_STACK=4194304 \
+JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/typed-current-producer.pack \
+JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/typed-current-producer.sqlite \
+cargo nextest run -p jazz -p groove --no-default-features \
+  --features jazz/testing,jazz/transport-compression-zstd --lib \
+  -E 'test(settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes)' \
+  --no-fail-fast
+```
+
+Output paths must not exist. The export variable skips the old diagnostic golden
+comparison, not candidate validation. The current producer fixture and its
+checksums are updated; committed historical epoch packs and binary native
+fixtures remain unchanged and retain their independent historical-open tests.
+The native corpus does not by itself prove every result-payload role: those
+boundaries have separate strict codec and maintained/query differential tests.
+
+## Test sensitivity
+
+A reversible mutation bypassed only the canonical role-schema equality checks
+in both current and aggregate readers. Both role canaries then failed on the
+specific assertion that a changed logical name must be rejected (0/2 passed).
+The mutation was restored exactly before the final canonical suite. This proves
+the tests detect positional reinterpretation rather than only checking goldens.
+
+Final implementation validation used the canonical 4 MiB Rust test stack and
+Jazz testing/zstd feature selection: **2503 tests passed, 4 skipped** across Jazz
+and Groove library targets. Workspace `cargo check --workspace --all-targets
+--features jazz/testing,jazz/transport-compression-zstd` also passed. These are
+Rust receipts, not a claim that the complete local CI-equivalent workflow ran.

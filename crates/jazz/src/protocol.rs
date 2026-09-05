@@ -851,10 +851,11 @@ pub struct PeerPayloadInventory {
 
 /// One immutable row-version payload carried by a committed transaction.
 ///
-/// The record serializes as `(table, bytes)`; the receiver resolves the wire
-/// descriptor from its local schema by table name. v0 requires sender and
-/// receiver descriptors to match exactly. Schema changes therefore require a
-/// protocol/schema negotiation layer before mixed-version sync.
+/// The outer message retains table, schema UUID, branch and authored-column
+/// identity. The row uses the explicit `JVRR` v1 envelope: persisted schema
+/// descriptor plus canonical record bytes, never runtime `OwnedRecord` serde.
+/// The receiver validates that descriptor against the declared schema before
+/// translating columns into its node-local physical catalogue.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct VersionRecord {
     table: groove::Intern<String>,
@@ -862,11 +863,149 @@ pub struct VersionRecord {
     /// Exact branch coordinate of this version's branch-local row.
     #[serde(default)]
     branch_key: BranchKey,
+    #[serde(with = "version_record_wire_row")]
     record: OwnedRecord,
     /// `None` denotes a legacy or lens-translated payload whose authored
     /// presence is unavailable; consumers must conservatively treat every
     /// present payload cell as authored.
     authored_columns: Option<BTreeSet<String>>,
+}
+
+/// Explicit immutable-version row encoding. Outer sync framing owns lengths
+/// and resource bounds; this record role owns its discriminator and schema.
+mod version_record_wire_row {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    const MAGIC: &[u8; 5] = b"JVRR\x01";
+
+    pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
+        let descriptor = groove::records::encode_persisted_record_descriptor(record.descriptor())?;
+        let canonical = groove::records::decode_persisted_record_descriptor(&descriptor)?;
+        let values = canonical.bind(record.raw()).to_values()?;
+        if canonical.create(&values)? != record.raw() {
+            return Err(groove::records::Error::NonCanonicalRecord);
+        }
+        let length =
+            u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + descriptor.len() + record.raw().len());
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(&descriptor);
+        bytes.extend_from_slice(record.raw());
+        Ok(bytes)
+    }
+
+    pub(super) fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
+        let invalid = || groove::records::Error::NonCanonicalRecord;
+        if !bytes.starts_with(MAGIC) {
+            return Err(invalid());
+        }
+        let length = u32::from_le_bytes(
+            bytes
+                .get(5..9)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        ) as usize;
+        let end = 9usize.checked_add(length).ok_or_else(invalid)?;
+        let descriptor = groove::records::decode_persisted_record_descriptor(
+            bytes.get(9..end).ok_or_else(invalid)?,
+        )?;
+        let raw = bytes.get(end..).ok_or_else(invalid)?;
+        let values = descriptor.bind(raw).to_values()?;
+        if descriptor.create(&values)? != raw {
+            return Err(invalid());
+        }
+        Ok(OwnedRecord::new(raw.to_vec(), descriptor))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use groove::records::{DescriptorField, FieldIdentity};
+
+        #[test]
+        fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
+            let descriptor = RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                ("_app_title", ValueType::String),
+                (
+                    "_app_nested",
+                    ValueType::Record(Box::new(RecordDescriptor::new([(
+                        "literal_name",
+                        ValueType::U64,
+                    )]))),
+                ),
+            ]);
+            let nested = RecordDescriptor::new([("literal_name", ValueType::U64)]);
+            let raw = descriptor
+                .create(&[
+                    Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
+                    Value::String("same application cell".to_owned()),
+                    Value::Record(OwnedRecord::new(
+                        nested.create(&[Value::U64(42)]).unwrap(),
+                        nested,
+                    )),
+                ])
+                .unwrap();
+            let original = OwnedRecord::new(raw.clone(), descriptor);
+            let encoded = encode(&original).unwrap();
+            assert_eq!(
+                blake3::hash(&encoded).to_hex().as_str(),
+                "49f95ea224a6eb504d45a80ec11f003fa4717998d4d477198716237c865d0875"
+            );
+            assert_eq!(&encoded[..5], b"JVRR\x01");
+            assert_eq!(decode(&encoded).unwrap(), original);
+
+            let mut fields = descriptor.fields().to_vec();
+            fields[1].identity = Some(FieldIdentity::Slot(999));
+            let mut nested_fields = nested.fields().to_vec();
+            nested_fields[0].identity = Some(FieldIdentity::NamedSlot {
+                name: "runtime alias".to_owned(),
+                slot: 77,
+            });
+            fields[2].value_type =
+                ValueType::Record(Box::new(RecordDescriptor::new_with_fields(nested_fields)));
+            let rebound = OwnedRecord::new(
+                raw.clone(),
+                RecordDescriptor::new_with_fields(fields.clone()),
+            );
+            assert_eq!(encode(&rebound).unwrap(), encoded);
+
+            fields[1] = DescriptorField::new("_app_other_title", ValueType::String);
+            let other_schema = OwnedRecord::new(raw, RecordDescriptor::new_with_fields(fields));
+            assert_ne!(
+                encode(&other_schema).unwrap(),
+                encoded,
+                "logical field identity remains authoritative"
+            );
+            let mut unknown_version = encoded.clone();
+            unknown_version[4] = 2;
+            assert!(decode(&unknown_version).is_err());
+            let mut trailing = encoded.clone();
+            trailing.push(0);
+            assert!(decode(&trailing).is_err());
+            assert!(decode(&encoded[..8]).is_err());
+            assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
+        }
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        record: &OwnedRecord,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        encode(record)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<OwnedRecord, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        decode(&bytes).map_err(serde::de::Error::custom)
+    }
 }
 
 impl VersionRecord {
@@ -6057,7 +6196,32 @@ mod tests {
             },
             versions: vec![trailing_record],
         };
-        let remote = postcard::to_allocvec(&trailing_message).unwrap();
+        assert!(
+            postcard::to_allocvec(&trailing_message).is_err(),
+            "the canonical row writer rejects trailing bytes"
+        );
+        // A hostile sender can still write an invalid blob without invoking
+        // that writer. Splice its explicitly framed row into a valid message.
+        let valid_message = SyncMessage::CommitUnit {
+            tx: match &message {
+                SyncMessage::CommitUnit { tx, .. } => tx.clone(),
+                _ => unreachable!(),
+            },
+            versions: vec![version.clone()],
+        };
+        let mut remote = postcard::to_allocvec(&valid_message).unwrap();
+        let blob = version_record_wire_row::encode(version.record()).unwrap();
+        let encoded_blob = postcard::to_allocvec(&blob).unwrap();
+        let offset = remote
+            .windows(encoded_blob.len())
+            .position(|bytes| bytes == encoded_blob)
+            .expect("valid message contains its unique version-row blob");
+        let mut hostile_blob = blob;
+        hostile_blob.push(0xa5);
+        remote.splice(
+            offset..offset + encoded_blob.len(),
+            postcard::to_allocvec(&hostile_blob).unwrap(),
+        );
         assert!(crate::wire::decode_sync_message(&remote).is_err());
 
         let make_record = |descriptor: RecordDescriptor, values: Vec<Value>| {

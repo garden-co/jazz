@@ -4545,8 +4545,15 @@ fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
 }
 
 fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) -> Result<(), Error> {
-    let descriptor = records::decode_record_descriptor(&payload.descriptor)
-        .map_err(|_| Error::InvalidStoredValue("settled result payload descriptor is invalid"))?;
+    let (role, descriptor) =
+        super::descriptor_roles::decode_result_descriptor(&payload.descriptor)?;
+    if (role == super::descriptor_roles::ResultDescriptorRole::Aggregate)
+        != matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+    {
+        return Err(Error::InvalidStoredValue(
+            "result payload descriptor role differs from member",
+        ));
+    }
     if descriptor.fields().iter().any(|field| field.name.is_none()) {
         return Err(Error::InvalidStoredValue(
             "settled result payload descriptor field must be named",
@@ -4557,7 +4564,8 @@ fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) ->
         .to_values()
         .map_err(|_| Error::InvalidStoredValue("settled result payload record is invalid"))?;
     if descriptor.create(&values)? != payload.record
-        || records::encode_record_descriptor(&descriptor)? != payload.descriptor
+        || super::descriptor_roles::encode_result_descriptor(role, &descriptor)?
+            != payload.descriptor
     {
         return Err(Error::InvalidStoredValue(
             "settled result payload encoding is not canonical",
@@ -6528,24 +6536,40 @@ mod authority_storage_codec_tests {
                 records::ValueType::Nullable(Box::new(records::ValueType::U64)),
             ),
         ]);
-        let descriptor_bytes = records::encode_record_descriptor(&descriptor).unwrap();
+        let descriptor_bytes = records::encode_persisted_record_descriptor(&descriptor).unwrap();
         assert_eq!(
             blake3::hash(&descriptor_bytes).to_hex().as_str(),
             "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
         );
-        let decoded_descriptor = records::decode_record_descriptor(&descriptor_bytes).unwrap();
+        let decoded_descriptor =
+            records::decode_persisted_record_descriptor(&descriptor_bytes).unwrap();
         assert_eq!(
-            records::encode_record_descriptor(&decoded_descriptor).unwrap(),
+            records::encode_persisted_record_descriptor(&decoded_descriptor).unwrap(),
             descriptor_bytes
         );
         let mut descriptor_trailing = descriptor_bytes.clone();
         descriptor_trailing.push(0);
-        assert!(records::decode_record_descriptor(&descriptor_trailing).is_err());
+        assert!(records::decode_persisted_record_descriptor(&descriptor_trailing).is_err());
 
+        let payload_descriptor = records::RecordDescriptor::new([
+            ("value/0/name", records::ValueType::String),
+            (
+                "value/1/labels",
+                records::ValueType::Array(Box::new(records::ValueType::String)),
+            ),
+            (
+                "value/2/optional_count",
+                records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+            ),
+        ]);
         let payload = ResultMemberPayloadEntry {
             member: fixture_member(),
-            descriptor: descriptor_bytes.clone(),
-            record: descriptor
+            descriptor: super::super::descriptor_roles::encode_result_descriptor(
+                super::super::descriptor_roles::ResultDescriptorRole::Aggregate,
+                &payload_descriptor,
+            )
+            .unwrap(),
+            record: payload_descriptor
                 .create(&[
                     Value::String("synth".to_owned()),
                     Value::Array(vec![Value::String("a".to_owned())]),
@@ -6557,7 +6581,7 @@ mod authority_storage_codec_tests {
             program_fact_storage_bytes(&ProgramFactEntry::ResultPayload(payload.clone())).unwrap();
         assert_eq!(
             blake3::hash(&encoded_fact).to_hex().as_str(),
-            "266952cded111efe3209e4a478835693924f09c52d18b01293057d5307b2e3c8"
+            "612a52116020e1219c5b75f67dd18d491485a9b1579a06cadf7d16c18a84631a"
         );
         let descriptor_offset = encoded_fact
             .windows(payload.descriptor.len())

@@ -914,6 +914,7 @@ mod tests {
                 occurrence_id_fields: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()],
                 occurrence_union_arm_fields: BTreeMap::from([(0, "__root_join_arm_0".to_owned())]),
                 payload_fields: Vec::new(),
+                payload_publication_fields: BTreeMap::new(),
                 branch_or_prefix_field: None,
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),

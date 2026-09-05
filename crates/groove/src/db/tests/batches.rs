@@ -5162,11 +5162,11 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
                     ColumnSchema::new("row_uuid", ColumnType::Uuid),
                     ColumnSchema::new("tx_time", ColumnType::U64),
                     ColumnSchema::new("tx_node_id", ColumnType::U64),
-                    ColumnSchema::new("user_parent", ColumnType::Uuid),
+                    ColumnSchema::new("_app_parent", ColumnType::Uuid),
                 ],
             )
             .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("row_uuid")]))
-            .with_index(IndexSchema::new("by_user_parent", ["user_parent"])),
+            .with_index(IndexSchema::new("by_app_parent", ["_app_parent"])),
             TableSchema::new(
                 "jazz_docs_register_global_current",
                 [
