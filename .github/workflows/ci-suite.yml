@@ -272,6 +272,16 @@ jobs:
       # browser suites. The local CI-equivalent gate calls this exact partition.
       - name: Run CI-equivalent TypeScript and workspace partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
+      - name: Upload BandChat failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: band-chat-browser-failure-screenshots
+          # This fixture renders synthetic users and rooms; do not broaden to
+          # browser traces, storage profiles, or arbitrary application captures.
+          path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
