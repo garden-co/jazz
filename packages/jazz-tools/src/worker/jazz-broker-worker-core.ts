@@ -168,11 +168,41 @@ export type ForegroundLeaseTestHooks = {
 
 export type JazzBrokerWorkerOptions = {
   foregroundLeaseTestHooks?: ForegroundLeaseTestHooks;
+  /** Test-worker-only redacted lifecycle observation. Never enabled by production entrypoints. */
+  diagnosticHooks?: { record(event: BrowserDiagnosticEvent): void };
+};
+
+export type BrowserDiagnosticEvent = {
+  event:
+    | "lease-request-received"
+    | "lease-admitted"
+    | "connect-runtime-received"
+    | "worker-alive-sent"
+    | "idb-owner-opening"
+    | "idb-owner-opened"
+    | "durable-runtime-opening"
+    | "durable-runtime-opened"
+    | "runtime-ready-sent"
+    | "runtime-error"
+    | "follower-init-received"
+    | "peer-attached"
+    | "follower-init-ack"
+    | "page-frames-received"
+    | "worker-frames-sent"
+    | "flush-local-received"
+    | "flush-local-observed"
+    | "flush-local-complete";
+  elapsedMs: number;
+  frameCount?: number;
+  frameBytes?: number;
+  errorKind?: "idb-open" | "wasm-open" | "owner" | "other";
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const workerRealmId = crypto.randomUUID();
 let foregroundLeaseTestHooks: ForegroundLeaseTestHooks | null = null;
+let diagnosticHooks: JazzBrokerWorkerOptions["diagnosticHooks"] | null = null;
+const diagnosticStartedAt = performance.now();
 const contexts = new Map<string, RuntimeContext>();
 const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
 const physicalDatabaseOwners = new Map<string, PhysicalDatabaseOwner>();
@@ -374,6 +404,7 @@ function releaseInvalidatedPhysicalDatabaseOwner(dbName: string): void {
 
 export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): void {
   foregroundLeaseTestHooks = options.foregroundLeaseTestHooks ?? null;
+  diagnosticHooks = options.diagnosticHooks ?? null;
   workerGlobal.onconnect = (event) => {
     const port = event.ports[0];
     if (!port) return;
@@ -453,12 +484,14 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
       }
       detachBootstrapListeners();
       if (message.type === "connect-runtime") {
+        recordDiagnostic("connect-runtime-received");
         recordWorkerLifecycle(
           "bootstrap-start",
           message.options.dbName,
           message.options.authSessionKey,
         );
         post(port, { type: "worker-alive" });
+        recordDiagnostic("worker-alive-sent");
         void connectTab(port, message, finishBootstrap);
       } else {
         if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
@@ -473,6 +506,7 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
           return;
         }
         recordWorkerLifecycle("lease-request", message.dbName, null);
+        recordDiagnostic("lease-request-received");
         void acquireForegroundNodeLease(port, message).finally(finishBootstrap);
       }
     }
@@ -712,6 +746,7 @@ async function acquireForegroundNodeLease(
       return;
     }
     recordWorkerLifecycle("lease-admitted", request.dbName, null);
+    recordDiagnostic("lease-admitted");
     post(port, {
       type: "foreground-node-lease-ready",
       leaseId: lease.leaseId,
@@ -847,11 +882,13 @@ async function connectTab(
     // still sees normal idle cleanup ordering.
     finishBootstrap();
     post(port, { type: "runtime-ready" });
+    recordDiagnostic("runtime-ready-sent");
   } catch (error) {
     // Failed connection setup has already cleaned any partial context; clear
     // the bootstrap reservation before surfacing the terminal result so its
     // physical owner can be released without a follow-on admission race.
     finishBootstrap();
+    recordDiagnostic("runtime-error", { errorKind: diagnosticErrorKind(error) });
     post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
     port.close();
   }
@@ -904,12 +941,15 @@ async function initialize(context: RuntimeContext): Promise<void> {
     // particular, a low-level attempt to open another account's physical root
     // is an ordinary connect rejection, not a partially
     // initialized worker that can affect the rightful owner's next open.
+    recordDiagnostic("idb-owner-opening");
     const physicalOwner = await ensurePhysicalDatabaseOwner(options.dbName, options.storageOwner);
+    recordDiagnostic("idb-owner-opened");
     context.pageStore = physicalOwner.pageStore;
     context.disposePageStoreInvalidation = context.pageStore.onInvalidated(() =>
       handleStorageInvalidation(context),
     );
     workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    recordDiagnostic("durable-runtime-opening");
     const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
     context.disposeTelemetry = installWasmTelemetry({
       wasmModule,
@@ -952,6 +992,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       { selfSignedClientProof: proof, scopeIsolatedRelay: true },
     );
     context.runtime = runtime;
+    recordDiagnostic("durable-runtime-opened");
     unownedDb = null;
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
@@ -1201,6 +1242,7 @@ function attachTab(
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
+    if (diagnosticHooks) recordDiagnostic("page-frames-received", frameMetadata(message.frames));
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
         "peer-frames",
@@ -1248,6 +1290,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "flush-local-observed") {
+    recordDiagnostic("flush-local-observed");
     peer.flushObserved = true;
     completeLocalFlush(peer);
     return;
@@ -1277,6 +1320,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   try {
     const activeRuntime = requireRuntime(peer.context);
     if (message.type === "init") {
+      recordDiagnostic("follower-init-received");
       if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
       // A different tab can be publishing a newly admitted upstream session.
       // Join its transition before checking the shared snapshot so an init
@@ -1297,6 +1341,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         peer.context.options.dbName,
         peer.context.options.authSessionKey,
       );
+      recordDiagnostic("peer-attached");
       if (peer.pendingFrames.length > 0) {
         const pending = peer.pendingFrames.splice(0);
         pump.receive(pending);
@@ -1316,6 +1361,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
           : undefined,
       );
+      recordDiagnostic("follower-init-ack");
       return;
     }
     if (message.type === "update-auth") {
@@ -1367,6 +1413,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "flush-local") {
+      recordDiagnostic("flush-local-received");
       if (peer.flushRequestId !== null) {
         result(peer, message.id, new Error("Browser tab already has a local flush in progress"));
         return;
@@ -1787,6 +1834,7 @@ function attachPeerTransport(
     activeRuntime,
     subscriber,
     (frames) => {
+      if (diagnosticHooks) recordDiagnostic("worker-frames-sent", frameMetadata(frames));
       const copies = transferableFrames(frames);
       peer.port.postMessage(
         { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,
@@ -1812,6 +1860,41 @@ function completeLocalFlush(peer: TabPeer): void {
   peer.flushRequestId = null;
   peer.flushedLocal = true;
   result(peer, requestId);
+  recordDiagnostic("flush-local-complete");
+}
+
+function recordDiagnostic(
+  event: BrowserDiagnosticEvent["event"],
+  detail: Omit<BrowserDiagnosticEvent, "event" | "elapsedMs"> = {},
+): void {
+  const hooks = diagnosticHooks;
+  if (!hooks) return;
+  try {
+    hooks.record({
+      event,
+      elapsedMs: Math.round(performance.now() - diagnosticStartedAt),
+      ...detail,
+    });
+  } catch {
+    // Diagnostics are strictly observational; a test hook must not affect runtime behavior.
+  }
+}
+
+function frameMetadata(
+  frames: readonly Uint8Array[],
+): Pick<BrowserDiagnosticEvent, "frameCount" | "frameBytes"> {
+  return {
+    frameCount: frames.length,
+    frameBytes: frames.reduce((bytes, frame) => bytes + frame.byteLength, 0),
+  };
+}
+
+function diagnosticErrorKind(error: unknown): NonNullable<BrowserDiagnosticEvent["errorKind"]> {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("owner")) return "owner";
+  if (message.includes("indexeddb") || message.includes("page store")) return "idb-open";
+  if (message.includes("wasm")) return "wasm-open";
+  return "other";
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

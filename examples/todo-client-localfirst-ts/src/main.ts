@@ -1,5 +1,6 @@
 import { createDb, BrowserAuthSecretStore, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
+import { traceSafariReceipt } from "./safari-receipt-trace.js";
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -67,8 +68,11 @@ export async function startApp(
   let initialTodos: Todo[];
   try {
     // Do not claim startup until the attached runtime has served a local read.
+    traceSafariReceipt({ phase: "local-read-start" });
     initialTodos = await db.all(app.todos, { tier: "local" });
+    traceSafariReceipt({ phase: "local-read", outcome: "fulfilled" });
   } catch (error) {
+    traceSafariReceipt({ phase: "local-read", outcome: "rejected" });
     // Preserve the attachment/read error even when shutdown itself is unhealthy.
     void db.shutdown().catch(() => undefined);
     container.innerHTML = "";
@@ -180,10 +184,13 @@ export async function startApp(
     mutationStatus.textContent = "Saving locally (pending)…";
     clearErrorMessage();
     try {
+      traceSafariReceipt({ phase: "local-write-wait-start" });
       await action().wait({ tier: "local" });
+      traceSafariReceipt({ phase: "local-write-wait", outcome: "fulfilled" });
       mutationStatus.textContent = "Saved locally";
       onSaved?.();
     } catch (failure) {
+      traceSafariReceipt({ phase: "local-write-wait", outcome: "rejected" });
       showMutationFailure(failure);
     } finally {
       mutationInFlight = false;

@@ -50,7 +50,7 @@ class Driver:
             raise WebDriverError(f"{method} {path} HTTP {error.code}: {detail}") from error
         except OSError as error:
             raise WebDriverError(f"{method} {path}: {error}") from error
-        if isinstance(result, dict) and result.get("value", {}).get("error"):
+        if isinstance(result, dict) and isinstance(result.get("value"), dict) and result["value"].get("error"):
             raise WebDriverError(f"{method} {path}: {result['value']}")
         return result.get("value") if isinstance(result, dict) and "value" in result else result
 
@@ -110,6 +110,8 @@ return {
   readyStatus: text('receipt-status'),
   startupError: hidden('startup-error') ? null : text('startup-error'),
   applicationError: hidden('error-message') ? null : text('error-message'),
+  mutationStatus: text('mutation-status'),
+  listReady: document.getElementById('todo-list')?.dataset.ready ?? null,
   restartEnabled: !Boolean(document.getElementById('restart-storage')?.disabled),
   addEnabled: !Boolean(document.querySelector('#add-form button[type="submit"]')?.disabled),
   markerVisible: document.body?.innerText?.includes(arguments[0]) ?? false,
@@ -175,6 +177,33 @@ def wait_for(driver: Driver, marker: str, seconds: float, events: list[dict[str,
     raise WebDriverError(f"{phase}: marker not visible after {seconds}s; final status={latest}")
 
 
+def marker_visible(driver: Driver, marker: str, seconds: float) -> tuple[bool, dict[str, Any]]:
+    deadline = time.monotonic() + seconds
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        value = driver.execute(STATUS, [marker])
+        latest = value if isinstance(value, dict) else {"raw": value}
+        if latest.get("markerVisible"):
+            return True, latest
+        time.sleep(0.5)
+    return False, latest
+
+
+def wait_local_ack(driver: Driver, marker: str, events: list[dict[str, Any]]) -> None:
+    deadline = time.monotonic() + 20
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        value = driver.execute(STATUS, [marker])
+        latest = value if isinstance(value, dict) else {"raw": value}
+        if latest.get("startupError") or latest.get("applicationError"):
+            raise WebDriverError(f"local acknowledgement: page reported error: {latest}")
+        if latest.get("markerVisible") and latest.get("mutationStatus") == "Saved locally":
+            event(events, "local-ack-settled", status=latest)
+            return
+        time.sleep(0.5)
+    raise WebDriverError(f"local acknowledgement did not settle after 20s; final status={latest}")
+
+
 def snapshot(driver: Driver, marker: str, events: list[dict[str, Any]], phase: str) -> None:
     status = driver.execute(STATUS, [marker])
     idb = driver.execute_async(IDB_METADATA)
@@ -210,6 +239,8 @@ def main() -> int:
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--endpoint", default="http://127.0.0.1:4444")
     parser.add_argument("--output", default="safari-webdriver-receipt")
+    parser.add_argument("--scenario", choices=("hosted", "embedded"), default="hosted")
+    parser.add_argument("--probe-only", action="store_true", help="start and close a Safari session without navigating")
     args = parser.parse_args()
     if not 1 <= args.cycles <= 12:
         parser.error("--cycles must be 1..12")
@@ -222,14 +253,22 @@ def main() -> int:
         "startedAt": now(),
         "url": args.url,
         "cycles": args.cycles,
-        "host": {"platform": platform.platform(), "safari": version(["/Applications/Safari.app/Contents/MacOS/Safari", "--version"]), "safaridriver": version(["/usr/bin/safaridriver", "--version"])},
+        "host": {"platform": platform.platform(), "safari": version(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", "/Applications/Safari.app/Contents/Info.plist"]), "safaridriver": version(["/usr/bin/safaridriver", "--version"])},
         "events": events,
     }
     try:
         event(events, "webdriver-session-start")
         driver.start()
         receipt["capabilities"] = driver.capabilities
-        event(events, "webdriver-session-ready", browserName=driver.capabilities.get("browserName"), browserVersion=driver.capabilities.get("browserVersion") or driver.capabilities.get("version"))
+        event(
+            events,
+            "webdriver-session-ready",
+            browserName=driver.capabilities.get("browserName"),
+            browserVersion=driver.capabilities.get("browserVersion") or driver.capabilities.get("version"),
+        )
+        if args.probe_only:
+            receipt["result"] = "probe-passed"
+            return 0
         driver.navigate(args.url)
         event(events, "initial-navigation-complete")
         marker_prefix = f"safari-e2e-{int(time.time())}"
@@ -240,7 +279,35 @@ def main() -> int:
             marker = f"{marker_prefix}-{cycle}"
             event(events, "write-dispatch", cycle=cycle, marker=marker)
             driver.execute(ADD_MARKER, [marker])
-            wait_for(driver, marker, 10, events, "immediate-visible")
+            immediate_status = wait_for(driver, marker, 10, events, "immediate-visible")
+            if args.scenario == "embedded":
+                # Do not wait for the visible app's local acknowledgement here:
+                # this is the deliberate optimistic-write/reload comparison.
+                # WebDriver polling itself can race the acknowledgement, so
+                # retain that observation instead of mislabelling this as a
+                # guaranteed pre-ack reload.
+                event(
+                    events,
+                    "optimistic-reload-dispatch",
+                    cycle=cycle,
+                    localAckAlready=immediate_status.get("mutationStatus") == "Saved locally",
+                )
+                driver.refresh()
+                event(events, "optimistic-reload-complete", cycle=cycle)
+                wait_ready(driver, marker, events, "optimistic-post-reload-ready")
+                survived, status = marker_visible(driver, marker, 20)
+                event(events, "optimistic-post-reload-marker", survived=survived, status=status)
+
+                acknowledged = f"{marker}-local-ack"
+                event(events, "local-ack-write-dispatch", cycle=cycle, marker=acknowledged)
+                driver.execute(ADD_MARKER, [acknowledged])
+                wait_local_ack(driver, acknowledged, events)
+                driver.refresh()
+                event(events, "local-ack-reload-complete", cycle=cycle)
+                wait_ready(driver, acknowledged, events, "local-ack-post-reload-ready")
+                wait_for(driver, acknowledged, 20, events, "local-ack-post-reload-marker")
+                snapshot(driver, acknowledged, events, "local-ack-post-reload-diagnostics")
+                continue
             snapshot(driver, marker, events, "after-immediate-visible")
             time.sleep(5)
             wait_for(driver, marker, 1, events, "five-second-visible")

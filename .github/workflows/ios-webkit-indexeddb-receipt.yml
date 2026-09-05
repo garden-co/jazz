@@ -17,13 +17,14 @@ on:
       mode:
         description: "Receipt to run"
         required: false
-        default: "playwright-webkit"
+        default: "safari-local"
         type: choice
         options:
           - playwright-webkit
+          - safari-local
           - safari-webdriver
       safari_url:
-        description: "Public Safari diagnostic URL (used only by safari-webdriver)"
+        description: "Optional public Safari diagnostic URL (used only by safari-webdriver)"
         required: false
         default: "https://thee-screenshots-attempts-applied.trycloudflare.com/"
         type: string
@@ -49,7 +50,7 @@ jobs:
     # heavier WebKit setup on this explicit Blacksmith receipt, not routine CI.
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 25
-    if: ${{ inputs.mode != 'safari-webdriver' }}
+    if: ${{ inputs.mode == 'playwright-webkit' || inputs.mode == '' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -80,7 +81,7 @@ jobs:
       - name: Record macOS and Safari versions
         run: |
           sw_vers
-          /Applications/Safari.app/Contents/MacOS/Safari --version || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Safari.app/Contents/Info.plist || true
           /usr/bin/safaridriver --version || true
       - name: Enable and start Safari WebDriver
         run: |
@@ -118,7 +119,7 @@ jobs:
           cp safaridriver.log safari-webdriver-receipt/ 2>/dev/null || true
           cp safaridriver-status.json safari-webdriver-receipt/ 2>/dev/null || true
           sw_vers > safari-webdriver-receipt/macos-version.txt || true
-          /Applications/Safari.app/Contents/MacOS/Safari --version > safari-webdriver-receipt/safari-version.txt 2>&1 || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Safari.app/Contents/Info.plist > safari-webdriver-receipt/safari-version.txt 2>&1 || true
           /usr/bin/safaridriver --version > safari-webdriver-receipt/safaridriver-version.txt 2>&1 || true
       - name: Upload Safari WebDriver diagnostics
         if: ${{ always() }}
@@ -126,4 +127,111 @@ jobs:
         with:
           name: safari-webdriver-receipt-${{ github.run_id }}
           path: safari-webdriver-receipt
+          if-no-files-found: warn
+
+  safari-local:
+    name: Safari selected-ref local persistence receipt
+    # Primary Safari receipt: build the selected ref and serve its isolated
+    # diagnostic page on loopback. The hosted URL job above remains a fast
+    # independent probe for the frozen user page.
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 30
+    if: ${{ inputs.mode == 'safari-local' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+      - name: Probe Safari WebDriver before selected-ref build
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/safaridriver --enable || /usr/bin/safaridriver --enable
+          /usr/bin/safaridriver --port 4444 > safaridriver-probe.log 2>&1 &
+          echo $! > safaridriver-probe.pid
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error http://127.0.0.1:4444/status > safaridriver-probe-status.json; then
+              python3 dev/ci/safari_webdriver_receipt.py --probe-only \
+                --url about:blank --output safari-local-receipt --scenario embedded
+              exit 0
+            fi
+            sleep 1
+          done
+          cat safaridriver-probe.log || true
+          exit 1
+      - name: Build selected-ref runtime and diagnostic page
+        run: |
+          set -euo pipefail
+          mkdir -p safari-local-receipt
+          git rev-parse HEAD > safari-local-receipt/checkout-sha.txt
+          date -u +%FT%TZ > safari-local-receipt/build-started-at.txt
+          { time pnpm build:correctness-artifacts; } 2>&1 | tee safari-local-receipt/build-correctness.log
+          node --input-type=module -e "import { copyFileSync } from 'node:fs'; import { correctnessArtifactProducerManifest } from './dev/artifacts/correctness-artifact-producer.mjs'; copyFileSync(correctnessArtifactProducerManifest(process.cwd()), 'safari-local-receipt/producer-manifest.json')"
+          { time pnpm --filter jazz-tools build:runtime; } 2>&1 | tee safari-local-receipt/build-runtime.log
+          export VITE_SAFARI_RECEIPT_VERSION="$(git rev-parse HEAD)"
+          { time pnpm --filter todo-client-localfirst-ts build; } 2>&1 | tee safari-local-receipt/build-diagnostic.log
+          git diff -- \
+            crates/jazz-napi/native-artifact-fingerprint.cjs \
+            packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts \
+            packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts \
+            > safari-local-receipt/producer-fingerprint.diff
+          git restore --source=HEAD -- \
+            crates/jazz-napi/native-artifact-fingerprint.cjs \
+            packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts \
+            packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts
+          date -u +%FT%TZ > safari-local-receipt/build-finished-at.txt
+      - name: Serve selected-ref diagnostic page on loopback
+        run: |
+          set -euo pipefail
+          python3 dev/ci/safari_receipt_server.py \
+            --directory examples/todo-client-localfirst-ts/dist \
+            --trace safari-local-receipt/page-trace.ndjson \
+            --port 4173 > safari-local-receipt/server.log 2>&1 &
+          echo $! > safari-local-receipt/server.pid
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error http://127.0.0.1:4173/diagnostic.html > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat safari-local-receipt/server.log || true
+          exit 1
+      - name: Record macOS and Safari versions
+        run: |
+          sw_vers
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Safari.app/Contents/Info.plist || true
+          /usr/bin/safaridriver --version || true
+      - name: Confirm Safari WebDriver remains available after build
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error http://127.0.0.1:4444/status > safari-local-receipt/safaridriver-status.json
+      - name: Exercise optimistic and local-ack reload paths in Safari
+        env:
+          SAFARI_RECEIPT_CYCLES: ${{ inputs.safari_cycles }}
+        run: >-
+          python3 dev/ci/safari_webdriver_receipt.py
+          --url http://127.0.0.1:4173/diagnostic.html
+          --cycles "$SAFARI_RECEIPT_CYCLES"
+          --scenario embedded
+          --output safari-local-receipt
+      - name: Collect selected-ref Safari diagnostics
+        if: ${{ always() }}
+        run: |
+          mkdir -p safari-local-receipt
+          for pid in safaridriver-probe.pid safari-local-receipt/server.pid; do
+            if [ -f "$pid" ]; then kill "$(cat "$pid")" || true; fi
+          done
+          sw_vers > safari-local-receipt/macos-version.txt || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Safari.app/Contents/Info.plist > safari-local-receipt/safari-version.txt 2>&1 || true
+          /usr/bin/safaridriver --version > safari-local-receipt/safaridriver-version.txt 2>&1 || true
+          cp safaridriver-probe.log safari-local-receipt/ 2>/dev/null || true
+          cp safaridriver-probe-status.json safari-local-receipt/ 2>/dev/null || true
+          /usr/bin/log show --last 10m --style compact --predicate 'process == "Safari" OR process == "safaridriver"' > safari-local-receipt/safari-system.log 2>&1 || true
+      - name: Upload selected-ref Safari diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: safari-local-receipt-${{ github.run_id }}
+          path: safari-local-receipt
           if-no-files-found: warn

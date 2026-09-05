@@ -67,12 +67,83 @@
     </section>
     <div id="app"></div>
     <script type="module">
-      import { startApp } from "/src/main.ts";
+      // This page-local wrapper observes only lifecycle metadata. It must run
+      // before Jazz imports so a pre-ready worker failure is visible too.
+      const started = performance.now();
+      const trace = [];
+      const pageRun = Number(sessionStorage.getItem("jazz-safari-receipt-page-run") || "0") + 1;
+      sessionStorage.setItem("jazz-safari-receipt-page-run", String(pageRun));
+      const post = (event) => {
+        trace.push({
+          origin: "page",
+          pageRun,
+          elapsedMs: Math.round(performance.now() - started),
+          ...event,
+        });
+        if (trace.length > 64) trace.shift();
+        navigator.sendBeacon("/__safari_trace", JSON.stringify({ events: trace.slice(-1) }));
+      };
+      const metadata = (message) => {
+        const type = typeof message?.type === "string" ? message.type : "unknown";
+        if (type !== "frames") return { messageType: type };
+        const frames = Array.isArray(message.frames) ? message.frames : [];
+        return {
+          messageType: type,
+          frameCount: frames.length,
+          frameBytes: frames.reduce((total, frame) => total + (frame?.byteLength ?? 0), 0),
+        };
+      };
+      const NativeSharedWorker = window.SharedWorker;
+      if (NativeSharedWorker) {
+        window.SharedWorker = class extends NativeSharedWorker {
+          constructor(...args) {
+            super(...args);
+            post({ phase: "shared-worker-constructed" });
+            const send = this.port.postMessage.bind(this.port);
+            this.port.postMessage = (message, transfer) => {
+              post({ phase: "worker-message", direction: "out", ...metadata(message) });
+              return send(message, transfer);
+            };
+            this.port.addEventListener("message", (event) => {
+              post({ phase: "worker-message", direction: "in", ...metadata(event.data) });
+            });
+          }
+        };
+      } else {
+        post({ phase: "shared-worker-unavailable" });
+      }
+      window.__jazzSafariReceiptTrace__ = { record: post };
+      window.addEventListener("error", () => post({ phase: "page-error" }));
+      window.addEventListener("unhandledrejection", () =>
+        post({ phase: "page-unhandled-rejection" }),
+      );
+      const internalTrace = new BroadcastChannel("jazz-safari-receipt-trace");
+      internalTrace.addEventListener("message", (event) => {
+        const value = event.data;
+        if (!value || typeof value.event !== "string") return;
+        post({
+          phase: `worker-${value.event}`,
+          frameCount: Number.isSafeInteger(value.frameCount) ? value.frameCount : undefined,
+          frameBytes: Number.isSafeInteger(value.frameBytes) ? value.frameBytes : undefined,
+          workerElapsedMs: Number.isSafeInteger(value.elapsedMs) ? value.elapsedMs : undefined,
+          errorKind: ["idb-open", "wasm-open", "owner", "other"].includes(value.errorKind)
+            ? value.errorKind
+            : undefined,
+          origin: "worker",
+        });
+      });
+      const [{ startApp }, { safariReceiptRuntimeSources }] = await Promise.all([
+        import("/src/main.ts"),
+        import("/src/safari-receipt-runtime.ts"),
+      ]);
       const app = document.getElementById("app");
       const status = document.getElementById("receipt-status");
       const error = document.getElementById("startup-error");
       const restart = document.getElementById("restart-storage");
-      const config = { driver: { type: "persistent", dbName: "safari-private-check-alpha54" } };
+      const config = {
+        driver: { type: "persistent", dbName: "safari-private-check-alpha54" },
+        runtimeSources: safariReceiptRuntimeSources,
+      };
       let running;
 
       async function open() {
