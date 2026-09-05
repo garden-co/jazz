@@ -39,7 +39,9 @@ use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportError, NativeTransportRequest, NativeTransportTerminal,
+};
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
@@ -4075,8 +4077,15 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
     let mut progressed = false;
     for message in relay_wire.take_outbound()? {
         let _live_connection = relay_wire.enter()?;
-        upstream.send(message).map_err(|error| {
-            RelayError::ForegroundCommand(format!("native upstream send: {error:?}"))
+        upstream.send(message).map_err(|error| match error {
+            // `WebSocketTransport` exposes an already-retired peer through
+            // this concrete transport state. Preserve it as `Closed` so the
+            // socket worker can reconnect; every other send error remains a
+            // terminal foreground error.
+            TransportError::Failed(message) if message == "websocket pump is closed" => {
+                RelayError::Closed
+            }
+            error => RelayError::ForegroundCommand(format!("native upstream send: {error:?}")),
         })?;
         progressed = true;
     }
@@ -4354,22 +4363,41 @@ async fn run_native_relay_socket_worker(
                 return;
             }
             if let Err(error) = bridge_native_relay_wire_once(&lease.wire, &mut upstream) {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay wire bridge failed: {error}"
-                )));
+                // A closed established socket can surface first as a failed
+                // bridge send, before its terminal future wins this select.
+                // It shares the retryable reconnect path below; pre-connect
+                // authentication and protocol admission failures remain
+                // terminal above.
+                if !matches!(error, RelayError::Closed) {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay wire bridge failed: {error}"
+                    )));
+                }
                 break;
             }
             if let Err(error) = relay.pump() {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay owner pump failed: {error}"
-                )));
+                // Only the explicit closed state is the expected race with a
+                // peer teardown. Every other owner/storage/program error must
+                // remain visible as terminal to the foreground host.
+                if !matches!(error, RelayError::Closed) {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay owner pump failed: {error}"
+                    )));
+                }
                 break;
             }
             tokio::select! {
                 terminal = &mut terminal => {
-                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                        "native relay socket terminated: {terminal:?}"
-                    )));
+                    // An established peer loss is retryable transport state:
+                    // the ClientDb retains local work and its existing recovery
+                    // driver parks strict remote operations until replacement.
+                    // Do not poison the foreground host, which would turn a
+                    // network outage into a local SQLite failure.
+                    if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) = terminal {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay socket terminated: {error}"
+                        )));
+                    }
                     break;
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
@@ -11610,15 +11638,6 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .unwrap(),
             NativeRelaySocketEvent::Connected
-        );
-        assert_eq!(
-            events_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap(),
-            NativeRelaySocketEvent::TerminalError(
-                "native relay socket terminated: PeerClosed(\"test close\")".to_owned()
-            ),
-            "a terminal adapter result is surfaced before retry rather than discarded"
         );
         assert_eq!(
             events_rx

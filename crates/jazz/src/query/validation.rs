@@ -234,6 +234,12 @@ fn validate_query_canonical_parts(
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
+    if let Some(relation) = &query.relation {
+        validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
+        let normalized = normalize_query(&resolved_query);
+        let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
+        return Ok((normalized, params, canonical));
+    }
     for join in &mut resolved_query.joins {
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
@@ -320,6 +326,58 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+/// Validate every relation UNION arm through the established single-relation
+/// facade, then merge its inferred parameter domain. The outer union itself
+/// stays retained for row-set normalization so its labels remain observable.
+fn validate_retained_relation_union(
+    relation: &RelationQuery,
+    output_table: &str,
+    schema: &RuntimeSchema,
+    params: &mut BTreeMap<String, ColumnType>,
+) -> Result<(), QueryError> {
+    let RelationExpr::Union { inputs } = &relation.rel else {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "retained relation query must be a union".to_owned(),
+        ));
+    };
+    if inputs.is_empty() {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "union requires at least one input".to_owned(),
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    for arm in inputs {
+        if arm.label.is_empty() || arm.label.contains('\0') || !labels.insert(&arm.label) {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "union arm labels must be non-empty, NUL-free, and unique".to_owned(),
+            ));
+        }
+        let arm_query = relation_query_to_query(&RelationQuery {
+            rel: arm.input.clone(),
+        })?;
+        if arm_query.table != output_table {
+            return Err(QueryError::UnsupportedRelationQuery(
+                "union inputs must output the same table".to_owned(),
+            ));
+        }
+        let (_, arm_params, _) = validate_query_canonical_parts(&arm_query, schema)?;
+        for (name, ty) in arm_params {
+            match params.entry(name) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(ty);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &ty => {}
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    return Err(QueryError::ParamTypeConflict {
+                        param: entry.key().clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {

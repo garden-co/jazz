@@ -4752,7 +4752,6 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
 ///
 /// Every changed occurrence carries its previous and final position, so
 /// consumers never reconstruct ordering from a suffix convention.
-#[cfg(test)]
 fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
@@ -4950,6 +4949,14 @@ fn apply_maintained_update_to_snapshot(
             LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
                 format!("flat:add={} remove={}", added.len(), removed.len())
             }
+            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+                snapshot,
+                occurrence_ids,
+            } => format!(
+                "aggregate-window:roots={} occurrences={}",
+                snapshot.root_count,
+                occurrence_ids.len()
+            ),
         };
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=apply_maintained_snapshot roots={} update={update_kind}",
@@ -4957,11 +4964,28 @@ fn apply_maintained_update_to_snapshot(
         );
     }
     match update {
-        LocalMaintainedViewSubscriptionUpdate::Flat {
-            authoritative_membership_changed: _,
-            added,
-            removed,
+        LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            snapshot: current,
+            occurrence_ids,
         } => {
+            // Validate the entire replacement facade before touching the
+            // currently published snapshot. In particular, a BTreeMap would
+            // otherwise silently collapse duplicate occurrence identities.
+            let current_index =
+                relation_snapshot_index_with_root_occurrences(&current, &occurrence_ids)?;
+            let event = subscription_terminal_delta_event(
+                tier,
+                settled,
+                snapshot,
+                &snapshot_root_occurrences(snapshot, snapshot_index)?,
+                &current,
+                &occurrence_ids,
+            )?;
+            *snapshot = current;
+            *snapshot_index = current_index;
+            Ok(event)
+        }
+        LocalMaintainedViewSubscriptionUpdate::Flat { added, removed } => {
             let mut event = apply_maintained_membership_update_to_snapshot(
                 snapshot,
                 snapshot_index,

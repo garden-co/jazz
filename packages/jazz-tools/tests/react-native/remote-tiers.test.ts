@@ -1,4 +1,7 @@
 import { expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
@@ -157,3 +160,88 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
     await issuer.stop();
   }
 }, 30_000);
+
+it("keeps local and RemoteIfPossible reads usable across an established native socket outage", async () => {
+  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+    await import("../../src/testing/index.js");
+  const issuer = await startTestJwtIssuer();
+  const dataDir = await mkdtemp(join(tmpdir(), "jazz-rn-established-outage-"));
+  let server = await startLocalJazzServer({
+    dataDir,
+    jwksUrl: issuer.jwksUrl,
+    jwtIssuer: issuer.issuer,
+    jwtAudience: issuer.audience,
+  });
+  try {
+    const permissions = schema.definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+    ]);
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const initial = {
+      appId: server.appId,
+      port: server.port,
+      adminSecret: server.adminSecret,
+      backendSecret: server.backendSecret,
+    };
+    await withNativeRelayFixture(
+      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      async (fixture) => {
+        const db = await fixture.createDb();
+        expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
+        await server.stop();
+
+        const write = db.insert(app.todos, { title: "durable through outage", done: false });
+        const local = await write.wait({ tier: "local" });
+        await expect.poll(async () => db.all(app.todos, { tier: ReadTier.Local })).toEqual([local]);
+        await expect
+          .poll(async () => db.all(app.todos, { tier: ReadTier.RemoteIfPossible }))
+          .toEqual([local]);
+
+        let strictSettled = false;
+        const strict = db.all(app.todos, { tier: ReadTier.Remote }).then(
+          (rows) => {
+            strictSettled = true;
+            return rows;
+          },
+          (error) => {
+            strictSettled = true;
+            throw error;
+          },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(strictSettled).toBe(false);
+
+        server = await startLocalJazzServer({
+          ...initial,
+          dataDir,
+          jwksUrl: issuer.jwksUrl,
+          jwtIssuer: issuer.issuer,
+          jwtAudience: issuer.audience,
+        });
+        await expect(strict).resolves.toEqual(expect.arrayContaining([local]));
+        await write.wait({ tier: "global" });
+      },
+      {
+        appId: initial.appId,
+        session: {
+          issuer: issuer.issuer,
+          user_id: "rn-established-outage",
+          claims: {},
+          authMode: "external",
+        },
+        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-established-outage") },
+      },
+    );
+  } finally {
+    await server.stop();
+    await issuer.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+}, 45_000);
