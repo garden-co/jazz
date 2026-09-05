@@ -130,6 +130,13 @@
             ? value.errorKind
             : undefined,
           role: value.role === "tab" || value.role === "worker" ? value.role : undefined,
+          operation: ["metadata", "read-page", "commit-pages"].includes(value.operation)
+            ? value.operation
+            : undefined,
+          operationId:
+            Number.isSafeInteger(value.operationId) && value.operationId > 0
+              ? value.operationId
+              : undefined,
           origin: "worker",
         });
       });

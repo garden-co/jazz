@@ -16,6 +16,7 @@ import {
   INDEXEDDB_REPLICA_NODE_BYTES,
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
+  type IndexedDbPageStoreDiagnostic,
 } from "./indexeddb-page-store.js";
 
 const databaseNames: string[] = [];
@@ -49,6 +50,34 @@ describe("IndexedDbPageStore", () => {
     expect(await store.metadata()).toEqual(metadata);
     expect(await store.readPage(7)).toEqual(new Uint8Array([1, 2, 3]));
     expect(await store.readPage(3)).toEqual(new Uint8Array([4, 5]));
+    store.close();
+  });
+
+  it("emits bounded operation lifecycle metadata only when a receipt observer is installed", async () => {
+    const diagnostics: IndexedDbPageStoreDiagnostic[] = [];
+    const store = await IndexedDbPageStore.open(databaseName(), {
+      diagnostic: (event) => diagnostics.push(event),
+    });
+
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, new Uint8Array([7])]]),
+    });
+    await store.metadata();
+    await store.readPage(1);
+
+    expect(diagnostics).toEqual([
+      { operation: "commit-pages", phase: "call-start", operationId: 1 },
+      { operation: "commit-pages", phase: "request-settled", operationId: 1 },
+      { operation: "commit-pages", phase: "transaction-settled", operationId: 1 },
+      { operation: "metadata", phase: "call-start", operationId: 2 },
+      { operation: "metadata", phase: "request-settled", operationId: 2 },
+      { operation: "metadata", phase: "transaction-settled", operationId: 2 },
+      { operation: "read-page", phase: "call-start", operationId: 3 },
+      { operation: "read-page", phase: "request-settled", operationId: 3 },
+      { operation: "read-page", phase: "transaction-settled", operationId: 3 },
+    ]);
     store.close();
   });
 

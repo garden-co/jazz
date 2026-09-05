@@ -1,6 +1,9 @@
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
-import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
+import {
+  IndexedDbPageStore,
+  type IndexedDbPageStoreDiagnostic,
+} from "../runtime/indexeddb-page-store.js";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
   BrowserPhysicalDatabaseBusyError,
@@ -203,11 +206,17 @@ export type BrowserDiagnosticEvent = {
     | "pump-outbound-drain"
     | "core-tick-start"
     | "core-tick-complete"
-    | "core-tick-error";
+    | "core-tick-error"
+    | "idb-page-store-call-start"
+    | "idb-page-store-request-settled"
+    | "idb-page-store-transaction-settled"
+    | "idb-page-store-error";
   role?: "tab" | "worker";
   elapsedMs: number;
   frameCount?: number;
   frameBytes?: number;
+  operation?: IndexedDbPageStoreDiagnostic["operation"];
+  operationId?: number;
   errorKind?: "idb-open" | "wasm-open" | "owner" | "other";
 };
 
@@ -358,7 +367,10 @@ async function openPhysicalDatabaseOwner(
   const epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
   let pageStore: IndexedDbPageStore | null = null;
   try {
-    pageStore = await IndexedDbPageStore.open(dbName, { owner: storageOwner });
+    pageStore = await IndexedDbPageStore.open(dbName, {
+      owner: storageOwner,
+      diagnostic: diagnosticHooks ? recordPageStoreDiagnostic : undefined,
+    });
     await pageStore.claimBrowserWorkerEpoch(epoch.id);
     const owner: PhysicalDatabaseOwner = {
       epoch,
@@ -1890,6 +1902,21 @@ function completeLocalFlush(peer: TabPeer): void {
   peer.flushedLocal = true;
   result(peer, requestId);
   recordDiagnostic("flush-local-complete");
+}
+
+function recordPageStoreDiagnostic(event: IndexedDbPageStoreDiagnostic): void {
+  const receiptEvent: BrowserDiagnosticEvent["event"] =
+    event.phase === "call-start"
+      ? "idb-page-store-call-start"
+      : event.phase === "request-settled"
+        ? "idb-page-store-request-settled"
+        : event.phase === "transaction-settled"
+          ? "idb-page-store-transaction-settled"
+          : "idb-page-store-error";
+  recordDiagnostic(receiptEvent, {
+    operation: event.operation,
+    operationId: event.operationId,
+  });
 }
 
 function recordDiagnostic(
