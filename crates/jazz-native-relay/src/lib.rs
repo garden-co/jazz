@@ -4356,9 +4356,12 @@ async fn run_native_relay_socket_worker(
                 return;
             }
             if let Err(error) = bridge_native_relay_wire_once(&lease.wire, &mut upstream) {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay wire bridge failed: {error}"
-                )));
+                // A closed established socket can surface first as a failed
+                // bridge send, before its terminal future wins this select.
+                // It shares the retryable reconnect path below; pre-connect
+                // authentication and protocol admission failures remain
+                // terminal above.
+                let _ = error;
                 break;
             }
             if let Err(error) = relay.pump() {
