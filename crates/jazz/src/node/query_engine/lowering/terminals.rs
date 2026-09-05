@@ -76,6 +76,25 @@ fn collect_publication_fields(
     fields
 }
 
+pub(super) fn validate_app_row_publication_schema(rows: &AppRowSchema) -> CapabilityResult<()> {
+    for field in rows.descriptor.fields() {
+        let name = field.name.as_deref().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(
+                "application row descriptor has an unnamed field".to_owned(),
+            ))
+        })?;
+        if name != "row_uuid"
+            && !rows.hidden_fields.contains(name)
+            && !rows.publication_fields.contains_key(name)
+        {
+            return Err(single_gap_report(UnsupportedReason::Runtime(format!(
+                "application row field {name:?} has no publication binding"
+            ))));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn lowered_terminals(
     graph: GraphBuilder,
     request: &QueryProgramRequest,
@@ -3859,4 +3878,36 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
         }
     }
     fields
+}
+
+#[cfg(test)]
+mod publication_schema_tests {
+    use super::*;
+
+    #[test]
+    fn missing_publication_binding_is_rejected_before_row_materialization() {
+        let mut schema = AppRowSchema {
+            descriptor: RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                ("_app_title", ValueType::String),
+                ("route", ValueType::String),
+            ]),
+            publication_fields: BTreeMap::from([(
+                "_app_title".to_owned(),
+                CurrentRowPublicationField::ResultField {
+                    name: "title".to_owned(),
+                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                },
+            )]),
+            hidden_fields: BTreeSet::from(["route".to_owned()]),
+            carrier: AppRowCarrier::Logical,
+            field_carriers: BTreeMap::new(),
+            public_field_names: BTreeMap::new(),
+            terminal: AppRowTerminal::Direct,
+        };
+        validate_app_row_publication_schema(&schema).expect("complete typed publication");
+        schema.publication_fields.clear();
+        let error = validate_app_row_publication_schema(&schema).unwrap_err();
+        assert!(format!("{error:?}").contains("has no publication binding"));
+    }
 }

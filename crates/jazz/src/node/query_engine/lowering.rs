@@ -268,6 +268,11 @@ pub(crate) fn lower_resolved_query_program(
         &parameters.routing_params,
         &lowered.fields,
     )?;
+    for terminal in &terminals {
+        if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
+            validate_app_row_publication_schema(rows)?;
+        }
+    }
     verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
