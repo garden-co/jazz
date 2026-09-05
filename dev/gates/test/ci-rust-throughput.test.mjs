@@ -720,6 +720,9 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const sealBaseline = shard.steps.find(
     (step) => step.name === "Seal clean checked-out source baseline",
   );
+  const runShard = shard.steps.find(
+    (step) => step.name === "Run exact-inventory Rust shadow shard",
+  );
   const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   assert.equal(
     checkout?.with?.clean,
@@ -763,6 +766,11 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
     "${{ runner.temp }}/rust-shadow-source.json",
     "the source baseline must resolve runner.temp at step scope",
+  );
+  assert.equal(
+    runShard?.env?.RUST_SHADOW_SOURCE_BASELINE,
+    "${{ runner.temp }}/rust-shadow-source.json",
+    "the exact partition producer must consume the sealed source baseline",
   );
   assert.match(
     rustShadowWorkflow,
@@ -940,6 +948,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       "M3 receipt semantics",
       (shards) => (shards[0].m3.runner = "cargo-test"),
       /maintained M3 seed 11/,
+    ],
+    [
+      "nested receipt staged source identity",
+      (shards) => {
+        shards[0].testReceipt.source.staged = "f".repeat(64);
+        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
+      },
+      /partition test receipt source staged does not match its inventory receipt/,
     ],
     [
       "nested receipt source identity",

@@ -340,6 +340,7 @@ function aggregate(argv) {
       "commit",
       "headTree",
       "indexTree",
+      "staged",
       "unstaged",
       "untracked",
       "fingerprint",

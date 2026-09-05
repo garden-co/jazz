@@ -103,6 +103,8 @@ jobs:
         run: node dev/gates/rust-shadow-matrix.mjs clean-source-baseline "$RUST_SHADOW_SOURCE_BASELINE" "${{ github.sha }}"
       - uses: ./.github/actions/setup-blacksmith
       - name: Run exact-inventory Rust shadow shard
+        env:
+          RUST_SHADOW_SOURCE_BASELINE: ${{ runner.temp }}/rust-shadow-source.json
         run: node dev/gates/rust-shadow-matrix.mjs shard ${{ matrix.index }} 2 "target/rust-shadow/shard-${{ matrix.index }}.json"
       - name: Upload shadow shard receipt
         if: always()
