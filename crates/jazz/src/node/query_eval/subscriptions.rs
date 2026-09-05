@@ -349,30 +349,6 @@ where
             .retain(|key, _| !reclaimed.contains(key.binding_view.shape_id));
 
         self.query
-            .settled_program_facts
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
-        self.query
-            .settled_through_by_binding_view
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
-        self.query
-            .authorization_progress_by_binding_view
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
-        self.query
-            .known_state_declared_binding_views
-            .retain(|key| !reclaimed.contains(key.shape_id));
-        self.query
-            .initial_hydration_binding_views
-            .retain(|key| !reclaimed.contains(key.shape_id));
-        self.query
-            .deferred_publication_binding_views
-            .retain(|key| !reclaimed.contains(key.shape_id));
-        self.query
-            .pending_authoritative_reset_binding_views
-            .retain(|key| !reclaimed.contains(key.shape_id));
-        self.query
-            .pending_opening_binding_views
-            .retain(|key| !reclaimed.contains(key.shape_id));
-        self.query
             .outbound_binding_owners
             .retain(|(subscription, _), _| !reclaimed.contains(subscription.shape_id));
     }
@@ -625,15 +601,6 @@ where
         {
             self.clear_settled_result_view(authority_result_key.clone());
         }
-        if subscribe.known_state.is_some() {
-            self.query
-                .known_state_declared_binding_views
-                .insert(binding_view_key);
-        } else {
-            self.query
-                .known_state_declared_binding_views
-                .remove(&binding_view_key);
-        }
         self.query
             .authority_results
             .entry(authority_result_key.clone())
@@ -754,7 +721,6 @@ where
         let Some(registered) = registered else {
             return;
         };
-        let binding_view_key = registered.binding_view_key;
         let authority_result_key = registered.authority_result_key;
         let retained_local_window = self
             .query
@@ -790,16 +756,6 @@ where
             } else {
                 self.retire_authority_result_view(authority_result_key);
             }
-            self.query.settled_program_facts.remove(&binding_view_key);
-            self.query
-                .known_state_declared_binding_views
-                .remove(&binding_view_key);
-            self.query
-                .initial_hydration_binding_views
-                .remove(&binding_view_key);
-            self.query
-                .pending_opening_binding_views
-                .remove(&binding_view_key);
         }
     }
 
@@ -903,19 +859,6 @@ where
         for authority_result_key in authority_result_keys {
             self.retire_authority_result_view(authority_result_key);
         }
-        self.query.settled_program_facts.remove(&binding_view_key);
-        self.query
-            .settled_through_by_binding_view
-            .remove(&binding_view_key);
-        self.query
-            .authorization_progress_by_binding_view
-            .remove(&binding_view_key);
-        self.query
-            .pending_authoritative_reset_binding_views
-            .remove(&binding_view_key);
-        self.query
-            .deferred_publication_binding_views
-            .remove(&binding_view_key);
         true
     }
 

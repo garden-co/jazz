@@ -26,7 +26,11 @@ The retired authority-member indexes have no remaining producer. The separate
 binding-view member cache was never populated by production at all; only tests
 injected fake cache entries. Those fields, unused mutators, and the vacuous
 uniqueness helper are removed. The tests retain their observable canonical-row,
-schema projection, policy-tier, and catalogue replay checks.
+schema projection, policy-tier, and catalogue replay checks. The remaining
+unwritten binding-view fact/progress/hydration shadows are also removed; their
+corruption tests now inspect active `AuthorityResultState` receipts. The
+write-only `known_state_declared_binding_views` shadow had no reader and is
+removed; the authority-scoped known-state field remains active.
 
 ## Before and after inventory
 
@@ -82,6 +86,44 @@ family prediction exactly. The sole removed line is
 `store\tjazz_settled_result_members`; every one of the 35 retained entry key/value
 byte pairs is unchanged. Current pack SHA256 is `bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b`;
 semantic receipt SHA256 is `0d84a926096b690c772ca50edc950f2d647b8e924a7eb1b45e83b373b5cf15f6`.
-Historical blobs/checksums remain unchanged. Historical receipt comparison omits
-only that empty declaration and explicitly rejects any member entry rather
-than hiding stored data.
+Historical blobs/checksums remain unchanged. Their retired required-codec
+profiles now fail real current adapter admission. No comparison normalization or
+fake historical profile is used. New positive physical fixtures were exported
+through the canonical live producer and reopened through current adapters.
+
+## Closed-profile delta and current physical receipts
+
+Deleting dormant codecs also removes `jazz.result-member-key.v1` and
+`jazz.result-row-source.v1` from both Rust and IndexedDB required-family lists.
+The JSM1 sample now has 12 required families and SHA256
+`a3e89ed15b6b2b243fb15c3eef650d843398cf081ecf3be73f650e741349fe96`.
+This manifest change is separate from the unchanged 35 logical source entries.
+Old manifests reject as inconsistent with the current adapter, before ordinary
+row interpretation; this is an intentional pre-freeze contract change.
+
+Current native physical fixtures came from the guarded producer, including
+independent staged-candidate reopen and source removal:
+
+- SQLite gzip SHA256: `975d14bc2089829c4a34c845ccf69129f92adfb86ebc4be2ce08d4120ab8d7dd`.
+- SQLite raw SHA256: `e4cb84ad01d606c14aa7d066c639f3fc01c42d3a8e5c93a0bebbf3f0fe1950fb`.
+- RocksDB archive SHA256: `e79bc1fa5297ba62f812e3aa7b095dd9f1f6ede58dea397d401c04b53c14844e`.
+
+The browser producer uses real Chromium/public WasmDb, deployed catalogue,
+branch history and large values. It closes the writer, snapshots raw IndexedDB,
+reopens with the server blocked, validates both branches, then optionally exports
+through `JAZZ_BROWSER_CORPUS_OUT` to a new path. Its pinned positive fixture must
+be generated before the final browser gate; historical fixture rejection remains
+separate. An intermediate artifact build used to create this fixture is not a
+final consumer receipt.
+
+## Focused commands
+
+These Node tests are textually included under the `harness` module; source file
+paths are not compiled module paths. Exact public wrapper examples:
+
+```sh
+dev/t node::tests::harness::maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_without_authority
+dev/t node::tests::harness::retired_result_codec_profiles_reject_historical_native_roots
+dev/t node::tests::harness::corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix
+dev/t --test persistent_codec_family_registry authoritative_persistent_codec_family_registry_is_complete_and_current
+```

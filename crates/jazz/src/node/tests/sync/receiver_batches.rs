@@ -1261,10 +1261,10 @@ fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
                 ),
             ]
         };
-        let binding_view_key = reader
-            .binding_view_key_for_subscription(subscription)
+        let authority_result_key = reader
+            .authority_result_key_for_subscription(subscription)
             .unwrap();
-        let state_before = reader.query.initial_hydration_binding_views.clone();
+        let state_before = authority_hydration_receipts(&reader).0;
         let result = reader
             .apply_view_updates_in_batch(vec![reset_scope_update(
             subscription,
@@ -1277,11 +1277,8 @@ fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
         ));
         assert!(reader.query_transaction(tx_id).unwrap().is_none());
         assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
-        assert_eq!(reader.query.initial_hydration_binding_views, state_before);
-        assert!(!reader
-            .query
-            .initial_hydration_binding_views
-            .contains(&binding_view_key));
+        assert_eq!(authority_hydration_receipts(&reader).0, state_before);
+        assert!(!authority_hydration_receipts(&reader).0.contains(&authority_result_key));
     }
 }
 
@@ -1522,8 +1519,8 @@ fn assert_reset_authored_columns_conflict(
         reader.initial_sync_flush_active,
         reader.initial_sync_flush_completed,
     );
-    let hydration_before = reader.query.initial_hydration_binding_views.clone();
-    let deferred_before = reader.query.deferred_publication_binding_views.clone();
+    let hydration_before = authority_hydration_receipts(&reader).0;
+    let deferred_before = authority_hydration_receipts(&reader).1;
 
     let update = ViewUpdateParts {
         subscription,
@@ -1582,11 +1579,11 @@ fn assert_reset_authored_columns_conflict(
         cadence_before
     );
     assert_eq!(
-        reader.query.initial_hydration_binding_views,
+        authority_hydration_receipts(&reader).0,
         hydration_before
     );
     assert_eq!(
-        reader.query.deferred_publication_binding_views,
+        authority_hydration_receipts(&reader).1,
         deferred_before
     );
 }

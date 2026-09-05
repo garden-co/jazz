@@ -2164,3 +2164,11 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         message_counts,
     }
 }
+
+// Rejection tests must observe active authority receipts, not removed binding-view shadows.
+fn authority_hydration_receipts(node: &NodeState<RocksDbStorage>) -> (BTreeSet<AuthorityResultKey>, BTreeSet<AuthorityResultKey>) {
+    (
+        node.query.authority_results.iter().filter(|(_, state)| state.initial_hydration).map(|(key, _)| key.clone()).collect(),
+        node.query.authority_results.iter().filter(|(_, state)| state.deferred_publication).map(|(key, _)| key.clone()).collect(),
+    )
+}

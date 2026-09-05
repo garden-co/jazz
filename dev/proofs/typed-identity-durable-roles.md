@@ -97,7 +97,9 @@ cargo nextest run -p jazz -p groove --no-default-features \
 Output paths must not exist. The export variable skips the old diagnostic golden
 comparison, not candidate validation. The current producer fixture and its
 checksums are updated; committed historical epoch packs and binary native
-fixtures remain unchanged and retain their independent historical-open tests.
+fixtures remain unchanged. After #2578 removes the retired required-codec
+profile, they prove historical rejection; new current-profile physical fixtures
+retain the positive reopen tests.
 The native corpus does not by itself prove every result-payload role: those
 boundaries have separate strict codec and maintained/query differential tests.
 

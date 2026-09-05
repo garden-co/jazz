@@ -1783,8 +1783,7 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
     ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
-    assert!(reader.query.settled_program_facts.is_empty());
-    assert!(reader.query.settled_through_by_binding_view.is_empty());
+    assert!(reader.query.authority_results.is_empty());
 }
 
 #[test]

@@ -873,25 +873,13 @@ struct QueryServing {
     /// can run the same query with the same binding and still receive
     /// different authorized membership.
     authority_results: BTreeMap<AuthorityResultKey, AuthorityResultState>,
-    // Transitional local facade materialization state.  It stays keyed by an
-    // ordinary binding view and must never be used as the receiving-side
-    // authority receipt.  The following implementation moves inbound updates
-    // into `authority_results` first, then selects the exact aggregate when a
-    // relay needs an authority source.
+    /// Generation last applied for each local query binding.
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
     /// Bounded, receiver-local source pages retained by a non-durable client
     /// after the matching authority usage site detached. This is not an
     /// authority receipt: only an exact compatible Local lowering may use it;
     /// Edge/Global must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
-    settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
-    settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalTime>,
-    authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
-    known_state_declared_binding_views: BTreeSet<BindingViewKey>,
-    initial_hydration_binding_views: BTreeSet<BindingViewKey>,
-    deferred_publication_binding_views: BTreeSet<BindingViewKey>,
-    pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
-    pending_opening_binding_views: BTreeSet<BindingViewKey>,
 }
 
 /// Compiler-owned description of the root window stage represented by a

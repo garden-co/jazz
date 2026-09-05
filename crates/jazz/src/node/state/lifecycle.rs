@@ -597,14 +597,6 @@ where
                 authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 retained_root_window_sources: BTreeMap::new(),
-                settled_program_facts: BTreeMap::new(),
-                settled_through_by_binding_view: BTreeMap::new(),
-                authorization_progress_by_binding_view: BTreeMap::new(),
-                known_state_declared_binding_views: BTreeSet::new(),
-                initial_hydration_binding_views: BTreeSet::new(),
-                deferred_publication_binding_views: BTreeSet::new(),
-                pending_authoritative_reset_binding_views: BTreeSet::new(),
-                pending_opening_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
@@ -1586,14 +1578,6 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.authority_results.clear();
         self.query.retained_root_window_sources.clear();
-        self.query.settled_program_facts.clear();
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
-        self.query.known_state_declared_binding_views.clear();
-        self.query.initial_hydration_binding_views.clear();
-        self.query.deferred_publication_binding_views.clear();
-        self.query.pending_authoritative_reset_binding_views.clear();
-        self.query.pending_opening_binding_views.clear();
     }
 
     fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {

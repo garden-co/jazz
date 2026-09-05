@@ -48,6 +48,11 @@ const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
     "bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
     "0d84a926096b690c772ca50edc950f2d647b8e924a7eb1b45e83b373b5cf15f6";
+const CURRENT_NATIVE_SQLITE_BASE64: &str = include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
+const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "975d14bc2089829c4a34c845ccf69129f92adfb86ebc4be2ce08d4120ab8d7dd";
+const CURRENT_NATIVE_SQLITE_SHA256: &str = "e4cb84ad01d606c14aa7d066c639f3fc01c42d3a8e5c93a0bebbf3f0fe1950fb";
+const CURRENT_NATIVE_ROCKSDB_BASE64: &str = include_str!("../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
+const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "e79bc1fa5297ba62f812e3aa7b095dd9f1f6ede58dea397d401c04b53c14844e";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -149,12 +154,16 @@ fn decode_native_physical_fixture(
 }
 
 fn materialize_native_sqlite_fixture(path: &std::path::Path, base64: &str) -> Result<(), String> {
+    materialize_native_sqlite_fixture_with_hashes(path, base64, EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256, EPOCH_1_NATIVE_SQLITE_SHA256)
+}
+
+fn materialize_native_sqlite_fixture_with_hashes(path: &std::path::Path, base64: &str, archive_sha: &str, sqlite_sha: &str) -> Result<(), String> {
     // Verify the immutable payload before creating a target. This is both a
     // corruption receipt and a guard against a bad checked-in fixture being
     // reported later as an adapter-open failure.
     let bytes = decode_native_physical_fixture(
         base64,
-        EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256,
+        archive_sha,
         "SQLite",
     )?;
     let mut sqlite = Vec::new();
@@ -163,7 +172,7 @@ fn materialize_native_sqlite_fixture(path: &std::path::Path, base64: &str) -> Re
         &mut sqlite,
     )
     .map_err(|error| format!("SQLite corpus fixture is not gzip: {error}"))?;
-    if format!("{:x}", Sha256::digest(&sqlite)) != EPOCH_1_NATIVE_SQLITE_SHA256 {
+    if format!("{:x}", Sha256::digest(&sqlite)) != sqlite_sha {
         return Err("SQLite corpus decompressed checksum does not match".to_owned());
     }
     materialize_native_sqlite_bytes(path, &sqlite)
@@ -1345,33 +1354,6 @@ where
 /// catalogue snapshot, physical IDs, row histories, current registers, and
 /// large-value descriptor; current code must recover all of those before it
 /// is allowed to add a new row.
-// Historical artifacts recorded this retired family as empty. Preserve their
-// original blobs/checksums, but compare the current registered-family inventory.
-// Never discard an entry: a populated member family is outside this proof.
-fn active_native_corpus_pack(pack: String) -> String {
-    assert!(
-        !pack.lines().any(|line| line.starts_with("entry\tjazz_settled_result_members\t")),
-        "historical result-member entries cannot be omitted from the corpus receipt"
-    );
-    let mut result = String::new();
-    for line in pack.lines() {
-        if line != "store\tjazz_settled_result_members" {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-    result
-}
-
-#[test]
-fn historical_corpus_inventory_cannot_hide_retired_member_entries() {
-    // Internal receipt parser: public APIs cannot construct a corpus listing.
-    let empty = "header\nstore\tjazz_settled_result_members\nstore\tactive\n";
-    assert_eq!(active_native_corpus_pack(empty.to_owned()), "header\nstore\tactive\n");
-    let populated = format!("{empty}entry\tjazz_settled_result_members\t00\t01\n");
-    assert!(std::panic::catch_unwind(|| active_native_corpus_pack(populated)).is_err());
-}
-
 fn verify_historical_native_corpus<S>(
     schema: JazzSchema,
     expected_pack: fn() -> String,
@@ -1387,7 +1369,7 @@ where
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
         assert_eq!(
             native_corpus_pack(&before_write),
-            active_native_corpus_pack(expected_pack()),
+            expected_pack(),
             "current Jazz reads every retained historical family and entry"
         );
     }
@@ -1679,7 +1661,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite fixture directory");
     let sqlite_path = sqlite_directory.path().join("epoch-1-native-jazz.sqlite");
-    materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64)
+    materialize_native_sqlite_fixture_with_hashes(&sqlite_path, CURRENT_NATIVE_SQLITE_BASE64, CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256, CURRENT_NATIVE_SQLITE_SHA256)
         .expect("materialize checksum-guarded SQLite corpus");
     {
         // This first physical inspection is read-only and intentionally below
@@ -1699,7 +1681,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let sqlite_schema = schema.clone();
     let sqlite_profile = profile.clone();
     let sqlite_open_path = sqlite_path.clone();
-    verify_historical_native_corpus(sqlite_schema.clone(), epoch_1_native_corpus_pack, move || {
+    verify_historical_native_corpus(sqlite_schema.clone(), current_producer_native_corpus_pack, move || {
         let families = sqlite_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
@@ -1714,10 +1696,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     });
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB fixture directory");
-    let rocks_path = unpack_native_rocksdb_fixture(
-        rocks_directory.path(),
-        EPOCH_1_NATIVE_ROCKSDB_BASE64,
-    )
+    let rocks_path = unpack_native_rocksdb_archive(rocks_directory.path(), &decode_native_physical_fixture(CURRENT_NATIVE_ROCKSDB_BASE64, CURRENT_NATIVE_ROCKSDB_SHA256, "current RocksDB").unwrap())
     .expect("extract checksum-guarded RocksDB corpus");
     {
         let options = rocksdb::Options::default();
@@ -1742,7 +1721,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     }
     let rocks_schema = schema;
     let rocks_open_path = rocks_path.clone();
-    verify_historical_native_corpus(rocks_schema.clone(), epoch_1_native_corpus_pack, move || {
+    verify_historical_native_corpus(rocks_schema.clone(), current_producer_native_corpus_pack, move || {
         let families = rocks_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
@@ -1755,6 +1734,28 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
             .expect("current RocksDB adapter opens committed native corpus"),
         )
     });
+}
+
+#[test]
+fn retired_result_codec_profiles_reject_historical_native_roots() {
+    // Internal physical admission receipt: no fake historical codec profile.
+    let historical = epoch_1_native_corpus_pack();
+    assert!(historical.contains("store\tjazz_settled_result_members\n"));
+    let schema = native_corpus_schema();
+    let profile = epoch_1_storage_codec_profile().unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let sqlite_dir = tempfile::tempdir().unwrap();
+    let sqlite_path = sqlite_dir.path().join("historical.sqlite");
+    materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64).unwrap();
+    let sqlite_before = std::fs::read(&sqlite_path).unwrap();
+    let sqlite_error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(&sqlite_path, &refs, SqliteDurability::FullSync, &profile).err().expect("retired SQLite profile must reject");
+    assert!(sqlite_error.to_string().contains("storage manifest is inconsistent"), "{sqlite_error}");
+    assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
+    let rocks_dir = tempfile::tempdir().unwrap();
+    let rocks_path = unpack_native_rocksdb_fixture(rocks_dir.path(), EPOCH_1_NATIVE_ROCKSDB_BASE64).unwrap();
+    let rocks_error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(&rocks_path, &refs, RocksDurability::FullSync, &profile).err().expect("retired RocksDB profile must reject");
+    assert!(rocks_error.to_string().contains("storage manifest is inconsistent"), "{rocks_error}");
 }
 
 #[test]
@@ -2058,7 +2059,7 @@ fn native_jazz_corpus_publication_creates_a_fresh_output_without_overwrite() {
 fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
     let source_root = tempfile::tempdir().expect("create live producer root");
     let source = source_root.path().join("live.sqlite");
-    materialize_native_sqlite_fixture(&source, EPOCH_1_NATIVE_SQLITE_BASE64)
+    materialize_native_sqlite_fixture_with_hashes(&source, CURRENT_NATIVE_SQLITE_BASE64, CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256, CURRENT_NATIVE_SQLITE_SHA256)
         .expect("materialize an independent live producer fixture");
     let staging_root = tempfile::tempdir().expect("create private staging root");
     let candidate = staging_root.path().join("candidate.sqlite");
@@ -2075,7 +2076,7 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
         .expect("staged candidate remains physically valid after live source removal");
     let schema = native_corpus_schema();
     let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
-    verify_historical_native_corpus(schema.clone(), epoch_1_native_corpus_pack, move || {
+    verify_historical_native_corpus(schema.clone(), current_producer_native_corpus_pack, move || {
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(

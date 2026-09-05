@@ -137,7 +137,7 @@ intentionally unsupported.
 The current producer no longer registers `jazz_settled_result_members`. Its
 previous pack contained only the empty family declaration; the live producer
 removes exactly that line and preserves every active entry byte. Historical
-physical blobs and their checksums above remain unchanged. Their current-reader
-comparison excludes only the known empty declaration and rejects any member
-entry. See the [cleanup proof](../../../dev/proofs/inactive-result-persistence-cleanup.md)
+physical blobs and their checksums above remain unchanged. They now prove rejection of the retired required-codec profile under real
+current admission. New current-profile physical fixtures prove positive reopen;
+no old manifest is normalized or admitted through a historical compatibility profile. See the [cleanup proof](../../../dev/proofs/inactive-result-persistence-cleanup.md)
 for exact current hashes and retained storage/runtime inventory.

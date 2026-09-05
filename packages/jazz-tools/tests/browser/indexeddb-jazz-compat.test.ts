@@ -11,6 +11,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
+import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
@@ -85,6 +86,87 @@ describe("browser Jazz storage compatibility corpus", () => {
     await Promise.all([...databaseNames].map((name) => IndexedDbPageStore.destroy(name)));
     databaseNames.clear();
   });
+
+  it("produces the current catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app.wasmSchema,
+      permissions,
+    });
+    const dbName = uniqueDbName("browser-storage-current-producer");
+    const config = persistentConfig(
+      dbName,
+      "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      server,
+    );
+    let db = await openPersistentDb(config);
+    const physicalDbName = await trackPhysicalDatabase(dbName);
+    const body = "large value ".repeat(20_000);
+    const initial = await db.transaction((tx) => {
+      const project = tx.insert(app.projects, { name: "corpus project" });
+      const main = tx.insert(
+        app.documents,
+        {
+          branch: "main",
+          title: "original title",
+          projectId: project.id,
+          body,
+        },
+        { branch: "main" },
+      );
+      tx.insert(
+        app.documents,
+        {
+          branch: "draft",
+          title: "draft override",
+          projectId: project.id,
+          body,
+        },
+        { branch: "draft" },
+      );
+      return main.id;
+    });
+    await withTimeout(
+      initial.wait({ tier: "edge" }),
+      20_000,
+      "corpus initial write did not settle",
+    );
+    await withTimeout(
+      db
+        .update(app.documents, initial.value, { title: "current title" }, { branch: "main" })
+        .wait({ tier: "edge" }),
+      20_000,
+      "corpus history update did not settle",
+    );
+    expect(await db.all(app.documents, { tier: "edge", branch: "main" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "edge", branch: "draft" })).toHaveLength(1);
+    await db.shutdown();
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await sleep(100);
+    const candidate = await rawRecords(physicalDbName);
+    expect(
+      rawManifest(candidate).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1],
+    ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
+    await blockJazzServerNetwork(server.serverUrl);
+    try {
+      db = await openPersistentDb(config);
+      expect(
+        await db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" })),
+      ).toMatchObject([{ branch: "main", title: "current title", body }]);
+      expect(
+        await db.all(app.documents, inspectorLocalQueryOptions({ branch: "draft" })),
+      ).toMatchObject([{ branch: "draft", title: "draft override", body }]);
+      await db.shutdown();
+      openDbs.splice(openDbs.indexOf(db), 1);
+    } finally {
+      await unblockJazzServerNetwork(server.serverUrl);
+    }
+    // Export only after actual public reopen has validated the raw candidate.
+    await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
+  }, 90_000);
 
   it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
     const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
@@ -225,6 +307,27 @@ describe("browser Jazz storage compatibility corpus", () => {
       await unblockJazzServerNetwork(server.serverUrl);
     }
   }, 90_000);
+
+  it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
+    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
+    const dbName = uniqueDbName("browser-storage-retired-profile");
+    const config = persistentConfig(
+      dbName,
+      "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      server,
+    );
+    const bootstrap = await openPersistentDb(config);
+    const physicalDbName = await trackPhysicalDatabase(dbName);
+    await bootstrap.shutdown();
+    openDbs.splice(openDbs.indexOf(bootstrap), 1);
+    await sleep(100);
+    const historical = JSON.parse(historicalCorpus) as Record<string, string>;
+    await installRawRecords(physicalDbName, historical);
+    await expect(
+      withTimeout(createDb(config), 5_000, "retired profile open did not reject"),
+    ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+    expect(await rawRecords(physicalDbName)).toEqual(historical);
+  }, 30_000);
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
     const cleanup = new TestCleanup();
