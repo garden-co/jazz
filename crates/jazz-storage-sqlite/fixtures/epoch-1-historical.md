@@ -26,8 +26,9 @@ indices are intentionally absent from this fixture: after a future authoritative
 epoch migration they are discarded and rebuilt, never treated as historical
 authoritative bytes.
 
-The compatibility gate first opens the decoded historical file read-only to
-prove its snapshot, then copies it for a current adapter mixed-write/reopen
-receipt. It rejects a deliberately corrupted fixture checksum before any file
-is materialized. Pre-settlement alpha stores remain unsupported; this fixture
-starts at epoch 1.
+The historical gate verifies the decoded file and its checksum, then proves
+that the final V1 opener rejects this retired physical layout before ordinary
+data admission. It never writes or reopens this archive as a current root.
+Current mixed-write/reopen evidence is generated separately in
+`jazz/fixtures/current-native-jazz-corpus-v1.md`. Pre-settlement alpha stores
+remain unsupported; this fixture starts at epoch 1.

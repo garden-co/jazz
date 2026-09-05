@@ -16,7 +16,9 @@ RocksDB `JSM1` manifest with Groove's complete epoch-1 codec base, plus the rows
 adapter-private physical implementation artifacts, not interchange bytes.
 
 The gate verifies the archive checksum before extraction, inspects the archive
-through RocksDB's read-only API, then extracts a separate copy for current
-mixed writes and reopen. Derived Jazz state is deliberately absent: it is
-discarded/rebuilt after an authoritative future migration rather than preserved
-as historical authoritative bytes. Alpha stores before epoch 1 are unsupported.
+through RocksDB's read-only API, then proves that the final V1 opener rejects
+the unmarked retired layout before ordinary data admission. It never writes or
+reopens this archive as a current root. Derived Jazz state is deliberately
+absent: it is discarded/rebuilt after an authoritative future migration rather
+than preserved as historical authoritative bytes. Alpha stores before epoch 1
+are unsupported.
