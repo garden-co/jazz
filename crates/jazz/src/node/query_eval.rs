@@ -1566,7 +1566,7 @@ where
         let deltas = deltas_result?;
         retire_result?;
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &app_output, deltas)?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
         } else if shape.query().flat_join.is_some() {
             deltas
                 .iter()
@@ -1753,7 +1753,7 @@ where
 
         let phase_started = Instant::now();
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &app_output, deltas)?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
@@ -2118,7 +2118,7 @@ where
             self.materialize_aggregate_query_rows(
                 query,
                 &materialization_app_row_schema(None, Some(&program))?,
-                deltas,
+                &deltas,
             )
         } else {
             self.materialize_include_deleted_query_rows(table, deltas)
@@ -2740,7 +2740,7 @@ where
             self.materialize_aggregate_query_rows(
                 shape.query(),
                 &materialization_app_row_schema(None, Some(&program))?,
-                deltas,
+                &deltas,
             )?
         } else {
             self.materialize_inline_current_query_rows(&table, deltas)?

@@ -207,7 +207,7 @@ where
         &mut self,
         query: &crate::query::Query,
         output: &AppRowSchema,
-        deltas: groove::ivm::RecordDeltas,
+        deltas: &groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
@@ -1001,6 +1001,20 @@ where
                 "relation snapshot program did not emit app rows".to_owned(),
             ));
         };
+        if shape.query().aggregate.is_some() {
+            // Aggregate terminals own synthetic result identities and public
+            // bindings. Decoding these as source-table rows would turn count
+            // aliases into unresolved catalogue columns.
+            let output = materialization_app_row_schema(None, Some(program))?;
+            let mut rows =
+                self.materialize_aggregate_query_rows(shape.query(), &output, app_rows)?;
+            self.finish_engine_query_rows_in_schema(
+                shape.query(),
+                shape.schema_version(),
+                &mut rows,
+            )?;
+            return Ok(rows);
+        }
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
             .clone();

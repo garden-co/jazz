@@ -153,3 +153,41 @@ Two TypeScript mock producers now explicitly declare source output names and
 provenance/hidden roles while retaining their private `user_*` carrier spellings.
 Their behavioral assertions are unchanged; the input fixtures no longer assume
 that a consumer reconstructs public identity by stripping a carrier prefix.
+
+## Standalone integration target audit
+
+The `--lib` receipts above exclude integration binaries. A separate canonical
+4 MiB run of every Jazz/Groove integration binary measured 284 passes and two
+failures at the typed checkpoint: `large_json_wire::json_version_records_freeze_inline_and_indirect_semantics`
+and `branch_views::branch_view_reduction_precedes_aggregation_and_ordered_windows`.
+The repaired batch passes all 286 tests, with four skipped. Reproduce this
+coverage with `RUST_MIN_STACK=4194304 cargo nextest run -p jazz -p groove
+--no-default-features --features jazz/testing,jazz/transport-compression-zstd
+--tests -E 'kind(test)' --profile jazz-ci --no-fail-fast`; library-only commands
+do not substitute for this receipt. The official workspace partition includes
+both library and integration targets.
+
+The branch-view relation snapshot materializer had interpreted synthetic
+aggregate output as a source-table row, then attempted to resolve the count
+alias as a catalogue column. It now uses the compiler's full aggregate app-row
+schema and the shared aggregate conversion, retaining result identities,
+publication names, ordering and windows. The existing black-box branch-view
+count/window assertions fail before this change and pass afterwards.
+
+The standalone `large_json_wire_v1.json` corpus was last produced before `JVRR`.
+Its owning test now supports the existing `JAZZ_UPDATE_WIRE_FIXTURES=1` writer
+convention and recreates the same inline JSON, indirect large-JSON reference,
+and deliberately wrong String-descriptor example through `VersionRecord`.
+The last example remains a malformed semantic kind inside the current envelope,
+not an old-format reader or a compatibility path. Inline bytes grow 357 → 895,
+indirect 474 → 1012, and wrong-String 355 → 895. Each row envelope contains a
+680-byte explicit descriptor. The canonical raw row and outer authored-column
+suffix are byte-identical to the old corpus: inline/wrong-String raw rows are
+175 bytes (SHA-256 `f42a2be2b181f3d07e0b6ff48dc2b699edf5453a9592fe38263ee7157e3541cc`),
+and indirect raw rows are 292 bytes (SHA-256
+`29bd9bed0e0b4269adc0d2ab73ec6e8a5e99116f6e602bf15234ff3964442d8b`).
+The test retains inline/indirect semantic-kind and raw-byte assertions, exact
+round trips, the wrong-descriptor rejection receipt, and an explicit `JVRR` tag
+assertion. Other standalone integration targets contain no additional embedded
+row-byte corpus beyond the already-covered `wire_fixtures` target; the persistent
+codec registry checks exact proof anchors rather than encoding records itself.

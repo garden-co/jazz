@@ -19,6 +19,9 @@ fn unhex(value: &str) -> Vec<u8> {
 }
 
 #[test]
+/// Alice's inline and indirect JSON version records retain their semantic kind
+/// at Bob's wire decoder. This codec receipt inspects descriptors because visible
+/// JSON alone cannot distinguish a JSON kind from an ordinary String carrier.
 fn json_version_records_freeze_inline_and_indirect_semantics() {
     let schema = JazzSchema::new(
         &SchemaBuilder::new()
@@ -84,11 +87,23 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
         OwnedRecord::new(legacy_raw, legacy_descriptor),
     );
     let corpus = serde_json::json!({ "inline": hex(&postcard::to_allocvec(&inline).unwrap()), "indirect": hex(&postcard::to_allocvec(&indirect).unwrap()), "legacy_inline": hex(&postcard::to_allocvec(&legacy).unwrap()) });
+    if std::env::var_os("JAZZ_UPDATE_WIRE_FIXTURES").is_some() {
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/large_json_wire_v1.json"
+            ),
+            serde_json::to_string_pretty(&corpus).unwrap() + "\n",
+        )
+        .unwrap();
+        return;
+    }
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("../fixtures/large_json_wire_v1.json")).unwrap();
     assert_eq!(corpus, expected);
     for (name, value) in [("inline", inline_value), ("indirect", indirect_value)] {
         let bytes = unhex(expected[name].as_str().unwrap());
+        assert!(bytes.windows(5).any(|bytes| bytes == b"JVRR\x01"));
         let decoded: VersionRecord = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(
             decoded.record().descriptor(),
