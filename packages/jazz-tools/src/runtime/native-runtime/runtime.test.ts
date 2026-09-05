@@ -413,7 +413,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -473,7 +473,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -564,7 +564,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.waitForUpstreamServerConnection();
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }), null, "edge"),
+      runtime.query(
+        JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+        null,
+        "edge",
+      ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[1]).toEqual({ tier: "edge" });
@@ -611,7 +615,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -663,7 +667,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -707,7 +711,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -2425,6 +2429,39 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
+  it("preserves raw subscription literal number spellings in native relation bytes", () => {
+    let relationBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribeRelationQuery: (bytes: Uint8Array) => {
+              relationBytes = bytes;
+              return new ReadableStream();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.createSubscription(
+      '{"relation_ir":{"Union":{"inputs":[{"label":"source","input":{"Filter":{"input":{"TableScan":{"table":"todos"}},"predicate":{"Cmp":{"left":{"column":"priority"},"op":"Eq","right":{"Literal":1.0}}}}}}]}}}',
+    );
+
+    expect(relationBytes).toBeDefined();
+    expect(Array.from(relationBytes!.slice(-10))).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    ]);
+  });
+
   it("lowers simple Project relation IR while preparing the original subscription query", () => {
     const calls: string[] = [];
     let preparedBytes: Uint8Array | undefined;
@@ -3049,11 +3086,15 @@ describe("NativeRuntimeAdapter server transport", () => {
                       left: { TableScan: { table: "todos" } },
                       right: { TableScan: { table: "todos" } },
                       on: [{ left: { column: "parent_id" }, right: { column: "id" } }],
+                      join_kind: "Inner",
                     },
                   },
+                  columns: [],
                 },
               },
+              frontier_key: { RowId: "Current" },
               bound: { MaxDepth: 3 },
+              dedupe_key: [],
             },
           },
         }),
@@ -3162,7 +3203,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await runtime.query(JSON.stringify({ table: "todos" }));
-    await runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    await runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+    );
     await runtime.query(
       JSON.stringify({
         table: "todos",
@@ -3177,7 +3220,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
     runtime.createSubscription(JSON.stringify({ table: "todos" }));
-    runtime.createSubscription(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+    );
     runtime.beginTransaction("mergeable", "backend-read-tx" as never);
     await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -4424,7 +4469,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await expect(
       runtime.query(
-        JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+        JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
         undefined,
         undefined,
         opts,
@@ -5496,7 +5541,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       null,
       null,
@@ -5560,7 +5605,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "global",
       null,
@@ -5610,7 +5655,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5661,7 +5706,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5708,7 +5753,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5779,7 +5824,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks, teamsSchema);
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5872,7 +5917,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "notes", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "notes", relation_ir: supportedGatherRelationIr("notes") }),
       null,
       null,
       null,
@@ -7318,10 +7363,25 @@ function unsupportedJoinRelationIr(): unknown {
     Join: {
       left: { TableScan: { table: "todos" } },
       right: { TableScan: { table: "projects" } },
-      on: {
-        left: { column: "todos.project_id" },
-        right: { column: "projects.id" },
-      },
+      on: [
+        {
+          left: { column: "todos.project_id" },
+          right: { column: "projects.id" },
+        },
+      ],
+      join_kind: "Inner",
+    },
+  };
+}
+
+function supportedGatherRelationIr(table: string): unknown {
+  return {
+    Gather: {
+      seed: { TableScan: { table } },
+      step: { TableScan: { table } },
+      frontier_key: { RowId: "Current" },
+      bound: "Fixpoint",
+      dedupe_key: [{ RowId: "Current" }],
     },
   };
 }

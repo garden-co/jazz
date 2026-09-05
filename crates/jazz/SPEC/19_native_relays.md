@@ -409,16 +409,16 @@ The following ordinals are reserved for the coordinated V1 continuation.
 Reservation alone does not imply that a native artifact implements a handler;
 unsupported operations must fail closed until their acceptance gates pass.
 
-| Request ordinal | Reserved request                                         | Response ordinal / payload                              |
-| --------------- | -------------------------------------------------------- | ------------------------------------------------------- |
-| 26              | NativeSessionMetadata (no fields)                        | 18 NativeSessionMetadata: issuer string, user_id string |
-| 27              | WriteState: tx_id 16 raw bytes                           | 19 WriteState: state_json string                        |
-| 28              | DrainMutationErrors (no fields)                          | 20 MutationErrors: events_json string                   |
-| 29              | BeginStreamingMutation                                   | 21 StreamingMutationOpened: upload u64                  |
-| 30              | PushStreamingMutation: upload u64, chunk byte vector     | 22 StreamingMutationPushed (no fields)                  |
-| 31              | FinishStreamingMutation: upload u64                      | existing 14 TransactionCommitted                        |
-| 32              | AbortStreamingMutation: upload u64                       | 23 StreamingMutationAborted: aborted bool               |
-| 33              | AllRelationQuery: query_json string, options_json string | existing 3 Rows                                         |
+| Request ordinal | Reserved request                                               | Response ordinal / payload                              |
+| --------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
+| 26              | NativeSessionMetadata (no fields)                              | 18 NativeSessionMetadata: issuer string, user_id string |
+| 27              | WriteState: tx_id 16 raw bytes                                 | 19 WriteState: state_json string                        |
+| 28              | DrainMutationErrors (no fields)                                | 20 MutationErrors: events_json string                   |
+| 29              | BeginStreamingMutation                                         | 21 StreamingMutationOpened: upload u64                  |
+| 30              | PushStreamingMutation: upload u64, chunk byte vector           | 22 StreamingMutationPushed (no fields)                  |
+| 31              | FinishStreamingMutation: upload u64                            | existing 14 TransactionCommitted                        |
+| 32              | AbortStreamingMutation: upload u64                             | 23 StreamingMutationAborted: aborted bool               |
+| 33              | AllRelationQuery: query_bytes byte vector, options_json string | existing 3 Rows                                         |
 
 BeginStreamingMutation has ordered fields mutation enum, table string,
 row_id 16 raw bytes, cells byte vector, column string, options_json string.
@@ -427,7 +427,7 @@ is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
 u64; its response is existing 14 TransactionCommitted. The continuation bytes
 are pinned by `foreground_continuation_v1_byte_contract`.
-Request 37 is SubscribeRelationQuery: query_json string, options_json string;
+Request 37 is SubscribeRelationQuery: query_bytes byte vector, options_json string;
 its response is existing 4 Subscribed. It uses the same asynchronous canonical
 relation preparation as request 33, then the ordinary deferred subscription
 opener and event codec. It requires the default read view.
@@ -477,12 +477,39 @@ snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
 event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 
-`AllRelationQuery` accepts the existing native `relation_ir` JSON wrapper and
+`AllRelationQuery` accepts the bounded typed Postcard relation-query payload and
 uses the core relation resolver plus asynchronous canonical query preparation.
-It shares the same coverage, row hydration, pending-operation, and cleanup path
-as ordinary option-bearing reads. As on the other native bindings, raw
-relation-IR one-shot reads require the default read view; transaction-local
-array includes continue to use the transaction-aware snapshot command.
+
+### Relation-query Postcard carrier
+
+Relation-query payloads use the same typed Postcard grammar as their enclosing
+`Query`, `ShapeAst`, and native command envelopes. `Query.relation` and
+`ShapeBody::Relation` recursively serialize the relation expression, predicate,
+column/key/project references, recursion bound, and a typed JSON literal tree.
+The literal tree explicitly distinguishes null, boolean, i64, u64, f64 bits,
+string, array, and object entries; it does not serialize `serde_json::Value`
+directly and does not embed JSON or a second custom byte codec. Direct native
+relation reads receive that same standalone Postcard relation payload.
+
+Relation payloads are capped at 1 MiB, nesting at 128, structural collections
+at 4,096, strings at 65,536 UTF-8 bytes, and semantic dimensions at `u32::MAX`.
+Union labels remain unique, UTF-8, NUL-free, and 1 through 4,096 bytes. Rows,
+cells, snapshots, and subscription deltas retain their existing native binding
+encodings; only the relation-query AST carrier changes.
+
+The standalone direct-read payload is `WireRelationQuery { rel }`. Within a
+`Query.relation` option and a `ShapeBody::Relation` variant, that same struct is
+nested directly in the enclosing Postcard value; it is never length-wrapped as a
+byte vector. Postcard enum ordinals follow the declared Rust order: relation
+expressions are `TableScan`, `Filter`, `Union`, `Join`, `Project`, `Gather`,
+`Distinct`, `OrderBy`, `Offset`, `Limit`; predicates are `Cmp`, `IsNull`,
+`IsNotNull`, `In`, `Contains`, `EnumMatch`, `And`, `Or`, `Not`, `True`, `False`;
+and value references are `Literal`, `Param`, `SessionRef`, `OuterColumn`,
+`FrontierColumn`, `RowId`. Struct fields use declaration order. Literal ordinals
+are `Null`, `Bool`, `I64`, `U64`, `F64(bits)`, `String`, `Array`, and `Object`.
+Objects contain sorted, unique UTF-8 keys; `F64` carries raw IEEE-754 bits, so
+negative zero is preserved. A receiver requires an exact canonical Postcard
+payload with no trailing bytes or overlong alternative spelling.
 
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
