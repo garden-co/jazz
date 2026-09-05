@@ -4,7 +4,7 @@ import { startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
-import { captureAndroidBacktrace } from "./android-backtrace.mjs";
+import { captureAndroidFailure } from "./android-postmortem.mjs";
 import { androidAcceptanceFailure } from "./android-diagnostics.mjs";
 import { adb } from "./android-adb.mjs";
 import { verifyAndroidRelayStage } from "./android-relay-stage.mjs";
@@ -118,7 +118,7 @@ try {
       }
       if (Date.now() >= deadline)
         throw new Error(
-          `${androidAcceptanceFailure("timeout", phase, output)}; Core observation control: ${control.diagnostic()}; native backtrace: ${JSON.stringify(captureAndroidBacktrace({ serial }))}`,
+          `${androidAcceptanceFailure("timeout", phase, output)}; Core observation control: ${control.diagnostic()}; process diagnostic: ${JSON.stringify(captureAndroidFailure({ serial }))}`,
         );
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }

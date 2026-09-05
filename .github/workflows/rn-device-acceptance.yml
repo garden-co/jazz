@@ -239,3 +239,15 @@ jobs:
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android
+      - name: Retain matching Android crash-symbol artifacts
+        if: failure()
+        env:
+          JAZZ_ANDROID_FAILURE_ARTIFACT: ${{ runner.temp }}/jazz-rn-android-failure-artifact
+        run: node dev/rn-device-acceptance/scripts/stage-android-failure-artifact.mjs
+      - name: Upload synthetic Android failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rn-device-android-failure-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jazz-rn-android-failure-artifact
+          if-no-files-found: ignore

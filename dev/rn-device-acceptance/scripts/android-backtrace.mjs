@@ -52,8 +52,10 @@ export function summarizeAndroidBacktrace(output) {
       continue;
     }
     const quotedThread = /^"([^"]+)"\s+sysTid=(\d+)/.exec(line);
+    const nativeThread = /^pid:\s*(\d+),\s*tid:\s*(\d+),\s*name:/.exec(line);
     const name =
-      processId && quotedThread?.[2] === processId
+      (processId && quotedThread?.[2] === processId) ||
+      (nativeThread && nativeThread[1] === nativeThread[2])
         ? "main"
         : (/^"([^"]+)"\s+sysTid=\d+/.exec(line)?.[1] ??
           /\btid:\s*\d+,\s*name:\s*(\S+)/.exec(line)?.[1]);
