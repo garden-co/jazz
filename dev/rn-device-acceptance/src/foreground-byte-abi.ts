@@ -28,12 +28,14 @@ export function proveForegroundByteAbi(
   codec: ForegroundByteCodec,
   markFailure?: (
     stage:
+      | "foreground-abi-version-failed"
       | "foreground-open-failed"
       | "foreground-probe-failed"
       | "foreground-tick-failed"
       | "foreground-close-failed",
   ) => void,
 ): NativeForegroundRuntime {
+  markFailure?.("foreground-abi-version-failed");
   if (factory.abiVersion !== NATIVE_RELAY_ABI_V1)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
   markFailure?.("foreground-open-failed");

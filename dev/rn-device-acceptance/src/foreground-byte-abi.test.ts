@@ -63,6 +63,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
   );
   assert.deepEqual(commands, [0, 1, 2, 0]);
   assert.deepEqual(stages, [
+    "foreground-abi-version-failed",
     "foreground-open-failed",
     "foreground-probe-failed",
     "foreground-tick-failed",
@@ -79,6 +80,38 @@ test("foreground receipt treats a native revocation as an execution error", () =
     close: () => false,
   };
   proveForegroundRevoked(revokedForeground, codec.encode);
+});
+
+test("foreground receipt rejects a live alias after claimed revocation", () => {
+  const liveForeground = {
+    execute: () => Uint8Array.of(0, NATIVE_RELAY_ABI_V1),
+    tick() {},
+    close: () => false,
+  };
+  assert.throws(
+    () => proveForegroundRevoked(liveForeground, codec.encode),
+    /revoked foreground accepted Probe/,
+  );
+});
+
+test("foreground ABI mismatch records its boundary before any open", () => {
+  const stages: string[] = [];
+  assert.throws(
+    () =>
+      proveForegroundByteAbi(
+        {
+          abiVersion: NATIVE_RELAY_ABI_V1 + 1,
+          openAttached() {
+            throw new Error("must not open");
+          },
+        },
+        capability,
+        codec,
+        (stage) => stages.push(stage),
+      ),
+    /unexpected ABI/,
+  );
+  assert.deepEqual(stages, ["foreground-abi-version-failed"]);
 });
 
 test("scope-isolation receipt keeps both native-selected scope stores disjoint", async () => {

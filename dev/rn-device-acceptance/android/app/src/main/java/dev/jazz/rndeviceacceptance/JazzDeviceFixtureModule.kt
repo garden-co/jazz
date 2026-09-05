@@ -38,6 +38,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "relay-probe-failed",
     "relay-cleanup-failed",
     "foreground-byte-abi-failed",
+    "foreground-abi-version-failed",
+    "foreground-revocation-failed",
     "foreground-install-failed",
     "foreground-open-failed",
     "foreground-probe-failed",

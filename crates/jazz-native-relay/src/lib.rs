@@ -5794,6 +5794,26 @@ mod tests {
             JazzNativeRelayStatus::InvalidHandle,
             "revocation retires A's already-open foreground"
         );
+        // Tick and byte-command execution use separate C entry points. The
+        // installed device receipt probes the stale JSI alias, so prove that
+        // exact liveness boundary instead of inferring it from tick failure.
+        let request = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
+        let mut output = JazzNativeRelayBytes::EMPTY;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    fixture.lease,
+                    a,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::InvalidHandle,
+            "a revoked foreground cannot answer the installed JSI byte Probe"
+        );
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
         assert_eq!(
             fixture.tick_status(b),
             JazzNativeRelayStatus::Ok,

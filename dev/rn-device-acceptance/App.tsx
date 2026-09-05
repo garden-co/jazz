@@ -144,7 +144,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
   markFailure("auth-switch-failed");
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
-  markFailure("foreground-byte-abi-failed");
+  markFailure("foreground-revocation-failed");
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   markFailure("scope-isolation-failed");
