@@ -37,12 +37,12 @@ changing only `todos.title`, then while changing only `notes.body`; each change
 must alter the digest. This prevents a metadata-only exporter from silently
 passing while excluding application rows.
 
-The currently populated historical families are catalogue genesis plus an
+The currently populated current-corpus families are catalogue genesis plus an
 active deterministic lineage/lens and current-write pointer, durable node/schema identities,
 branch-keyed immutable versions/current projections, transaction/fate/global-
 change/merge-head records, globally settled deletion history, known-state and
 exact covered-input/source-coverage facts, and an authenticated indirect byte tree. Its
-fixed test-only capabilities exist solely to make this historical receipt
+fixed test-only capabilities exist solely to make this current receipt
 reproducible; product writers continue to mint random capabilities. The
 registry additionally tracks the more focused provenance and catalogue codec
 fixtures that supply corruption detail beyond this whole-root receipt.
@@ -121,7 +121,7 @@ The producer intentionally publishes candidate outputs before the pinned checksu
 assertion, so a deliberate format change leaves reviewable candidates even
 though the command exits non-zero. It first validates every candidate by
 opening a fresh materialized SQLite copy and freshly unpacked RocksDB root with
-the full historical receipt. Each requested output must be a fresh path: the
+the full current receipt. Each requested output must be a fresh path: the
 publisher refuses to overwrite an existing artifact. Encode the pack and Rocks archive with base64;
 gzip the SQLite file deterministically (`gzip -n -9`) before base64. Then
 update the logical-pack checksum and any physical checksums whose reviewed
