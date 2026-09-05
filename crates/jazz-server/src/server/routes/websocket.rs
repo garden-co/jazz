@@ -210,6 +210,32 @@ enum RequestedWebSocketLink {
     ScopeIsolatedClientRelay,
 }
 
+/// Select the server-owned link capability after credential admission and wire
+/// feature negotiation. This stays separate from the client prelude because a
+/// request alone cannot grant scoped relay authority.
+fn ws_link_admission(
+    admission: &WebSocketAdmission,
+    negotiated_features: u64,
+    admission_epoch: u64,
+) -> Result<ServerLinkAdmission, WireError> {
+    match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
+        RequestedWebSocketLink::ScopeIsolatedClientRelay
+            if admission.credential == WebSocketCredential::Session
+                && negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
+        {
+            // This epoch was minted by the server for this accepted socket.
+            // Reconnects necessarily get a fresh capability.
+            Ok(ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch })
+        }
+        RequestedWebSocketLink::ScopeIsolatedClientRelay => Err(WireError::new(
+            WireErrorCode::UnsupportedFeature,
+            WireRetry::Never,
+            "scope-isolated client relay requires an authenticated session and negotiated relay feature",
+        )),
+    }
+}
+
 async fn ws_admission(
     prelude: WebSocketPrelude,
     request_headers: &HeaderMap,
@@ -723,32 +749,15 @@ async fn handle_ws_connection(
     } else {
         None
     };
-    let link_admission = match admission.requested_link {
-        RequestedWebSocketLink::OrdinarySession => ServerLinkAdmission::OrdinarySession,
-        RequestedWebSocketLink::ScopeIsolatedClientRelay
-            if admission.credential == WebSocketCredential::Session
-                && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
-        {
-            // This epoch was minted by the server for this accepted socket.
-            // Reconnects necessarily get a fresh capability.
-            ServerLinkAdmission::ScopeIsolatedClientRelay {
-                admission_epoch: server_endpoint.epoch,
+    let link_admission =
+        match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
+            Ok(link_admission) => link_admission,
+            Err(error) => {
+                send_ws_error(&mut socket, error).await;
+                let _ = socket.close().await;
+                return;
             }
-        }
-        RequestedWebSocketLink::ScopeIsolatedClientRelay => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::Never,
-                    "scope-isolated client relay requires an authenticated session and negotiated relay feature",
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
+        };
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -1483,6 +1492,25 @@ mod tests {
             RequestedWebSocketLink::ScopeIsolatedClientRelay,
             "a verified session must retain its scope-isolated request for feature negotiation"
         );
+        assert!(matches!(
+            ws_link_admission(
+                &scoped_session,
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
+                73,
+            )
+            .expect("session plus scope feature selects scoped server admission"),
+            ServerLinkAdmission::ScopeIsolatedClientRelay {
+                admission_epoch: 73
+            }
+        ));
+        assert!(matches!(
+            ws_link_admission(&scoped_session, 0, 73),
+            Err(WireError {
+                code: WireErrorCode::UnsupportedFeature,
+                retry: WireRetry::Never,
+                ..
+            })
+        ));
 
         let backend_scope_request = ws_admission(
             WebSocketPrelude {
@@ -1508,6 +1536,15 @@ mod tests {
             RequestedWebSocketLink::OrdinarySession,
             "backend credentials must not select scope-isolated client admission"
         );
+        assert!(matches!(
+            ws_link_admission(
+                &backend_scope_request,
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
+                73,
+            )
+            .expect("normalized backend request selects the ordinary server link"),
+            ServerLinkAdmission::OrdinarySession
+        ));
     }
 
     #[tokio::test]
