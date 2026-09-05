@@ -8,6 +8,7 @@ use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
+    validate_permissions_relation_unions,
 };
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
@@ -655,6 +656,8 @@ impl CatalogueStore for StoredCatalogue {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
+        validate_permissions_relation_unions(&permissions)
+            .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         // Catalogue mutations take storage before the in-memory index. Holding
         // both locks makes parent validation and head advancement linearizable
         // for callers sharing this StoredCatalogue. The two storage writes
