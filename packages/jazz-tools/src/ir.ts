@@ -84,7 +84,8 @@ export type RelExpr =
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
 
-export type PolicyExpr =
+/** A relational policy expression used by the query IR, distinct from the schema DSL AST. */
+export type PolicyIRExpr =
   | { Predicate: RelPredicateExpr }
   | { ExistsRel: { rel: RelExpr } }
   | {
@@ -94,8 +95,8 @@ export type PolicyExpr =
         max_depth?: number;
       };
     }
-  | { And: PolicyExpr[] }
-  | { Or: PolicyExpr[] }
-  | { Not: PolicyExpr }
+  | { And: PolicyIRExpr[] }
+  | { Or: PolicyIRExpr[] }
+  | { Not: PolicyIRExpr }
   | "True"
   | "False";

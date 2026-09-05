@@ -577,9 +577,9 @@ function resolveBuiltRelationOutputTable(schema: WasmSchema, relation: BuiltRela
     if (!first) {
       throw new Error("union(...) requires at least one relation.");
     }
-    const firstTable = resolveBuiltRelationOutputTable(schema, first);
+    const firstTable = resolveBuiltRelationOutputTable(schema, first.input);
     for (const input of relation.union.inputs.slice(1)) {
-      const inputTable = resolveBuiltRelationOutputTable(schema, input);
+      const inputTable = resolveBuiltRelationOutputTable(schema, input.input);
       if (inputTable !== firstTable) {
         throw new Error("union(...) requires all relations to output the same table.");
       }
