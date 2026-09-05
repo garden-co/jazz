@@ -80,7 +80,7 @@ it("delivers native insert/update/delete to useAll and useOne and replaces query
         <Probe query={query} onDb={onDb} />
       </JazzProvider>
     );
-    const mounted = render(view(app.notes.where({ done: false })));
+    const mounted = render(view(app.notes.where({ done: false }).orderBy("title")));
     try {
       await waitFor(() => expect(mounted.getByTestId("one").textContent).toBe("empty"));
       const initial = observed;
@@ -89,6 +89,12 @@ it("delivers native insert/update/delete to useAll and useOne and replaces query
         .wait({ tier: "local" });
       await waitFor(() => expect(mounted.getByTestId("all").textContent).toBe("first"));
       expect(mounted.getByTestId("one").textContent).toBe("first");
+      const later = await writer
+        .insert(app.notes, { title: "later", done: false })
+        .wait({ tier: "local" });
+      await waitFor(() => expect(mounted.getByTestId("all").textContent).toBe("first|later"));
+      expect(mounted.getByTestId("one").textContent).toBe("first");
+      await writer.delete(app.notes, later.id).wait({ tier: "local" });
       await writer.update(app.notes, row.id, { title: "edited" }).wait({ tier: "local" });
       await waitFor(() => expect(mounted.getByTestId("one").textContent).toBe("edited"));
       mounted.rerender(view(app.notes.where({ done: true })));
