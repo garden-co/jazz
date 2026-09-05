@@ -200,6 +200,15 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.of(7, 1);
         case 10:
           return Uint8Array.of(11, 13);
+        case 36: {
+          const reader = new PostcardReader(command.subarray(1));
+          expect(reader.u64()).toBe(0); // direct insert
+          expect(reader.string()).toBe("notes");
+          expect(reader.u64()).toBe(0); // native allocates the row id
+          expect(reader.bytes().length).toBeGreaterThan(0);
+          expect(JSON.parse(reader.string())).toEqual({ updatedAtMs: expect.any(Number) });
+          return Uint8Array.from([24, ...new Uint8Array(16).fill(4), ...rowId]);
+        }
         case 22:
           return Uint8Array.from([12, ...rowId]);
         case 21:
@@ -208,6 +217,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.of(17, 0, 0, 0);
         case 26:
           return encodeNativeSession("reader");
+        case 28:
+          return Uint8Array.of(20, 2, 91, 93); // mutationErrors: "[]"
         case 15:
           return Uint8Array.from([14, ...new Uint8Array(16).fill(4)]);
         case 16:
@@ -249,12 +260,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     await expect(inserted.wait({ tier: "local" })).resolves.toMatchObject({
       title: "Native note",
     });
-    await expect(inserted.txId).resolves.toMatch(/[0-9a-f-]{36}/);
+    await expect(inserted.txId).resolves.toBe("04".repeat(16));
     await expect(client.db.all(app.notes, { tier: "edge" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
     expect(readOptions).toContainEqual({ tier: "edge" });
-    expect(commandTags).toEqual(expect.arrayContaining([2, 18, 20, 5, 6, 10, 22, 15, 21, 26]));
+    expect(commandTags).toEqual(expect.arrayContaining([2, 18, 20, 5, 6, 36, 21, 26, 28]));
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(nativeForegroundTest.turboModule).not.toHaveProperty("installForegroundRuntime");
     expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
@@ -291,6 +302,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       if (command[0] === 18) return encodeBytesResponse(3, rows);
       if (command[0] === 25) return Uint8Array.of(17, 0, 0, 0);
       if (command[0] === 26) return encodeNativeSession("old-reader");
+      if (command[0] === 28) return Uint8Array.of(20, 2, 91, 93);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);
     };
