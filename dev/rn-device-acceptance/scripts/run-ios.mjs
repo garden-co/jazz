@@ -47,7 +47,9 @@ const localSession = await startLocalEdgeSessionHarness({
   runNonce,
   host: "127.0.0.1",
 });
-process.once("exit", () => { void localSession.terminate(); });
+process.once("exit", () => {
+  void localSession.terminate();
+});
 let control;
 try {
   simctl(["bootstatus", udid, "-b"]);

@@ -74,13 +74,23 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
   const waitForLine = (prefix, timeoutMs = 15_000) =>
     new Promise((resolve, reject) => {
       let settled = false;
-      const finish = (run) => { if (!settled) { settled = true; clearTimeout(deadline); run(); } };
-      const deadline = setTimeout(() => finish(() => reject(new Error(`harness did not emit ${prefix}`))), timeoutMs);
+      const finish = (run) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(deadline);
+          run();
+        }
+      };
+      const deadline = setTimeout(
+        () => finish(() => reject(new Error(`harness did not emit ${prefix}`))),
+        timeoutMs,
+      );
       const poll = () => {
         if (settled) return;
         const line = stdout.split(/\r?\n/).find((item) => item.startsWith(prefix));
         if (line) finish(() => resolve(line));
-        else if (child.exitCode !== null || child.signalCode) finish(() => reject(new Error(`harness exited before ${prefix}`)));
+        else if (child.exitCode !== null || child.signalCode)
+          finish(() => reject(new Error(`harness exited before ${prefix}`)));
         else setTimeout(poll, 20);
       };
       poll();
@@ -228,9 +238,18 @@ export async function terminateHarness(child, timeoutMs = 5_000, processInfo = p
 function assertEndpointRefused(port) {
   return new Promise((resolve, reject) => {
     const socket = createConnection({ host: "127.0.0.1", port });
-    socket.once("connect", () => { socket.destroy(); reject(new Error("interrupted Edge remained reachable")); });
-    socket.once("error", (error) => { socket.destroy(); error.code === "ECONNREFUSED" ? resolve() : reject(error); });
-    socket.setTimeout(1_000, () => { socket.destroy(); reject(new Error("interrupted Edge refusal timed out")); });
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error("interrupted Edge remained reachable"));
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      error.code === "ECONNREFUSED" ? resolve() : reject(error);
+    });
+    socket.setTimeout(1_000, () => {
+      socket.destroy();
+      reject(new Error("interrupted Edge refusal timed out"));
+    });
   });
 }
 

@@ -198,9 +198,17 @@ function assertCoreObserverContract(source) {
   const writer = /let core_writer = connect\(AppContext \{([\s\S]*?)\}\)/.exec(source)?.[1];
   assert.ok(observer, "observer must use an explicit isolated client context");
   assert.ok(writer, "recovery writer must use an explicit isolated client context");
-  assert.match(observer, /server_url: core\.base_url\(\)/, "observer must connect directly to Core");
+  assert.match(
+    observer,
+    /server_url: core\.base_url\(\)/,
+    "observer must connect directly to Core",
+  );
   assert.match(observer, /storage: ClientStorage::Memory/);
-  assert.match(writer, /server_url: core\.base_url\(\)/, "recovery writer must connect directly to Core");
+  assert.match(
+    writer,
+    /server_url: core\.base_url\(\)/,
+    "recovery writer must connect directly to Core",
+  );
   assert.match(writer, /rn-device-core-recovery-writer/);
   assert.doesNotMatch(writer, /rn-device-core-observer/);
   assert.doesNotMatch(source, /observer\.insert\(/);
@@ -212,7 +220,10 @@ function assertCoreObserverContract(source) {
   assert.match(source, /wait_for_query\(\s*&observer,/);
   assert.match(source, /values\.contains\(&Value::Text\(title\.clone\(\)\)\)/);
   const recovery = source.slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'));
-  const healthAssertion = /assert_eq!\(\s*edge\.server_state\(\)\.edge_upstream_health\(\),\s*EdgeUpstreamHealth::Connected\s*\);/.exec(recovery);
+  const healthAssertion =
+    /assert_eq!\(\s*edge\.server_state\(\)\.edge_upstream_health\(\),\s*EdgeUpstreamHealth::Connected\s*\);/.exec(
+      recovery,
+    );
   assert.ok(healthAssertion, "recovered Edge must be confirmed healthy");
   assert.ok(
     healthAssertion.index < recovery.indexOf("core_writer\n        .insert"),
@@ -248,10 +259,12 @@ test("Core observer cannot seed the device marker and a separate Core writer wai
     () =>
       assertCoreObserverContract(
         source.slice(0, source.indexOf('assert_eq!(line.trim(), "recover-edge")')) +
-          source.slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")')).replace(
-            /assert_eq!\(\n        edge\.server_state\(\)\.edge_upstream_health\(\),\n        EdgeUpstreamHealth::Connected\n    \);/,
-            "",
-          ),
+          source
+            .slice(source.indexOf('assert_eq!(line.trim(), "recover-edge")'))
+            .replace(
+              /assert_eq!\(\n        edge\.server_state\(\)\.edge_upstream_health\(\),\n        EdgeUpstreamHealth::Connected\n    \);/,
+              "",
+            ),
       ),
     /recovered Edge must be confirmed healthy|recovery writer must wait for Edge health/,
   );
@@ -264,7 +277,12 @@ test("harness termination escalates its process group and rejects a surviving gr
     exitCode: null,
     signalCode: null,
     pid: 42,
-    stdin: { ended: false, end() { this.ended = true; } },
+    stdin: {
+      ended: false,
+      end() {
+        this.ended = true;
+      },
+    },
   });
   const processInfo = {
     platform: "linux",
@@ -287,7 +305,13 @@ test("harness termination escalates its process group and rejects a surviving gr
   };
   await terminateHarness(child, 1, processInfo);
   assert.equal(child.stdin.ended, true);
-  assert.deepEqual(signals.filter(([, signal]) => signal !== 0), [[-42, "SIGTERM"], [-42, "SIGKILL"]]);
+  assert.deepEqual(
+    signals.filter(([, signal]) => signal !== 0),
+    [
+      [-42, "SIGTERM"],
+      [-42, "SIGKILL"],
+    ],
+  );
 
   const survivor = Object.assign(new EventEmitter(), {
     exitCode: null,
@@ -299,13 +323,18 @@ test("harness termination escalates its process group and rejects a surviving gr
   await assert.rejects(
     terminateHarness(survivor, 1, {
       platform: "linux",
-      kill(pid, signal) { survivorSignals.push([pid, signal]); },
+      kill(pid, signal) {
+        survivorSignals.push([pid, signal]);
+      },
     }),
     /survived SIGKILL/,
   );
   assert.deepEqual(
     survivorSignals.filter(([, signal]) => signal !== 0),
-    [[-43, "SIGTERM"], [-43, "SIGKILL"]],
+    [
+      [-43, "SIGTERM"],
+      [-43, "SIGKILL"],
+    ],
   );
 
   let orphanedGroupAlive = true;
@@ -333,7 +362,10 @@ test("harness termination escalates its process group and rejects a surviving gr
   assert.equal(orphanedGroupAlive, true);
   assert.deepEqual(
     orphanedSignals.filter(([, signal]) => signal !== 0),
-    [[-44, "SIGTERM"], [-44, "SIGKILL"]],
+    [
+      [-44, "SIGTERM"],
+      [-44, "SIGKILL"],
+    ],
   );
 });
 
