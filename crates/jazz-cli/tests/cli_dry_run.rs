@@ -87,7 +87,7 @@ fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
 }
 
 #[cfg(unix)]
-fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
+fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> (Child, u16) {
     let mut child = jazz_tools_command()
         .args([
             "server",
@@ -109,26 +109,36 @@ fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
         .expect("spawn jazz-tools server");
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !bound_port_file.exists() {
+    let port = loop {
         if let Some(status) = child.try_wait().expect("poll jazz-tools startup") {
             panic!("jazz-tools server exited before binding: {status}");
+        }
+        if let Ok(contents) = std::fs::read_to_string(bound_port_file)
+            && let Some(port) = parse_bound_port_record(&contents)
+        {
+            break port;
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("jazz-tools server did not bind within 10s");
+            panic!("jazz-tools server did not publish a complete bound-port record within 10s");
         }
         thread::sleep(Duration::from_millis(20));
-    }
-    child
+    };
+    (child, port)
 }
 
 #[cfg(unix)]
-fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir: &Path) {
-    let port = std::fs::read_to_string(bound_port_file)
-        .expect("read bound port")
-        .parse::<u16>()
-        .expect("bound port is numeric");
+fn parse_bound_port_record(contents: &str) -> Option<u16> {
+    let record = contents.strip_suffix('\n')?;
+    if record.is_empty() || record.contains('\n') {
+        return None;
+    }
+    record.parse::<u16>().ok().filter(|port| *port != 0)
+}
+
+#[cfg(unix)]
+fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
     let body = r#"{"schema":{"tables":{}}}"#;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
     write!(
@@ -569,8 +579,8 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let first_port_file = temp_dir.path().join("first-port");
-    let mut first = start_jazz_tools_server(&data_dir, &first_port_file);
-    publish_empty_schema_and_wait_for_live_core(&first_port_file, &data_dir);
+    let (mut first, first_port) = start_jazz_tools_server(&data_dir, &first_port_file);
+    publish_empty_schema_and_wait_for_live_core(first_port, &data_dir);
 
     // SAFETY: `first.id()` names the live child process spawned above.
     let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGTERM) };
@@ -580,12 +590,28 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     // Reopening the same RocksDB directory proves controlled shutdown released
     // the process-local storage lock rather than merely stopping the listener.
     let second_port_file = temp_dir.path().join("second-port");
-    let mut second = start_jazz_tools_server(&data_dir, &second_port_file);
+    let (mut second, _second_port) = start_jazz_tools_server(&data_dir, &second_port_file);
     assert!(data_dir.join("server-shell.rocksdb").is_dir());
     // SAFETY: `second.id()` names the live child process spawned above.
     let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(result, 0, "send SIGTERM to restarted jazz-tools server");
     wait_for_successful_exit(&mut second, Duration::from_secs(10));
+}
+
+/// Bound-port readiness accepts only one complete newline-terminated numeric record.
+///
+/// This internal parser test is necessary because a process test can observe the
+/// readiness file between creation and completion, before any public network API
+/// can be contacted.
+#[cfg(unix)]
+#[test]
+fn bound_port_record_waits_for_a_complete_line() {
+    assert_eq!(parse_bound_port_record(""), None);
+    assert_eq!(parse_bound_port_record("42"), None);
+    assert_eq!(parse_bound_port_record("\n"), None);
+    assert_eq!(parse_bound_port_record("not-a-port\n"), None);
+    assert_eq!(parse_bound_port_record("0\n"), None);
+    assert_eq!(parse_bound_port_record("42000\n"), Some(42000));
 }
 
 #[test]
