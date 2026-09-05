@@ -296,4 +296,108 @@ describe("MessagePortBrowserFollowerConnection", () => {
 
     connection.detachForReconnect();
   });
+  it("cancels a silent inspector control opening and protocol-closes its channel", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    const controller = new AbortController();
+    const opening = connection.openInspectorControlPort(controller.signal);
+    await vi.waitFor(() =>
+      expect(port.sent.some((request) => request.type === "open-inspector-control")).toBe(true),
+    );
+    const request = port.sent.find((candidate) => candidate.type === "open-inspector-control");
+    if (!request || request.type !== "open-inspector-control") {
+      throw new Error("follower did not request an inspector control");
+    }
+    request.port.start();
+    const closed = new Promise<unknown>((resolve) => {
+      request.port.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+
+    controller.abort();
+
+    await expect(opening).rejects.toThrow("cancelled");
+    await expect(closed).resolves.toEqual({ type: "close" });
+    request.port.close();
+    connection.detachForReconnect();
+  });
+  it("protocol-closes an inspector channel when follower disposal rejects its opening", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    const opening = connection.openInspectorControlPort();
+    await vi.waitFor(() =>
+      expect(port.sent.some((request) => request.type === "open-inspector-control")).toBe(true),
+    );
+    const request = port.sent.find((candidate) => candidate.type === "open-inspector-control");
+    if (!request || request.type !== "open-inspector-control") {
+      throw new Error("follower did not request an inspector control");
+    }
+    request.port.start();
+    const closed = new Promise<unknown>((resolve) => {
+      request.port.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+
+    connection.detachForReconnect();
+
+    await expect(opening).rejects.toThrow("reconnecting");
+    await expect(closed).resolves.toEqual({ type: "close" });
+    request.port.close();
+  });
 });

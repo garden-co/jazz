@@ -106,8 +106,11 @@ export function installInspectorHost(
     getConnectionConfig() {
       return buildOverlayDbConfig(db.getConfig(), getDbInternalSession(db));
     },
-    openControlPort() {
-      return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());
+    openControlPort(signal) {
+      return openAggregatedBrowserInspectorControlPort(
+        (factorySignal) => db.openInspectorControlPort(factorySignal),
+        signal,
+      );
     },
     getWasmSchema() {
       const live = db.getRuntimeSchema();

@@ -7,8 +7,12 @@ import {
   deserializeBrowserRelayError,
   serializeBrowserRelayError,
 } from "../../runtime/native-runtime/browser-worker-protocol.js";
+import {
+  closeInspectorControlPort,
+  inspectorControlAbortError,
+} from "../../runtime/native-runtime/inspector-control-lifecycle.js";
 
-type ControlPortFactory = () => Promise<MessagePort>;
+type ControlPortFactory = (signal?: AbortSignal) => Promise<MessagePort>;
 type ControlRequestWithoutId = BrowserInspectorControlRequest extends infer Request
   ? Request extends { id: number }
     ? Omit<Request, "id">
@@ -23,6 +27,8 @@ function registry(): RegistryState {
   return (scope[REGISTRY_KEY] ??= { factories: new Map(), nextFactoryId: 1 });
 }
 
+const CONTROL_REQUEST_TIMEOUT_MS = 4_500;
+
 export function registerBrowserInspectorControl(factory: ControlPortFactory): () => void {
   const state = registry();
   const id = state.nextFactoryId++;
@@ -32,35 +38,111 @@ export function registerBrowserInspectorControl(factory: ControlPortFactory): ()
 
 export async function openAggregatedBrowserInspectorControlPort(
   fallback: ControlPortFactory,
+  signal?: AbortSignal,
 ): Promise<MessagePort> {
+  if (signal?.aborted) throw inspectorControlAbortError();
   const factories = registry().factories;
-  if (factories.size === 0) return fallback();
-  const registrations = [...factories];
-  const controls = await Promise.all(
-    registrations.map(async ([id, factory]) => ({ id, port: await factory(), nextId: 1 })),
-  );
+  if (factories.size === 0) return fallback(signal);
+
+  type Control = { id: number; port: MessagePort; nextId: number };
+  const controls: Control[] = [];
+  let acquisitionCancelled = false;
+  let rejectAcquisition: ((error: Error) => void) | undefined;
+  const closeAcquiredControls = () => {
+    for (const control of controls.splice(0)) closeInspectorControlPort(control.port);
+  };
+  const onAcquisitionAbort = () => {
+    acquisitionCancelled = true;
+    closeAcquiredControls();
+    rejectAcquisition?.(inspectorControlAbortError());
+  };
+  signal?.addEventListener("abort", onAcquisitionAbort, { once: true });
+  try {
+    const acquisition = Promise.all(
+      [...factories].map(async ([id, factory]) => {
+        const port = await factory(signal);
+        if (acquisitionCancelled || signal?.aborted) {
+          closeInspectorControlPort(port);
+          throw inspectorControlAbortError();
+        }
+        controls.push({ id, port, nextId: 1 });
+      }),
+    );
+    await (signal
+      ? Promise.race([
+          acquisition,
+          new Promise<never>((_, reject) => {
+            rejectAcquisition = reject;
+          }),
+        ])
+      : acquisition);
+  } catch (error) {
+    acquisitionCancelled = true;
+    closeAcquiredControls();
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", onAcquisitionAbort);
+    rejectAcquisition = undefined;
+  }
+
   for (const control of controls) control.port.start();
   const routes = new Map<string, { port: MessagePort; contextKey: string }>();
   const channel = new MessageChannel();
   const port = channel.port1;
+  const pendingCancels = new Set<(error: Error) => void>();
+  let disposed = false;
 
   const request = <T extends BrowserInspectorControlEvent>(
-    control: (typeof controls)[number],
+    control: Control,
     message: ControlRequestWithoutId,
     transfer: Transferable[] = [],
   ) =>
     new Promise<T>((resolve, reject) => {
       const id = control.nextId++;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (error?: unknown, event?: BrowserInspectorControlEvent) => {
+        if (settled) return;
+        settled = true;
+        control.port.removeEventListener("message", onMessage);
+        clearTimeout(timer);
+        pendingCancels.delete(cancel);
+        if (error !== undefined) reject(error);
+        else resolve(event as T);
+      };
+      const cancel = (error: Error) => finish(error);
       const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
         if (event.data.id !== id) return;
-        control.port.removeEventListener("message", onMessage);
-        if ("error" in event.data && event.data.error)
-          reject(deserializeBrowserRelayError(event.data.error));
-        else resolve(event.data as T);
+        if ("error" in event.data && event.data.error) {
+          finish(deserializeBrowserRelayError(event.data.error));
+        } else {
+          finish(undefined, event.data);
+        }
       };
+      pendingCancels.add(cancel);
       control.port.addEventListener("message", onMessage);
-      control.port.postMessage({ ...message, id }, transfer);
+      timer = setTimeout(
+        () => finish(new Error("Inspector relay control request timed out")),
+        CONTROL_REQUEST_TIMEOUT_MS,
+      );
+      try {
+        control.port.postMessage({ ...message, id }, transfer);
+      } catch (error) {
+        finish(error);
+      }
     });
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    port.removeEventListener("message", onMessage);
+    for (const cancel of [...pendingCancels]) {
+      cancel(new Error("Inspector aggregate control is closed"));
+    }
+    routes.clear();
+    closeAcquiredControls();
+    port.close();
+  };
 
   const onMessage = async (event: MessageEvent<BrowserInspectorControlRequest>) => {
     const message = event.data;
@@ -116,20 +198,14 @@ export async function openAggregatedBrowserInspectorControlPort(
       );
       port.postMessage({ type: "result", id: message.id });
     } catch (error) {
+      if (message.type === "attach-context") message.port.close();
+      if (disposed) return;
       port.postMessage({
         type: "result",
         id: "id" in message ? message.id : 0,
         error: serializeBrowserRelayError(error),
       });
     }
-  };
-  const dispose = () => {
-    port.removeEventListener("message", onMessage);
-    for (const control of controls) {
-      control.port.postMessage({ type: "close" });
-      control.port.close();
-    }
-    port.close();
   };
   port.addEventListener("message", onMessage);
   port.start();

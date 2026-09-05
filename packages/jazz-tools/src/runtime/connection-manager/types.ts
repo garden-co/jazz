@@ -168,7 +168,7 @@ export abstract class ConnectionManager {
     return null;
   }
 
-  openInspectorControlPort(): Promise<MessagePort> {
+  openInspectorControlPort(_signal?: AbortSignal): Promise<MessagePort> {
     return Promise.reject(new Error("This runtime has no shared browser worker"));
   }
 

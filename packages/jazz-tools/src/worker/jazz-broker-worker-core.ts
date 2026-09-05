@@ -1510,6 +1510,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       context.storageInvalidated ||
       !context.runtime
     ) {
+      message.port.close();
       port.postMessage({
         type: "result",
         id: message.id,

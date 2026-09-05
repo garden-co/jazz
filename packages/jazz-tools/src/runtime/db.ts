@@ -1968,8 +1968,8 @@ export class Db {
   }
 
   /** @internal Open a control channel for the same-origin embedded inspector. */
-  openInspectorControlPort(): Promise<MessagePort> {
-    return this.connection.openInspectorControlPort();
+  openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    return this.connection.openInspectorControlPort(signal);
   }
 
   /**

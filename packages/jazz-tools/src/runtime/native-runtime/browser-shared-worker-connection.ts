@@ -21,6 +21,7 @@ import type {
 } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
   BrowserWorkerInitOptions,
@@ -599,10 +600,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.deleteStorage();
   }
 
-  async openInspectorControlPort(): Promise<MessagePort> {
-    await this.ready();
+  async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    await waitForInspectorOpening(this.ready(), signal);
     if (!this.connection) throw new Error("Shared browser runtime is not connected");
-    const port = await this.connection.openInspectorControlPort();
+    const port = await this.connection.openInspectorControlPort(signal);
     const generation = this.connectedGeneration;
     if (generation !== null) {
       installWorkerTerminationGenerationHandoff(port, this.workerName, generation);

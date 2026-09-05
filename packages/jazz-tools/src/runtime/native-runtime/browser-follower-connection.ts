@@ -11,6 +11,11 @@ import {
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
+import {
+  closeInspectorControlPort,
+  inspectorControlAbortError,
+  waitForInspectorOpening,
+} from "./inspector-control-lifecycle.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -147,23 +152,51 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "finish-storage-reset" });
   }
 
-  async openInspectorControlPort(): Promise<MessagePort> {
-    await this.ready();
+  async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    await waitForInspectorOpening(this.ready(), signal);
+    if (signal?.aborted) throw inspectorControlAbortError();
+
     const channel = new MessageChannel();
     const id = this.nextRequestId++;
+    let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
+      rejectPending = reject;
       this.pending.set(id, { type: "open-inspector-control", resolve, reject });
     });
-    this.port.postMessage(
-      {
-        type: "open-inspector-control",
-        id,
-        port: channel.port2,
-      } satisfies BrowserFollowerPortRequest,
-      [channel.port2],
-    );
-    await promise;
-    return channel.port1;
+    let controlClosed = false;
+    const closeControl = () => {
+      if (controlClosed) return;
+      controlClosed = true;
+      closeInspectorControlPort(channel.port1);
+    };
+    const onAbort = () => {
+      if (!this.pending.delete(id)) return;
+      closeControl();
+      rejectPending(inspectorControlAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      this.port.postMessage(
+        {
+          type: "open-inspector-control",
+          id,
+          port: channel.port2,
+        } satisfies BrowserFollowerPortRequest,
+        [channel.port2],
+      );
+      await promise;
+      if (signal?.aborted) {
+        closeControl();
+        throw inspectorControlAbortError();
+      }
+      return channel.port1;
+    } catch (error) {
+      this.pending.delete(id);
+      closeControl();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
