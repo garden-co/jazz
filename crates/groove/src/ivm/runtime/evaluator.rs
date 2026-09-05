@@ -2604,27 +2604,11 @@ impl TickEvaluator<'_> {
         if let Some(mapping) = &self.node_meta.entry(node).or_default().join_output_mapping {
             return Ok(mapping.clone());
         }
-        let mapping = output_descriptor
-            .fields()
-            .iter()
-            .map(|field| {
-                let name = field
-                    .name
-                    .as_deref()
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-                if let Some(name) = name.strip_prefix("left.") {
-                    let field_idx = resolve_field_name(&left_descriptor, name)
-                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
-                    Ok((0, field_idx))
-                } else if let Some(name) = name.strip_prefix("right.") {
-                    let field_idx = resolve_field_name(&right_descriptor, name)
-                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
-                    Ok((1, field_idx))
-                } else {
-                    Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()))
-                }
-            })
-            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        let mapping = super::join::join_output_mapping(
+            &left_descriptor,
+            &right_descriptor,
+            &output_descriptor,
+        )?;
         let mapping = Arc::<[(usize, usize)]>::from(mapping);
         self.node_meta.entry(node).or_default().join_output_mapping = Some(mapping.clone());
         Ok(mapping)

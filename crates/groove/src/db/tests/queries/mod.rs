@@ -891,7 +891,7 @@ async fn stored_name_projection_uses_unambiguous_logical_name_when_carrier_is_sh
 }
 
 #[futures_test::test]
-async fn stored_name_projection_rejects_irreducible_name_ambiguity() {
+async fn stored_name_projection_preserves_exact_selection_under_irreducible_name_ambiguity() {
     use crate::ivm::{FieldRef, ProjectExpr};
     use crate::records::{DescriptorField, FieldIdentity};
     let descriptor = RecordDescriptor::new_with_fields([
@@ -911,21 +911,83 @@ async fn stored_name_projection_rejects_irreducible_name_ambiguity() {
     let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
         .await
         .unwrap();
-    let graph = GraphBuilder::values(
+    for (expression, expected) in [
+        (
+            ProjectExpr::Field(FieldRef::stored_name("right_carrier")),
+            Value::U64(33),
+        ),
+        (
+            ProjectExpr::Nullable(FieldRef::stored_name("right_carrier")),
+            Value::Nullable(Some(Box::new(Value::U64(33)))),
+        ),
+        (
+            ProjectExpr::NullableFlat(FieldRef::stored_name("right_carrier")),
+            Value::Nullable(Some(Box::new(Value::U64(33)))),
+        ),
+    ] {
+        let graph = GraphBuilder::values(
+            descriptor,
+            [vec![Value::U64(11), Value::U64(22), Value::U64(33)]],
+        )
+        .unwrap()
+        .project_fields([ProjectField {
+            expression,
+            output_name: "selected".into(),
+            output_identity: FieldIdentity::Name("selected".into()),
+        }]);
+        assert_eq!(
+            database
+                .query_graph(graph)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(vec![expected], 1)]
+        );
+    }
+}
+
+#[futures_test::test]
+async fn joined_output_carriers_do_not_rebind_to_colliding_application_names() {
+    use crate::records::{DescriptorField, FieldIdentity};
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField::new("_app_created_by", ValueType::U64)
+            .with_identity(FieldIdentity::Name("created_by".into())),
+        DescriptorField::new("created_by", ValueType::String),
+    ]);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    let left = GraphBuilder::values(
         descriptor,
-        [vec![Value::U64(11), Value::U64(22), Value::U64(33)]],
+        [vec![Value::U64(33), Value::String("metadata".into())]],
     )
-    .unwrap()
-    .project_fields([ProjectField {
-        expression: ProjectExpr::Field(FieldRef::stored_name("right_carrier")),
-        output_name: "selected".into(),
-        output_identity: FieldIdentity::Name("selected".into()),
-    }]);
-    let error = database.query_graph(graph).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("cannot be represented unambiguously"),
-        "{error}"
+    .unwrap();
+    let right = GraphBuilder::values(
+        RecordDescriptor::new([("seed", ValueType::U8)]),
+        [vec![Value::U8(7)]],
+    )
+    .unwrap();
+    let graph = GraphBuilder::join(
+        left,
+        right,
+        std::iter::empty::<String>(),
+        std::iter::empty::<String>(),
+    );
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(
+            vec![
+                Value::U64(33),
+                Value::String("metadata".into()),
+                Value::U8(7)
+            ],
+            1
+        )]
     );
 }

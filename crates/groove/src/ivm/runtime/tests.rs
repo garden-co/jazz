@@ -1393,7 +1393,7 @@ async fn pure_copy_project_lowers_with_full_fast_mapping() {
             && project
                 .expressions
                 .iter()
-                .all(|expr| matches!(expr.expression, PlanExpr::Field(_)))
+                .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
     }));
 }
 

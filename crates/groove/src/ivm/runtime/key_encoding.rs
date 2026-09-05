@@ -714,9 +714,8 @@ pub(super) fn project_binding_source_deltas(
                 .name
                 .as_ref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-            resolve_field_name(&input.descriptor, name)
+            resolve_field_ref(&input.descriptor, &FieldRef::stored_name(name))
                 .map(|index| (0, index))
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let deltas = input

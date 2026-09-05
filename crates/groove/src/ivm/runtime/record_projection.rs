@@ -613,35 +613,20 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
 pub(super) fn project_field_expr(
     input: &RecordDescriptor,
     field: &ProjectField,
-) -> Result<PlanExpr, IvmRuntimeError> {
-    match &field.expression {
-        ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
-        ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
-        ProjectExpr::TypedLiteral { value, .. } => Ok(PlanExpr::literal(value.clone())),
-        ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
-        ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
-        ProjectExpr::NullableFlat(source) => {
-            Ok(PlanExpr::nullable_flat(field_ref_name(input, source)?))
+) -> Result<ProjectExpr, IvmRuntimeError> {
+    let mut expression = field.expression.clone();
+    match &mut expression {
+        ProjectExpr::Field(source)
+        | ProjectExpr::Nullable(source)
+        | ProjectExpr::NullableFlat(source)
+        | ProjectExpr::EnumTagRemap { source, .. }
+        | ProjectExpr::EnumRemap { source, .. }
+        | ProjectExpr::RecursiveEnumRemap { source, .. } => {
+            *source = FieldRef::Resolved(resolve_field_ref(input, source)?);
         }
-        ProjectExpr::EnumTagRemap { source, tags } => Ok(PlanExpr::EnumTagRemap {
-            field: field_ref_name(input, source)?,
-            tags: tags.clone(),
-        }),
-        ProjectExpr::EnumRemap { source, tags } => Ok(PlanExpr::EnumRemap {
-            field: field_ref_name(input, source)?,
-            tags: tags.clone(),
-        }),
-        ProjectExpr::RecursiveEnumRemap {
-            source,
-            remaps,
-            omit_unrepresentable,
-            ..
-        } => Ok(PlanExpr::RecursiveEnumRemap {
-            field: field_ref_name(input, source)?,
-            remaps: remaps.clone(),
-            omit_unrepresentable: *omit_unrepresentable,
-        }),
+        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {}
     }
+    Ok(expression)
 }
 
 pub(super) fn project_record(
@@ -661,20 +646,21 @@ pub(super) fn project_record(
 
     let input = BorrowedRecord::new(input_record, input_desc);
     let mut values = Vec::with_capacity(expressions.len());
-    for expr in expressions {
-        let resolved = |field: &String| -> Result<Value, IvmRuntimeError> {
-            let source_idx = resolve_field_name(input_desc, field)
-                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+    for (output_idx, expr) in expressions.iter().enumerate() {
+        let resolved = |field: &FieldRef| -> Result<Value, IvmRuntimeError> {
+            let source_idx = resolve_field_ref(input_desc, field)?;
             input
                 .get_idx(source_idx)
                 .map_err(IvmRuntimeError::RecordEncoding)
         };
         values.push(match &expr.expression {
-            PlanExpr::Field(field) => resolved(field)?,
-            PlanExpr::Literal(value) => value.to_value(),
-            PlanExpr::Null(_) => Value::Nullable(None),
-            PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
-            PlanExpr::NullableFlat(field) => {
+            ProjectExpr::Field(field) => resolved(field)?,
+            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
+                value.to_value()
+            }
+            ProjectExpr::Null(_) => Value::Nullable(None),
+            ProjectExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
+            ProjectExpr::NullableFlat(field) => {
                 let value = resolved(field)?;
                 if matches!(value, Value::Nullable(_)) {
                     value
@@ -682,16 +668,20 @@ pub(super) fn project_record(
                     Value::Nullable(Some(Box::new(value)))
                 }
             }
-            PlanExpr::EnumTagRemap { field, tags } => remap_enum_tag(resolved(field)?, tags)?,
-            PlanExpr::EnumRemap { field, tags } => remap_enum(resolved(field)?, tags)?,
-            PlanExpr::RecursiveEnumRemap { field, remaps, .. } => {
-                let source_idx = resolve_field_name(input_desc, field)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-                let output_idx = output_desc
-                    .field_index(expr.output_name.as_deref().ok_or_else(|| {
-                        IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned())
-                    })?)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            ProjectExpr::EnumTagRemap {
+                source: field,
+                tags,
+            } => remap_enum_tag(resolved(field)?, tags)?,
+            ProjectExpr::EnumRemap {
+                source: field,
+                tags,
+            } => remap_enum(resolved(field)?, tags)?,
+            ProjectExpr::RecursiveEnumRemap {
+                source: field,
+                remaps,
+                ..
+            } => {
+                let source_idx = resolve_field_ref(input_desc, field)?;
                 remap_recursive_enum_value(
                     resolved(field)?,
                     &input_desc.fields()[source_idx].value_type,
@@ -940,7 +930,7 @@ pub(super) fn projection_uses_raw_copy(
         && mapping.len() == output_desc.fields().len()
         && expressions
             .iter()
-            .all(|expr| matches!(expr.expression, PlanExpr::Field(_)))
+            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
 }
 
 pub(super) fn raw_projection_fields(
@@ -955,32 +945,34 @@ pub(super) fn raw_projection_fields(
     let fields = project
         .expressions
         .iter()
-        .map(|expr| match &expr.expression {
-            PlanExpr::Field(field) => resolve_field_name(input_desc, field)
+        .enumerate()
+        .map(|(output_idx, expr)| match &expr.expression {
+            ProjectExpr::Field(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::Copy { source_idx }),
-            PlanExpr::Nullable(field) => resolve_field_name(input_desc, field)
+            ProjectExpr::Nullable(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::WrapNullable { source_idx }),
-            PlanExpr::NullableFlat(field) => resolve_field_name(input_desc, field)
+            ProjectExpr::NullableFlat(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::FlattenNullable { source_idx }),
-            PlanExpr::Null(_) => Some(RawProjectionField::Encoded {
+            ProjectExpr::Null(_) => Some(RawProjectionField::Encoded {
                 bytes: encode_projection_field_value(
                     output_desc,
-                    expr.output_name.as_deref(),
+                    output_idx,
                     Value::Nullable(None),
                 )
                 .ok()?,
             }),
-            PlanExpr::Literal(value) => Some(RawProjectionField::Encoded {
-                bytes: encode_projection_field_value(
-                    output_desc,
-                    expr.output_name.as_deref(),
-                    value.to_value(),
-                )
-                .ok()?,
-            }),
-            PlanExpr::EnumTagRemap { .. }
-            | PlanExpr::EnumRemap { .. }
-            | PlanExpr::RecursiveEnumRemap { .. } => None,
+            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
+                Some(RawProjectionField::Encoded {
+                    bytes: encode_projection_field_value(output_desc, output_idx, value.to_value())
+                        .ok()?,
+                })
+            }
+            ProjectExpr::EnumTagRemap { .. }
+            | ProjectExpr::EnumRemap { .. }
+            | ProjectExpr::RecursiveEnumRemap { .. } => None,
         })
         .collect::<Option<Vec<_>>>();
     Ok(fields)
@@ -988,16 +980,9 @@ pub(super) fn raw_projection_fields(
 
 fn encode_projection_field_value(
     output_desc: RecordDescriptor,
-    output_name: Option<&str>,
+    field_idx: usize,
     value: Value,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    let field_idx = if let Some(output_name) = output_name {
-        output_desc
-            .field_index(output_name)
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(output_name.to_owned()))?
-    } else {
-        return Err(IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()));
-    };
     let field = output_desc
         .fields()
         .get(field_idx)

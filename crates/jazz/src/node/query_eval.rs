@@ -3929,7 +3929,10 @@ where
             .await
             .map_err(Error::Groove)?;
         let subscription_id = subscription.id();
-        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        let snapshot = match futures::future::poll_fn(|cx| subscription.poll_next_event(cx)).await {
+            GrooveSubscriptionEvent::Update(update) => Ok(update.deltas),
+            GrooveSubscriptionEvent::Error(error) => Err(Error::Groove(error.into())),
+        };
         self.database.unsubscribe(subscription_id);
         snapshot
     }
@@ -3958,7 +3961,10 @@ where
             }
         };
         let subscription_id = subscription.id();
-        let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
+        let snapshot = match futures::future::poll_fn(|cx| subscription.poll_next_event(cx)).await {
+            GrooveSubscriptionEvent::Update(update) => Ok(update.deltas),
+            GrooveSubscriptionEvent::Error(error) => Err(Error::Groove(error.into())),
+        };
         self.database.unsubscribe(subscription_id);
         self.database
             .retire_prepared_shape(shape)

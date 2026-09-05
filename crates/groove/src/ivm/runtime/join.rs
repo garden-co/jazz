@@ -14,13 +14,14 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use crate::{
-    ivm::ValueComparison,
+    ivm::{FieldRef, ValueComparison},
     records::{RecordDescriptor, ValueType},
 };
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part, record_projection::resolve_field_name,
+    encode_key_part,
+    record_projection::{resolve_field_name, resolve_field_ref},
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -1047,12 +1048,10 @@ pub(super) fn join_output_mapping(
                 .as_deref()
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
             if let Some(name) = name.strip_prefix("left.") {
-                let field_idx = resolve_field_name(left_descriptor, name)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
+                let field_idx = resolve_field_ref(left_descriptor, &FieldRef::stored_name(name))?;
                 Ok((0, field_idx))
             } else if let Some(name) = name.strip_prefix("right.") {
-                let field_idx = resolve_field_name(right_descriptor, name)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
+                let field_idx = resolve_field_ref(right_descriptor, &FieldRef::stored_name(name))?;
                 Ok((1, field_idx))
             } else {
                 Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()))
