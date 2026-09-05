@@ -1,6 +1,6 @@
 /* Expo prebuild hook: injects the test-only trusted fixture source into the
  * generated host. It intentionally does not expose configuration to JS. */
-const { withDangerousMod } = require("@expo/config-plugins");
+const { withAndroidManifest, withDangerousMod } = require("@expo/config-plugins");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -27,7 +27,7 @@ function injectAndroidBuildConfig(root) {
     "        // Schema/app metadata is public; endpoint and ephemeral bearers are",
     "        // launch-only inputs from the local Rust Edge/Core harness.",
     '        buildConfigField "String", "JAZZ_DEVICE_APP_ID", "\\"jazz-device-acceptance\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\\"{\\\\\"tables\\\\\":{\\\\\"todos\\\\\":{\\\\\"columns\\\\\":[{\\\\\"name\\\\\":\\\\\"title\\\\\",\\\\\"column_type\\\\\":{\\\\\"type\\\\\":\\\\\"Text\\\\\"},\\\\\"nullable\\\\\":false}]}}}\\""',
+    `        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", ${JSON.stringify(JSON.stringify(JSON.stringify(require("../native/device-fixture.json").schema)))}`, // todos and policy-protected scope_rows
   ].join("\n");
   if (!source.includes(marker))
     throw new Error("Expo app build.gradle no longer has the BuildConfig insertion marker");
@@ -35,6 +35,18 @@ function injectAndroidBuildConfig(root) {
 }
 
 module.exports = function withJazzDeviceFixture(config) {
+  config = withAndroidManifest(config, (mod) => {
+    const application = mod.modResults.manifest.application?.[0];
+    if (!application) throw new Error("Expo Android manifest has no application");
+    application.$["android:networkSecurityConfig"] = "@xml/jazz_device_network_security";
+    return mod;
+  });
+  config = copyTemplate(
+    config,
+    "android",
+    "android/jazz_device_network_security.xml",
+    "app/src/main/res/xml/jazz_device_network_security.xml",
+  );
   const androidSource = "app/src/main/java/dev/jazz/rndeviceacceptance/";
   config = copyTemplate(
     config,

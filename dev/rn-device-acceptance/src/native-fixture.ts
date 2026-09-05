@@ -1,6 +1,7 @@
-import { NativeModules } from "react-native";
+import { NativeModules, Platform as NativePlatform } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
 import { decodeBase64 } from "./base64.ts";
+import type { SeedBoundary } from "./seed-teardown";
 import type { DeviceDiagnosticCode } from "./device-diagnostics.ts";
 import type { Platform } from "./protocol";
 import type { AdmittedRelay } from "./relay-admission";
@@ -14,6 +15,8 @@ export type DeviceReceiptContext = {
 };
 
 type FixtureModule = {
+  waitForCoreObservation(): Promise<void>;
+  recordSeedBoundary(code: SeedBoundary): boolean;
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
   switchAuthScope(): Promise<string>;
@@ -113,4 +116,20 @@ export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promis
 /** Clear the pending stage only after the complete native lifecycle succeeds. */
 export async function clearDeviceDiagnostic(): Promise<void> {
   await fixtureModule().clearDiagnostic();
+}
+
+/** Test-only host acknowledgement, separate from the public write wait API. */
+export async function waitForNativeCoreObservation(): Promise<void> {
+  await fixtureModule().waitForCoreObservation();
+}
+
+/** Synchronous Android log capture survives a subsequent blocked JS/native call.
+ * Diagnostic failure must never change the acceptance proof or teardown. */
+export function recordNativeSeedBoundary(code: SeedBoundary): void {
+  if (NativePlatform.OS !== "android") return;
+  try {
+    fixtureModule().recordSeedBoundary(code);
+  } catch {
+    // Preserve the actual acceptance outcome if the diagnostic sink fails.
+  }
 }

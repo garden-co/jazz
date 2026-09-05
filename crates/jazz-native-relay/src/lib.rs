@@ -6,6 +6,7 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
 use std::future::Future;
@@ -2701,7 +2702,11 @@ impl NativeRelayClient {
                 .get(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
             client.db.set_tick_scheduler(wake.map(|wake| {
-                Rc::new(ForegroundWakeScheduler { wake, foreground }) as Rc<dyn TickScheduler>
+                Rc::new(ForegroundWakeScheduler {
+                    wake,
+                    foreground,
+                    pending: worker.pending_foreground_wakes.clone(),
+                }) as Rc<dyn TickScheduler>
             }));
             Ok(())
         })
@@ -2883,13 +2888,45 @@ impl NativeRelayClient {
     }
 }
 
+// A Db poll may temporarily switch to a stacker segment. Platform callbacks
+// can attach to the JVM, whose stack checks require the original pthread stack.
+// Schedulers only record owner-local signals; each owner operation flushes them
+// after all polls return and before publishing its result or parking again.
+// Foreground handles are host-global, not client-local; that host owns this
+// relay's registry. Replacement is itself an owner operation, so a pending
+// entry never crosses into a later registration's operation.
+type PendingForegroundWakes = Rc<RefCell<BTreeMap<u64, PendingForegroundWake>>>;
+
+struct PendingForegroundWake {
+    wake: Arc<ForegroundWakeState>,
+    kind: u8,
+    delay_ms: u64,
+}
+
 struct ForegroundWakeScheduler {
     wake: Arc<ForegroundWakeState>,
     foreground: u64,
+    pending: PendingForegroundWakes,
 }
 impl ForegroundWakeScheduler {
     fn wake(&self, kind: u8, delay_ms: u64) {
-        self.wake.wake(self.foreground, kind, delay_ms);
+        let mut pending = self.pending.borrow_mut();
+        let entry = pending
+            .entry(self.foreground)
+            .or_insert_with(|| PendingForegroundWake {
+                wake: self.wake.clone(),
+                kind,
+                delay_ms,
+            });
+        if kind == FOREGROUND_WAKE_IMMEDIATE
+            || (kind == FOREGROUND_WAKE_DEFERRED && entry.kind == FOREGROUND_WAKE_AFTER)
+            || (kind == FOREGROUND_WAKE_AFTER
+                && entry.kind == FOREGROUND_WAKE_AFTER
+                && delay_ms < entry.delay_ms)
+        {
+            entry.kind = kind;
+            entry.delay_ms = delay_ms;
+        }
     }
 }
 impl TickScheduler for ForegroundWakeScheduler {
@@ -3354,9 +3391,11 @@ async fn run_native_relay_socket_worker(
         let connected = match connected {
             Ok(connected) => connected,
             Err(error) => {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay socket connect failed: {error}"
-                )));
+                if !error.is_retryable() {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay socket connect failed: {error}"
+                    )));
+                }
                 (config.on_event)(NativeRelaySocketEvent::Reconnecting);
                 tokio::select! {
                     _ = tokio::time::sleep(config.reconnect_delay) => {},
@@ -3615,6 +3654,7 @@ fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest,
 }
 
 struct RelayWorker {
+    pending_foreground_wakes: PendingForegroundWakes,
     persistent: Db<SqliteStorage>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     clients: BTreeMap<u64, ConnectedClient>,
@@ -3625,6 +3665,15 @@ struct RelayWorker {
 }
 
 impl RelayWorker {
+    fn flush_foreground_wakes(&mut self) {
+        let pending = std::mem::take(&mut *self.pending_foreground_wakes.borrow_mut());
+        for (foreground, pending) in pending {
+            pending
+                .wake
+                .wake(foreground, pending.kind, pending.delay_ms);
+        }
+    }
+
     fn open(
         config: RelayOpenConfig,
         wire: NativeRelayWire,
@@ -3652,6 +3701,7 @@ impl RelayWorker {
         let upstream =
             block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
         Ok(Self {
+            pending_foreground_wakes: Rc::default(),
             persistent,
             _upstream: upstream,
             clients: BTreeMap::new(),
@@ -4457,7 +4507,9 @@ impl NativeRelay {
     ) -> Result<T, RelayError> {
         let (response_tx, response_rx) = mpsc::channel();
         let job: RelayJob = Box::new(move |worker| {
-            let _ = response_tx.send(operation(worker));
+            let result = operation(worker);
+            worker.flush_foreground_wakes();
+            let _ = response_tx.send(result);
         });
         let normal_permit = (!teardown)
             .then(|| NormalOwnerQueuePermit::acquire(&self.inner.normal_queue_depth))
@@ -5262,6 +5314,62 @@ mod tests {
     /// acceptance receipt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_edge_core_write_survives_worker_and_relay_restart() {
+        private_session_restart_receipt(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_edge_core_write_survives_offline_relay_restart() {
+        private_session_restart_receipt(true).await;
+    }
+
+    /// The C ABI must surface an actual Edge authentication denial, even though
+    /// a disconnected peer no longer disables local SQLite work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_invalid_bearer_still_fails_closed() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = schema();
+        let edge = JazzServer::builder()
+            .with_schema(schema.public_schema().clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+        let mut bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
+        let signature = bearer.rfind('.').unwrap() + 1;
+        let replacement = if &bearer[signature..signature + 1] == "A" {
+            "B"
+        } else {
+            "A"
+        };
+        bearer.replace_range(signature..signature + 1, replacement);
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let admitted = fixture.begin_private_session(
+            &edge.base_url(),
+            &edge.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let foreground = fixture.open_foreground(&admitted);
+        jazz_testkit::wait_for(
+            Duration::from_secs(5),
+            "invalid signature fails the native foreground closed",
+            || {
+                let denied =
+                    fixture.tick_status(foreground) == JazzNativeRelayStatus::LifecycleFailure;
+                async move { denied.then_some(()) }
+            },
+        )
+        .await;
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            edge.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
+    async fn private_session_restart_receipt(offline: bool) {
         let issuer = TestJwtIssuer::start().await;
         let schema = schema();
         let public_schema = schema.public_schema().clone();
@@ -5343,23 +5451,41 @@ mod tests {
             "revoked private-session capability cannot restart the old worker"
         );
 
-        let reopened = fixture.begin_private_session(
-            &edge.base_url(),
-            &core.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let endpoint = edge.base_url();
+        let app_id = core.app_id().to_string();
+        let mut edge = Some(edge);
+        let mut core = Some(core);
+        if offline {
+            assert_eq!(
+                edge.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+            assert_eq!(
+                core.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+        }
+
+        let reopened =
+            fixture.begin_private_session(&endpoint, &app_id, &bearer, storage.path(), &schema);
         let reopened_foreground = fixture.open_foreground(&reopened);
-        jazz_testkit::wait_for(
-            Duration::from_secs(15),
-            "replacement native worker reconnects through normal Edge auth",
-            || {
-                let connected = edge.server_state().shutdown.active_websockets() > 0;
-                async move { connected.then_some(()) }
-            },
-        )
-        .await;
+        if !offline {
+            jazz_testkit::wait_for(
+                Duration::from_secs(15),
+                "replacement native worker reconnects through normal Edge auth",
+                || {
+                    let connected = edge
+                        .as_ref()
+                        .unwrap()
+                        .server_state()
+                        .shutdown
+                        .active_websockets()
+                        > 0;
+                    async move { connected.then_some(()) }
+                },
+            )
+            .await;
+        }
         wait_for_persisted_todo(
             &fixture,
             reopened_foreground,
@@ -5370,14 +5496,16 @@ mod tests {
         .await;
 
         fixture.revoke_private_session(&reopened);
-        assert_eq!(
-            edge.shutdown().await,
-            jazz_server::ShutdownPhase::StorageClosed
-        );
-        assert_eq!(
-            core.shutdown().await,
-            jazz_server::ShutdownPhase::StorageClosed
-        );
+        if !offline {
+            assert_eq!(
+                edge.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+            assert_eq!(
+                core.take().unwrap().shutdown().await,
+                jazz_server::ShutdownPhase::StorageClosed
+            );
+        }
     }
 
     impl Drop for NativeHostAbiFixture {
@@ -5689,6 +5817,26 @@ mod tests {
             JazzNativeRelayStatus::InvalidHandle,
             "revocation retires A's already-open foreground"
         );
+        // Tick and byte-command execution use separate C entry points. The
+        // installed device receipt probes the stale JSI alias, so prove that
+        // exact liveness boundary instead of inferring it from tick failure.
+        let request = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
+        let mut output = JazzNativeRelayBytes::EMPTY;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    fixture.lease,
+                    a,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::InvalidHandle,
+            "a revoked foreground cannot answer the installed JSI byte Probe"
+        );
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
         assert_eq!(
             fixture.tick_status(b),
             JazzNativeRelayStatus::Ok,
@@ -6161,6 +6309,163 @@ mod tests {
         let old_first_foreground = NodeUuid::from_bytes(deterministic);
         assert_ne!(before_restart.node, old_first_foreground);
         assert_ne!(after_restart.node, old_first_foreground);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreground_wakes_leave_alternate_stacks_before_native_callback() {
+        // Internal embedding-boundary receipt: row results cannot reveal which
+        // native stack invokes a callback. ART derives attachment bounds from
+        // pthread metadata, so a scheduler called on stacker's separate segment
+        // must defer JNI until the owner operation returns to that stack.
+        #[derive(Default)]
+        struct Receipt {
+            operation_returned: AtomicBool,
+            calls: Mutex<Vec<(u8, u64, bool, bool)>>,
+        }
+        fn on_pthread_stack() -> bool {
+            let marker = 0u8;
+            unsafe {
+                let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+                assert_eq!(
+                    libc::pthread_getattr_np(libc::pthread_self(), attr.as_mut_ptr()),
+                    0
+                );
+                let mut attr = attr.assume_init();
+                let mut base = std::ptr::null_mut();
+                let mut size = 0;
+                assert_eq!(libc::pthread_attr_getstack(&attr, &mut base, &mut size), 0);
+                assert_eq!(libc::pthread_attr_destroy(&mut attr), 0);
+                let address = &marker as *const u8 as usize;
+                (base as usize..base as usize + size).contains(&address)
+            }
+        }
+        unsafe extern "C" fn capture(context: *mut c_void, _: u64, kind: u8, delay: u64) {
+            let receipt = unsafe { &*(context as *const Receipt) };
+            receipt.calls.lock().unwrap().push((
+                kind,
+                delay,
+                on_pthread_stack(),
+                receipt.operation_returned.load(Ordering::SeqCst),
+            ));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("stack.sqlite"), Some("stack")))
+                .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x44; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let receipt = Arc::new(Receipt::default());
+        let state = Arc::new(ForegroundWakeState::new(ForegroundWakeRegistration {
+            callback: capture,
+            context: Arc::as_ptr(&receipt) as usize,
+        }));
+        client
+            .set_foreground_wake_callback(1, Some(state.clone()))
+            .unwrap();
+        receipt.calls.lock().unwrap().clear();
+        for (urgencies, expected, fail) in [
+            (
+                vec![TickUrgency::AfterCurrentTurn],
+                (FOREGROUND_WAKE_AFTER, 0),
+                false,
+            ),
+            (
+                vec![TickUrgency::Deferred],
+                (FOREGROUND_WAKE_DEFERRED, 0),
+                false,
+            ),
+            (
+                vec![TickUrgency::Immediate, TickUrgency::Deferred],
+                (FOREGROUND_WAKE_IMMEDIATE, 0),
+                true,
+            ),
+            (vec![], (FOREGROUND_WAKE_AFTER, 3), false),
+        ] {
+            receipt.operation_returned.store(false, Ordering::SeqCst);
+            let done = receipt.clone();
+            let timer_state = state.clone();
+            let client_id = client.id;
+            let result = relay.run(move |worker| {
+                let db = &worker.clients[&client_id].db;
+                let timer = ForegroundWakeScheduler {
+                    wake: timer_state,
+                    foreground: 1,
+                    pending: worker.pending_foreground_wakes.clone(),
+                };
+                assert!(on_pthread_stack());
+                stacker::grow(8 * 1024 * 1024, || {
+                    assert!(
+                        !on_pthread_stack(),
+                        "control enters a separate stack segment"
+                    );
+                    timer.schedule_tick_after(20);
+                    timer.schedule_tick_after(3);
+                    for urgency in urgencies {
+                        db.schedule_tick(urgency);
+                    }
+                    assert!(
+                        done.calls.lock().unwrap().is_empty(),
+                        "native callback must wait for original stack"
+                    );
+                });
+                done.operation_returned.store(true, Ordering::SeqCst);
+                if fail {
+                    Err(RelayError::Closed)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(
+                *receipt.calls.lock().unwrap(),
+                vec![(expected.0, expected.1, true, true)],
+                "wake flushes even on operation error, before response and owner park"
+            );
+            receipt.calls.lock().unwrap().clear();
+        }
+        // Cancellation after a signal but before flush must make its queued
+        // registration inert, including when no later owner command arrives.
+        let cancel = state.clone();
+        client
+            .with_db(move |db| {
+                stacker::grow(8 * 1024 * 1024, || {
+                    db.schedule_tick(TickUrgency::Immediate);
+                    cancel.inert();
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert!(receipt.calls.lock().unwrap().is_empty());
+
+        // Replacing the same foreground's inert callback cannot leave an old
+        // pending Arc suppressing the new registration's signal.
+        let replacement = Arc::new(Receipt::default());
+        replacement.operation_returned.store(true, Ordering::SeqCst);
+        let replacement_state = Arc::new(ForegroundWakeState::new(ForegroundWakeRegistration {
+            callback: capture,
+            context: Arc::as_ptr(&replacement) as usize,
+        }));
+        client
+            .set_foreground_wake_callback(1, Some(replacement_state.clone()))
+            .unwrap();
+        replacement.calls.lock().unwrap().clear();
+        client
+            .with_db(|db| {
+                stacker::grow(8 * 1024 * 1024, || db.schedule_tick(TickUrgency::Deferred));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            *replacement.calls.lock().unwrap(),
+            vec![(FOREGROUND_WAKE_DEFERRED, 0, true, true)]
+        );
+        assert!(receipt.calls.lock().unwrap().is_empty());
+        replacement_state.inert();
     }
 
     #[test]

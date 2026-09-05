@@ -47,8 +47,16 @@ connection to the same SQLite store. The worker stays alive across a clean
 foreground handoff and is stopped only by trusted scope revocation or host
 teardown. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
-host aliases (`10.0.2.2` and `10.0.3.2`). A failed connect, bridge, owner pump,
-or established transport is recorded as a scope terminal error and surfaced to
+host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O failures and
+handshake timeouts leave local relay work available while the worker retries.
+An I/O wrapper alone is insufficient: rustls certificate/protocol failures
+arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
+A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
+matching browser admission. Authentication denial, invalid protocol, TLS, and
+unclassified connection failures remain terminal; diagnostic text never selects
+this category. A retryable failure cannot clear a previous terminal denial.
+A failed bridge, owner pump, or established transport is also recorded as a
+scope terminal error and surfaced to
 foreground ticks until a later authenticated reconnect clears it; it may never
 silently degrade into an indefinitely pending foreground operation.
 
