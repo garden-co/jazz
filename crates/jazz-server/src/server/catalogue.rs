@@ -8,6 +8,7 @@ use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
+    validate_permissions_relation_unions,
 };
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
@@ -655,6 +656,8 @@ impl CatalogueStore for StoredCatalogue {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
+        validate_permissions_relation_unions(&permissions)
+            .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         // Catalogue mutations take storage before the in-memory index. Holding
         // both locks makes parent validation and head advancement linearizable
         // for callers sharing this StoredCatalogue. The two storage writes
@@ -840,7 +843,9 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
-    use jazz::tools::public_schema::{SchemaBuilder, TablePolicies};
+    use jazz::tools::public_schema::{
+        PolicyExpr, RelExpr, RelUnionArm, SchemaBuilder, TableName, TablePolicies,
+    };
 
     use super::{CatalogueStore, StoredCatalogue};
     use crate::server::catalogue_storage::CatalogueMemoryStorage;
@@ -899,5 +904,58 @@ mod tests {
                 .count(),
             PUBLISHERS - 1
         );
+    }
+
+    #[test]
+    fn malformed_relation_union_labels_fail_before_catalogue_publication() {
+        let schema = SchemaBuilder::new().build();
+        let schema_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
+        let store = StoredCatalogue::new(
+            jazz::tools::AppId::from_name("invalid-union-labels"),
+            Some(schema),
+            Box::new(CatalogueMemoryStorage::new()),
+        )
+        .expect("catalogue");
+        let leaf = || RelExpr::TableScan {
+            table: TableName::new("todos"),
+            alias: None,
+        };
+        for labels in [
+            vec!["".to_owned()],
+            vec!["duplicate".to_owned(), "duplicate".to_owned()],
+            vec!["contains\0nul".to_owned()],
+            vec!["x".repeat(4097)],
+        ] {
+            let permissions = std::collections::HashMap::from([(
+                TableName::new("todos"),
+                TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                    rel: RelExpr::Union {
+                        inputs: labels
+                            .into_iter()
+                            .map(|label| RelUnionArm {
+                                label,
+                                input: leaf(),
+                            })
+                            .collect(),
+                    },
+                }),
+            )]);
+            assert!(matches!(
+                store.publish_permissions_bundle(schema_hash, permissions, None),
+                Err(super::CatalogueError::WriteError(_))
+            ));
+            assert!(
+                store
+                    .current_permissions_head()
+                    .expect("read head")
+                    .is_none()
+            );
+            assert!(
+                store
+                    .current_permissions()
+                    .expect("read permissions")
+                    .is_none()
+            );
+        }
     }
 }
