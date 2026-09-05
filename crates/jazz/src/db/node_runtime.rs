@@ -8,6 +8,8 @@ use super::peer_connection::{
     coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
+
+type DetachPeerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
@@ -2423,25 +2425,92 @@ where
         }
         let connection_ref = connection.borrow_mut();
         let node = self.node.borrow_mut();
-        self.detach_connection_with_guards(connection, connection_ref, node)
+        self.detach_connection_with_guards(connection, connection_ref, node, None, None)
     }
 
-    /// Wait for both owners before applying the shared detach transition.
+    /// Await a stable peer inventory and preload replay before detach mutation.
     pub async fn detach_connection_async(
         &self,
         connection: &Rc<LocalMutex<PeerConnection<S>>>,
-    ) -> bool {
-        if !self
-            .connections
-            .borrow()
-            .iter()
-            .any(|candidate| Rc::ptr_eq(candidate, connection))
-        {
-            return false;
+    ) -> Result<bool, Error> {
+        loop {
+            let peers = self.connections.borrow().clone();
+            if !peers.iter().any(|peer| Rc::ptr_eq(peer, connection)) {
+                return Ok(false);
+            }
+            // Every concurrent detach uses registry order, never target-first.
+            // No node guard is held while waiting for a peer owner.
+            let mut guards = BTreeMap::new();
+            for peer in &peers {
+                guards.insert(Rc::as_ptr(peer) as usize, peer.lock().await);
+            }
+            let mut node = self.node.lock().await;
+            let unchanged = {
+                let current = self.connections.borrow();
+                current.len() == peers.len()
+                    && current.iter().zip(&peers).all(|(a, b)| Rc::ptr_eq(a, b))
+            };
+            if !unchanged {
+                drop(node);
+                drop(guards);
+                continue;
+            }
+            let mut replay = BTreeMap::new();
+            let target = guards.get(&(Rc::as_ptr(connection) as usize)).unwrap();
+            let handoff = match &target.link {
+                ConnectionLink::Upstream(state) => {
+                    state.expected_scope_authority.is_some_and(|authority| {
+                        *self.admitted_upstream_authority.borrow() == Some(authority)
+                            && self
+                                .admitted_upstream_authorities
+                                .borrow()
+                                .iter()
+                                .any(|other| *other != authority)
+                    })
+                }
+                _ => false,
+            };
+            if handoff {
+                let transactions: Vec<_> = self
+                    .edge_fate_routes
+                    .borrow()
+                    .iter()
+                    .filter_map(|(tx_id, obligation)| {
+                        obligation
+                            .routes
+                            .iter()
+                            .any(|route| route.queue.upgrade().is_some())
+                            .then_some(*tx_id)
+                    })
+                    .collect();
+                for tx_id in transactions {
+                    // Finish cold storage work before any detach mutation. A
+                    // failed load leaves peers, receipts and outbox unchanged.
+                    replay.insert(tx_id, node.commit_unit_for(tx_id).await?);
+                }
+            }
+            let target = guards.remove(&(Rc::as_ptr(connection) as usize)).unwrap();
+            return Ok(self.detach_connection_with_guards(
+                connection,
+                target,
+                node,
+                Some(guards),
+                Some(replay),
+            ));
         }
-        let connection_ref = connection.lock().await;
-        let node = self.node.lock().await;
-        self.detach_connection_with_guards(connection, connection_ref, node)
+    }
+
+    fn with_detach_peer<T>(
+        peer: &Rc<LocalMutex<PeerConnection<S>>>,
+        guards: &mut Option<DetachPeerGuards<'_, S>>,
+        run: impl FnOnce(&mut PeerConnection<S>) -> T,
+    ) -> T {
+        match guards {
+            Some(guards) => run(guards
+                .get_mut(&(Rc::as_ptr(peer) as usize))
+                .expect("stable detach peer inventory")),
+            None => run(&mut peer.borrow_mut()),
+        }
     }
 
     fn detach_connection_with_guards(
@@ -2449,6 +2518,8 @@ where
         connection: &Rc<LocalMutex<PeerConnection<S>>>,
         mut connection_ref: futures::lock::MutexGuard<'_, PeerConnection<S>>,
         mut node: futures::lock::MutexGuard<'_, NodeState<S>>,
+        mut sibling_guards: Option<DetachPeerGuards<'_, S>>,
+        replay_units: Option<BTreeMap<TxId, SyncMessage>>,
     ) -> bool {
         if !self
             .connections
@@ -2667,18 +2738,23 @@ where
                     .iter()
                     .rev()
                     .find_map(|connection| {
-                        let connection_ref = connection.borrow();
-                        matches!(&connection_ref.link, ConnectionLink::Upstream(_))
-                            .then(|| Rc::clone(connection))
+                        Self::with_detach_peer(connection, &mut sibling_guards, |peer| {
+                            matches!(&peer.link, ConnectionLink::Upstream(_))
+                        })
+                        .then(|| Rc::clone(connection))
                     });
             if let Some(connection) = &fallback_connection {
-                connection
-                    .borrow_mut()
-                    .stage_inbound_without_authority_receipt();
+                Self::with_detach_peer(connection, &mut sibling_guards, |peer| {
+                    peer.stage_inbound_without_authority_receipt()
+                });
             }
             *self.active_authority_view_receipts.borrow_mut() =
                 fallback_connection.map(|connection| AuthorityViewReceipts {
-                    connection_epoch: connection.borrow().connection_epoch,
+                    connection_epoch: Self::with_detach_peer(
+                        &connection,
+                        &mut sibling_guards,
+                        |peer| peer.connection_epoch,
+                    ),
                     confirmation_floor: self.node.borrow().committed_global_time(),
                     subscriptions: BTreeSet::new(),
                     binding_views: BTreeSet::new(),
@@ -2717,30 +2793,39 @@ where
                     // the unit before becoming owner. Its per-link uploaded
                     // set is an optimization, never a fate authority token.
                     for candidate in self.connections.borrow().iter() {
-                        let mut candidate = candidate.borrow_mut();
-                        let ConnectionLink::Upstream(UpstreamConnectionState {
-                            expected_scope_authority,
-                            uploaded,
-                            outbox,
-                            ..
-                        }) = &mut candidate.link
-                        else {
-                            continue;
-                        };
-                        if *expected_scope_authority != Some(handoff) {
-                            continue;
-                        }
-                        for tx_id in &routed_txs {
-                            uploaded.remove(tx_id);
-                            let mut outbox = outbox.borrow_mut();
-                            outbox.push(PendingUpload {
-                                tx_id: *tx_id,
-                                unit: crate::db::block_on(
-                                    self.node.borrow_mut().commit_unit_for(*tx_id),
-                                )
-                                .ok(),
-                            });
-                        }
+                        Self::with_detach_peer(candidate, &mut sibling_guards, |candidate| {
+                            let ConnectionLink::Upstream(UpstreamConnectionState {
+                                expected_scope_authority,
+                                uploaded,
+                                outbox,
+                                ..
+                            }) = &mut candidate.link
+                            else {
+                                return;
+                            };
+                            if *expected_scope_authority != Some(handoff) {
+                                return;
+                            }
+                            for tx_id in &routed_txs {
+                                uploaded.remove(tx_id);
+                                let mut outbox = outbox.borrow_mut();
+                                outbox.push(PendingUpload {
+                                    tx_id: *tx_id,
+                                    unit: match &replay_units {
+                                        Some(units) => Some(
+                                            units
+                                                .get(tx_id)
+                                                .expect("preloaded detach replay")
+                                                .clone(),
+                                        ),
+                                        None => crate::db::block_on(
+                                            self.node.borrow_mut().commit_unit_for(*tx_id),
+                                        )
+                                        .ok(),
+                                    },
+                                });
+                            }
+                        });
                     }
                     self.schedule_tick(TickUrgency::Immediate);
                 } else {
