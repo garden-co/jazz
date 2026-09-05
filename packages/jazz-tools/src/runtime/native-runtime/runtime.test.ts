@@ -133,7 +133,12 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 }
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
-  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  if (
+    occurrenceKey.length === 25 &&
+    occurrenceKey[0] === 1 &&
+    occurrenceKey.subarray(17).every((byte) => byte === 0)
+  )
+    return sourceId;
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
@@ -5432,7 +5437,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
       const bytes = new Uint8Array(50);
-      bytes[0] = 2;
+      bytes[0] = 1;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -5463,8 +5468,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:02"),
-      expect.stringContaining("result:02"),
+      expect.stringContaining("result:01"),
+      expect.stringContaining("result:01"),
     ]);
     runtime.close();
   });
@@ -7616,7 +7621,7 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
-  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const keys of [
     delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
     delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
@@ -7640,7 +7645,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
     const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 2;
+    key[0] = 1;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(8, 21, 37);
@@ -7668,8 +7673,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const firstDelta = runtimeDeltaChanges(first.rootDelta);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:02"),
-    expect.stringContaining("result:02"),
+    expect.stringContaining("result:01"),
+    expect.stringContaining("result:01"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
@@ -7879,7 +7884,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
-  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
+  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec((index) => index.u64(0), 1);
@@ -7912,8 +7917,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writeTeamGatherBatches(writer, updated, descriptor);
   writer.vec(() => undefined, 0);
   for (const keys of [
-    delta.addedOccurrenceKeys ?? added.map((row) => Uint8Array.from([1, ...row.rowId])),
-    delta.updatedOccurrenceKeys ?? updated.map((row) => Uint8Array.from([1, ...row.rowId])),
+    delta.addedOccurrenceKeys ??
+      added.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+    delta.updatedOccurrenceKeys ??
+      updated.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
     [],
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
@@ -7968,7 +7975,7 @@ function writeTeamGatherBatches(
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
   const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-  key[0] = 2;
+  key[0] = 1;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);
   key.fill(2, 21, 37);

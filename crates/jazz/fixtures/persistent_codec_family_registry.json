@@ -481,7 +481,7 @@
         },
         {
           "path": "crates/jazz/fixtures/native_storage_corpus.md",
-          "anchor": "# Native Jazz epoch-1 compatibility corpus"
+          "anchor": "# Native Jazz current storage corpus"
         }
       ]
     },

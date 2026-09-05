@@ -45,14 +45,14 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "e01876d920687887c42fe5409bae09959a388c1159b41f9023eeb701219744a7";
+    "4aec397721f146845becdf0d5268a2229242a88ffe8b882312345d0039482d65";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "f47d144484972c04f336b02a4973cf6efde9935ac67f001d5abd3585c0c08dca";
+    "180cb5a7e50253ff1880c4a066ac987de4c889acee49fd93bdb75782727b9699";
 const CURRENT_NATIVE_SQLITE_BASE64: &str = include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
-const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "85569fa00541c4a6ab60fb85a6ff9d0d2a234b008a53cadfde20d48df1ebb28c";
-const CURRENT_NATIVE_SQLITE_SHA256: &str = "1f747a9a166019467aa30173f6552ba149c5a5f66bb1529e597eefc998b0d9ba";
+const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "8ad336a716f3166896cd9d5bcbc73140871bb2b6ed1dbe1e06589db924eb39ef";
+const CURRENT_NATIVE_SQLITE_SHA256: &str = "68392b7e23153baece369a7905532c5ed52efb1f572a35383cbfedaefa3e251c";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str = include_str!("../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
-const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "f6e5f312091070cf215700a5b8c7cb90f6d22c53b4e9a26e2a97ceb2b1df15ee";
+const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "d215f099b52e40da63ad1b8d9ea55efa44deb67fe6811f870b185fc63b4314d6";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -1705,7 +1705,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
         let read_only = rocksdb::DB::open_cf_for_read_only(&options, &rocks_path, &families, false)
             .expect("open committed RocksDB corpus read-only");
         assert!(
-            families.iter().any(|family| family == "__groove_storage_internal_v3"),
+            families.iter().any(|family| family == "__groove_storage_internal_v1"),
             "committed RocksDB corpus retains Groove's immutable internal family"
         );
         let rows = families
@@ -1750,12 +1750,18 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64).unwrap();
     let sqlite_before = std::fs::read(&sqlite_path).unwrap();
     let sqlite_error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(&sqlite_path, &refs, SqliteDurability::FullSync, &profile).err().expect("retired SQLite profile must reject");
-    assert!(sqlite_error.to_string().contains("storage manifest is inconsistent"), "{sqlite_error}");
+    assert!(
+        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("storage manifest is inconsistent")),
+        "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
+    );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
     let rocks_dir = tempfile::tempdir().unwrap();
     let rocks_path = unpack_native_rocksdb_fixture(rocks_dir.path(), EPOCH_1_NATIVE_ROCKSDB_BASE64).unwrap();
     let rocks_error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(&rocks_path, &refs, RocksDurability::FullSync, &profile).err().expect("retired RocksDB profile must reject");
-    assert!(rocks_error.to_string().contains("storage manifest is inconsistent"), "{rocks_error}");
+    assert!(
+        matches!(rocks_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("unmarked non-empty RocksDB store cannot be opened as raw-v1")),
+        "historical RocksDB root must fail closed before ordinary data admission: {rocks_error}"
+    );
 }
 
 #[test]
