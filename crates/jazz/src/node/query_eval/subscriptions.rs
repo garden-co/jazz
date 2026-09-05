@@ -347,12 +347,7 @@ where
         self.query
             .authority_results
             .retain(|key, _| !reclaimed.contains(key.binding_view.shape_id));
-        self.query
-            .settled_result_sets
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
-        self.query
-            .settled_result_row_index
-            .retain(|key, _| !reclaimed.contains(key.shape_id));
+
         self.query
             .settled_program_facts
             .retain(|key, _| !reclaimed.contains(key.shape_id));
@@ -831,7 +826,6 @@ where
                     !self.query.retained_root_window_sources.contains_key(key)
                         && (state.live_settled
                             || state.settled_through.is_some()
-                            || !state.settled_result_set.is_empty()
                             || !state.settled_program_facts.is_empty())
                 })
                 .count(),

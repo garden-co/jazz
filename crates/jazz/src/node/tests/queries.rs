@@ -144,28 +144,17 @@ fn maintained_rows_by_uuid_for_identity(
 }
 
 #[test]
-fn history_complete_query_ignores_stale_settled_result_membership() {
+fn history_complete_query_derives_membership_from_canonical_rows() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_history_complete_node_with_schema(node(9), schema);
     let (first, second, _owner) = seed_access_path_docs(&mut writer, &mut core);
     let query = Query::from("docs");
-    let shape = query.validate(&core.catalogue.schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let binding_view = crate::protocol::BindingViewKey::new(
-        shape.shape_id(),
-        binding.binding_id(),
-        crate::protocol::ReadViewKey::default(),
-    );
-    core.query
-        .settled_result_sets
-        .insert(binding_view, BTreeSet::new());
-
     assert!(core.is_history_complete());
     assert_eq!(
         query_rows_by_uuid(&mut core, query, DurabilityTier::Global).0,
         vec![first, second],
-        "a history-complete authority must read canonical physical state rather than its downstream settled-result cache"
+        "a history-complete authority must derive both rows from canonical physical state"
     );
 }
 

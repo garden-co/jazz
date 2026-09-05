@@ -131,3 +131,13 @@ logical-pack coverage change may leave physical checksums unchanged when the
 existing artifacts already contain the newly audited bytes; record that
 fresh-root verification explicitly. Pre-settlement alpha stores remain
 intentionally unsupported.
+
+## Inactive output persistence removal (#2578)
+
+The current producer no longer registers `jazz_settled_result_members`. Its
+previous pack contained only the empty family declaration; the live producer
+removes exactly that line and preserves every active entry byte. Historical
+physical blobs and their checksums above remain unchanged. Their current-reader
+comparison excludes only the known empty declaration and rejects any member
+entry. See the [cleanup proof](../../../dev/proofs/inactive-result-persistence-cleanup.md)
+for exact current hashes and retained storage/runtime inventory.

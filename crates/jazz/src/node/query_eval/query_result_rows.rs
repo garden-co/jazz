@@ -190,12 +190,12 @@ pub(super) fn aggregate_query_row_uuid(
             groove::records::ValueType::String,
         ),
     };
-    let row = super::super::codec::settled_result_value_storage_bytes(&row_value, &row_type)?;
+    let row = super::super::codec::runtime_result_identity_bytes(&row_value, &row_type)?;
     aggregate_result_member_row_uuid(&ResultMemberEntry::Synthetic {
         table: "aggregate_result".to_owned(),
         row,
         replacement: SyntheticReplacementToken::from_encoded_record(
-            super::super::codec::settled_result_value_storage_bytes(
+            super::super::codec::runtime_result_identity_bytes(
                 &Value::String("identity-only".to_owned()),
                 &groove::records::ValueType::String,
             )?,

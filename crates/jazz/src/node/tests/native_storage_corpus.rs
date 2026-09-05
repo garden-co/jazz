@@ -30,7 +30,6 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_deletion_history",
     "jazz_authority_policy_bindings",
     "jazz_known_state_facts",
-    "jazz_settled_result_members",
     "jazz_settled_program_facts",
     groove::db::LARGE_VALUE_METADATA_CF,
 ];
@@ -46,9 +45,9 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "2acca4b24d4d4128f7d18e13c14df973a93cb0aa3d65a9287bc9eb6543b584b3";
+    "bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "c4dca94039cd5b9417f5a5e30dfcac3486bcbeb2fee2f539fa639ee756e9cb15";
+    "0d84a926096b690c772ca50edc950f2d647b8e924a7eb1b45e83b373b5cf15f6";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -1346,6 +1345,33 @@ where
 /// catalogue snapshot, physical IDs, row histories, current registers, and
 /// large-value descriptor; current code must recover all of those before it
 /// is allowed to add a new row.
+// Historical artifacts recorded this retired family as empty. Preserve their
+// original blobs/checksums, but compare the current registered-family inventory.
+// Never discard an entry: a populated member family is outside this proof.
+fn active_native_corpus_pack(pack: String) -> String {
+    assert!(
+        !pack.lines().any(|line| line.starts_with("entry\tjazz_settled_result_members\t")),
+        "historical result-member entries cannot be omitted from the corpus receipt"
+    );
+    let mut result = String::new();
+    for line in pack.lines() {
+        if line != "store\tjazz_settled_result_members" {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+#[test]
+fn historical_corpus_inventory_cannot_hide_retired_member_entries() {
+    // Internal receipt parser: public APIs cannot construct a corpus listing.
+    let empty = "header\nstore\tjazz_settled_result_members\nstore\tactive\n";
+    assert_eq!(active_native_corpus_pack(empty.to_owned()), "header\nstore\tactive\n");
+    let populated = format!("{empty}entry\tjazz_settled_result_members\t00\t01\n");
+    assert!(std::panic::catch_unwind(|| active_native_corpus_pack(populated)).is_err());
+}
+
 fn verify_historical_native_corpus<S>(
     schema: JazzSchema,
     expected_pack: fn() -> String,
@@ -1361,8 +1387,8 @@ where
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
         assert_eq!(
             native_corpus_pack(&before_write),
-            expected_pack(),
-            "current Jazz reads the full committed historical logical pack"
+            active_native_corpus_pack(expected_pack()),
+            "current Jazz reads every retained historical family and entry"
         );
     }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
