@@ -38,7 +38,7 @@ removed; the authority-scoped known-state field remains active.
 | ------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Local source history, deletion, registers, and indexes | Active storage                                                          | Unchanged Groove records under catalogue-owned physical layouts. No JVRR envelope or per-row descriptor is stored here.                                                         |
 | Network `VersionRecord` / `JVRR`                       | Active wire format                                                      | Unchanged descriptor/row envelope validated before translation into local physical storage.                                                                                     |
-| `jazz_settled_program_facts` / `JPFK` v1               | Two active source variants plus thirteen inactive output/proof variants | Only tag `3` source coverage and tag `14` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.                  |
+| `jazz_settled_program_facts` / `JPFK` v1               | Two active source variants plus thirteen inactive output/proof variants | Only dense tag `0` source coverage and tag `1` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.             |
 | `jazz_known_state_facts`                               | Active closure progress                                                 | Unchanged. Exact authority identity, settlement/authorization progress, and source-closure generation support reopen admission.                                                 |
 | `jazz_authority_policy_bindings`                       | Active exact policy directory                                           | Unchanged. Bounded digest addresses exact subject/claims; collision/mismatch checks remain before write and recovery.                                                           |
 | Closed required-codec profile                          | Advertised the two dormant result codecs                                | Rust and IndexedDB remove both IDs. JSM1 required-family count changes from 14 to 12; existing roots advertising the retired profile reject.                                    |
@@ -53,8 +53,7 @@ removed; the authority-scoped known-state field remains active.
 ## Retained byte contracts
 
 Jazz SPEC 16 specifies the full `JPFK` field order, primitive widths, bounds,
-source role tags, version references, and canonical rejection rules. Both active
-tags and bytes remain unchanged to avoid unnecessary source-closure churn.
+source role tags, version references, and canonical rejection rules. The only active tags are dense `0` and `1`; the field payloads remain unchanged.
 The direct-store key is the five-field authority prefix followed by the
 32-byte BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`; the
 value is one `Bytes` field holding the exact canonical fact. Retired tags are
