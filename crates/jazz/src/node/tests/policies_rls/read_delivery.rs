@@ -529,14 +529,6 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    core.query.settled_result_sets.insert(
-        crate::protocol::BindingViewKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-        read_view: Default::default(),
-},
-        BTreeSet::new(),
-    );
     assert!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)
             .unwrap()

@@ -322,58 +322,12 @@
       ]
     },
     {
-      "id": "jazz.result-member-key.v1",
-      "boundary": "durable-storage",
-      "profile": "jazz-root",
-      "spec": {
-        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
-        "anchor": "#### Durable settled-program-fact keys"
-      },
-      "semantic_fixture": {
-        "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
-      },
-      "rejection_receipt": {
-        "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
-      },
-      "evidence": [
-        {
-          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
-        }
-      ]
-    },
-    {
-      "id": "jazz.result-row-source.v1",
-      "boundary": "durable-storage",
-      "profile": "jazz-root",
-      "spec": {
-        "path": "crates/jazz/SPEC/8_sync_protocol.md",
-        "anchor": "### 8.4 Downstream: query-driven view updates"
-      },
-      "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-        "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
-      },
-      "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-        "anchor": "corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix"
-      },
-      "evidence": [
-        {
-          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement"
-        }
-      ]
-    },
-    {
       "id": "jazz.subscription-program-fact-key.v1",
       "boundary": "durable-storage",
       "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
-        "anchor": "#### Durable settled-program-fact keys"
+        "anchor": "#### Durable source closure facts"
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/sync/known_state.rs",
@@ -381,7 +335,7 @@
       },
       "rejection_receipt": {
         "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
+        "anchor": "source_closure_storage_rejects_unknown_tags_and_malformed_bytes"
       },
       "evidence": [
         {
@@ -477,7 +431,10 @@
         "anchor": "stored_merge_heads_require_a_canonical_transaction_id_array"
       },
       "evidence": [
-        { "path": "crates/jazz/src/node/tests/merge_heads.rs", "anchor": "across_reopen" }
+        {
+          "path": "crates/jazz/src/node/tests/merge_heads.rs",
+          "anchor": "across_reopen"
+        }
       ]
     },
     {
@@ -561,7 +518,10 @@
     {
       "id": "jazz.binding-abi.v1",
       "boundary": "wire-binding-abi",
-      "spec": { "path": "crates/jazz/SPEC/13_db_api.md", "anchor": "#### 13.7.2 Binding Payloads" },
+      "spec": {
+        "path": "crates/jazz/SPEC/13_db_api.md",
+        "anchor": "#### 13.7.2 Binding Payloads"
+      },
       "semantic_fixture": {
         "path": "crates/jazz/fixtures/binding_codec_golden.json",
         "anchor": "jazz-binding-codec-golden-v1"

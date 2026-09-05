@@ -712,7 +712,7 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x73), base);
     reader.set_initial_sync_flush_cadence(2).unwrap();
     assert!(!reader.initial_sync_flush_active);
-    assert!(reader.query.initial_hydration_binding_views.is_empty());
+    assert!(authority_hydration_receipts(&reader).0.is_empty());
     assert!(matches!(
         reader.apply_view_updates_in_batch(vec![ViewUpdateParts {
             subscription,
@@ -735,7 +735,7 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
     ));
     assert!(!reader.initial_sync_flush_active);
     assert!(!reader.initial_sync_flush_completed);
-    assert!(reader.query.initial_hydration_binding_views.is_empty());
+    assert!(authority_hydration_receipts(&reader).0.is_empty());
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
 
@@ -821,7 +821,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     assert_eq!(reader.query_all_versions().unwrap(), history_before);
     assert!(reader.query_transaction(valid_tx_id).unwrap().is_none());
     assert!(!reader.initial_sync_flush_active);
-    assert!(reader.query.initial_hydration_binding_views.is_empty());
+    assert!(authority_hydration_receipts(&reader).0.is_empty());
 }
 
 // Internal wire-compatibility receipt: public JSON values cannot distinguish
