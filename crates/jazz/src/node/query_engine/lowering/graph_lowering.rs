@@ -1604,10 +1604,10 @@ fn lower_linear_plan_steps_cached(
                 let mut unwrap_fields = BTreeMap::<String, usize>::new();
                 let mut projected_nullable_field_depths = BTreeMap::<String, usize>::new();
                 let mut wrap_after_project = BTreeMap::<String, usize>::new();
-                let project_fields = columns
+                let field_plans = columns
                     .iter()
                     .map(|column| {
-                        let field = lower_projection_field(
+                        lower_projection_field(
                             column,
                             plan,
                             root_source,
@@ -1616,25 +1616,45 @@ fn lower_linear_plan_steps_cached(
                             last_join_right.as_ref(),
                             &accumulated_join_fields,
                             request,
-                        )?;
-                        if let Some((name, depth)) = field.wrap_after_project {
-                            wrap_after_project.insert(name, depth);
-                        }
-                        for (source, depth) in field.unwrap_before_project {
-                            unwrap_fields
-                                .entry(source)
-                                .and_modify(|existing| *existing = (*existing).max(depth))
-                                .or_insert(depth);
-                        }
-                        if let Some((output, depth)) = field.nullable_after_project {
-                            projected_nullable_field_depths
-                                .entry(output)
-                                .and_modify(|existing| *existing = (*existing).max(depth))
-                                .or_insert(depth);
-                        }
-                        Ok(field.project)
+                        )
                     })
                     .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+                for field in &field_plans {
+                    for (source, depth) in &field.unwrap_before_project {
+                        unwrap_fields
+                            .entry(source.clone())
+                            .and_modify(|existing| *existing = (*existing).max(*depth))
+                            .or_insert(*depth);
+                    }
+                }
+                let project_fields = field_plans
+                    .into_iter()
+                    .map(|mut field| {
+                        let output_depth = field
+                            .nullable_after_project
+                            .as_ref()
+                            .map_or(0, |(_, depth)| *depth);
+                        if let Some((source, source_depth)) = &field.source_nullability {
+                            // Every alias sees the same transformed input. Plan its
+                            // wrappers only after all aliases agree on source unwraps.
+                            let remaining = source_depth
+                                .saturating_sub(unwrap_fields.get(source).copied().unwrap_or(0));
+                            let wrappers = output_depth.saturating_sub(remaining);
+                            if wrappers > 0 {
+                                field.project =
+                                    ProjectField::nullable(source, &field.project.output_name);
+                                if wrappers > 1 {
+                                    wrap_after_project
+                                        .insert(field.project.output_name.clone(), wrappers - 1);
+                                }
+                            }
+                        }
+                        if let Some((output, depth)) = field.nullable_after_project {
+                            projected_nullable_field_depths.insert(output, depth);
+                        }
+                        field.project
+                    })
+                    .collect::<Vec<_>>();
                 for (field, depth) in unwrap_fields {
                     for _ in 0..depth {
                         graph = graph.unwrap_nullable(field.clone());
@@ -2472,7 +2492,7 @@ fn lower_projection_field(
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeMap::new();
     let mut nullable_after_project = None;
-    let mut wrap_after_project = None;
+    let mut source_nullability = None;
     let project = match lower_projection_source(
         &column.value,
         plan,
@@ -2495,15 +2515,8 @@ fn lower_projection_field(
             if output_depth > 0 {
                 nullable_after_project = Some((column.output.name.clone(), output_depth));
             }
-            if output_depth > nullable_depth {
-                let additional_layers = output_depth - nullable_depth - 1;
-                if additional_layers > 0 {
-                    wrap_after_project = Some((column.output.name.clone(), additional_layers));
-                }
-                ProjectField::nullable(field, column.output.name.clone())
-            } else {
-                ProjectField::renamed(field, column.output.name.clone())
-            }
+            source_nullability = Some((field.clone(), nullable_depth));
+            ProjectField::renamed(field, column.output.name.clone())
         }
         ProjectionSource::Literal(value) => {
             ProjectField::literal(column.output.name.clone(), value)
@@ -2513,7 +2526,7 @@ fn lower_projection_field(
         project,
         unwrap_before_project,
         nullable_after_project,
-        wrap_after_project,
+        source_nullability,
     })
 }
 
@@ -2531,7 +2544,7 @@ struct ProjectionFieldPlan {
     pub(super) project: ProjectField,
     pub(super) unwrap_before_project: BTreeMap<String, usize>,
     pub(super) nullable_after_project: Option<(String, usize)>,
-    pub(super) wrap_after_project: Option<(String, usize)>,
+    pub(super) source_nullability: Option<(String, usize)>,
 }
 
 fn lower_projection_source(

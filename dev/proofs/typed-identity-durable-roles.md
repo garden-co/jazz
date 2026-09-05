@@ -231,3 +231,12 @@ author: reordered declarations, swapped contributors, missing contributors and
 changed UNION labels/positions. This is runtime correctness; retained result
 persistence remains unfrozen and scheduled for removal in #2578. Active source
 storage gains no new format or persistence path.
+
+The final projection planner first computes shared source unwrap depths, then
+plans each output wrapper against that transformed source. An executable compiler
+canary covers reversed alias order, one/two nullable layers, null-only projections
+and a raw alias that must filter a null source. Branch payload schemas exclude
+the separately declared root identity so both direct and prepared terminals emit
+one carrier. The native foreground input decoder delegates to the same explicit
+named-cell codec as NAPI/WASM; native fixture consumers read publication roles,
+and a literal U64 envelope pins the shared input ABI.

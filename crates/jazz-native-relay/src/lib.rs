@@ -6,7 +6,7 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
 use std::future::Future;
 use std::path::PathBuf;
@@ -24,7 +24,7 @@ use jazz::db::{
     Transport, UpdateOptions, UpsertOptions, block_on,
 };
 use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
@@ -4205,40 +4205,8 @@ impl RelayWorker {
 /// foreground ABI deliberately shares this compact descriptor-plus-bytes
 /// representation; it does not invent a React-Native row/value object shape.
 fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
-    let ((descriptor, raw), trailing): ((RecordDescriptor, Vec<u8>), _) =
-        postcard::take_from_bytes(bytes)
-            .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))?;
-    if !trailing.is_empty() {
-        return Err(RelayError::ForegroundCommand(
-            "encoded cells have trailing bytes".to_owned(),
-        ));
-    }
-    let canonical = postcard::to_allocvec(&(&descriptor, &raw)).map_err(|error| {
-        RelayError::ForegroundCommand(format!("encode canonical cells: {error}"))
-    })?;
-    if canonical != bytes {
-        return Err(RelayError::ForegroundCommand(
-            "encoded cells are not canonically encoded".to_owned(),
-        ));
-    }
-    let record = BorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|error| RelayError::ForegroundCommand(format!("decode cell record: {error}")))?;
-    let mut cells = jazz::db::RowCells::new();
-    let mut names = BTreeSet::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let name = field.name.clone().ok_or_else(|| {
-            RelayError::ForegroundCommand("encoded cells must use named fields".to_owned())
-        })?;
-        if !names.insert(name.clone()) {
-            return Err(RelayError::ForegroundCommand(format!(
-                "encoded cells contain duplicate field {name}"
-            )));
-        }
-        cells.insert(name, value);
-    }
-    Ok(cells)
+    jazz::binding_codec::decode_named_cells(bytes)
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))
 }
 
 fn encode_foreground_subscription_event(
@@ -4632,7 +4600,8 @@ mod tests {
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
     use jazz::db::{InsertOptions, Transport, WireTransportAdapter};
-    use jazz::groove::records::ValueType;
+    use jazz::groove::records::{BorrowedRecord, RecordDescriptor, ValueType};
+    mod publication_codec;
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::time::TxTime;
@@ -4868,12 +4837,16 @@ mod tests {
         let raw = descriptor
             .create(&[Value::String(title.to_owned())])
             .expect("fixture title record is valid");
-        postcard::to_allocvec(&(descriptor, raw)).expect("fixture cells encode")
+        jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+            raw, descriptor,
+        ))
+        .expect("fixture cells encode")
     }
 
     #[derive(serde::Deserialize)]
     struct DecodedForegroundRowBatch {
         table: String,
+        #[serde(deserialize_with = "publication_codec::descriptor")]
         descriptor: RecordDescriptor,
         rows: Vec<DecodedForegroundRow>,
     }
@@ -6074,11 +6047,31 @@ mod tests {
                 Value::String("second".to_owned()),
             ])
             .unwrap();
-        let mut cells = postcard::to_allocvec(&(duplicate, raw)).unwrap();
+        let mut cells = jazz::binding_codec::encode_named_cells(
+            &jazz::groove::records::OwnedRecord::new(raw, duplicate),
+        )
+        .unwrap();
         assert!(decode_foreground_cells(&cells).is_err());
 
         cells.push(0);
         assert!(decode_foreground_cells(&cells).is_err());
+
+        let canonical =
+            jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+                7_u64.to_le_bytes().to_vec(),
+                RecordDescriptor::new([("count", ValueType::U64)]),
+            ))
+            .unwrap();
+        assert_eq!(
+            canonical,
+            vec![
+                1, 1, 5, b'c', b'o', b'u', b'n', b't', 3, 8, 7, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert_eq!(
+            decode_foreground_cells(&canonical).unwrap().get("count"),
+            Some(&Value::U64(7))
+        );
 
         let mut command = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
         command.push(0);
