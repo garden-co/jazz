@@ -138,6 +138,13 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
   policy.todos.allowDelete.always();
 });
 
+const publicUnionBigIntApp = s.defineApp({
+  metrics: s.table({
+    label: s.string(),
+    value: s.bigint(),
+  }),
+});
+
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
     columns: [
@@ -594,6 +601,48 @@ describe("NAPI integration", () => {
       await expect(reader.all(query, { tier: "local" })).resolves.toMatchObject([
         { title: "visible", done: false },
         { title: "visible", done: false },
+      ]);
+    } finally {
+      if (context) await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("evaluates out-of-safe-range signed bigint predicates in public unions", async () => {
+    const dataRoot = await createTempDir("jazz-napi-public-union-bigint-");
+    const dataPath = join(dataRoot, "runtime.db");
+    let context: { db(): Db; shutdown(): Promise<void> } | null = null;
+    const positive = 9_007_199_254_740_993n;
+    const negative = -9_007_199_254_740_993n;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: publicUnionBigIntApp,
+        permissions: {},
+        driver: { type: "persistent", dataPath },
+      });
+      const db = context.db();
+      await db
+        .insert(publicUnionBigIntApp.metrics, { label: "positive", value: positive })
+        .wait({ tier: "local" });
+      await db
+        .insert(publicUnionBigIntApp.metrics, { label: "negative", value: negative })
+        .wait({ tier: "local" });
+      await db
+        .insert(publicUnionBigIntApp.metrics, { label: "nearby", value: positive - 1n })
+        .wait({ tier: "local" });
+
+      const query = publicUnionBigIntApp
+        .union({
+          positive: publicUnionBigIntApp.metrics.where({ value: positive }),
+          negative: publicUnionBigIntApp.metrics.where({ value: negative }),
+        })
+        .orderBy("label");
+      await expect(db.all(query, { tier: "local" })).resolves.toMatchObject([
+        { label: "negative", value: negative },
+        { label: "positive", value: positive },
       ]);
     } finally {
       if (context) await context.shutdown();
