@@ -474,7 +474,12 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
     "JAZZ_TEST_SEALED_TOOLS_DIST",
   ];
-  for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
+  assert.deepEqual(
+    turbo.tasks["jazz-napi#build"].passThroughEnv,
+    ["JAZZ_RN_TEST_BRIDGE", ...expectedLease],
+    "jazz-napi#build must preserve RN bridge feature selection and the aggregate parent's artifact lease and sealed test surface",
+  );
+  for (const task of ["jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
       expectedLease,
