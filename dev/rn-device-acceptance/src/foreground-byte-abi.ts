@@ -1,4 +1,4 @@
-import { scopeQuery, scopeCells } from "./scope-fixture.ts";
+import { scopeQuery, scopeCells, todosQuery } from "./scope-fixture.ts";
 import type {
   NativeForegroundCommand,
   NativeForegroundResponse,
@@ -189,7 +189,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     codec.decode(foreground.execute(codec.encode(command)));
   try {
     markFailure("same-runtime-subscribe-failed");
-    const prepared = execute(b, { type: "prepareQuery", query: TODOS_QUERY });
+    const prepared = execute(b, { type: "prepareQuery", query: todosQuery });
     if (prepared.type !== "preparedQuery")
       throw new Error("foreground B could not prepare the todos subscription");
     const subscribed = execute(b, { type: "subscribe", query: prepared.query });
@@ -486,31 +486,6 @@ function openScopeForeground(
 function scopeFixtureTitle(scope: "a" | "b") {
   return scope === "a" ? "scope-a-private-row" : "scope-b-private-row";
 }
-
-// `postcard::to_allocvec(&Query::from("todos"))` in the shared Rust binding.
-// This is intentionally a fixed fixture byte sequence rather than a second
-// TypeScript query encoder.
-const TODOS_QUERY = Uint8Array.of(
-  5,
-  116,
-  111,
-  100,
-  111,
-  115,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-);
 
 async function readScopeRows(
   foreground: NativeForegroundRuntime,
