@@ -40,6 +40,16 @@ The relay is a normal non-history-complete `Db`:
 - No binding may read directly from SQLite or bypass a `Db` to answer an app
   query.
 
+Each successful socket handshake installs a fresh core upstream connection
+with the connector's unchanged authenticated session context before any frames
+are delivered. Its queue belongs to that socket generation, not to the relay's
+lifetime. Termination immediately closes that queue to stale bridge traffic and
+retains exact-generation core detach until the owner becomes available; a late
+terminal notification cannot detach a replacement. Core detach owns receipt
+demotion and pending advice/outbox handoff. Foreground operations and accepted
+local transactions remain owned throughout reconnect. Socket cancellation during
+installation retains the same cleanup even before Connected is reported.
+
 One admitted persistent scope owns exactly one authenticated upstream socket
 worker. Foregrounds are leases on that relay, not socket owners: opening a
 second foreground reuses the scope worker and cannot create a competing bearer

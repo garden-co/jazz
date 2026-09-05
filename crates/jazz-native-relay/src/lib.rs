@@ -3721,6 +3721,7 @@ pub struct NativeRelayWire {
     inbound: Arc<Mutex<BoundedMessageQueue>>,
     outbound: Arc<Mutex<BoundedMessageQueue>>,
     liveness: Option<Arc<RelayLiveness>>,
+    connection_liveness: Option<Arc<RelayLiveness>>,
 }
 
 impl Default for NativeRelayWire {
@@ -3729,6 +3730,7 @@ impl Default for NativeRelayWire {
             inbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: None,
+            connection_liveness: None,
         }
     }
 }
@@ -3819,16 +3821,37 @@ impl BoundedMessageQueue {
     }
 }
 
+type WireLivenessGuards<'a> = (
+    Option<std::sync::MutexGuard<'a, ()>>,
+    Option<std::sync::MutexGuard<'a, ()>>,
+);
+
 impl NativeRelayWire {
     fn for_owner(liveness: Arc<RelayLiveness>) -> Self {
         Self {
             inbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: Some(liveness),
+            connection_liveness: Some(Arc::new(RelayLiveness::new())),
         }
     }
-    fn enter(&self) -> Result<Option<std::sync::MutexGuard<'_, ()>>, RelayError> {
-        self.liveness.as_ref().map(|l| l.enter()).transpose()
+    fn enter(&self) -> Result<WireLivenessGuards<'_>, RelayError> {
+        let owner = self.liveness.as_ref().map(|l| l.enter()).transpose()?;
+        let connection = self
+            .connection_liveness
+            .as_ref()
+            .map(|l| l.enter())
+            .transpose()?;
+        Ok((owner, connection))
+    }
+    fn retire_connection(&self) {
+        if let Some(liveness) = &self.connection_liveness {
+            let _guard = liveness
+                .gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            liveness.mark_terminal();
+        }
     }
     pub fn push_inbound(&self, message: SyncMessage) -> Result<(), RelayError> {
         let _terminal = self.enter()?;
@@ -3928,6 +3951,7 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
 ) -> Result<bool, RelayError> {
     let mut progressed = false;
     for message in relay_wire.take_outbound()? {
+        let _live_connection = relay_wire.enter()?;
         upstream.send(message).map_err(|error| {
             RelayError::ForegroundCommand(format!("native upstream send: {error:?}"))
         })?;
@@ -4062,6 +4086,32 @@ impl Drop for NativeRelaySocketWorker {
     }
 }
 
+struct SocketUpstreamLease {
+    relay: NativeRelay,
+    generation: u64,
+    wire: NativeRelayWire,
+}
+
+impl Drop for SocketUpstreamLease {
+    fn drop(&mut self) {
+        // Stop stale bridge traffic immediately, even if owner cleanup must
+        // wait behind an already-running local operation.
+        self.wire.retire_connection();
+        loop {
+            let generation = self.generation;
+            match self
+                .relay
+                .run_teardown(move |worker| Ok(worker.retire_socket_upstream(generation)))
+            {
+                Err(RelayError::OwnerQueueFull) => {
+                    thread::sleep(std::time::Duration::from_millis(1))
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
 async fn run_native_relay_socket_worker(
     relay: NativeRelay,
     config: NativeRelaySocketConfig,
@@ -4069,7 +4119,7 @@ async fn run_native_relay_socket_worker(
     cancelled: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
 ) {
-    while !cancelled.load(Ordering::Acquire) {
+    'reconnect: while !cancelled.load(Ordering::Acquire) {
         let request = NativeTransportRequest {
             server_url: config.server_url.clone(),
             app_id: config.app_id,
@@ -4109,6 +4159,51 @@ async fn run_native_relay_socket_worker(
             }
             continue;
         }
+        if connected
+            .session_context
+            .is_some_and(|context| context.link_identity != config.peer_identity)
+        {
+            (config.on_event)(NativeRelaySocketEvent::TerminalError(
+                "native relay connector session identity differs from admission".into(),
+            ));
+            break;
+        }
+        let session_context = connected.session_context;
+        let (generation, wire) =
+            match relay.run(move |worker| worker.begin_socket_upstream(session_context)) {
+                Ok(installed) => installed,
+                Err(error) => {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay upstream install failed: {error}"
+                    )));
+                    break;
+                }
+            };
+        let lease = SocketUpstreamLease {
+            relay: relay.clone(),
+            generation,
+            wire,
+        };
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            match relay.run(move |worker| {
+                worker.poll_upstream_transition();
+                if worker.socket_generation != generation || worker.socket_wire.is_none() {
+                    return Err(RelayError::Closed);
+                }
+                Ok(worker.upstream_attached && worker.upstream_transition.is_none())
+            }) {
+                Ok(true) => break,
+                Ok(false) | Err(RelayError::OwnerQueueFull) => {}
+                Err(_) => continue 'reconnect,
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {},
+                _ = wake.notified() => {},
+            }
+        }
         (config.on_event)(NativeRelaySocketEvent::Connected);
         let mut upstream = jazz::db::WireTransportAdapter::new_with_session_context(
             connected.transport,
@@ -4120,10 +4215,11 @@ async fn run_native_relay_socket_worker(
         let mut terminal = connected.terminal;
         loop {
             if cancelled.load(Ordering::Acquire) {
+                drop(lease);
                 (config.on_event)(NativeRelaySocketEvent::Stopped);
                 return;
             }
-            if let Err(error) = bridge_native_relay_wire_once(&relay.wire(), &mut upstream) {
+            if let Err(error) = bridge_native_relay_wire_once(&lease.wire, &mut upstream) {
                 (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
                     "native relay wire bridge failed: {error}"
                 )));
@@ -4146,6 +4242,7 @@ async fn run_native_relay_socket_worker(
                 _ = wake.notified() => {},
             }
         }
+        drop(lease);
         if !cancelled.load(Ordering::Acquire) {
             (config.on_event)(NativeRelaySocketEvent::Reconnecting);
         }
@@ -4159,9 +4256,13 @@ fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
 
 struct QueueTransport {
     wire: NativeRelayWire,
+    session_context: Option<jazz::db::ConnectionSessionContext>,
 }
 
 impl Transport for QueueTransport {
+    fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
+        self.session_context
+    }
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let _terminal = self.wire.enter().map_err(transport_queue_error)?;
         self.wire
@@ -4207,6 +4308,7 @@ fn duplex(
         inbound: Arc::clone(&wire.outbound),
         outbound: Arc::clone(&wire.inbound),
         liveness: wire.liveness.clone(),
+        connection_liveness: wire.connection_liveness.clone(),
     };
     (
         Box::new(DuplexTransport { wire: wire.clone() }),
@@ -4286,6 +4388,7 @@ impl ConnectedClient {
                         inbound: Arc::clone(&self.wire.outbound),
                         outbound: Arc::clone(&self.wire.inbound),
                         liveness: self.wire.liveness.clone(),
+                        connection_liveness: self.wire.connection_liveness.clone(),
                     },
                 ));
                 self._served = Some(served);
@@ -4433,6 +4536,7 @@ impl RelayPeerIo {
         }
         let mut transport = QueueTransport {
             wire: self.wire.clone(),
+            session_context: None,
         };
         for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
             match self.pump.send_outbound(&mut transport, 1) {
@@ -4600,12 +4704,27 @@ impl ClosingForeground {
     }
 }
 
+type UpstreamTransition = Pin<
+    Box<
+        dyn Future<
+            Output = Option<(
+                Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+                NativeRelayWire,
+            )>,
+        >,
+    >,
+>;
+
 struct RelayWorker {
     wake: Arc<RelayWake>,
     persistent: Rc<Db<SqliteStorage>>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    upstream_attached: bool,
+    socket_generation: u64,
+    socket_wire: Option<NativeRelayWire>,
+    upstream_transition: Option<UpstreamTransition>,
     clients: BTreeMap<u64, ConnectedClient>,
     closing: VecDeque<ClosingForeground>,
     next_client_id: u64,
@@ -4641,8 +4760,10 @@ impl RelayWorker {
             }))
             .map_err(RelayError::Db)?,
         );
-        let upstream =
-            block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
+        let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
+            wire: wire.clone(),
+            session_context: None,
+        })));
         let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire);
         let wake = Arc::new(RelayWake::default());
         Ok(Self {
@@ -4651,6 +4772,10 @@ impl RelayWorker {
             persistent_tick: None,
             upstream_io,
             _upstream: upstream,
+            upstream_attached: true,
+            socket_generation: 0,
+            socket_wire: None,
+            upstream_transition: None,
             clients: BTreeMap::new(),
             closing: VecDeque::new(),
             next_client_id: 1,
@@ -4658,6 +4783,82 @@ impl RelayWorker {
             schema: config.schema,
             liveness,
         })
+    }
+
+    fn begin_socket_upstream(
+        &mut self,
+        session_context: Option<jazz::db::ConnectionSessionContext>,
+    ) -> Result<(u64, NativeRelayWire), RelayError> {
+        self.socket_generation = self
+            .socket_generation
+            .checked_add(1)
+            .ok_or(RelayError::ClientIdExhausted)?;
+        self.upstream_io.wire.retire_connection();
+        if let Some(wire) = self.socket_wire.take() {
+            wire.retire_connection();
+        }
+        self.persistent_tick = None;
+        self.upstream_io.incoming = None;
+        self.upstream_transition = None;
+        let wire = NativeRelayWire::for_owner(Arc::clone(&self.liveness));
+        self.socket_wire = Some(wire.clone());
+        let next_wire = wire.clone();
+        let persistent = Rc::clone(&self.persistent);
+        let previous = Rc::clone(&self._upstream);
+        self.upstream_attached = false;
+        self.upstream_transition = Some(Box::pin(async move {
+            persistent.detach_connection_async(&previous).await;
+            let connection = persistent
+                .connect_upstream(Box::new(QueueTransport {
+                    wire: next_wire.clone(),
+                    session_context,
+                }))
+                .await;
+            Some((connection, next_wire))
+        }));
+        self.poll_upstream_transition();
+        Ok((self.socket_generation, wire))
+    }
+
+    fn retire_socket_upstream(&mut self, generation: u64) -> bool {
+        if generation != self.socket_generation || self.socket_wire.is_none() {
+            return false;
+        }
+        self.socket_wire.take().unwrap().retire_connection();
+        self.persistent_tick = None;
+        self.upstream_io.incoming = None;
+        self.upstream_transition = None;
+        let persistent = Rc::clone(&self.persistent);
+        let previous = Rc::clone(&self._upstream);
+        self.upstream_attached = false;
+        self.upstream_transition = Some(Box::pin(async move {
+            persistent.detach_connection_async(&previous).await;
+            None
+        }));
+        self.poll_upstream_transition();
+        true
+    }
+
+    fn poll_upstream_transition(&mut self) {
+        let Some(mut transition) = self.upstream_transition.take() else {
+            return;
+        };
+        let waker = Waker::from(Arc::clone(&self.wake));
+        match transition.as_mut().poll(&mut Context::from_waker(&waker)) {
+            Poll::Pending => self.upstream_transition = Some(transition),
+            Poll::Ready(Some((connection, wire))) => {
+                self.upstream_io = RelayPeerIo::new(
+                    connection
+                        .try_lock()
+                        .expect("installed upstream owner is available")
+                        .io_pump(),
+                    wire,
+                );
+                self._upstream = connection;
+                self.upstream_attached = true;
+            }
+            Poll::Ready(None) => {}
+        }
     }
 
     fn retire_foreground(&mut self, id: u64) -> Result<(), RelayError> {
@@ -4799,6 +5000,7 @@ impl RelayWorker {
 
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
+        self.poll_upstream_transition();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
@@ -4821,7 +5023,9 @@ impl RelayWorker {
             client.poll_read_cleanup(&waker);
             client.poll_mutation_cleanup(&waker);
         }
-        self.upstream_io.poll(&waker)?;
+        if self.upstream_attached {
+            self.upstream_io.poll(&waker)?;
+        }
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
@@ -7957,6 +8161,122 @@ mod tests {
             Err(RelayError::ScopeConfigurationMismatch)
         ));
         generic.close().unwrap();
+    }
+
+    // The native socket queue and owner suspension are private scheduling
+    // boundaries; public row receipts below prove accepted work survives them.
+    #[test]
+    fn socket_install_cancellation_waits_for_owner_and_preserves_local_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("socket-owner.sqlite"),
+            Some("socket-owner"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let (generation, wire, committed) = relay
+            .run(move |worker| {
+                let persistent = Rc::clone(&worker.persistent);
+                let mut held: RelayTickFuture = Box::pin(async move {
+                    persistent.hold_node_owner_for_test().await;
+                    Ok(())
+                });
+                assert!(
+                    held.as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                worker.clients.get_mut(&id).unwrap().tick = Some(held);
+                let start = std::time::Instant::now();
+                let (generation, wire) = worker.begin_socket_upstream(None)?;
+                assert!(start.elapsed() < std::time::Duration::from_millis(100));
+                assert!(worker.upstream_transition.is_some());
+                let (committed, _) = worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    None,
+                    encoded_title_cells("accepted while install waits"),
+                    "{}".into(),
+                )?;
+                assert!(worker.retire_socket_upstream(generation));
+                assert!(worker.upstream_transition.is_some());
+                worker.clients.get_mut(&id).unwrap().tick = None;
+                worker.poll_upstream_transition();
+                assert!(worker.upstream_transition.is_none());
+                assert!(!worker.upstream_attached);
+                Ok((generation, wire, committed))
+            })
+            .unwrap();
+        assert!(matches!(wire.take_outbound(), Err(RelayError::Closed)));
+        let (replacement, fresh) = relay
+            .run(|worker| worker.begin_socket_upstream(None))
+            .unwrap();
+        assert!(replacement > generation);
+        assert!(
+            !relay
+                .run(move |worker| Ok(worker.retire_socket_upstream(generation)))
+                .unwrap()
+        );
+        assert!(fresh.take_outbound().is_ok());
+        let mut settled = client
+            .wait_for_foreground_transaction(*committed.as_bytes(), CoreDurabilityTier::Local)
+            .unwrap();
+        for _ in 0..100 {
+            let ForegroundOperationPoll::Pending { operation } = settled else {
+                break;
+            };
+            relay.pump().unwrap();
+            settled = client.poll_foreground_operation(operation).unwrap();
+        }
+        assert!(matches!(
+            settled,
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+        ));
+        client.close().unwrap();
+    }
+
+    #[test]
+    fn retired_socket_wire_rejects_stale_advice_and_cannot_detach_successor() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("socket-epoch.sqlite"),
+            Some("socket-epoch"),
+        ))
+        .unwrap();
+        let (first, stale) = relay
+            .run(|worker| worker.begin_socket_upstream(None))
+            .unwrap();
+        let (second, fresh) = relay
+            .run(|worker| worker.begin_socket_upstream(None))
+            .unwrap();
+        assert!(second > first);
+        assert!(matches!(
+            stale.push_inbound(SyncMessage::AuthorizationScopeDecision {
+                request_id: jazz::protocol::PermissionAdviceRequestId([1; 16]),
+                advice: jazz::protocol::PermissionAdvice::Allowed,
+            }),
+            Err(RelayError::Closed)
+        ));
+        assert!(matches!(stale.take_outbound(), Err(RelayError::Closed)));
+        assert!(
+            !relay
+                .run(move |worker| Ok(worker.retire_socket_upstream(first)))
+                .unwrap()
+        );
+        assert!(fresh.take_outbound().is_ok());
+        assert!(
+            relay
+                .run(move |worker| Ok(worker.retire_socket_upstream(second)))
+                .unwrap()
+        );
+        assert!(matches!(fresh.take_outbound(), Err(RelayError::Closed)));
     }
 
     #[test]
