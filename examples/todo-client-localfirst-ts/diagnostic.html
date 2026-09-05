@@ -137,6 +137,10 @@
             Number.isSafeInteger(value.operationId) && value.operationId > 0
               ? value.operationId
               : undefined,
+          tickPhase:
+            typeof value.tickPhase === "string" && value.tickPhase.length <= 64
+              ? value.tickPhase
+              : undefined,
           origin: "worker",
         });
       });

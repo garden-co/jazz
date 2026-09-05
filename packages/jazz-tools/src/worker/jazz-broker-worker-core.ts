@@ -210,13 +210,15 @@ export type BrowserDiagnosticEvent = {
     | "idb-page-store-call-start"
     | "idb-page-store-request-settled"
     | "idb-page-store-transaction-settled"
-    | "idb-page-store-error";
+    | "idb-page-store-error"
+    | "wasm-tick-phase";
   role?: "tab" | "worker";
   elapsedMs: number;
   frameCount?: number;
   frameBytes?: number;
   operation?: IndexedDbPageStoreDiagnostic["operation"];
   operationId?: number;
+  tickPhase?: string;
   errorKind?: "idb-open" | "wasm-open" | "owner" | "other";
 };
 
@@ -1007,6 +1009,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
           config,
           physicalOwner.storageOwner,
         );
+    if (diagnosticHooks) installDiagnosticTickObserver(unownedDb);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1916,6 +1919,43 @@ function recordPageStoreDiagnostic(event: IndexedDbPageStoreDiagnostic): void {
   recordDiagnostic(receiptEvent, {
     operation: event.operation,
     operationId: event.operationId,
+  });
+}
+
+const DIAGNOSTIC_TICK_PHASES = new Set([
+  "lifecycle-start",
+  "lifecycle-deferred-rejections-complete",
+  "lifecycle-finalizations-start",
+  "lifecycle-finalizations-complete",
+  "lifecycle-local-publications-start",
+  "lifecycle-local-publications-complete",
+  "lifecycle-node-tick-start",
+  "lifecycle-node-tick-complete",
+  "node-tick-start",
+  "node-query-runtime-lock-start",
+  "node-query-runtime-lock-complete",
+  "node-subscription-refresh-start",
+  "node-subscription-refresh-complete",
+  "node-connection-lock-start",
+  "node-connection-lock-complete",
+  "node-connection-tick-start",
+  "node-connection-tick-complete",
+  "subscriber-register-shape",
+  "subscriber-subscribe",
+  "subscriber-node-lock-start",
+  "subscriber-node-lock-complete",
+  "subscriber-capability-compile-start",
+  "subscriber-capability-compile-complete",
+  "node-tick-complete",
+]);
+
+function installDiagnosticTickObserver(db: WasmDb): void {
+  const diagnosticDb = db as unknown as {
+    setDiagnosticTickObserver?: (observer: (phase: unknown) => void) => void;
+  };
+  diagnosticDb.setDiagnosticTickObserver?.((phase) => {
+    if (typeof phase !== "string" || !DIAGNOSTIC_TICK_PHASES.has(phase)) return;
+    recordDiagnostic("wasm-tick-phase", { tickPhase: phase });
   });
 }
 

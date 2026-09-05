@@ -52,6 +52,15 @@ impl Transport for ObservedTestTransport {
     }
 }
 
+fn report_tick_diagnostic(
+    observer: &Option<Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    phase: DbTickDiagnosticPhase,
+) {
+    if let Some(observer) = observer {
+        observer(phase);
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -1175,10 +1184,25 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub fn tick(&self) -> impl Future<Output = Result<(), Error>> + '_ {
-        StackSafeFuture::new(self.tick_inner())
+        StackSafeFuture::new(self.tick_inner_with_diagnostic(None))
     }
 
-    async fn tick_inner(&self) -> Result<(), Error> {
+    /// Diagnostic-only tick driver used by the browser Safari receipt worker.
+    /// The observer is opt-in and receives no query, identity, storage, or
+    /// wire data; ordinary callers retain [`Self::tick`].
+    #[doc(hidden)]
+    pub fn tick_with_diagnostic(
+        &self,
+        observer: Rc<dyn Fn(DbTickDiagnosticPhase)>,
+    ) -> impl Future<Output = Result<(), Error>> + '_ {
+        StackSafeFuture::new(self.tick_inner_with_diagnostic(Some(observer)))
+    }
+
+    async fn tick_inner_with_diagnostic(
+        &self,
+        observer: Option<Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    ) -> Result<(), Error> {
+        report_tick_diagnostic(&observer, DbTickDiagnosticPhase::LifecycleStart);
         // Advance both retained queues: a later cold mutation can own the
         // node lock needed to settle an earlier publication. Do not wait for
         // settlement before giving that lock owner its next poll.
@@ -1188,6 +1212,10 @@ where
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
+        report_tick_diagnostic(
+            &observer,
+            DbTickDiagnosticPhase::LifecycleDeferredRejectionsComplete,
+        );
         // A queued read may await a delivery receipt without retaining the
         // owner. Keep its FIFO position, but service the semantic/peer work
         // producing that receipt. Cold operations holding the owner still yield.
@@ -1204,11 +1232,29 @@ where
             }
             return Ok(());
         }
+        report_tick_diagnostic(
+            &observer,
+            DbTickDiagnosticPhase::LifecycleFinalizationsStart,
+        );
         self.node.drain_subscription_finalizations().await?;
+        report_tick_diagnostic(
+            &observer,
+            DbTickDiagnosticPhase::LifecycleFinalizationsComplete,
+        );
         if self.node.has_pending_local_publications() {
+            report_tick_diagnostic(
+                &observer,
+                DbTickDiagnosticPhase::LifecycleLocalPublicationsStart,
+            );
             self.node.settle_local_publications().await?;
+            report_tick_diagnostic(
+                &observer,
+                DbTickDiagnosticPhase::LifecycleLocalPublicationsComplete,
+            );
         }
-        self.node.tick().await?;
+        report_tick_diagnostic(&observer, DbTickDiagnosticPhase::LifecycleNodeTickStart);
+        self.node.tick_with_diagnostic(observer.as_ref()).await?;
+        report_tick_diagnostic(&observer, DbTickDiagnosticPhase::LifecycleNodeTickComplete);
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         Ok(())

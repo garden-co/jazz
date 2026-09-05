@@ -11,6 +11,15 @@ use super::node_runtime::{
 use super::*;
 use crate::protocol::expand_version_carriers;
 
+fn report_peer_tick_diagnostic(
+    observer: Option<&Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    phase: DbTickDiagnosticPhase,
+) {
+    if let Some(observer) = observer {
+        observer(phase);
+    }
+}
+
 /// Both wire rejections and receiver validation failures terminate the same
 /// downstream usages. A relay has no public SubscriptionList of its own.
 fn queue_relay_subscription_rejection(
@@ -1799,6 +1808,13 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        self.tick_with_diagnostic(None).await
+    }
+
+    pub(crate) async fn tick_with_diagnostic(
+        &mut self,
+        observer: Option<&Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    ) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -3706,6 +3722,10 @@ where
                             opts,
                             ast,
                         } => {
+                            report_peer_tick_diagnostic(
+                                observer,
+                                DbTickDiagnosticPhase::SubscriberRegisterShape,
+                            );
                             // Shape admission carries the parsed AST and may
                             // compile policy dependencies. Keep that inactive
                             // state out of ordinary commit-serving turns.
@@ -3813,13 +3833,25 @@ where
                                         }
                                     };
                                     let supported = {
+                                        report_peer_tick_diagnostic(
+                                            observer,
+                                            DbTickDiagnosticPhase::SubscriberNodeLockStart,
+                                        );
                                         let mut node = self.node.lock().await;
+                                        report_peer_tick_diagnostic(
+                                            observer,
+                                            DbTickDiagnosticPhase::SubscriberNodeLockComplete,
+                                        );
                                         let mut node = node.scoped_active_session_claims(
                                             session_claim_binding.as_ref().expect("subscriber claims").0,
                                             session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
                                         );
                                         let authorization_mode = node.peer_query_authorization_mode();
-                                        node.ensure_peer_maintained_subscription_view_supported(
+                                        report_peer_tick_diagnostic(
+                                            observer,
+                                            DbTickDiagnosticPhase::SubscriberCapabilityCompileStart,
+                                        );
+                                        let supported = node.ensure_peer_maintained_subscription_view_supported(
                                             shape,
                                             &binding,
                                             opts.tier,
@@ -3827,7 +3859,12 @@ where
                                             &opts.read_view,
                                             authorization_mode,
                                         )
-                                        .await
+                                        .await;
+                                        report_peer_tick_diagnostic(
+                                            observer,
+                                            DbTickDiagnosticPhase::SubscriberCapabilityCompileComplete,
+                                        );
+                                        supported
                                     };
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
@@ -3935,6 +3972,10 @@ where
                             }
                         }
                         SyncMessage::Subscribe(subscribe) => {
+                            report_peer_tick_diagnostic(
+                                observer,
+                                DbTickDiagnosticPhase::SubscriberSubscribe,
+                            );
                             // Subscription admission has a substantially larger async state
                             // machine than ordinary peer messages. Keep that state on the heap
                             // so a commit uploaded on this same connection does not carry the
@@ -4153,13 +4194,25 @@ where
                                 return Ok::<bool, Error>(true);
                             }
                             let supported = {
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberNodeLockStart,
+                                );
                                 let mut node = self.node.lock().await;
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberNodeLockComplete,
+                                );
                                 let mut node = node.scoped_active_session_claims(
                                     session_claim_binding.as_ref().expect("subscriber claims").0,
                                     session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
                                 );
                                 let authorization_mode = node.peer_query_authorization_mode();
-                                node.ensure_peer_maintained_subscription_view_supported(
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberCapabilityCompileStart,
+                                );
+                                let supported = node.ensure_peer_maintained_subscription_view_supported(
                                     &shape,
                                     &binding,
                                     opts.tier,
@@ -4167,7 +4220,12 @@ where
                                     &opts.read_view,
                                     authorization_mode,
                                 )
-                                .await
+                                .await;
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberCapabilityCompileComplete,
+                                );
+                                supported
                             };
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 queue_direct_control(&mut self.pending_control_responses,

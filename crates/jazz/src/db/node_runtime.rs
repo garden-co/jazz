@@ -12,6 +12,15 @@ use super::*;
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
+fn report_node_tick_diagnostic(
+    observer: Option<&Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    phase: DbTickDiagnosticPhase,
+) {
+    if let Some(observer) = observer {
+        observer(phase);
+    }
+}
+
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
 /// close future drops the lease, rather than the accepted operation.
 struct QueuedMutationLease<'a> {
@@ -2926,16 +2935,34 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.tick_with_diagnostic(None).await
+    }
+
+    pub(crate) async fn tick_with_diagnostic(
+        &self,
+        observer: Option<&Rc<dyn Fn(DbTickDiagnosticPhase)>>,
+    ) -> Result<DbTickStats, Error> {
+        report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeTickStart);
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
+        report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeQueryRuntimeLockStart);
+        let has_pending_query_runtime = self.node.lock().await.has_pending_query_runtime();
+        report_node_tick_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::NodeQueryRuntimeLockComplete,
+        );
         if self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
-            || self.node.lock().await.has_pending_query_runtime()
+            || has_pending_query_runtime
         {
+            report_node_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::NodeSubscriptionRefreshStart,
+            );
             stats.subscription_events += Box::pin(refresh_subscriptions_in(
                 &self.node,
                 &self.subscriptions,
@@ -2943,6 +2970,10 @@ where
                 progress_waker.as_ref(),
             ))
             .await?;
+            report_node_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::NodeSubscriptionRefreshComplete,
+            );
             self.observed_chunk_completion_generation
                 .set(chunk_completion_generation);
         }
@@ -2957,12 +2988,22 @@ where
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
+            report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeConnectionLockStart);
             let mut connection = connection.lock().await;
+            report_node_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::NodeConnectionLockComplete,
+            );
             // `PeerConnection::tick` contains the subscriber admission state
             // machine. Keep that future off the enclosing Db tick frame so a
             // normal host/test thread cannot accumulate it across connection
             // passes.
-            let next = Box::pin(connection.tick()).await?;
+            report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeConnectionTickStart);
+            let next = Box::pin(connection.tick_with_diagnostic(observer)).await?;
+            report_node_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::NodeConnectionTickComplete,
+            );
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
@@ -2989,8 +3030,24 @@ where
                         connection.mark_subscriber_dirty() || subscriber_state_changed
                     };
                     if should_tick {
+                        report_node_tick_diagnostic(
+                            observer,
+                            DbTickDiagnosticPhase::NodeConnectionLockStart,
+                        );
                         let mut connection = connection.lock().await;
-                        let next = Box::pin(connection.tick()).await?;
+                        report_node_tick_diagnostic(
+                            observer,
+                            DbTickDiagnosticPhase::NodeConnectionLockComplete,
+                        );
+                        report_node_tick_diagnostic(
+                            observer,
+                            DbTickDiagnosticPhase::NodeConnectionTickStart,
+                        );
+                        let next = Box::pin(connection.tick_with_diagnostic(observer)).await?;
+                        report_node_tick_diagnostic(
+                            observer,
+                            DbTickDiagnosticPhase::NodeConnectionTickComplete,
+                        );
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;
@@ -3012,6 +3069,7 @@ where
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
+        report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeTickComplete);
         Ok(stats)
     }
 

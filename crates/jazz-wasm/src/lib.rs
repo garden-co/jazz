@@ -676,6 +676,9 @@ pub struct WasmDb {
     // are otherwise a privilege-escalation surface, because their author is
     // provenance while admission remains the runtime's SYSTEM identity.
     trusted_backend: bool,
+    // Installed only by the Safari diagnostic worker. The regular browser
+    // worker never sets this and therefore retains its ordinary tick path.
+    diagnostic_tick_observer: Rc<RefCell<Option<js_sys::Function>>>,
 }
 
 enum WasmDbInner {
@@ -1315,6 +1318,13 @@ impl WasmDbInner {
     async fn tick(&self) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| db.tick().await)
     }
+
+    async fn tick_with_diagnostic(
+        &self,
+        observer: Rc<dyn Fn(jazz::db::DbTickDiagnosticPhase)>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db.tick_with_diagnostic(observer).await)
+    }
 }
 
 fn start_transaction_rows<S>(
@@ -1796,6 +1806,7 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -1821,6 +1832,7 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: true,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -1852,6 +1864,7 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -1881,6 +1894,7 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -1914,6 +1928,7 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -1929,6 +1944,7 @@ impl WasmDb {
             ))),
             owns_runtime: false,
             trusted_backend: self.trusted_backend,
+            diagnostic_tick_observer: Rc::clone(&self.diagnostic_tick_observer),
         })
     }
 
@@ -2534,10 +2550,29 @@ impl WasmDb {
             Ok(inner) => inner,
             Err(error) => return js_sys::Promise::reject(&error),
         };
+        let diagnostic_tick_observer = self.diagnostic_tick_observer.borrow().clone();
         future_to_promise(async move {
-            inner.tick().await.map_err(to_js_error)?;
+            if let Some(callback) = diagnostic_tick_observer {
+                let observer = Rc::new(move |phase: jazz::db::DbTickDiagnosticPhase| {
+                    let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(phase.as_str()));
+                });
+                inner
+                    .tick_with_diagnostic(observer)
+                    .await
+                    .map_err(to_js_error)?;
+            } else {
+                inner.tick().await.map_err(to_js_error)?;
+            }
             Ok(JsValue::UNDEFINED)
         })
+    }
+
+    /// Test-worker-only browser receipt hook. The callback receives one
+    /// fixed phase name and never query, identity, storage, or wire data.
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = setDiagnosticTickObserver)]
+    pub fn set_diagnostic_tick_observer(&self, callback: Option<js_sys::Function>) {
+        *self.diagnostic_tick_observer.borrow_mut() = callback;
     }
 
     /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
@@ -5028,6 +5063,7 @@ mod dynamic_schema_view_tests {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(db)))),
             owns_runtime: false,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         };
         let subscriber = AuthorSubject::from_canonical(
             &serde_json::to_string(&("https://wasm.test", "subscriber")).unwrap(),
@@ -5634,6 +5670,7 @@ mod dynamic_schema_view_tests {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
             owns_runtime: false,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         };
         let tx_id = OpenTransactionId::new();
         binding
@@ -5650,6 +5687,7 @@ mod dynamic_schema_view_tests {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&view))))),
             owns_runtime: false,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         };
         let view_query = WasmPreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
@@ -5741,6 +5779,7 @@ mod dynamic_schema_view_tests {
             ))))),
             owns_runtime: false,
             trusted_backend: false,
+            diagnostic_tick_observer: Rc::new(RefCell::new(None)),
         };
         let other_query = WasmPreparedQuery {
             inner: other_owner

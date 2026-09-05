@@ -2577,6 +2577,70 @@ pub struct DbTickStats {
     pub remote_sync_applied: usize,
 }
 
+/// Test-only, redacted progress markers for an in-flight database tick.
+///
+/// A browser diagnostic can observe a blocked owner turn without exposing
+/// identities, query data, wire frames, storage keys, or connection handles.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DbTickDiagnosticPhase {
+    LifecycleStart,
+    LifecycleDeferredRejectionsComplete,
+    LifecycleFinalizationsStart,
+    LifecycleFinalizationsComplete,
+    LifecycleLocalPublicationsStart,
+    LifecycleLocalPublicationsComplete,
+    LifecycleNodeTickStart,
+    LifecycleNodeTickComplete,
+    NodeTickStart,
+    NodeQueryRuntimeLockStart,
+    NodeQueryRuntimeLockComplete,
+    NodeSubscriptionRefreshStart,
+    NodeSubscriptionRefreshComplete,
+    NodeConnectionLockStart,
+    NodeConnectionLockComplete,
+    NodeConnectionTickStart,
+    NodeConnectionTickComplete,
+    SubscriberRegisterShape,
+    SubscriberSubscribe,
+    SubscriberNodeLockStart,
+    SubscriberNodeLockComplete,
+    SubscriberCapabilityCompileStart,
+    SubscriberCapabilityCompileComplete,
+    NodeTickComplete,
+}
+
+impl DbTickDiagnosticPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LifecycleStart => "lifecycle-start",
+            Self::LifecycleDeferredRejectionsComplete => "lifecycle-deferred-rejections-complete",
+            Self::LifecycleFinalizationsStart => "lifecycle-finalizations-start",
+            Self::LifecycleFinalizationsComplete => "lifecycle-finalizations-complete",
+            Self::LifecycleLocalPublicationsStart => "lifecycle-local-publications-start",
+            Self::LifecycleLocalPublicationsComplete => "lifecycle-local-publications-complete",
+            Self::LifecycleNodeTickStart => "lifecycle-node-tick-start",
+            Self::LifecycleNodeTickComplete => "lifecycle-node-tick-complete",
+            Self::NodeTickStart => "node-tick-start",
+            Self::NodeQueryRuntimeLockStart => "node-query-runtime-lock-start",
+            Self::NodeQueryRuntimeLockComplete => "node-query-runtime-lock-complete",
+            Self::NodeSubscriptionRefreshStart => "node-subscription-refresh-start",
+            Self::NodeSubscriptionRefreshComplete => "node-subscription-refresh-complete",
+            Self::NodeConnectionLockStart => "node-connection-lock-start",
+            Self::NodeConnectionLockComplete => "node-connection-lock-complete",
+            Self::NodeConnectionTickStart => "node-connection-tick-start",
+            Self::NodeConnectionTickComplete => "node-connection-tick-complete",
+            Self::SubscriberRegisterShape => "subscriber-register-shape",
+            Self::SubscriberSubscribe => "subscriber-subscribe",
+            Self::SubscriberNodeLockStart => "subscriber-node-lock-start",
+            Self::SubscriberNodeLockComplete => "subscriber-node-lock-complete",
+            Self::SubscriberCapabilityCompileStart => "subscriber-capability-compile-start",
+            Self::SubscriberCapabilityCompileComplete => "subscriber-capability-compile-complete",
+            Self::NodeTickComplete => "node-tick-complete",
+        }
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,

@@ -30,7 +30,7 @@ class Handler(SimpleHTTPRequestHandler):
             # Deliberately retain only the approved metadata schema.
             approved = ({
                 "receivedAt": dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds"),
-                **{key: event[key] for key in ("origin", "role", "pageRun", "phase", "elapsedMs", "workerElapsedMs", "direction", "messageType", "frameCount", "frameBytes", "errorKind", "operation", "operationId", "outcome") if key in event},
+                **{key: event[key] for key in ("origin", "role", "pageRun", "phase", "elapsedMs", "workerElapsedMs", "direction", "messageType", "frameCount", "frameBytes", "errorKind", "operation", "operationId", "tickPhase", "outcome") if key in event},
             } for event in events if isinstance(event, dict))
             with self.trace.open("a") as file:
                 for event in approved:
