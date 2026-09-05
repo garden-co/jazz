@@ -2949,16 +2949,20 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeQueryRuntimeLockStart);
-        let has_pending_query_runtime = self.node.lock().await.has_pending_query_runtime();
-        report_node_tick_diagnostic(
-            observer,
-            DbTickDiagnosticPhase::NodeQueryRuntimeLockComplete,
-        );
-        if self.chunk_resolver.has_pending_local_demand()
-            || chunk_completion_generation != self.observed_chunk_completion_generation.get()
-            || has_pending_query_runtime
-        {
+        let refresh_already_required = self.chunk_resolver.has_pending_local_demand()
+            || chunk_completion_generation != self.observed_chunk_completion_generation.get();
+        let has_pending_query_runtime = if refresh_already_required {
+            false
+        } else {
+            report_node_tick_diagnostic(observer, DbTickDiagnosticPhase::NodeQueryRuntimeLockStart);
+            let has_pending_query_runtime = self.node.lock().await.has_pending_query_runtime();
+            report_node_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::NodeQueryRuntimeLockComplete,
+            );
+            has_pending_query_runtime
+        };
+        if refresh_already_required || has_pending_query_runtime {
             report_node_tick_diagnostic(
                 observer,
                 DbTickDiagnosticPhase::NodeSubscriptionRefreshStart,
