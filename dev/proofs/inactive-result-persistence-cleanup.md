@@ -38,7 +38,7 @@ removed; the authority-scoped known-state field remains active.
 | ------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Local source history, deletion, registers, and indexes | Active storage                                                          | Unchanged Groove records under catalogue-owned physical layouts. No JVRR envelope or per-row descriptor is stored here.                                                         |
 | Network `VersionRecord` / `JVRR`                       | Active wire format                                                      | Unchanged descriptor/row envelope validated before translation into local physical storage.                                                                                     |
-| `jazz_settled_program_facts` / `JPFK` v1               | Two active source variants plus thirteen inactive output/proof variants | Only tag `3` source coverage and tag `14` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.                  |
+| `jazz_settled_program_facts` / `JPFK` v1               | Two active source variants plus thirteen inactive output/proof variants | Only dense tag `0` source coverage and tag `1` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.             |
 | `jazz_known_state_facts`                               | Active closure progress                                                 | Unchanged. Exact authority identity, settlement/authorization progress, and source-closure generation support reopen admission.                                                 |
 | `jazz_authority_policy_bindings`                       | Active exact policy directory                                           | Unchanged. Bounded digest addresses exact subject/claims; collision/mismatch checks remain before write and recovery.                                                           |
 | Closed required-codec profile                          | Advertised the two dormant result codecs                                | Rust and IndexedDB remove both IDs. JSM1 required-family count changes from 14 to 12; existing roots advertising the retired profile reject.                                    |
@@ -53,8 +53,7 @@ removed; the authority-scoped known-state field remains active.
 ## Retained byte contracts
 
 Jazz SPEC 16 specifies the full `JPFK` field order, primitive widths, bounds,
-source role tags, version references, and canonical rejection rules. Both active
-tags and bytes remain unchanged to avoid unnecessary source-closure churn.
+source role tags, version references, and canonical rejection rules. The only active tags are dense `0` and `1`; the field payloads remain unchanged.
 The direct-store key is the five-field authority prefix followed by the
 32-byte BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`; the
 value is one `Bytes` field holding the exact canonical fact. Retired tags are
@@ -85,10 +84,11 @@ than silently regenerating a failing baseline.
 
 The live SQLite/RocksDB producer matches the precomputed old-pack-minus-empty-
 family prediction exactly. The sole removed line is
-`store\tjazz_settled_result_members`; every one of the 35 retained logical-pack entry key/value
-encodings is unchanged. Direct-store entries in this pack render decoded Values;
-this is not a claim that complete physical roots are byte-identical. Current pack SHA256 is `bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b`;
-semantic receipt SHA256 is `0d84a926096b690c772ca50edc950f2d647b8e924a7eb1b45e83b373b5cf15f6`.
+`store\tjazz_settled_result_members`; the JPFK v1 tag transition changes the
+affected `jazz_settled_program_facts` direct-store keys and values while the
+remaining producer inventory stays fixed. Direct-store entries in this pack render decoded Values;
+this is not a claim that complete physical roots are byte-identical. Current pack SHA256 is `e01876d920687887c42fe5409bae09959a388c1159b41f9023eeb701219744a7`;
+semantic receipt SHA256 is `f47d144484972c04f336b02a4973cf6efde9935ac67f001d5abd3585c0c08dca`.
 Historical blobs/checksums remain unchanged. Their retired required-codec
 profiles now fail real current adapter admission. No comparison normalization or
 fake historical profile is used. New positive physical fixtures were exported
@@ -107,16 +107,16 @@ row interpretation; this is an intentional pre-freeze contract change.
 Current native physical fixtures came from the guarded producer, including
 independent staged-candidate reopen and source removal:
 
-- SQLite gzip SHA256: `975d14bc2089829c4a34c845ccf69129f92adfb86ebc4be2ce08d4120ab8d7dd`.
-- SQLite raw SHA256: `e4cb84ad01d606c14aa7d066c639f3fc01c42d3a8e5c93a0bebbf3f0fe1950fb`.
-- RocksDB archive SHA256: `e79bc1fa5297ba62f812e3aa7b095dd9f1f6ede58dea397d401c04b53c14844e`.
+- SQLite gzip SHA256: `85569fa00541c4a6ab60fb85a6ff9d0d2a234b008a53cadfde20d48df1ebb28c`.
+- SQLite raw SHA256: `1f747a9a166019467aa30173f6552ba149c5a5f66bb1529e597eefc998b0d9ba`.
+- RocksDB archive SHA256: `f6e5f312091070cf215700a5b8c7cb90f6d22c53b4e9a26e2a97ceb2b1df15ee`.
 
 The browser producer uses real Chromium/public WasmDb, deployed catalogue,
 branch history and large values. It closes the writer, snapshots raw IndexedDB,
 reopens with the server blocked, validates both branches, then optionally exports
 through `JAZZ_BROWSER_CORPUS_OUT` to a new path. The committed current browser fixture has SHA256
-`8b2a26247c05b7706f89a50b560cf5c417122db51da712daaf9db5b6f29e9bac`;
-it was generated and independently reopened offline on source `781b88389c`.
+`72ca13df039926ac5ad9055d5c6bfb664bf24aedf4f5b8e093cd464e615359a7`;
+it was generated and independently reopened offline on source `193ac53e34`.
 Historical fixture rejection remains separate. An intermediate artifact build used to create this fixture is not a
 final consumer receipt.
 
