@@ -1,0 +1,110 @@
+{
+  "schema": {
+    "tables": {
+      "scope_rows": {
+        "columns": [
+          {
+            "column_type": {
+              "type": "Text"
+            },
+            "name": "title",
+            "nullable": false
+          },
+          {
+            "column_type": {
+              "type": "Text"
+            },
+            "name": "owner",
+            "nullable": false
+          }
+        ],
+        "policies": {
+          "delete": {
+            "using": {
+              "column": "owner",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": ["user"],
+                "type": "SessionRef"
+              }
+            },
+            "with_check": null
+          },
+          "insert": {
+            "using": null,
+            "with_check": {
+              "column": "owner",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": ["user"],
+                "type": "SessionRef"
+              }
+            }
+          },
+          "select": {
+            "using": {
+              "column": "owner",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": ["user"],
+                "type": "SessionRef"
+              }
+            },
+            "with_check": null
+          },
+          "update": {
+            "using": {
+              "column": "owner",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": ["user"],
+                "type": "SessionRef"
+              }
+            },
+            "with_check": {
+              "column": "owner",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": ["user"],
+                "type": "SessionRef"
+              }
+            }
+          }
+        }
+      },
+      "todos": {
+        "columns": [
+          {
+            "column_type": {
+              "type": "Text"
+            },
+            "name": "title",
+            "nullable": false
+          }
+        ]
+      }
+    }
+  },
+  "scopeCells": {
+    "a": [
+      2, 1, 5, 116, 105, 116, 108, 101, 8, 1, 5, 111, 119, 110, 101, 114, 8, 64, 24, 0, 0, 0, 2,
+      115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105, 118, 97, 116, 101, 45, 114, 111, 119, 2,
+      91, 34, 117, 114, 110, 58, 106, 97, 122, 122, 58, 116, 101, 115, 116, 34, 44, 34, 114, 110,
+      45, 100, 101, 118, 105, 99, 101, 45, 112, 114, 105, 118, 97, 116, 101, 45, 97, 34, 93
+    ],
+    "b": [
+      2, 1, 5, 116, 105, 116, 108, 101, 8, 1, 5, 111, 119, 110, 101, 114, 8, 64, 24, 0, 0, 0, 2,
+      115, 99, 111, 112, 101, 45, 98, 45, 112, 114, 105, 118, 97, 116, 101, 45, 114, 111, 119, 2,
+      91, 34, 117, 114, 110, 58, 106, 97, 122, 122, 58, 116, 101, 115, 116, 34, 44, 34, 114, 110,
+      45, 100, 101, 118, 105, 99, 101, 45, 112, 114, 105, 118, 97, 116, 101, 45, 98, 34, 93
+    ]
+  },
+  "scopeQuery": [
+    10, 115, 99, 111, 112, 101, 95, 114, 111, 119, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  ]
+}
