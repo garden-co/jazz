@@ -925,6 +925,82 @@ fn encode_canonical_relation_expr(buf: &mut Vec<u8>, rel: &RelExpr) {
     encode_relation_expr_body(buf, rel);
 }
 
+/// Validate every relation-IR arm before an infallible catalogue encoder is
+/// allowed to hash or persist it. Server callers can publish `TablePolicies`
+/// directly, bypassing core-schema conversion, so this is the admission
+/// boundary for the durable grammar as well as a decoder defense.
+pub fn validate_permissions_relation_unions(
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Result<(), CatalogueEncodingError> {
+    for policies in permissions.values() {
+        for policy in [
+            policies.select.using.as_ref(),
+            policies.insert.with_check.as_ref(),
+            policies.update.using.as_ref(),
+            policies.update.with_check.as_ref(),
+            policies.delete.using.as_ref(),
+            policies.delete.with_check.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_policy_relation_unions(policy)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
+    match policy {
+        PolicyExpr::ExistsRel { rel } => validate_relation_union_labels(rel),
+        PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
+            validate_policy_relation_unions(condition)
+        }
+        PolicyExpr::And(expressions) | PolicyExpr::Or(expressions) => {
+            for expression in expressions {
+                validate_policy_relation_unions(expression)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_relation_union_labels(rel: &RelExpr) -> Result<(), CatalogueEncodingError> {
+    match rel {
+        RelExpr::TableScan { .. } => Ok(()),
+        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
+            validate_relation_union_labels(input)
+        }
+        RelExpr::Union { inputs } => {
+            let mut labels = BTreeSet::new();
+            for arm in inputs {
+                if arm.label.is_empty()
+                    || arm.label.len() > MAX_RELATION_UNION_ARM_LABEL_BYTES
+                    || arm.label.contains('\0')
+                    || !labels.insert(&arm.label)
+                {
+                    return Err(CatalogueEncodingError::DecodeError {
+                        message:
+                            "relation union labels must be unique, NUL-free, and 1..=4096 bytes"
+                                .to_owned(),
+                    });
+                }
+                validate_relation_union_labels(&arm.input)?;
+            }
+            Ok(())
+        }
+        RelExpr::Join { left, right, .. } => {
+            validate_relation_union_labels(left)?;
+            validate_relation_union_labels(right)
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            validate_relation_union_labels(seed)?;
+            validate_relation_union_labels(step)
+        }
+    }
+}
+
 fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
     let mut tasks = vec![RelationEncodeTask::Expr(rel)];
     while let Some(task) = tasks.pop() {
@@ -3876,6 +3952,31 @@ mod tests {
             ),
             Err(CatalogueEncodingError::DecodeError { .. })
         ));
+
+        let invalid = HashMap::from([(
+            TableName::new("documents"),
+            TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Union {
+                    inputs: vec![
+                        RelUnionArm {
+                            label: "duplicate".to_owned(),
+                            input: RelExpr::TableScan {
+                                table: TableName::new("a"),
+                                alias: None,
+                            },
+                        },
+                        RelUnionArm {
+                            label: "duplicate".to_owned(),
+                            input: RelExpr::TableScan {
+                                table: TableName::new("b"),
+                                alias: None,
+                            },
+                        },
+                    ],
+                },
+            }),
+        )]);
+        assert!(validate_permissions_relation_unions(&invalid).is_err());
     }
 
     #[test]
