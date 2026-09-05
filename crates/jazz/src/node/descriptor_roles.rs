@@ -605,4 +605,93 @@ mod tests {
         trailing.record.push(0);
         assert!(decode_aggregate_payload_record(&trailing, &rebound_schema).is_err());
     }
+
+    // Internal fixture: public queries cannot independently choose nested
+    // execution slots while keeping the authoritative result-role schema fixed.
+    #[test]
+    fn review_nested_role_equality_and_runtime_rebinding() {
+        fn nested_schema(slot: u64, name: &str, ty: ValueType) -> AggregateResultSchema {
+            let mut schema = aggregate_schema(slot, slot + 1);
+            let child = RecordDescriptor::new_with_fields([
+                DescriptorField::new(name, ty).with_identity(FieldIdentity::Slot(slot + 2))
+            ]);
+            schema.value_fields[0].value_type =
+                ValueType::Array(Box::new(ValueType::Record(Box::new(child))));
+            schema
+        }
+        let schema = nested_schema(10, "literal/name", ValueType::U64);
+        let ValueType::Array(element) = &schema.value_fields[0].value_type else {
+            unreachable!()
+        };
+        let ValueType::Record(child) = element.as_ref() else {
+            unreachable!()
+        };
+        let nested = Value::Array(vec![Value::Record(OwnedRecord::new(
+            child.create(&[Value::U64(42)]).unwrap(),
+            **child,
+        ))]);
+        let runtime = RecordDescriptor::new_with_fields(
+            schema
+                .group_key_fields
+                .iter()
+                .chain(&schema.value_fields)
+                .cloned(),
+        );
+        let raw = runtime.create(&[Value::U64(1), nested.clone()]).unwrap();
+        let (descriptor, record) =
+            encode_aggregate_payload_record(runtime.bind(&raw), &schema).unwrap();
+        let payload = ResultMemberPayloadEntry {
+            member: ResultMemberEntry::Synthetic {
+                table: "aggregate_result".to_owned(),
+                row: super::super::codec::settled_result_value_storage_bytes(
+                    &Value::U64(1),
+                    &ValueType::U64,
+                )
+                .unwrap(),
+                replacement: SyntheticReplacementToken::from_encoded_record(
+                    super::super::codec::settled_result_value_storage_bytes(
+                        &nested,
+                        &schema.value_fields[0].value_type,
+                    )
+                    .unwrap(),
+                ),
+            },
+            descriptor,
+            record,
+        };
+        let relocated = nested_schema(800, "literal/name", ValueType::U64);
+        let decoded = decode_aggregate_payload_record(&payload, &relocated).unwrap();
+        let (descriptor, record) =
+            encode_aggregate_payload_record(decoded.borrowed(), &relocated).unwrap();
+        assert_eq!(descriptor, payload.descriptor);
+        assert_eq!(record, payload.record);
+        assert!(
+            decode_aggregate_payload_record(
+                &payload,
+                &nested_schema(800, "another/name", ValueType::U64),
+            )
+            .is_err(),
+            "nested logical-name substitution must reject"
+        );
+        assert!(
+            decode_aggregate_payload_record(
+                &payload,
+                &nested_schema(800, "literal/name", ValueType::I64),
+            )
+            .is_err(),
+            "nested equal-width type substitution must reject"
+        );
+        let mut wrong_member = payload.clone();
+        let ResultMemberEntry::Synthetic { replacement, .. } = &mut wrong_member.member else {
+            unreachable!()
+        };
+        *replacement = SyntheticReplacementToken::from_encoded_record(
+            super::super::codec::settled_result_value_storage_bytes(
+                &Value::U64(42),
+                &ValueType::U64,
+            )
+            .unwrap(),
+        );
+        assert!(decode_aggregate_payload_record(&wrong_member, &relocated).is_err());
+    }
 }

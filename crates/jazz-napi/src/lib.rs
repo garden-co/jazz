@@ -70,9 +70,7 @@ use jazz::db::{
     SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
-use jazz::groove::records::{
-    BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
-};
+use jazz::groove::records::Value as CoreValue;
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage,
@@ -4770,22 +4768,8 @@ where
 }
 
 fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
-        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
-    let record = CoreBorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
-    let mut cells = CoreRowCells::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let Some(name) = &field.name else {
-            return Err(napi::Error::from_reason(
-                "encoded cells must use named fields",
-            ));
-        };
-        cells.insert(name.clone(), value);
-    }
-    Ok(cells)
+    jazz::binding_codec::decode_named_cells(bytes)
+        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))
 }
 
 fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
@@ -6590,7 +6574,10 @@ mod tests {
                 .create(&[CoreValue::String(value.to_owned())])
                 .expect("encode label fixture cell");
             Uint8Array::from(
-                postcard::to_allocvec(&(descriptor, raw)).expect("encode named NAPI cells"),
+                jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+                    raw, descriptor,
+                ))
+                .expect("encode named NAPI cells"),
             )
         };
 
@@ -7048,7 +7035,10 @@ mod tests {
         let raw = descriptor
             .create(&[CoreValue::String("credited to alice".to_owned())])
             .unwrap();
-        let cells = postcard::to_allocvec(&(descriptor, raw)).unwrap();
+        let cells = jazz::binding_codec::encode_named_cells(
+            &jazz::groove::records::OwnedRecord::new(raw, descriptor),
+        )
+        .unwrap();
 
         let backend = NapiDb::open_memory_as_backend(
             Uint8Array::from(schema.clone()),

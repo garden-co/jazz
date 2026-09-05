@@ -50,7 +50,7 @@ impl Serialize for NativeValueType<'_> {
     }
 }
 
-struct NativeDescriptor<'a>(&'a RecordDescriptor);
+pub(super) struct NativeDescriptor<'a>(pub(super) &'a RecordDescriptor);
 impl Serialize for NativeDescriptor<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
@@ -99,4 +99,91 @@ impl Serialize for NativeEnumSchema<'_> {
         }
         .serialize(serializer)
     }
+}
+
+// Host input is an explicit name/type tree, not RecordDescriptor's execution
+// serde. Bound both total nodes and recursion before allocating child vectors.
+pub(super) fn read_descriptor(input: &mut &[u8]) -> Result<RecordDescriptor, String> {
+    read_fields(input, &mut 1024, 0)
+}
+
+fn take<'a, T: serde::Deserialize<'a>>(input: &mut &'a [u8]) -> Result<T, String> {
+    let (value, rest) = postcard::take_from_bytes(input).map_err(|error| error.to_string())?;
+    *input = rest;
+    Ok(value)
+}
+
+fn count(input: &mut &[u8], budget: usize) -> Result<usize, String> {
+    let count: usize = take(input)?;
+    if count > budget || count > input.len() {
+        return Err("binding descriptor node limit exceeded".to_owned());
+    }
+    Ok(count)
+}
+
+fn read_fields(
+    input: &mut &[u8],
+    budget: &mut usize,
+    depth: usize,
+) -> Result<RecordDescriptor, String> {
+    let count = count(input, *budget)?;
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name: Option<String> = take(input)?;
+        let value_type = read_type(input, budget, depth)?;
+        fields.push(groove::records::DescriptorField {
+            identity: name.clone().map(groove::records::FieldIdentity::Name),
+            name,
+            value_type,
+        });
+    }
+    Ok(RecordDescriptor::new_with_fields(fields))
+}
+
+fn read_type(input: &mut &[u8], budget: &mut usize, depth: usize) -> Result<ValueType, String> {
+    if *budget == 0 || depth >= 128 {
+        return Err("binding descriptor node or depth limit exceeded".to_owned());
+    }
+    *budget -= 1;
+    let start = *input;
+    let tag: u32 = take(input)?;
+    Ok(match tag {
+        // These scalar payloads contain no record descriptors. Their fixed
+        // discriminants are the same ones pinned by NativeValueType's writer.
+        0..=12 => {
+            *input = start;
+            take(input)?
+        }
+        13 => {
+            let count = count(input, *budget)?;
+            let mut members = Vec::with_capacity(count);
+            for _ in 0..count {
+                members.push(read_type(input, budget, depth + 1)?);
+            }
+            ValueType::Tuple(members)
+        }
+        14 => ValueType::Array(Box::new(read_type(input, budget, depth + 1)?)),
+        15 => ValueType::Nullable(Box::new(read_type(input, budget, depth + 1)?)),
+        16 => ValueType::Record(Box::new(read_fields(input, budget, depth + 1)?)),
+        17 => {
+            let registry_id = take(input)?;
+            let name: String = take(input)?;
+            let count = count(input, *budget)?;
+            let mut cases = Vec::with_capacity(count);
+            for _ in 0..count {
+                *budget = budget
+                    .checked_sub(1)
+                    .ok_or("binding descriptor node limit exceeded")?;
+                let name: String = take(input)?;
+                let payload = read_fields(input, budget, depth + 1)?;
+                cases.push(groove::records::EnumCase::new(name, payload));
+            }
+            ValueType::Enum(Box::new(
+                EnumSchema::new(name, cases)
+                    .map_err(|error| error.to_string())?
+                    .with_registry_id(registry_id),
+            ))
+        }
+        _ => return Err("unknown binding value type".to_owned()),
+    })
 }

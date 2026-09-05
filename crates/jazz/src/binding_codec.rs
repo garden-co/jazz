@@ -14,6 +14,51 @@ use crate::node::{CurrentRow, CurrentRowPublicationField, RelationSnapshot};
 use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
 
+/// Encode the named-cell input ABI used by both native hosts. The descriptor
+/// contains names and recursive value types, never compiler field identities.
+pub fn encode_named_cells(record: &groove::records::OwnedRecord) -> Result<Vec<u8>, String> {
+    postcard::to_allocvec(&(
+        publication_type::NativeDescriptor(record.descriptor()),
+        record.raw(),
+    ))
+    .map_err(|error| error.to_string())
+}
+
+/// Decode one canonical named-cell input envelope before constructing RowCells.
+/// Both NAPI and WASM use this owner; execution descriptor serde is not accepted.
+pub fn decode_named_cells(bytes: &[u8]) -> Result<crate::db::RowCells, String> {
+    let mut remaining = bytes;
+    let descriptor = publication_type::read_descriptor(&mut remaining)?;
+    let (raw, trailing): (Vec<u8>, _) =
+        postcard::take_from_bytes(remaining).map_err(|error| error.to_string())?;
+    if !trailing.is_empty() {
+        return Err("trailing bytes in named-cell envelope".to_owned());
+    }
+    let record = groove::records::OwnedRecord::new(raw, descriptor);
+    if encode_named_cells(&record)? != bytes {
+        return Err("noncanonical named-cell envelope".to_owned());
+    }
+    let values = record.to_values().map_err(|error| error.to_string())?;
+    if descriptor
+        .create(&values)
+        .map_err(|error| error.to_string())?
+        != record.raw()
+    {
+        return Err("noncanonical named-cell record".to_owned());
+    }
+    let mut cells = crate::db::RowCells::new();
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        let name = field
+            .name
+            .as_ref()
+            .ok_or("encoded cells must use named fields")?;
+        if cells.insert(name.clone(), value).is_some() {
+            return Err("encoded cells contain duplicate names".to_owned());
+        }
+    }
+    Ok(cells)
+}
+
 /// Rust-owned frozen v1 binding corpus. Test harnesses may expose this through
 /// a generated host artifact, but consumers must still decode its payloads
 /// through their ordinary production readers.
@@ -262,6 +307,62 @@ mod tests {
     use super::*;
     use crate::node::CurrentRowBindingRole;
     use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+
+    // This direct boundary test is necessary to pin host input bytes independently
+    // of Rust execution serde; database tests alone cannot identify that framing.
+    #[test]
+    fn named_cell_input_uses_explicit_canonical_recursive_binding_types() {
+        use groove::records::{DescriptorField, FieldIdentity};
+        let fixture = b"\x01\x01\x05score\x03\x08\x2a\x00\x00\x00\x00\x00\x00\x00";
+        let cells = decode_named_cells(fixture).unwrap();
+        assert_eq!(cells.get("score"), Some(&Value::U64(42)));
+        let descriptor =
+            RecordDescriptor::new_with_fields([DescriptorField::new("score", ValueType::U64)
+                .with_identity(FieldIdentity::Slot(900))]);
+        let record = OwnedRecord::new(descriptor.create(&[Value::U64(42)]).unwrap(), descriptor);
+        assert_eq!(encode_named_cells(&record).unwrap(), fixture);
+        assert!(
+            decode_named_cells(&postcard::to_allocvec(&(descriptor, record.raw())).unwrap())
+                .is_err()
+        );
+        let mut trailing = fixture.to_vec();
+        trailing.push(0);
+        assert!(decode_named_cells(&trailing).is_err());
+        let mut overlong = vec![0x81, 0];
+        overlong.extend_from_slice(&fixture[1..]);
+        assert!(decode_named_cells(&overlong).is_err());
+        let nested =
+            RecordDescriptor::new_with_fields([DescriptorField::new("literal", ValueType::U64)
+                .with_identity(FieldIdentity::NamedSlot {
+                    name: "execution_alias".to_owned(),
+                    slot: 73,
+                })]);
+        let descriptor = RecordDescriptor::new([(
+            "payload",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(nested)))),
+        )]);
+        let record = OwnedRecord::new(
+            descriptor
+                .create(&[Value::Array(vec![Value::Record(OwnedRecord::new(
+                    nested.create(&[Value::U64(7)]).unwrap(),
+                    nested,
+                ))])])
+                .unwrap(),
+            descriptor,
+        );
+        let cells = decode_named_cells(&encode_named_cells(&record).unwrap()).unwrap();
+        let Some(Value::Array(items)) = cells.get("payload") else {
+            panic!("array payload")
+        };
+        let Value::Record(inner) = &items[0] else {
+            panic!("nested record")
+        };
+        assert_eq!(inner.get("literal"), Ok(Value::U64(7)));
+        assert_eq!(
+            inner.descriptor().fields()[0].identity,
+            Some(FieldIdentity::Name("literal".to_owned()))
+        );
+    }
 
     /// The contained 4c6eafaef5 binding enum, independently declared to pin
     /// its postcard variant order and fields before migrating publication.

@@ -25,7 +25,7 @@ use jazz::db::{
     RowCells, SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
     TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -3566,20 +3566,8 @@ fn ensure_transaction_runtime(db: &WasmDbInner, tx: &WasmTx) -> Result<(), JsVal
 }
 
 fn decode_cells(bytes: &[u8]) -> Result<RowCells, JsValue> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) =
-        postcard::from_bytes(bytes).map_err(|err| to_js_error(format!("decode cells: {err}")))?;
-    let record = BorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|err| to_js_error(format!("decode cell record: {err}")))?;
-    let mut cells = RowCells::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let Some(name) = &field.name else {
-            return Err(JsValue::from_str("encoded cells must use named fields"));
-        };
-        cells.insert(name.clone(), value);
-    }
-    Ok(cells)
+    jazz::binding_codec::decode_named_cells(bytes)
+        .map_err(|error| to_js_error(format!("decode cells: {error}")))
 }
 
 fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
