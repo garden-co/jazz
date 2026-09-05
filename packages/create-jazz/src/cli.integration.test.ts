@@ -77,6 +77,105 @@ describe("create-jazz CLI end-to-end", () => {
       }
     },
   );
+  it(
+    "uses the first positional app name after a separate --starter value",
+    { timeout: 60_000 },
+    () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-starter-before-name-"));
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        JAZZ_STARTER_PATH: path.join(repoRoot, "starters/next-betterauth"),
+        GIT_AUTHOR_NAME: "create-jazz tests",
+        GIT_AUTHOR_EMAIL: "tests@create-jazz.invalid",
+        GIT_COMMITTER_NAME: "create-jazz tests",
+        GIT_COMMITTER_EMAIL: "tests@create-jazz.invalid",
+      };
+      delete env.npm_config_user_agent;
+
+      const result = spawnSync(
+        tsxBin,
+        [
+          cliEntry,
+          "--starter",
+          "next-betterauth",
+          "starter-before-name",
+          "--starter=next-betterauth",
+          "--hosting=selfhosted",
+        ],
+        {
+          cwd: tmpDir,
+          env,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+
+      expect(
+        result.status,
+        `CLI exited non-zero. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      ).toBe(0);
+
+      const appDir = path.join(tmpDir, "starter-before-name");
+      expect(fs.existsSync(appDir), "scaffolded directory should use the positional name").toBe(
+        true,
+      );
+      expect(JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name).toBe(
+        "starter-before-name",
+      );
+    },
+  );
+
+  it(
+    "uses the first positional app name after a separate --hosting value",
+    { timeout: 60_000 },
+    () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-hosting-before-name-"));
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        JAZZ_STARTER_PATH: path.join(repoRoot, "starters/next-betterauth"),
+        GIT_AUTHOR_NAME: "create-jazz tests",
+        GIT_AUTHOR_EMAIL: "tests@create-jazz.invalid",
+        GIT_COMMITTER_NAME: "create-jazz tests",
+        GIT_COMMITTER_EMAIL: "tests@create-jazz.invalid",
+      };
+      delete env.npm_config_user_agent;
+
+      const result = spawnSync(
+        tsxBin,
+        [
+          cliEntry,
+          "--hosting",
+          "selfhosted",
+          "hosting-before-name",
+          "--starter=next-betterauth",
+          "--hosting=selfhosted",
+          "--no-git",
+        ],
+        {
+          cwd: tmpDir,
+          env,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+
+      expect(
+        result.status,
+        `CLI exited non-zero. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      ).toBe(0);
+
+      const appDir = path.join(tmpDir, "hosting-before-name");
+      expect(fs.existsSync(appDir), "scaffolded directory should use the positional name").toBe(
+        true,
+      );
+      expect(JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf-8")).name).toBe(
+        "hosting-before-name",
+      );
+      expect(fs.existsSync(path.join(appDir, ".git")), "--no-git should be preserved").toBe(false);
+    },
+  );
 
   hostedIt(
     "scaffolds a hosted project and provisions Jazz Cloud when CREATE_JAZZ_HOSTED_E2E=1",
