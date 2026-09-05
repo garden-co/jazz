@@ -64,7 +64,15 @@ it("isolates pending advice handles and retires them on cancel and close", async
 
 it("keeps local and spoofed permission advice unknown without an authority", async () => {
   await withNativeRelayFixture(app, async (fixture) => {
-    const db = await fixture.createDb({ ...fixture.config, serverUrl: "ws://example.invalid" });
+    const db = await fixture.createDb({
+      ...fixture.config,
+      cookieSession: {
+        issuer: "https://spoof.example",
+        user_id: "spoofed",
+        claims: {},
+        authMode: "external",
+      },
+    });
     const row = await db.insert(app.notes, { title: "local" }).wait({ tier: "local" });
     expect(
       await Promise.all([

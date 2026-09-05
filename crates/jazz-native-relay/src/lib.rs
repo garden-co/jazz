@@ -4223,6 +4223,7 @@ type ForegroundSubscriptionOpen =
 
 struct ConnectedClient {
     retiring: bool,
+    admitted_scope_advice: bool,
     db: Rc<Db<MemoryStorage>>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
@@ -4719,6 +4720,7 @@ impl RelayWorker {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
         tx_time_floor: Option<TxTime>,
+        admitted_scope_advice: bool,
     ) -> Result<u64, RelayError> {
         let column_families = self.schema.column_families();
         let refs = column_families
@@ -4763,6 +4765,7 @@ impl RelayWorker {
             id,
             ConnectedClient {
                 retiring: false,
+                admitted_scope_advice,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -5191,10 +5194,16 @@ impl RelayWorker {
                 }
             }
         };
-        let advice = self
-            .foreground_client(client)?
-            .db
-            .request_permission_advice(action);
+        if !self.foreground_client(client)?.admitted_scope_advice {
+            return Ok(ForegroundOperationPoll::Ready(
+                ForegroundOperationResult::PermissionAdvice(ForegroundPermissionAdvice::Unknown),
+            ));
+        }
+        // The foreground's immediate upstream is a partial replica and cannot
+        // issue advice. The capability binds this lease to the persistent Db's
+        // authenticated upstream subject; request on that ordinary Db while
+        // keeping cancellation and delivery exclusively foreground-owned.
+        let advice = self.persistent.request_permission_advice(action);
         self.start_foreground_operation(
             client,
             None,
@@ -6085,7 +6094,7 @@ impl NativeRelay {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
     ) -> Result<NativeRelayClient, RelayError> {
-        let id = self.run(move |worker| worker.attach_client(identity, claims, None))?;
+        let id = self.run(move |worker| worker.attach_client(identity, claims, None, false))?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -6105,8 +6114,11 @@ impl NativeRelay {
         claims: BTreeMap<String, Value>,
         lease: ForegroundNodeLease,
     ) -> Result<NativeRelayClient, RelayError> {
+        if identity.author != self.inner.identity.author {
+            return Err(RelayError::ScopeConfigurationMismatch);
+        }
         let id = self.run(move |worker| {
-            worker.attach_client(identity, claims, Some(lease.confirmed_tx_time))
+            worker.attach_client(identity, claims, Some(lease.confirmed_tx_time), true)
         })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
@@ -7913,6 +7925,41 @@ mod tests {
     // Internal scheduling receipt: JavaScript cannot deterministically suspend the
     // semantic owner between native commands. All data and uploads still use core.
     #[test]
+    fn permission_advice_route_requires_the_admitted_scope_author() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("advice-scope.sqlite"),
+            Some("advice"),
+        ))
+        .unwrap();
+        let identity = fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap();
+        let generic = relay.attach_client(identity, BTreeMap::new()).unwrap();
+        assert!(matches!(
+            generic
+                .request_foreground_permission_advice(ForegroundPermissionAdviceAction::Read {
+                    table: "todos".into(),
+                    row: [1; 16]
+                })
+                .unwrap(),
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::PermissionAdvice(
+                ForegroundPermissionAdvice::Unknown
+            ))
+        ));
+        assert!(matches!(
+            relay.attach_foreground_client(
+                identity,
+                BTreeMap::new(),
+                ForegroundNodeLease {
+                    node: identity.node,
+                    confirmed_tx_time: TxTime::default()
+                }
+            ),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        generic.close().unwrap();
+    }
+
+    #[test]
     fn streaming_push_yields_to_a_held_owner_and_close_cancels_it() {
         let directory = tempfile::tempdir().unwrap();
         let relay = NativeRelay::spawn(config(
@@ -8978,6 +9025,7 @@ mod tests {
                         fresh_client_identity(AuthorSubject::for_test_bytes([0x4f; 16]))?,
                         BTreeMap::new(),
                         None,
+                        false,
                     )?;
                     worker.retire_foreground(failed_id)?;
                     let liveness = Arc::clone(&worker.liveness);

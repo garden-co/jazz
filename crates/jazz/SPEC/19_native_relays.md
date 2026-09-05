@@ -564,9 +564,27 @@ progress, and an abandonment error is reported only after close ownership has
 been retained. Final relay shutdown still awaits the accepted local close drain;
 this does not promise bounded completion of a never-ready storage operation.
 
+**Permission advice.** Command 38 appends `PermissionAdvice { action }`, with
+action ordinals Insert=0 (table, encoded cells), Read=1 (table, 16-byte row id),
+Update=2 (table, row id, encoded patch), and Delete=3 (table, row id). Response 25
+appends the advice enum Allowed=0, Denied=1, Unknown=2. Strings and byte vectors
+use the existing V1 postcard framing. Pending responses use the existing
+foreground-owned operation handle and poll/cancel/close lifecycle.
+
+An admitted foreground requests advice through its scope's persistent ordinary
+`Db`, whose upstream carries the authenticated scope subject. Its immediate
+foreground-to-relay link cannot supply authoritative advice: the relay remains
+a partial replica. The native admission must match the foreground author to the
+persistent scope author before enabling this route. Generic peer attachments
+cannot use it. Advice still comes only from the upstream authority, contains no
+supporting rows or policy reasons, and never stages a mutation. The requesting
+foreground owns delivery and cancellation even though the request uses the
+scope's shared upstream. Offline/timeouts resolve Unknown; synchronous local
+advice remains Unknown.
+
 The V1 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation
-terminal operations, permission advice, and any not-yet-shared mutation
+terminal operations and any not-yet-shared mutation
 contract rather than silently receiving a distinct RN meaning. The admitted
 native scope continues to own schema, canonical session/author identity,
 claims, and ordinary peer synchronization; JavaScript only provides canonical
