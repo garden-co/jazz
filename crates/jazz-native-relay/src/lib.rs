@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Condvar;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
@@ -3203,10 +3203,18 @@ impl NativeRelayClient {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&foreground);
+            let generation = worker
+                .foreground_wake_generations
+                .entry(id)
+                .or_default()
+                .clone();
+            let expected_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
             let scheduler = wake.map(|wake| ForegroundWakeScheduler {
                 wake,
                 foreground,
                 pending: worker.pending_foreground_wakes.clone(),
+                generation,
+                expected_generation,
                 owner_wake: OwnerWakeNotifier {
                     commands: worker.owner_commands.clone(),
                     queued: worker.owner_wake_queued.clone(),
@@ -3591,6 +3599,8 @@ impl OwnerWakeNotifier {
 
 struct PendingForegroundWake {
     wake: Arc<ForegroundWakeState>,
+    generation: Arc<AtomicU64>,
+    expected_generation: u64,
     kind: u8,
     delay_ms: u64,
 }
@@ -3600,13 +3610,17 @@ struct ForegroundWakeScheduler {
     wake: Arc<ForegroundWakeState>,
     foreground: u64,
     pending: PendingForegroundWakes,
+    generation: Arc<AtomicU64>,
+    expected_generation: u64,
     owner_wake: OwnerWakeNotifier,
 }
 impl ForegroundWakeScheduler {
     fn wake(&self, kind: u8, delay_ms: u64) {
         // A retained Context waker can outlive callback replacement. Do not
         // let its inert registration occupy this foreground's coalescing slot.
-        if !self.wake.is_active() {
+        if self.generation.load(Ordering::Acquire) != self.expected_generation
+            || !self.wake.is_active()
+        {
             return;
         }
         let mut pending = self
@@ -3617,12 +3631,18 @@ impl ForegroundWakeScheduler {
             .entry(self.foreground)
             .or_insert_with(|| PendingForegroundWake {
                 wake: self.wake.clone(),
+                generation: self.generation.clone(),
+                expected_generation: self.expected_generation,
                 kind,
                 delay_ms,
             });
-        if !entry.wake.is_active() {
+        if entry.generation.load(Ordering::Acquire) != entry.expected_generation
+            || !entry.wake.is_active()
+        {
             *entry = PendingForegroundWake {
                 wake: self.wake.clone(),
+                generation: self.generation.clone(),
+                expected_generation: self.expected_generation,
                 kind,
                 delay_ms,
             };
@@ -4833,6 +4853,7 @@ struct RelayWorker {
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
+    foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
     owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
@@ -4857,9 +4878,11 @@ impl RelayWorker {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for (foreground, pending) in pending {
-            pending
-                .wake
-                .wake(foreground, pending.kind, pending.delay_ms);
+            if pending.generation.load(Ordering::Acquire) == pending.expected_generation {
+                pending
+                    .wake
+                    .wake(foreground, pending.kind, pending.delay_ms);
+            }
         }
     }
 
@@ -4900,6 +4923,7 @@ impl RelayWorker {
         Ok(Self {
             wake,
             pending_foreground_wakes: Arc::default(),
+            foreground_wake_generations: BTreeMap::new(),
             owner_wake_queued,
             owner_commands,
             persistent,
@@ -10461,6 +10485,58 @@ mod tests {
     }
 
     #[test]
+    fn replacement_wake_before_old_host_state_becomes_inert_uses_current_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("replacement.sqlite"),
+            Some("replacement"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x62; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let old_receipt = Arc::new(QueuedNativeWake::active());
+        let new_receipt = Arc::new(QueuedNativeWake::active());
+        let state = |receipt: &Arc<QueuedNativeWake>| {
+            Arc::new(ForegroundWakeState::new(ForegroundWakeRegistration {
+                callback: queue_native_wake,
+                context: Arc::as_ptr(receipt) as usize,
+            }))
+        };
+        let old_state = state(&old_receipt);
+        let new_state = state(&new_receipt);
+        client
+            .set_foreground_wake_callback(1, Some(old_state.clone()))
+            .unwrap();
+        let id = client.id;
+        let old_scheduler = relay
+            .run(move |worker| Ok(worker.wake.foregrounds.lock().unwrap()[&id].clone()))
+            .unwrap();
+        client
+            .set_foreground_wake_callback(1, Some(new_state.clone()))
+            .unwrap();
+        old_receipt.queued.lock().unwrap().clear();
+        new_receipt.queued.lock().unwrap().clear();
+        relay
+            .run(move |worker| {
+                old_scheduler.schedule_tick(TickUrgency::Immediate);
+                worker.clients[&id].db.schedule_tick(TickUrgency::Deferred);
+                Ok(())
+            })
+            .unwrap();
+        old_state.inert();
+        new_state.inert();
+        assert_eq!(
+            new_receipt.queued(),
+            1,
+            "the current registration receives its wake before old host retirement"
+        );
+    }
+
+    #[test]
     fn structured_foreground_read_progresses_without_blocking_the_owner() {
         // This native-boundary receipt needs the actual owner queue: a Rust
         // client executor would keep polling the read itself and hide a host
@@ -10671,10 +10747,17 @@ mod tests {
             let client_id = client.id;
             let result = relay.run(move |worker| {
                 let db = &worker.clients[&client_id].db;
+                let generation = worker
+                    .foreground_wake_generations
+                    .entry(client_id)
+                    .or_default()
+                    .clone();
                 let timer = ForegroundWakeScheduler {
                     wake: timer_state,
                     foreground: 1,
                     pending: worker.pending_foreground_wakes.clone(),
+                    expected_generation: generation.load(Ordering::Acquire),
+                    generation,
                     owner_wake: OwnerWakeNotifier {
                         commands: worker.owner_commands.clone(),
                         queued: worker.owner_wake_queued.clone(),
@@ -10754,10 +10837,17 @@ mod tests {
         relay
             .run(move |worker| {
                 // A retained Context waker may still own the cancelled registration.
+                let generation = worker
+                    .foreground_wake_generations
+                    .get(&client_id)
+                    .expect("foreground registration exists")
+                    .clone();
                 let stale = ForegroundWakeScheduler {
                     wake: stale_state,
                     foreground: 1,
                     pending: worker.pending_foreground_wakes.clone(),
+                    expected_generation: generation.load(Ordering::Acquire) - 1,
+                    generation,
                     owner_wake: OwnerWakeNotifier {
                         commands: worker.owner_commands.clone(),
                         queued: worker.owner_wake_queued.clone(),
