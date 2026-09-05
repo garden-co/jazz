@@ -673,7 +673,6 @@ where
         cleared: bool,
         fact_adds: &[ViewFactEntry],
         fact_removes: &[ViewFactEntry],
-        fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
         self.persist_authority_policy_binding_directory(&authority_result_key)
             .await?;
@@ -682,7 +681,6 @@ where
             cleared,
             fact_adds,
             fact_removes,
-            fact_rewrite,
         )
         .await?;
         Ok(())
@@ -748,12 +746,11 @@ where
         cleared: bool,
         adds: &[ViewFactEntry],
         removes: &[ViewFactEntry],
-        rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        if cleared || rewrite.is_some() {
+        if cleared {
             let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
@@ -765,20 +762,8 @@ where
                 .into_iter()
                 .map(|key| DirectRecordStoreWrite::Delete { key })
                 .collect::<Vec<_>>();
-            if let Some(facts) = rewrite {
-                for fact in facts {
-                    operations.push(settled_program_fact_storage_write(
-                        &authority_result_key,
-                        fact,
-                    )?);
-                }
-            } else {
-                for fact in adds {
-                    operations.push(settled_program_fact_storage_write(
-                        &authority_result_key,
-                        fact,
-                    )?);
-                }
+            for fact in adds {
+                operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
             }
             store.write_many(&operations).await?;
             return Ok(());

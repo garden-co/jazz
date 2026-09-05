@@ -1994,7 +1994,6 @@ where
                 .entry(authority_result_key.clone())
                 .or_default();
         }
-        let fact_rewrite;
         {
             let program_facts = &mut self
                 .query
@@ -2006,7 +2005,6 @@ where
                 program_facts.remove(&fact);
             }
             program_facts.extend(program_fact_adds);
-            fact_rewrite = None;
         }
         let state = self
             .query
@@ -2050,7 +2048,6 @@ where
                 reset_cleared_shared_state,
                 &persisted_fact_adds,
                 &persisted_fact_removes,
-                fact_rewrite.as_ref(),
             )
             .await?;
         }

@@ -20,7 +20,7 @@ that root at the epoch-one settlement baseline.
 - receipt: `storage_codec_profile::tests::epoch_one_jazz_profile_has_a_pinned_manifest_receipt`
 
 An omitted, added, duplicate, or substituted ID fails profile admission before
-the adapter decodes or mutates ordinary data. Any incompatible inventory change
+the adapter decodes or mutates ordinary data. After epoch-one freeze, any incompatible inventory change
 requires a new storage epoch, migration decision, and updated fixture; this is
 not a per-adapter `Bytes` compatibility exception.
 

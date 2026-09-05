@@ -34,19 +34,21 @@ removed; the authority-scoped known-state field remains active.
 
 ## Before and after inventory
 
-| Family or representation                          | Before                                                                  | After and concrete purpose                                                                                                                                                      |
-| ------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Immutable source rows / `JVRR`                    | Active                                                                  | Unchanged. Version carriers are validated and stored through catalogue-owned physical row layouts.                                                                              |
-| `jazz_settled_program_facts` / `JPFK` v1          | Two active source variants plus thirteen inactive output/proof variants | Only tag `3` source coverage and tag `14` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.                  |
-| `jazz_known_state_facts`                          | Active closure progress                                                 | Unchanged. Exact authority identity, settlement/authorization progress, and source-closure generation support reopen admission.                                                 |
-| `jazz_authority_policy_bindings`                  | Active exact policy directory                                           | Unchanged. Bounded digest addresses exact subject/claims; collision/mismatch checks remain before write and recovery.                                                           |
-| `jazz_settled_result_members`                     | Registered but never populated by admitted production updates           | Removed with writer, digest domain, reader, and schema declaration.                                                                                                             |
-| `JRME` / `JRSE`                                   | Dormant member/source storage encodings                                 | Removed, including storage-only record declarations, nested parsers, and obsolete golden fixtures.                                                                              |
-| `JPFK` result payload/member/proof variants       | Dormant encodings                                                       | Removed. Their old tags reject; no reinterpretation or compatibility branch.                                                                                                    |
-| `JRPD` Current/Aggregate                          | Shared runtime publication and dormant persistence representation       | Runtime only. Local materializers encode, schema-bound readers compare exact role/type trees and validate member/occurrence identity. Generic storage recovery decoder removed. |
-| Synthetic aggregate row/replacement bytes         | Runtime identity plus dormant member storage                            | Runtime only, byte-identical. `runtime_result_identity_bytes` serves maintained and one-shot aggregate execution and JRPD identity checks.                                      |
-| Root publication / flat-tuple revision hashes     | Runtime identity                                                        | Unchanged. Needed for terminal publication and occurrence replacement semantics.                                                                                                |
-| Protocol `ResultMemberEntry` / `ProgramFactEntry` | Runtime execution/wire types                                            | Retained. Deleting unused persistence does not delete local result values or change native wire enums.                                                                          |
+| Family or representation                               | Before                                                                  | After and concrete purpose                                                                                                                                                      |
+| ------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local source history, deletion, registers, and indexes | Active storage                                                          | Unchanged Groove records under catalogue-owned physical layouts. No JVRR envelope or per-row descriptor is stored here.                                                         |
+| Network `VersionRecord` / `JVRR`                       | Active wire format                                                      | Unchanged descriptor/row envelope validated before translation into local physical storage.                                                                                     |
+| `jazz_settled_program_facts` / `JPFK` v1               | Two active source variants plus thirteen inactive output/proof variants | Only tag `3` source coverage and tag `14` covered input. `views` admission → durable writer → `recover_known_state_facts` → covered-input indexes → local IVM.                  |
+| `jazz_known_state_facts`                               | Active closure progress                                                 | Unchanged. Exact authority identity, settlement/authorization progress, and source-closure generation support reopen admission.                                                 |
+| `jazz_authority_policy_bindings`                       | Active exact policy directory                                           | Unchanged. Bounded digest addresses exact subject/claims; collision/mismatch checks remain before write and recovery.                                                           |
+| Closed required-codec profile                          | Advertised the two dormant result codecs                                | Rust and IndexedDB remove both IDs. JSM1 required-family count changes from 14 to 12; existing roots advertising the retired profile reject.                                    |
+| `jazz_settled_result_members`                          | Registered but never populated by admitted production updates           | Removed with writer, digest domain, reader, and schema declaration.                                                                                                             |
+| `JRME` / `JRSE`                                        | Dormant member/source storage encodings                                 | Removed, including storage-only record declarations, nested parsers, and obsolete golden fixtures.                                                                              |
+| `JPFK` result payload/member/proof variants            | Dormant encodings                                                       | Removed. Their old tags reject; no reinterpretation or compatibility branch.                                                                                                    |
+| `JRPD` Current/Aggregate                               | Shared runtime publication and dormant persistence representation       | Runtime only. Local materializers encode, schema-bound readers compare exact role/type trees and validate member/occurrence identity. Generic storage recovery decoder removed. |
+| Synthetic aggregate row/replacement bytes              | Runtime identity plus dormant member storage                            | Runtime only, byte-identical. `runtime_result_identity_bytes` serves maintained and one-shot aggregate execution and JRPD identity checks.                                      |
+| Root publication / flat-tuple revision hashes          | Runtime identity                                                        | Unchanged. Needed for terminal publication and occurrence replacement semantics.                                                                                                |
+| Protocol `ResultMemberEntry` / `ProgramFactEntry`      | Runtime execution/wire types                                            | Retained. Deleting unused persistence does not delete local result values or change native wire enums.                                                                          |
 
 ## Retained byte contracts
 
@@ -83,8 +85,9 @@ than silently regenerating a failing baseline.
 
 The live SQLite/RocksDB producer matches the precomputed old-pack-minus-empty-
 family prediction exactly. The sole removed line is
-`store\tjazz_settled_result_members`; every one of the 35 retained entry key/value
-byte pairs is unchanged. Current pack SHA256 is `bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b`;
+`store\tjazz_settled_result_members`; every one of the 35 retained logical-pack entry key/value
+encodings is unchanged. Direct-store entries in this pack render decoded Values;
+this is not a claim that complete physical roots are byte-identical. Current pack SHA256 is `bebab63c0e11094559cc1d6faaf62acc697c6b6a890ac75c939378ad1394490b`;
 semantic receipt SHA256 is `0d84a926096b690c772ca50edc950f2d647b8e924a7eb1b45e83b373b5cf15f6`.
 Historical blobs/checksums remain unchanged. Their retired required-codec
 profiles now fail real current adapter admission. No comparison normalization or
@@ -111,9 +114,10 @@ independent staged-candidate reopen and source removal:
 The browser producer uses real Chromium/public WasmDb, deployed catalogue,
 branch history and large values. It closes the writer, snapshots raw IndexedDB,
 reopens with the server blocked, validates both branches, then optionally exports
-through `JAZZ_BROWSER_CORPUS_OUT` to a new path. Its pinned positive fixture must
-be generated before the final browser gate; historical fixture rejection remains
-separate. An intermediate artifact build used to create this fixture is not a
+through `JAZZ_BROWSER_CORPUS_OUT` to a new path. The committed current browser fixture has SHA256
+`8b2a26247c05b7706f89a50b560cf5c417122db51da712daaf9db5b6f29e9bac`;
+it was generated and independently reopened offline on source `781b88389c`.
+Historical fixture rejection remains separate. An intermediate artifact build used to create this fixture is not a
 final consumer receipt.
 
 ## Focused commands
@@ -127,3 +131,14 @@ dev/t node::tests::harness::retired_result_codec_profiles_reject_historical_nati
 dev/t node::tests::harness::corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix
 dev/t --test persistent_codec_family_registry authoritative_persistent_codec_family_registry_is_complete_and_current
 ```
+
+The intermediate browser producer receipt passed 1/1 in real Chromium after an
+official same-checkout NAPI/WASM build and admitted JazzTools build. Its manifest
+and generated fingerprint patch were archived externally, then the three tracked
+generated files were restored before committing the new fixture. The final
+pinned browser consumer still requires a final-source official artifact receipt.
+
+The source closure persistence wrapper no longer accepts an optional arbitrary
+rewrite set: its only caller always passed `None`. Actual source replacement
+remains the admitted reset (`cleared`) plus canonical additions, as exercised by
+the existing add/remove/reset/reopen tests.

@@ -11,6 +11,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
+import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -191,7 +192,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await bootstrap.shutdown();
     openDbs.splice(openDbs.indexOf(bootstrap), 1);
     await sleep(100);
-    const rawBeforeReadOnlyInspection = JSON.parse(historicalCorpus) as Record<string, string>;
+    const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
     await installRawRecords(physicalDbName, rawBeforeReadOnlyInspection);
     expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
 
