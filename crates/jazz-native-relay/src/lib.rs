@@ -7754,7 +7754,7 @@ mod tests {
         assert_eq!(
             postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
             vec![
-                5, 116, 111, 100, 111, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0
+                5, 116, 111, 100, 111, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0
             ]
         );
         let ForegroundDbCommandResponse::PreparedQuery {

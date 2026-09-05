@@ -5067,6 +5067,12 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
   }
+  // UNION ALL is retained relation IR. It cannot be flattened into the legacy
+  // predicate envelope because duplicate arm occurrences and global windows
+  // are semantic. Carry the relation tree in Query.relation instead.
+  if (relationOperator(parsed.relation_ir) === "Union") {
+    return queryWithPredicates(parsed.table, [], { relation: parsed.relation_ir });
+  }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(parsed.table, encoded.predicates, {
     limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
@@ -6378,27 +6384,17 @@ function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
 }
 
 function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
-  if (
-    bytes.length === 25 &&
-    bytes[0] === 1 &&
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(17) === 0 &&
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(21) === 0 &&
-    table &&
-    sourceId
-  )
-    return rowKey(table, sourceId);
+  if (isOrdinaryResultKey(bytes) && table && sourceId) return rowKey(table, sourceId);
   return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (
-    bytes.length === 25 &&
-    bytes[0] === 1 &&
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(17) === 0 &&
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(21) === 0
-  )
-    return formatUuid(bytes.subarray(1, 17));
+  if (isOrdinaryResultKey(bytes)) return formatUuid(bytes.subarray(1, 17));
   return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function isOrdinaryResultKey(bytes: Uint8Array): boolean {
+  return bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0);
 }
 
 function rowStateKey(row: RowState): string {
@@ -6927,19 +6923,19 @@ function runtimeDeltaFromChanges(
   return {
     added: added.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
       row: runtimeSubscriptionRow(row, schema, outputColumns),
     })),
     updated: updated.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
       row: runtimeSubscriptionRow(row, schema, outputColumns),
     })),
     removed: removed.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: row.index,
     })),
   };
@@ -7052,8 +7048,8 @@ function subscriptionRowsRequireBufferedPublication(
   });
 }
 
-function legacyResultKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...parseUuid(id)]);
+function ordinaryResultKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...parseUuid(id), 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function rowValuesEqual(left: Value[], right: Value[]): boolean {

@@ -170,6 +170,13 @@ function toRuntimeValue(value: unknown, columnType: ColumnType): object {
     return { type: "BigInt", value };
   }
   if (typeof value === "string") {
+    if (columnType?.type === "BigInt") {
+      try {
+        return { type: "BigInt", value: BigInt(value) };
+      } catch {
+        throw new Error("BIGINT query values must be signed integer strings");
+      }
+    }
     if (columnType?.type === "Timestamp") {
       return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
@@ -908,6 +915,14 @@ function toRuntimeOrderBy(
   });
 }
 
+function stringifyRuntimeQuery(value: unknown): string {
+  // JSON has no bigint token. Preserve the exact decimal spelling for the
+  // typed relation literal; Rust accepts that string only for a BigInt value.
+  return JSON.stringify(value, (_key, candidate) =>
+    typeof candidate === "bigint" ? candidate.toString() : candidate,
+  );
+}
+
 function toFlatConditions(
   conditions: BuiltCondition[],
   schema: WasmSchema,
@@ -943,7 +958,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
 
   if (usesNativeRelationFeatures(builder)) {
     const relation = translateBuilderToRelationIr(builderJson, schema);
-    return JSON.stringify({
+    return stringifyRuntimeQuery({
       table: builder.table,
       array_subqueries: arraySubqueries,
       relation_ir: relation,
@@ -966,5 +981,5 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
   };
 
-  return JSON.stringify(query);
+  return stringifyRuntimeQuery(query);
 }
