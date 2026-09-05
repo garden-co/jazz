@@ -203,7 +203,6 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         reader.sync_metrics().dropped_detached_subscription_messages,
         1
     );
-    assert!(reader.query.settled_result_sets.is_empty());
 }
 
 #[test]
@@ -1707,7 +1706,7 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
 }
 
 #[test]
-fn covered_input_reset_never_populates_retired_result_member_storage() {
+fn covered_input_reset_and_reopen_have_no_result_member_store() {
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1727,21 +1726,13 @@ fn covered_input_reset_never_populates_retired_result_member_storage() {
             subscription,
         ))
         .unwrap();
-    let store = reader
-        .database
-        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
-        .unwrap();
-    let entries = futures::executor::block_on(store.prefix_entries(&[])).unwrap();
-    assert!(entries.is_empty());
+    assert!(reader.database.direct_record_store("jazz_settled_result_members").is_err());
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
-    assert!(
-        reopened
-            .query
-            .authority_results
-            .values()
-            .all(|state| state.settled_result_set.is_empty())
-    );
+    assert!(reopened.database.direct_record_store("jazz_settled_result_members").is_err());
+    assert!(reopened.query.authority_results.values().any(|state| {
+        state.settled_program_facts.iter().any(|fact| matches!(fact, ProgramFactEntry::CoveredInput(_)))
+    }));
 }
 
 #[test]
@@ -1792,8 +1783,7 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
     ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
-    assert!(reader.query.settled_program_facts.is_empty());
-    assert!(reader.query.settled_through_by_binding_view.is_empty());
+    assert!(reader.query.authority_results.is_empty());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Role-specific durable result schemas. Execution identities remain local.
+//! Role-specific runtime result publication schemas. Execution identities remain local.
 
 use super::Error;
 use super::query_engine::AggregateResultSchema;
@@ -22,28 +22,6 @@ pub(super) fn encode_result_descriptor(
     bytes.push(role as u8);
     bytes.extend(records::encode_persisted_record_descriptor(descriptor)?);
     Ok(bytes)
-}
-
-pub(super) fn decode_result_descriptor(
-    bytes: &[u8],
-) -> Result<(ResultDescriptorRole, RecordDescriptor), Error> {
-    if !bytes.starts_with(RESULT_DESCRIPTOR_MAGIC) {
-        return Err(Error::InvalidStoredValue(
-            "result descriptor role/version is invalid",
-        ));
-    }
-    let role = match bytes.get(5) {
-        Some(0) => ResultDescriptorRole::Current,
-        Some(1) => ResultDescriptorRole::Aggregate,
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "result descriptor role/version is invalid",
-            ));
-        }
-    };
-    let descriptor = records::decode_persisted_record_descriptor(&bytes[6..])?;
-    validate_role_fields(role, &descriptor)?;
-    Ok((role, descriptor))
 }
 
 fn validate_role_fields(
@@ -238,8 +216,8 @@ pub(super) fn decode_aggregate_payload_record(
             records::ValueType::String,
         ),
     };
-    if super::codec::settled_result_value_storage_bytes(&group_value, &group_type)? != *row
-        || super::codec::settled_result_value_storage_bytes(&replacement_value, &replacement_type)?
+    if super::codec::runtime_result_identity_bytes(&group_value, &group_type)? != *row
+        || super::codec::runtime_result_identity_bytes(&replacement_value, &replacement_type)?
             != replacement.encoded_record()
     {
         return Err(Error::InvalidStoredValue(
@@ -805,13 +783,13 @@ mod tests {
         let payload = ResultMemberPayloadEntry {
             member: ResultMemberEntry::Synthetic {
                 table: "aggregate_result".to_owned(),
-                row: crate::node::codec::settled_result_value_storage_bytes(
+                row: crate::node::codec::runtime_result_identity_bytes(
                     &Value::U64(1),
                     &ValueType::U64,
                 )
                 .unwrap(),
                 replacement: SyntheticReplacementToken::from_encoded_record(
-                    crate::node::codec::settled_result_value_storage_bytes(
+                    crate::node::codec::runtime_result_identity_bytes(
                         &Value::U64(2),
                         &ValueType::U64,
                     )
@@ -892,13 +870,13 @@ mod tests {
         let payload = ResultMemberPayloadEntry {
             member: ResultMemberEntry::Synthetic {
                 table: "aggregate_result".to_owned(),
-                row: super::super::codec::settled_result_value_storage_bytes(
+                row: super::super::codec::runtime_result_identity_bytes(
                     &Value::U64(1),
                     &ValueType::U64,
                 )
                 .unwrap(),
                 replacement: SyntheticReplacementToken::from_encoded_record(
-                    super::super::codec::settled_result_value_storage_bytes(
+                    super::super::codec::runtime_result_identity_bytes(
                         &nested,
                         &schema.value_fields[0].value_type,
                     )
@@ -935,11 +913,8 @@ mod tests {
             unreachable!()
         };
         *replacement = SyntheticReplacementToken::from_encoded_record(
-            super::super::codec::settled_result_value_storage_bytes(
-                &Value::U64(42),
-                &ValueType::U64,
-            )
-            .unwrap(),
+            super::super::codec::runtime_result_identity_bytes(&Value::U64(42), &ValueType::U64)
+                .unwrap(),
         );
         assert!(decode_aggregate_payload_record(&wrong_member, &relocated).is_err());
     }

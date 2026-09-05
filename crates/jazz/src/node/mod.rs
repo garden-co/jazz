@@ -39,17 +39,17 @@ use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
     CurrentWriteSchema, LensOp, MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest,
     PhysicalTableIdentity, PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole,
-    ReadViewKey, RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    ReadViewKey, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
 };
 use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
 };
 use crate::schema::{
     AUTHORITY_POLICY_BINDINGS_STORE, JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy,
-    SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    TableSchema, registered_column_transform,
+    SCOPE_RELAY_REPAIR_LEDGER_STORE, SETTLED_PROGRAM_FACTS_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
@@ -336,8 +336,6 @@ pub(crate) use query_eval::{
     LocalMaintainedViewSubscriptionUpdate,
 };
 pub(crate) use views::MaintainedViewBundleInputs;
-
-type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
 use codec::*;
 use database_slot::DatabaseSlot;
@@ -869,34 +867,19 @@ struct QueryServing {
     /// to two readers with distinct immutable policy snapshots; neither may
     /// overwrite nor retire the other.
     registered_bindings: BTreeMap<ShapeId, BTreeMap<RegisteredBindingUsageKey, RegisteredBinding>>,
-    /// Every settled result received from an authority.  This is deliberately
+    /// Every source closure received from an authority.  This is deliberately
     /// keyed by Jazz's full policy-scoped identity, rather than the ordinary
     /// canonical binding view used by local maintained views.  Two sessions
     /// can run the same query with the same binding and still receive
     /// different authorized membership.
     authority_results: BTreeMap<AuthorityResultKey, AuthorityResultState>,
-    // Transitional local facade materialization state.  It stays keyed by an
-    // ordinary binding view and must never be used as the receiving-side
-    // authority receipt.  The following implementation moves inbound updates
-    // into `authority_results` first, then selects the exact aggregate when a
-    // relay needs an authority source.
+    /// Generation last applied for each local query binding.
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
-    settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
     /// Bounded, receiver-local source pages retained by a non-durable client
     /// after the matching authority usage site detached. This is not an
     /// authority receipt: only an exact compatible Local lowering may use it;
     /// Edge/Global must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
-    settled_result_row_index:
-        BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
-    settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
-    settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalTime>,
-    authorization_progress_by_binding_view: BTreeMap<BindingViewKey, u64>,
-    known_state_declared_binding_views: BTreeSet<BindingViewKey>,
-    initial_hydration_binding_views: BTreeSet<BindingViewKey>,
-    deferred_publication_binding_views: BTreeSet<BindingViewKey>,
-    pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
-    pending_opening_binding_views: BTreeSet<BindingViewKey>,
 }
 
 /// Compiler-owned description of the root window stage represented by a
@@ -1022,8 +1005,6 @@ pub(crate) struct AuthorityResultState {
     /// coverage.
     live_settled: bool,
     /// Exact authoritative membership and an occurrence index for replacement.
-    settled_result_set: BTreeSet<ResultMemberEntry>,
-    settled_result_row_index: BTreeMap<ResultRowMembershipKey, ResultMemberEntry>,
     /// Non-row facts paired with the membership.
     settled_program_facts: BTreeSet<ViewFactEntry>,
     /// O(changed) admission indexes for the exact source closure. These are
@@ -2761,44 +2742,6 @@ fn known_state_fact_key(authority_result_key: &AuthorityResultKey) -> Vec<Value>
     authority_result_store_prefix(authority_result_key)
 }
 
-fn settled_result_member_key(
-    authority_result_key: &AuthorityResultKey,
-    member: &ResultMemberEntry,
-) -> Result<Vec<Value>, Error> {
-    let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = authority_result_store_prefix(authority_result_key);
-    key.push(Value::Bytes(
-        settled_result_member_digest(&member_bytes).to_vec(),
-    ));
-    Ok(key)
-}
-
-/// Domain-separated identity for one settled result member.  A member may
-/// contain an application-controlled synthetic payload, so its canonical bytes
-/// belong in the direct-store value rather than an ordered storage key.  The
-/// fixed-size digest retains idempotent add/remove semantics without allowing
-/// a large member to make an IDB/B-tree key exceed its page bound.
-const SETTLED_RESULT_MEMBER_DIGEST_DOMAIN: &str = "jazz.settled-result-member-key.v1";
-
-fn settled_result_member_digest(member_bytes: &[u8]) -> [u8; 32] {
-    blake3::derive_key(SETTLED_RESULT_MEMBER_DIGEST_DOMAIN, member_bytes)
-}
-
-fn settled_result_member_storage_write(
-    authority_result_key: &AuthorityResultKey,
-    member: &ResultMemberEntry,
-) -> Result<groove::db::DirectRecordStoreWrite, Error> {
-    let member_bytes = codec::result_member_storage_bytes(member)?;
-    let mut key = authority_result_store_prefix(authority_result_key);
-    key.push(Value::Bytes(
-        settled_result_member_digest(&member_bytes).to_vec(),
-    ));
-    Ok(groove::db::DirectRecordStoreWrite::Set {
-        key,
-        value: vec![Value::Bytes(member_bytes)],
-    })
-}
-
 fn settled_program_fact_key(
     authority_result_key: &AuthorityResultKey,
     fact: &ViewFactEntry,
@@ -2810,10 +2753,9 @@ fn settled_program_fact_key(
     Ok(key)
 }
 
-/// Domain-separated identity for a settled program fact. Facts can include a
-/// hydrated application payload, so the full canonical encoding belongs in a
-/// value cell. The key keeps only this fixed-size identity, preserving ordered
-/// B-tree page bounds while retaining exact payload validation on recovery.
+/// Domain-separated identity for an admitted source closure fact. The full
+/// canonical source-role/version encoding belongs in the value cell, and its
+/// fixed-size digest is validated before recovery publishes resident state.
 const SETTLED_PROGRAM_FACT_DIGEST_DOMAIN: &str = "jazz.settled-program-fact-key.v1";
 
 fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {

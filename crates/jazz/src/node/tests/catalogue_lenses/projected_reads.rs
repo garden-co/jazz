@@ -185,7 +185,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
 }
 
 #[test]
-fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
+fn schema_projected_reads_derive_rows_from_canonical_sources() {
     let base = schema();
     let evolved = evolved_todos_name_body_schema();
     let evolved_payload = SchemaVersion::new(evolved);
@@ -250,14 +250,6 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
             Value::String("projected".to_owned()),
         )]))
         .unwrap();
-    core.query.settled_result_sets.insert(
-        crate::protocol::BindingViewKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        },
-        BTreeSet::new(),
-    );
 
     let rows = core
         .query_rows(&shape, &binding, DurabilityTier::Global)

@@ -12,7 +12,7 @@ use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
     owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    settled_result_value_storage_bytes, tx_ids_from_value, version_tx_id_from_aliases,
+    runtime_result_identity_bytes, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -2103,7 +2103,7 @@ fn decode_typed_terminal_record(
                 .transpose()?
                 // The empty/shared branch has a non-empty postcard encoding.
                 // Keep its historical `None` identity so ordinary result
-                // members and durable receipts do not churn merely because
+                // members and runtime receipts do not churn merely because
                 // branch coordinates are now carried for non-shared rows.
                 .filter(|bytes| {
                     !bytes.is_empty() && *bytes != BranchKey::default().canonical_bytes()
@@ -2151,7 +2151,7 @@ fn decode_typed_terminal_record(
                 ))?
                 .value_type
                 .clone();
-            let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+            let row = runtime_result_identity_bytes(&row_value, &row_type)?;
             let replacement_idx = field_idx(record, &schema.synthetic.replacement_field)?;
             let replacement_value = record.get_idx(replacement_idx)?;
             let replacement_type = record
@@ -2163,8 +2163,7 @@ fn decode_typed_terminal_record(
                 ))?
                 .value_type
                 .clone();
-            let replacement =
-                settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+            let replacement = runtime_result_identity_bytes(&replacement_value, &replacement_type)?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
@@ -2299,7 +2298,7 @@ fn decode_aggregate_app_row(
         }
         None => (Value::String("global".to_owned()), ValueType::String),
     };
-    let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+    let row = runtime_result_identity_bytes(&row_value, &row_type)?;
     let (replacement_value, replacement_type) = match schema.value_fields.first() {
         Some(output) => {
             let index = descriptor
@@ -2319,7 +2318,7 @@ fn decode_aggregate_app_row(
         }
         None => (Value::String("empty".to_owned()), ValueType::String),
     };
-    let replacement = settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+    let replacement = runtime_result_identity_bytes(&replacement_value, &replacement_type)?;
     let member = ResultMemberEntry::Synthetic {
         table: "aggregate_result".to_owned(),
         row,
@@ -2349,10 +2348,10 @@ fn decode_aggregate_app_row(
     })
 }
 
-/// Domain separation for the durable flat-join result revision.
+/// Domain separation for the runtime flat-join result revision.
 ///
-/// `ResultMemberEntry::row_digest` is persisted as part of settled result and
-/// program-fact state, so this must not inherit Rust/postcard layout. The
+/// `ResultMemberEntry::row_digest` identifies runtime tuple replacements. Its
+/// canonical identity does not inherit Rust/postcard layout. The
 /// preimage is a V1 envelope containing a canonical Groove descriptor with
 /// engine-owned ordinal field names and one canonical record under that exact
 /// descriptor. The descriptor carries every declared field type (including
@@ -2385,7 +2384,7 @@ fn flat_join_row_digest_preimage(
             .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
     );
     let descriptor_bytes = groove::records::encode_persisted_record_descriptor(&descriptor)?;
-    // The public payload descriptor is the durable contract. An inner join may
+    // The public payload descriptor is the runtime revision contract. An inner join may
     // nevertheless tighten a proven-present `Nullable(T)` runtime field to
     // `T` before the terminal sees it. Restore that wrapper here so the same
     // logical tuple gets one digest regardless of that execution detail.
@@ -3204,7 +3203,7 @@ mod tests {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
-    // Internal receipt: `row_digest` is a durable settled-result identity, so
+    // Internal receipt: `row_digest` is a canonical runtime result identity, so
     // its exact bytes cannot be asserted through the public query API alone.
     #[test]
     fn flat_join_row_digest_uses_the_v1_groove_record_envelope() {
