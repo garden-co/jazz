@@ -1750,12 +1750,18 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64).unwrap();
     let sqlite_before = std::fs::read(&sqlite_path).unwrap();
     let sqlite_error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(&sqlite_path, &refs, SqliteDurability::FullSync, &profile).err().expect("retired SQLite profile must reject");
-    assert!(sqlite_error.to_string().contains("storage manifest is inconsistent"), "{sqlite_error}");
+    assert!(
+        matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("storage manifest is inconsistent")),
+        "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
+    );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
     let rocks_dir = tempfile::tempdir().unwrap();
     let rocks_path = unpack_native_rocksdb_fixture(rocks_dir.path(), EPOCH_1_NATIVE_ROCKSDB_BASE64).unwrap();
     let rocks_error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(&rocks_path, &refs, RocksDurability::FullSync, &profile).err().expect("retired RocksDB profile must reject");
-    assert!(rocks_error.to_string().contains("storage manifest is inconsistent"), "{rocks_error}");
+    assert!(
+        matches!(rocks_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("unmarked non-empty RocksDB store cannot be opened as raw-v1")),
+        "historical RocksDB root must fail closed before ordinary data admission: {rocks_error}"
+    );
 }
 
 #[test]
