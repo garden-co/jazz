@@ -719,26 +719,33 @@ fn union_branch_plans_with_labels<'a>(
         .map(|branch| {
             let label = prefix.map_or_else(
                 || branch.label.clone(),
-                |prefix| format!("{prefix}\u{0}{}", branch.label),
+                |prefix| compose_union_arm_path(prefix, &branch.label),
             );
             (&branch.plan, label)
         })
         .collect::<Vec<_>>();
     while let Some((plan, label)) = pending.pop() {
         match plan {
-            RelationInputPlan::Union(nested) => pending.extend(
-                nested
-                    .branches
-                    .iter()
-                    .rev()
-                    .map(|branch| (&branch.plan, format!("{label}\u{0}{}", branch.label))),
-            ),
+            RelationInputPlan::Union(nested) => {
+                pending.extend(
+                    nested.branches.iter().rev().map(|branch| {
+                        (&branch.plan, compose_union_arm_path(&label, &branch.label))
+                    }),
+                )
+            }
             RelationInputPlan::Linear(_) | RelationInputPlan::Recursive(_) => {
                 leaves.push((plan, label))
             }
         }
     }
     leaves
+}
+
+/// Encode a nested semantic-arm path without relying on a separator that a
+/// user label could contain. The opaque carrier remains stable when siblings
+/// are inserted or reordered and is never derived from traversal position.
+fn compose_union_arm_path(prefix: &str, label: &str) -> String {
+    format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
 }
 
 fn lower_union_plan(
@@ -749,8 +756,8 @@ fn lower_union_plan(
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
-    for branch in &union.branches {
-        let mut input = match &branch.plan {
+    for (branch_plan, label) in union_branch_plans_with_labels(union, None) {
+        let mut input = match branch_plan {
             RelationInputPlan::Linear(linear) => {
                 let source_id = linear.root.source().ok_or_else(|| {
                     UnsupportedReason::Operator("union branch must have a source".to_owned())
@@ -777,13 +784,13 @@ fn lower_union_plan(
                 lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
             }
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
-                lower_relation_input(&branch.plan, resolved_sources, request)?
+                lower_relation_input(branch_plan, resolved_sources, request)?
             }
         };
         // A public root UNION ALL has no join-side occurrence slot. Retain an
         // explicit typed `(arm, source-row)` carrier beside the real root so
         // the terminal can address two derivations of one physical row.
-        let source_id = branch.plan.root_source().ok_or_else(|| {
+        let source_id = branch_plan.root_source().ok_or_else(|| {
             UnsupportedReason::Operator("UNION ALL root arm lacks a stable source row".to_owned())
         })?;
         let source = resolved_sources.get(source_id).ok_or_else(|| {
@@ -800,7 +807,7 @@ fn lower_union_plan(
                 .graph
                 .project_fields(input.fields.iter().map(ProjectField::named).chain([
                     ProjectField::renamed(row_field, "__root_union_row".to_owned()),
-                    ProjectField::literal("__root_union_arm", Value::String(branch.label.clone())),
+                    ProjectField::literal("__root_union_arm", Value::String(label)),
                 ]));
         input.fields.insert("__root_union_row".to_owned());
         input.fields.insert("__root_union_arm".to_owned());

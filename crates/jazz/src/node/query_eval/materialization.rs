@@ -1338,7 +1338,13 @@ where
                 .into_iter()
                 .map(|(terminal_key, record)| {
                     Ok((
-                        crate::db::terminal_root_occurrence_id(&terminal_key).map_err(|_| {
+                        crate::db::terminal_root_occurrence_id_with_root_union(
+                            &terminal_key,
+                            local
+                                .terminal_root_layout()
+                                .is_some_and(|layout| layout.root_union_arm),
+                        )
+                        .map_err(|_| {
                             Error::InvalidStoredValue(
                                 "collector terminal key cannot identify its root occurrence",
                             )
