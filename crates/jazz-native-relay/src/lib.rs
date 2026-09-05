@@ -39,7 +39,9 @@ use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportError, NativeTransportRequest, NativeTransportTerminal,
+};
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
@@ -4367,9 +4369,16 @@ async fn run_native_relay_socket_worker(
             }
             tokio::select! {
                 terminal = &mut terminal => {
-                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                        "native relay socket terminated: {terminal:?}"
-                    )));
+                    // An established peer loss is retryable transport state:
+                    // the ClientDb retains local work and its existing recovery
+                    // driver parks strict remote operations until replacement.
+                    // Do not poison the foreground host, which would turn a
+                    // network outage into a local SQLite failure.
+                    if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) = terminal {
+                        (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                            "native relay socket terminated: {error}"
+                        )));
+                    }
                     break;
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
@@ -11610,15 +11619,6 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .unwrap(),
             NativeRelaySocketEvent::Connected
-        );
-        assert_eq!(
-            events_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap(),
-            NativeRelaySocketEvent::TerminalError(
-                "native relay socket terminated: PeerClosed(\"test close\")".to_owned()
-            ),
-            "a terminal adapter result is surfaced before retry rather than discarded"
         );
         assert_eq!(
             events_rx
