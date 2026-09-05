@@ -63,3 +63,26 @@ test("relay readback cleanup preserves its publication failure and still shuts d
   }, primary);
   assert.equal(shutdowns, 1);
 });
+
+test("seed boundaries distinguish unsubscribe from a pending shutdown", async () => {
+  const events: string[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const teardown = finishSeedClient(
+    () => {
+      assert.equal(events.at(-1), "js-before-unsubscribe");
+    },
+    () => {
+      assert.equal(events.at(-1), "js-before-shutdown");
+      return pending;
+    },
+    false,
+    (code) => events.push(code),
+  );
+  assert.deepEqual(events, ["js-before-unsubscribe", "js-after-unsubscribe", "js-before-shutdown"]);
+  release();
+  await teardown;
+  assert.equal(events.at(-1), "js-after-shutdown");
+});

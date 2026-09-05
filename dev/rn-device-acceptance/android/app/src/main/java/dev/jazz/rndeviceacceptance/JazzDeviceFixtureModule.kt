@@ -149,6 +149,16 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
 
   /** The host acknowledges only after its independent Core reader sees the
    * run's write. No bearer or endpoint is exposed to JavaScript. */
+  // Runs on the JS calling thread, so a later synchronous native stall cannot
+  // strand this fixed marker in the asynchronous native-module queue.
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  fun recordSeedBoundary(code: String): Boolean {
+    if (code !in setOf("js-core-await-returned", "js-before-unsubscribe",
+        "js-after-unsubscribe", "js-before-shutdown", "js-after-shutdown")) return false
+    Log.e("JazzCoreObservation", code)
+    return true
+  }
+
   @ReactMethod fun waitForCoreObservation(promise: Promise) {
     try {
       val activity = reactApplicationContext.currentActivity

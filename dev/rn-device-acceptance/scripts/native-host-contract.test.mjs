@@ -972,7 +972,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   );
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(\s*scopeA\.capability,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,?\s*\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA\.capability,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim

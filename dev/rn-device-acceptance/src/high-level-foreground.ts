@@ -1,7 +1,7 @@
 import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools/react-native";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
-import { finishSeedClient } from "./seed-teardown";
+import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
 
 const app = s.defineApp({
@@ -38,6 +38,7 @@ export async function seedHighLevelForegroundRuntime(
   runNonce: string,
   markFailure: (code: DeviceDiagnosticCode) => void,
   waitForCoreObservation: () => Promise<void>,
+  boundary?: (code: SeedBoundary) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
   const client = await createJazzClient(clientConfig(capability));
@@ -71,13 +72,14 @@ export async function seedHighLevelForegroundRuntime(
     // handshake does not widen the public RN local-only write.wait contract.
     markFailure("public-client-core-observation-failed");
     await waitForCoreObservation();
+    boundary?.("js-core-await-returned");
     completed = true;
   } catch (error) {
     failed = true;
     throw error;
   } finally {
     if (completed && !failed) markFailure("public-client-shutdown-failed");
-    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed, boundary);
   }
 }
 

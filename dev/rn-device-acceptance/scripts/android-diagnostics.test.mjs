@@ -87,3 +87,26 @@ test("native Core HTTP outcome survives a later generic JS stage retry without e
     "failure-response-timeout",
   );
 });
+
+test("synchronous seed boundaries survive alongside native acknowledgement without arbitrary payloads", () => {
+  const codes = [
+    "request-started",
+    "request-sent",
+    "http-status-204",
+    "promise-resolved",
+    "js-core-await-returned",
+    "js-before-unsubscribe",
+    "js-after-unsubscribe",
+    "js-before-shutdown",
+    "js-after-shutdown",
+  ];
+  const line = (code, tag = "JazzCoreObservation") =>
+    `08-29 22:52:21.495  4268  4288 E ${tag}: ${code}`;
+  const output = [
+    ...codes.map((code) => line(code)),
+    line("js-after-shutdown secret"),
+    line("js-arbitrary"),
+    line("js-before-unsubscribe", "ReactNativeJS"),
+  ].join("\n");
+  assert.equal(androidCoreObservationDiagnostic(output), codes.join(","));
+});

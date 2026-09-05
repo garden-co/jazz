@@ -23,6 +23,7 @@ import {
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
   recordDeviceReceipt,
+  recordNativeSeedBoundary,
   switchNativeRelayAuthScope,
   waitForNativeCoreObservation,
 } from "./src/native-fixture";
@@ -122,6 +123,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
     receipt.runNonce,
     markFailure,
     waitForNativeCoreObservation,
+    recordNativeSeedBoundary,
   );
   // The first client is now fully shut down. A new public foreground must
   // read the run-bound row through the persistent relay before the driver
