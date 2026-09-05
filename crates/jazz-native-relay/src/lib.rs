@@ -3627,6 +3627,11 @@ impl ForegroundWakeScheduler {
             .pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.generation.load(Ordering::Acquire) != self.expected_generation
+            || !self.wake.is_active()
+        {
+            return;
+        }
         let entry = pending
             .entry(self.foreground)
             .or_insert_with(|| PendingForegroundWake {
