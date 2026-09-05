@@ -216,7 +216,7 @@ test("atomic publication keeps only the private stage root writable until it is 
   try {
     const snapshot = snapshotCorrectnessArtifacts(root, {
       beforePublish({ stage }) {
-        assert.notEqual(statSync(stage).mode & 0o222, 0, "stage root must permit rename on macOS");
+        assert.notEqual(statSync(stage).mode & 0o200, 0, "stage owner must permit rename on macOS");
         for (const entry of readdirSync(stage, { withFileTypes: true })) {
           assert.equal(
             statSync(join(stage, entry.name)).mode & 0o222,
