@@ -4365,9 +4365,11 @@ async fn run_native_relay_socket_worker(
                 break;
             }
             if let Err(error) = relay.pump() {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay owner pump failed: {error}"
-                )));
+                // Peer teardown can invalidate the borrowed upstream while an
+                // owner turn is in flight. The reconnect owner has already
+                // retained local state; retry from a fresh socket instead of
+                // poisoning foreground-local SQLite work.
+                let _ = error;
                 break;
             }
             tokio::select! {
