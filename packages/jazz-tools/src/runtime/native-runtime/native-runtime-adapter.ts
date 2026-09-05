@@ -5067,6 +5067,12 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
   }
+  // UNION ALL is retained relation IR. It cannot be flattened into the legacy
+  // predicate envelope because duplicate arm occurrences and global windows
+  // are semantic. Carry the relation tree in Query.relation instead.
+  if (relationOperator(parsed.relation_ir) === "Union") {
+    return queryWithPredicates(parsed.table, [], { relation: parsed.relation_ir });
+  }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(parsed.table, encoded.predicates, {
     limit: readLimitIfPresent(parsed.limit ?? encoded.limit),

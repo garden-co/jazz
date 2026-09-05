@@ -117,6 +117,19 @@ pub(super) fn lowered_terminals(
             available_fields,
         );
     }
+    // Root-union occurrence carriers are introduced by graph lowering rather
+    // than by a single source descriptor, so the source-derived availability
+    // set cannot see them. They are still real fields on every union branch
+    // and must survive both the closure and collector boundaries.
+    let mut available_fields_owned = available_fields.clone();
+    if matches!(plan, AnalyzedQueryPlan::Union(_)) {
+        available_fields_owned.extend(
+            root_join_occurrence_fields(plan, resolved_sources, request)?
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+    }
+    let available_fields = &available_fields_owned;
     let initial_root_route_fields = routing_param_fields
         .intersection(available_fields)
         .cloned()
@@ -599,6 +612,7 @@ pub(super) fn lowered_terminals(
                 public_field_names,
                 publication_fields,
                 terminal,
+                root_union_arm: matches!(plan, AnalyzedQueryPlan::Union(_)),
             }),
         });
     }
@@ -1152,7 +1166,12 @@ fn lower_collect_by_app_rows(
             .filter(|field| field.is_output && !field.is_row_id)
             .map(|field| (field.output.clone(), public_root_field_name(field)))
             .collect();
-        let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
+        let anchor = collect_anchor_graph(
+            visible_root,
+            root_source,
+            &layout,
+            !matches!(plan, AnalyzedQueryPlan::Union(_)),
+        )?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
                 .iter()
@@ -1179,8 +1198,8 @@ fn lower_collect_by_app_rows(
             .clone();
         let graph = GraphBuilder::collect_root_ordered(
             anchor,
-            std::iter::once(root_group)
-                .chain(layout.root_occurrence_inputs.iter().cloned())
+            root_collect_group_fields(root_group, &layout.root_occurrence_inputs)
+                .into_iter()
                 .chain(route_fields.iter().cloned()),
             layout
                 .root_fields
@@ -1214,7 +1233,12 @@ fn lower_collect_by_app_rows(
             terminal: AppRowTerminal::RootCollector,
         });
     }
-    let root_context = root_collect_context_graph(visible_root.clone(), root_source, &layout)?;
+    let root_context = root_collect_context_graph(
+        visible_root.clone(),
+        root_source,
+        &layout,
+        !matches!(plan, AnalyzedQueryPlan::Union(_)),
+    )?;
     let mut field_carriers = layout
         .root_fields
         .iter()
@@ -1268,7 +1292,12 @@ fn lower_collect_by_app_rows(
             request,
         )?);
     }
-    let anchor = collect_anchor_graph(visible_root, root_source, &layout)?;
+    let anchor = collect_anchor_graph(
+        visible_root,
+        root_source,
+        &layout,
+        !matches!(plan, AnalyzedQueryPlan::Union(_)),
+    )?;
     let input = GraphBuilder::union(std::iter::once(anchor).chain(association_graphs));
     let descriptor = collect_output_descriptor(&layout)?;
     let root_group = layout
@@ -1284,8 +1313,8 @@ fn lower_collect_by_app_rows(
         .clone();
     let graph = GraphBuilder::collect_by_tree_ordered(
         input,
-        std::iter::once(root_group.clone())
-            .chain(layout.root_occurrence_inputs.iter().cloned())
+        root_collect_group_fields(root_group.clone(), &layout.root_occurrence_inputs)
+            .into_iter()
             .chain(route_fields.iter().cloned()),
         layout
             .root_fields
@@ -1319,6 +1348,15 @@ fn lower_collect_by_app_rows(
         public_field_names,
         terminal: AppRowTerminal::RootCollector,
     })
+}
+
+/// Collectors require their physical root UUID as the first grouping field.
+/// For root UNION ALL the following discriminator is source position zero;
+/// the prepared terminal layout carries that fact to the decoder.
+fn root_collect_group_fields(root: String, occurrence: &[String]) -> Vec<String> {
+    std::iter::once(root)
+        .chain(occurrence.iter().cloned())
+        .collect()
 }
 
 fn align_collect_join_key_types(
@@ -1436,6 +1474,7 @@ fn align_collect_root_window(
             .iter()
             .chain(&path.output_steps)
             .collect::<Vec<_>>(),
+        AnalyzedQueryPlan::Union(union) => union.terminal_steps.iter().collect::<Vec<_>>(),
         _ => Vec::new(),
     };
     for step in steps {
@@ -1592,6 +1631,20 @@ fn collect_root_input_for_value(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<String> {
+    if let NormalizedValueRef::SourceField { field, .. } = value
+        && field == "__root_union_arm"
+    {
+        return layout
+            .root_fields
+            .iter()
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
+            .map(|candidate| candidate.input.clone())
+            .ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Operator(
+                    "collector root union-arm tie-breaker is missing".to_owned(),
+                ))
+            });
+    }
     match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => layout
             .root_fields
@@ -1689,6 +1742,12 @@ pub(super) fn root_join_occurrence_fields(
             .is_some_and(|output| !output.public_terminal)
     {
         return Ok(Vec::new());
+    }
+    if matches!(plan, AnalyzedQueryPlan::Union(_)) {
+        return Ok(vec![
+            ("__root_union_arm".to_owned(), ValueType::String),
+            ("__root_union_row".to_owned(), ValueType::Uuid),
+        ]);
     }
     let Some(steps) = root_linear_steps(plan) else {
         return Ok(Vec::new());
@@ -1880,6 +1939,7 @@ fn lowered_aggregate_terminals(
                 field_carriers: BTreeMap::new(),
                 public_field_names: BTreeMap::new(),
                 terminal: AppRowTerminal::Aggregate(aggregate_schema),
+                root_union_arm: false,
             }),
         });
     }
@@ -2411,7 +2471,10 @@ fn result_occurrence_union_arm_fields(
         return Ok(BTreeMap::new());
     }
     let fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
-    let mut joined_position = 0usize;
+    if matches!(plan, AnalyzedQueryPlan::Union(_)) {
+        return Ok(BTreeMap::from([(0, "__root_union_arm".to_owned())]));
+    }
+    let mut joined_position = 1usize;
     let mut pending_arm = None;
     let mut arms = BTreeMap::new();
     for (name, value_type) in fields {
@@ -2509,6 +2572,7 @@ fn projected_multisource_terminal(
 fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
     match plan {
         AnalyzedQueryPlan::Linear(plan) => Some(&plan.steps),
+        AnalyzedQueryPlan::Union(union) => Some(&union.terminal_steps),
         _ => None,
     }
 }
@@ -3967,6 +4031,7 @@ mod publication_schema_tests {
             field_carriers: BTreeMap::new(),
             public_field_names: BTreeMap::new(),
             terminal: AppRowTerminal::Direct,
+            root_union_arm: false,
         };
         validate_app_row_publication_schema(&schema).expect("complete typed publication");
         schema.publication_fields.clear();

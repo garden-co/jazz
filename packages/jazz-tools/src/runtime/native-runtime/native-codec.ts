@@ -299,6 +299,8 @@ export type QueryOptions = {
   orderBy?: QueryOrder[];
   select?: string[];
   arraySubqueries?: QueryArraySubquery[];
+  /** Relation expression carried in Query.relation by the public IR adapter. */
+  relation?: unknown;
 };
 
 export function queryWithEqFilters(
@@ -319,7 +321,7 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
+  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [], relation } = queryOptions;
   if (limit != null) validateQueryBound("query limit", limit);
   validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
@@ -360,7 +362,23 @@ export function queryWithPredicates(
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
   writer.u64(offset);
+  // Query.relation is an explicit final Option in the Rust postcard envelope.
+  if (relation == null) writer.none();
+  else
+    writer.some((relationWriter) =>
+      relationWriter.string(canonicalRelationJson({ rel: relation })),
+    );
   return writer.finish();
+}
+
+function canonicalRelationJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalRelationJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalRelationJson(record[key])}`)
+    .join(",")}}`;
 }
 
 function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery): void {

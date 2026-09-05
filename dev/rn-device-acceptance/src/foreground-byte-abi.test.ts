@@ -7,6 +7,7 @@ import {
   proveSameJsiRuntimeWriteSubscription,
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
+import { todosQuery } from "./scope-fixture.ts";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import {
   createRecord,
@@ -653,6 +654,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", async () => {
   let insertedRowId: Uint8Array | undefined;
   let insertedCells: Uint8Array | undefined;
+  let preparedQuery: Uint8Array | undefined;
   const command = {
     encode(value: unknown) {
       if (
@@ -665,6 +667,16 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       ) {
         insertedRowId = value.rowId;
         if ("cells" in value && value.cells instanceof Uint8Array) insertedCells = value.cells;
+      }
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "type" in value &&
+        value.type === "prepareQuery" &&
+        "query" in value &&
+        value.query instanceof Uint8Array
+      ) {
+        preparedQuery = value.query;
       }
       return new TextEncoder().encode(JSON.stringify(value));
     },
@@ -789,6 +801,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     subscriptionRowId,
     "the receipt inserts the host-run row instead of upserting a retained fixed id",
   );
+  assert.deepEqual(preparedQuery, todosQuery, "the receipt uses the Rust-generated todos query");
   assert.equal(
     insertedCells?.[9],
     insertedCells ? insertedCells.byteLength - 10 : undefined,
@@ -1361,12 +1374,17 @@ function encodeSubscriptionDelta({
   return writer.finish();
 }
 
-test("scope query and owner cells match the Rust-generated fixture", async () => {
+test("queries and owner cells match the Rust-generated fixture", async () => {
   const { readFileSync } = await import("node:fs");
   const fixture = JSON.parse(
     readFileSync(new URL("../native/device-fixture.json", import.meta.url), "utf8"),
   );
-  const { scopeQuery, scopeCells } = await import("./scope-fixture.ts");
+  const {
+    scopeQuery,
+    scopeCells,
+    todosQuery: generatedTodosQuery,
+  } = await import("./scope-fixture.ts");
   assert.deepEqual([...scopeQuery], fixture.scopeQuery);
+  assert.deepEqual([...generatedTodosQuery], fixture.todosQuery);
   assert.deepEqual(scopeCells, fixture.scopeCells);
 });

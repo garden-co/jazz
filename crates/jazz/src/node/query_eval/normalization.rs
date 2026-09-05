@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::node::query_engine::{CoverageScope, InheritedContribution};
+use crate::query::RelationQuery;
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -16,6 +17,162 @@ pub(super) fn root_source_id(table: &str) -> SourceId {
             components: vec![SourceRole::Root],
         },
     }
+}
+
+/// Move one independently-normalized relation arm into the union program.
+/// Source identities intentionally stay unchanged: public unions require the
+/// same real-row domain, while node ids must remain disjoint so each arm keeps
+/// its own filters, recursive frontier, and policy proof.
+fn prefix_normalized_relation_arm(
+    normalized: &mut NormalizedRowSetShape,
+    prefix: &str,
+    destination: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    closure_paths: &mut Vec<ClosurePath>,
+    join_contributions: &mut Vec<JoinContribution>,
+    inherited_contributions: &mut Vec<InheritedContribution>,
+    reachable_contributions: &mut Vec<ReachableContribution>,
+) -> Result<(), Error> {
+    let ids = normalized
+        .nodes
+        .keys()
+        .map(|id| (id.clone(), RowSetNodeId(format!("{prefix}:{}", id.0))))
+        .collect::<BTreeMap<_, _>>();
+    let map = |id: &RowSetNodeId| {
+        ids.get(id)
+            .cloned()
+            .expect("normal relation arm references a node in its own DAG")
+    };
+    let mut rewritten = BTreeMap::new();
+    for (id, expression) in std::mem::take(&mut normalized.nodes) {
+        let expression = match expression {
+            RowSetExpr::Filter { input, predicate } => RowSetExpr::Filter {
+                input: map(&input),
+                predicate,
+            },
+            RowSetExpr::Join {
+                left,
+                right,
+                mode,
+                on,
+            } => RowSetExpr::Join {
+                left: map(&left),
+                right: map(&right),
+                mode,
+                on,
+            },
+            RowSetExpr::RecursiveRelation {
+                seed,
+                step,
+                frontier,
+                frontier_key,
+                dedupe_keys,
+                bound,
+            } => RowSetExpr::RecursiveRelation {
+                seed: map(&seed),
+                step: map(&step),
+                frontier,
+                frontier_key,
+                dedupe_keys,
+                bound,
+            },
+            RowSetExpr::Union { inputs } => RowSetExpr::Union {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| UnionInput {
+                        node: map(&input.node),
+                        label: input.label,
+                    })
+                    .collect(),
+            },
+            RowSetExpr::Distinct { input, keys } => RowSetExpr::Distinct {
+                input: map(&input),
+                keys,
+            },
+            RowSetExpr::Project { input, columns } => RowSetExpr::Project {
+                input: map(&input),
+                columns,
+            },
+            RowSetExpr::CorrelatedPathProjection {
+                input,
+                child_input,
+                path,
+                correlation,
+                requirement,
+            } => RowSetExpr::CorrelatedPathProjection {
+                input: map(&input),
+                child_input: map(&child_input),
+                path,
+                correlation,
+                requirement,
+            },
+            RowSetExpr::OrderBy { input, keys } => RowSetExpr::OrderBy {
+                input: map(&input),
+                keys,
+            },
+            RowSetExpr::Slice {
+                input,
+                partition_by,
+                limit,
+                offset,
+                tie_breaker,
+                rank_output,
+            } => RowSetExpr::Slice {
+                input: map(&input),
+                partition_by,
+                limit,
+                offset,
+                tie_breaker,
+                rank_output,
+            },
+            RowSetExpr::Aggregate {
+                input,
+                group_by,
+                outputs,
+            } => RowSetExpr::Aggregate {
+                input: map(&input),
+                group_by,
+                outputs,
+            },
+            expression @ (RowSetExpr::Source { .. }
+            | RowSetExpr::ValueSource { .. }
+            | RowSetExpr::FrontierSource { .. }) => expression,
+        };
+        rewritten.insert(map(&id), expression);
+    }
+    if destination.keys().any(|id| rewritten.contains_key(id)) {
+        return Err(Error::QueryCapability(
+            "relation UNION arm node ids collide after prefixing".to_owned(),
+        ));
+    }
+    destination.extend(rewritten);
+    normalized.root = map(&normalized.root);
+    auxiliary_sources.append(&mut normalized.auxiliary_sources);
+    for path in &mut normalized.closure_paths {
+        match path {
+            ClosurePath::ImplicitRootReference { id, .. }
+            | ClosurePath::ExplicitInclude { id, .. } => {
+                *id = format!("{prefix}:{id}");
+            }
+        }
+    }
+    closure_paths.append(&mut normalized.closure_paths);
+    for contribution in &mut normalized.join_contributions {
+        contribution.id = format!("{prefix}:{}", contribution.id);
+        contribution.input = map(&contribution.input);
+    }
+    join_contributions.append(&mut normalized.join_contributions);
+    for contribution in &mut normalized.inherited_contributions {
+        contribution.id = format!("{prefix}:{}", contribution.id);
+        contribution.input = map(&contribution.input);
+    }
+    inherited_contributions.append(&mut normalized.inherited_contributions);
+    for contribution in &mut normalized.reachable_contributions {
+        contribution.id = format!("{prefix}:{}", contribution.id);
+        contribution.access_input = map(&contribution.access_input);
+    }
+    reachable_contributions.append(&mut normalized.reachable_contributions);
+    Ok(())
 }
 
 fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
@@ -124,6 +281,7 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && query.includes.is_empty()
         && query.array_subqueries.is_empty()
         && query.aggregate.is_none()
+        && query.relation.is_none()
         && query.policy_branches.is_empty()
         // `JazzQuery::includes` captures only caller-requested includes.
         // Normalization also injects the default root-reference closure for
@@ -2783,6 +2941,9 @@ where
                 .schema
         };
         let query = shape.query();
+        if let Some(relation) = &query.relation {
+            return self.normalized_relation_union_row_set_shape(shape, relation, _binding, schema);
+        }
         let root_source = root_source_id(&query.table);
         let (mut auxiliary_sources, closure_paths) =
             collect_closure_paths(self, &query.table, shape.schema_version(), &query.includes)?;
@@ -3237,6 +3398,135 @@ where
             query_binding_source_shape_for_parts(shape.params(), &claim_params);
         retarget_binding_value_sources(&mut normalized, &binding_source_shape);
         Ok(normalized)
+    }
+
+    /// Normalize a retained public `UNION ALL` by reusing the established
+    /// single-relation facade for each arm. The arm query is normalized before
+    /// the union, so joins and recursive gathers keep their existing Groove
+    /// source/policy lowering; only the public union boundary is new.
+    fn normalized_relation_union_row_set_shape(
+        &self,
+        shape: &ValidatedQuery,
+        relation: &RelationQuery,
+        binding: &Binding,
+        schema: &RuntimeSchema,
+    ) -> Result<NormalizedRowSetShape, Error> {
+        let Some(parts) = crate::query::relation_union_parts(&relation.rel) else {
+            return Err(Error::QueryCapability(
+                "retained relation body must be a UNION ALL with global terminal operators in builder order"
+                    .to_owned(),
+            ));
+        };
+        let mut nodes = BTreeMap::new();
+        let mut union_inputs = Vec::new();
+        let mut auxiliary_sources = BTreeSet::new();
+        let mut closure_paths = Vec::new();
+        let mut join_contributions = Vec::new();
+        let mut inherited_contributions = Vec::new();
+        let mut reachable_contributions = Vec::new();
+        for arm in parts.inputs {
+            let arm_query = relation_query_to_query(&RelationQuery {
+                rel: arm.input.clone(),
+            })?;
+            if arm_query.table != shape.query().table {
+                return Err(Error::QueryCapability(
+                    "UNION ALL arms must emit the same output table".to_owned(),
+                ));
+            }
+            let arm_shape =
+                arm_query.validate_with_schema_version(schema, shape.schema_version())?;
+            let mut normalized = self.normalized_row_set_shape(&arm_shape, binding)?;
+            let prefix = format!("relation_union:{}", arm.label);
+            prefix_normalized_relation_arm(
+                &mut normalized,
+                &prefix,
+                &mut nodes,
+                &mut auxiliary_sources,
+                &mut closure_paths,
+                &mut join_contributions,
+                &mut inherited_contributions,
+                &mut reachable_contributions,
+            )?;
+            union_inputs.push(UnionInput {
+                node: normalized.root,
+                label: arm.label.clone(),
+            });
+        }
+        let root = RowSetNodeId("relation_union:root".to_owned());
+        nodes.insert(
+            root.clone(),
+            RowSetExpr::Union {
+                inputs: union_inputs,
+            },
+        );
+        let root_source = root_source_id(&shape.query().table);
+        let mut terminal = root;
+        if let Some(terms) = parts.order_by {
+            let order = RowSetNodeId("relation_union:order".to_owned());
+            nodes.insert(
+                order.clone(),
+                RowSetExpr::OrderBy {
+                    input: terminal,
+                    keys: terms
+                        .into_iter()
+                        .map(|term| {
+                            Ok(NormalizedOrderKey {
+                                value: normalize_operand_for_schema(
+                                    schema,
+                                    &root_source,
+                                    &Operand::Column(term.column.column),
+                                )?,
+                                direction: match term.direction {
+                                    OrderDirection::Asc => NormalizedSortDirection::Asc,
+                                    OrderDirection::Desc => NormalizedSortDirection::Desc,
+                                },
+                            })
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?,
+                },
+            );
+            terminal = order;
+        }
+        if parts.limit.is_some() || parts.offset.is_some() {
+            let slice = RowSetNodeId("relation_union:slice".to_owned());
+            nodes.insert(
+                slice.clone(),
+                RowSetExpr::Slice {
+                    input: terminal,
+                    partition_by: Vec::new(),
+                    limit: parts.limit.map(|limit| limit.min(u32::MAX as usize) as u32),
+                    offset: parts.offset.unwrap_or_default().min(u32::MAX as usize) as u32,
+                    tie_breaker: vec![
+                        NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                        // A physical row can occur through more than one UNION ALL arm.
+                        // Its semantic arm carrier completes the global page order.
+                        NormalizedValueRef::SourceField {
+                            source: root_source.clone(),
+                            field: "__root_union_arm".to_owned(),
+                        },
+                    ],
+                    rank_output: None,
+                },
+            );
+            terminal = slice;
+        }
+        Ok(NormalizedRowSetShape {
+            identity: NormalizedShapeIdentity {
+                shape_id: shape.shape_id(),
+                canonical: shape.canonical_bytes().to_vec(),
+            },
+            root: terminal,
+            result: ResultId::RealRow {
+                table: shape.query().table.clone(),
+                row: ResultRowRef::Source(root_source_id(&shape.query().table)),
+            },
+            auxiliary_sources,
+            closure_paths,
+            join_contributions,
+            inherited_contributions,
+            reachable_contributions,
+            nodes,
+        })
     }
 
     pub(super) fn normalized_include_deleted_row_set_shape(

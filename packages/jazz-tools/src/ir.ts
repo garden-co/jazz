@@ -65,7 +65,7 @@ export type RelRecursionBound = "Fixpoint" | { MaxDepth: number };
 export type RelExpr =
   | { TableScan: { table: string; alias?: string } }
   | { Filter: { input: RelExpr; predicate: RelPredicateExpr } }
-  | { Union: { inputs: RelExpr[] } }
+  | { Union: { inputs: Array<{ label: string; input: RelExpr }> } }
   | { Join: { left: RelExpr; right: RelExpr; on: RelJoinCondition[]; join_kind: RelJoinKind } }
   | { Project: { input: RelExpr; columns: RelProjectColumn[] } }
   | {

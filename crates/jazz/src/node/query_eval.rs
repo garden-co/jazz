@@ -2874,12 +2874,29 @@ where
         rows: &mut Vec<CurrentRow>,
         occurrence_ids: &mut Vec<OutputOccurrenceId>,
     ) -> Result<(), Error> {
-        let table = if query.order_by.is_empty() || query.aggregate.is_some() {
-            None
-        } else {
-            Some(self.table_in_schema(&query.table, self.catalogue.current_write_schema.schema)?)
-        };
-        Self::sort_query_rows_with_occurrences(query, table.as_ref(), rows, occurrence_ids)
+        let mut presentation_query = query.clone();
+        if presentation_query.order_by.is_empty() {
+            if let Some(relation) = &presentation_query.relation {
+                if let Some(order_by) = crate::query::relation_union_presentation_order(relation) {
+                    presentation_query.order_by = order_by;
+                }
+            }
+        }
+        let table =
+            if presentation_query.order_by.is_empty() || presentation_query.aggregate.is_some() {
+                None
+            } else {
+                Some(self.table_in_schema(
+                    &presentation_query.table,
+                    self.catalogue.current_write_schema.schema,
+                )?)
+            };
+        Self::sort_query_rows_with_occurrences(
+            &presentation_query,
+            table.as_ref(),
+            rows,
+            occurrence_ids,
+        )
     }
 
     fn apply_projection(

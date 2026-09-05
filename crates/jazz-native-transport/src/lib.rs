@@ -111,6 +111,13 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
+        // An HTTP 5xx response is a typed server-unavailability result before
+        // the authenticated wire handshake. It must retry like a refused
+        // connection; 4xx responses remain terminal authorization/admission
+        // failures.
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().is_server_error()
+        }
         WebSocketClientError::ServerWireError(error) => {
             error.code == jazz::wire::WireErrorCode::NotReady
                 && error.retry == jazz::wire::WireRetry::Later
@@ -775,8 +782,8 @@ async fn run_ws_pump(
                                 }
                             };
                             if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                                return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
-                                    format!("websocket send failed: {error}"),
+                                return NativeTransportTerminal::Failed(native_transport_error(
+                                    WebSocketClientError::Send(error),
                                 ));
                             }
                             batch.clear();
@@ -797,9 +804,9 @@ async fn run_ws_pump(
                         }
                     };
                     if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                        return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
-                            "websocket send failed: {error}"
-                        )));
+                        return NativeTransportTerminal::Failed(native_transport_error(
+                            WebSocketClientError::Send(error),
+                        ));
                     }
                     drop(batch);
                     if outbound_backpressured.swap(false, Ordering::AcqRel) {
@@ -822,9 +829,10 @@ async fn run_ws_pump(
                             return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         Some(Err(error)) => {
-                            let reason = format!("websocket receive failed: {error}");
+                            let classified = native_transport_error(WebSocketClientError::Receive(error));
+                            let reason = classified.to_string();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
+                            return NativeTransportTerminal::Failed(classified);
                         }
                         None => {
                             let reason = "websocket peer closed before completing wire exchange"
@@ -897,6 +905,20 @@ mod tests {
         ));
         assert!(native_transport_error(refused).is_retryable());
         assert!(native_transport_error(WebSocketClientError::HandshakeTimeout).is_retryable());
+        for (status, retryable) in [(503, true), (401, false), (403, false), (429, false)] {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None::<Vec<u8>>)
+                .unwrap();
+            assert_eq!(
+                native_transport_error(WebSocketClientError::Connect(
+                    tokio_tungstenite::tungstenite::Error::Http(Box::new(response))
+                ))
+                .is_retryable(),
+                retryable,
+                "HTTP {status} must use its typed availability category"
+            );
+        }
         for (code, retry, expected) in [
             (WireErrorCode::NotReady, WireRetry::Later, true),
             (WireErrorCode::NotReady, WireRetry::AfterAuth, false),

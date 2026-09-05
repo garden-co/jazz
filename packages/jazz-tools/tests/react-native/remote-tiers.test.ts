@@ -1,4 +1,7 @@
 import { expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
@@ -157,3 +160,102 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
     await issuer.stop();
   }
 }, 30_000);
+
+it("keeps local work usable while remote read tiers recover from an established native socket outage", async () => {
+  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+    await import("../../src/testing/index.js");
+  const issuer = await startTestJwtIssuer();
+  const dataDir = await mkdtemp(join(tmpdir(), "jazz-rn-established-outage-"));
+  let server = await startLocalJazzServer({
+    dataDir,
+    jwksUrl: issuer.jwksUrl,
+    jwtIssuer: issuer.issuer,
+    jwtAudience: issuer.audience,
+  });
+  try {
+    const permissions = schema.definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+    ]);
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const initial = {
+      appId: server.appId,
+      port: server.port,
+      adminSecret: server.adminSecret,
+      backendSecret: server.backendSecret,
+    };
+    await withNativeRelayFixture(
+      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      async (fixture) => {
+        const db = await fixture.createDb();
+        expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
+        await server.stop();
+
+        const write = db.insert(app.todos, { title: "durable through outage", done: false });
+        const local = await write.wait({ tier: "local" });
+        await expect.poll(async () => db.all(app.todos, { tier: ReadTier.Local })).toEqual([local]);
+
+        let remoteIfPossibleSettled = false;
+        const remoteIfPossible = db.all(app.todos, { tier: ReadTier.RemoteIfPossible }).then(
+          (rows) => {
+            remoteIfPossibleSettled = true;
+            return rows;
+          },
+          (error) => {
+            remoteIfPossibleSettled = true;
+            throw error;
+          },
+        );
+        let strictSettled = false;
+        const strict = db.all(app.todos, { tier: ReadTier.Remote }).then(
+          (rows) => {
+            strictSettled = true;
+            return rows;
+          },
+          (error) => {
+            strictSettled = true;
+            throw error;
+          },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect([remoteIfPossibleSettled, strictSettled]).toEqual([false, false]);
+
+        server = await startLocalJazzServer({
+          ...initial,
+          dataDir,
+          jwksUrl: issuer.jwksUrl,
+          jwtIssuer: issuer.issuer,
+          jwtAudience: issuer.audience,
+        });
+        const [resumedIfPossible, resumedStrict] = await Promise.all([remoteIfPossible, strict]);
+        for (const rows of [resumedIfPossible, resumedStrict]) {
+          // Recovery establishes a fresh authority snapshot, which may precede
+          // this queued write's later Global admission.
+          expect(rows.every((row) => row.id === local.id)).toBe(true);
+        }
+        await write.wait({ tier: "global" });
+        await expect(db.all(app.todos, { tier: ReadTier.Remote })).resolves.toEqual([local]);
+      },
+      {
+        appId: initial.appId,
+        session: {
+          issuer: issuer.issuer,
+          user_id: "rn-established-outage",
+          claims: {},
+          authMode: "external",
+        },
+        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-established-outage") },
+      },
+    );
+  } finally {
+    await server.stop();
+    await issuer.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+}, 45_000);

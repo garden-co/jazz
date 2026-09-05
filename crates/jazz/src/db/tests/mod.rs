@@ -120,6 +120,7 @@ fn terminal_root_binding_fields_preserve_hybrid_public_slot_provenance() {
             },
         ],
         carrier: TerminalRootCarrier::Logical,
+        root_union_arm: false,
     };
 
     assert_eq!(

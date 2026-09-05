@@ -327,6 +327,7 @@ fn collect_root_field_projection(
     source: &ResolvedSource,
     field: &CollectFlatField,
     output: &str,
+    source_positions_are_stable: bool,
 ) -> ProjectField {
     let source_field = field
         .source_field
@@ -334,6 +335,9 @@ fn collect_root_field_projection(
         .expect("root collector fields retain their source field");
     match field.origin {
         CollectFieldOrigin::SourceRow => {
+            if !source_positions_are_stable {
+                return ProjectField::renamed(source_field, output);
+            }
             let source_idx = resolved_source_field_index_by_name(source, source_field)
                 .expect("source-row collector fields are present in the source descriptor");
             ProjectField::renamed_resolved(source_idx, output)
@@ -348,6 +352,7 @@ pub(super) fn root_collect_context_graph(
     graph: GraphBuilder,
     source: &ResolvedSource,
     layout: &CollectLayout,
+    source_positions_are_stable: bool,
 ) -> CapabilityResult<GraphBuilder> {
     let fields = layout
         .root_fields
@@ -358,8 +363,18 @@ pub(super) fn root_collect_context_graph(
                 .as_ref()
                 .expect("root collector fields retain their source field");
             [
-                collect_root_field_projection(source, field, source_field),
-                collect_root_field_projection(source, field, &field.input),
+                collect_root_field_projection(
+                    source,
+                    field,
+                    source_field,
+                    source_positions_are_stable,
+                ),
+                collect_root_field_projection(
+                    source,
+                    field,
+                    &field.input,
+                    source_positions_are_stable,
+                ),
             ]
         })
         .collect::<Vec<_>>();
@@ -370,12 +385,14 @@ pub(super) fn collect_anchor_graph(
     graph: GraphBuilder,
     root_source: &ResolvedSource,
     layout: &CollectLayout,
+    source_positions_are_stable: bool,
 ) -> CapabilityResult<GraphBuilder> {
     Ok(graph.project_fields(collect_flat_projection(
         layout,
         None,
         &BTreeSet::new(),
         Some(root_source),
+        source_positions_are_stable,
     )?))
 }
 
@@ -405,6 +422,7 @@ pub(super) fn lower_collect_slot_graphs(
         Some(slot),
         inherited_flat_fields,
         None,
+        true,
     )?);
     let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
         single_gap_report(UnsupportedReason::Runtime(format!(
@@ -449,6 +467,7 @@ fn collect_flat_projection(
     current_slot: Option<&CollectSlotLayout>,
     inherited_flat_fields: &BTreeSet<String>,
     root_source: Option<&ResolvedSource>,
+    source_positions_are_stable: bool,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let mut fields = layout
         .root_fields
@@ -457,7 +476,12 @@ fn collect_flat_projection(
             Some(_) => ProjectField::renamed(left_field(&field.input), &field.input),
             None => {
                 let source = root_source.expect("root projection carries its source descriptor");
-                collect_root_field_projection(source, field, &field.input)
+                collect_root_field_projection(
+                    source,
+                    field,
+                    &field.input,
+                    source_positions_are_stable,
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -526,6 +550,7 @@ fn collect_child_context_projection(
         Some(current_slot),
         inherited_flat_fields,
         None,
+        true,
     )?);
     Ok(fields)
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::groove::records::{
@@ -1441,8 +1441,19 @@ fn validate_exists_rel_join_conditions(
             validate_exists_rel_join_conditions(table, path, input)
         }
         RelExpr::Union { inputs } => {
-            for input in inputs {
-                validate_exists_rel_join_conditions(table, path, input)?;
+            let mut labels = BTreeSet::new();
+            for arm in inputs {
+                if arm.label.is_empty()
+                    || arm.label.len() > 4096
+                    || arm.label.contains('\0')
+                    || !labels.insert(&arm.label)
+                {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), path),
+                        "core schema ExistsRel union labels must be unique, NUL-free, and 1..=4096 bytes",
+                    ));
+                }
+                validate_exists_rel_join_conditions(table, path, &arm.input)?;
             }
             Ok(())
         }

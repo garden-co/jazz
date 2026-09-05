@@ -20,8 +20,9 @@ use jazz::protocol::{
     VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
-    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
-    lit,
+    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, RelationCmpOp,
+    RelationColumnRef, RelationExpr, RelationPredicate, RelationQuery, RelationUnionArm,
+    RelationValueRef, ShapeId, col, eq, lit,
 };
 use jazz::schema::JazzSchema;
 use jazz::time::{GlobalTime, TxTime};
@@ -1793,10 +1794,49 @@ fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
         .array_subqueries
         .push(ArraySubquery::new("participants", "participants", "team_id", "id").offset(2));
 
+    let mut union = Query::from("todos");
+    union.relation = Some(RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![
+                    RelationUnionArm {
+                        label: "first".to_owned(),
+                        input: RelationExpr::TableScan {
+                            table: "todos".to_owned(),
+                            alias: Some("left".to_owned()),
+                        },
+                    },
+                    RelationUnionArm {
+                        label: "second".to_owned(),
+                        input: RelationExpr::Filter {
+                            input: Box::new(RelationExpr::TableScan {
+                                table: "todos".to_owned(),
+                                alias: None,
+                            }),
+                            predicate: RelationPredicate::Cmp {
+                                left: RelationColumnRef {
+                                    scope: Some("todos".to_owned()),
+                                    column: "metadata".to_owned(),
+                                },
+                                op: RelationCmpOp::Eq,
+                                right: RelationValueRef::Literal(serde_json::json!({
+                                    "type": "Json",
+                                    "value": {"nested": [true, null, 7]}
+                                })),
+                            },
+                        },
+                    },
+                ],
+            }),
+            limit: 1,
+        },
+    });
+
     vec![
         ("forward_include_projected_optional", forward),
         ("reverse_include_required_nested_projection", reverse),
         ("unbounded_reverse_include_with_offset", unbounded),
+        ("labeled_union_relation_json_literal", union),
     ]
 }
 

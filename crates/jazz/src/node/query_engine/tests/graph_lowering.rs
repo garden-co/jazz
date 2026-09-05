@@ -885,7 +885,7 @@ fn assert_current_join_via_union_relation_input(
     assert_eq!(
         schema
             .occurrence_union_arm_fields
-            .get(&0)
+            .get(&1)
             .map(String::as_str),
         Some("__root_join_arm_0")
     );

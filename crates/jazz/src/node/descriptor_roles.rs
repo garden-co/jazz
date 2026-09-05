@@ -73,7 +73,8 @@ fn validate_role_fields(
             ResultDescriptorRole::Current if tag == "occurrence_union" => {
                 let position = ordinal.parse::<usize>().map_err(|_| invalid())?;
                 if field.value_type != records::ValueType::String
-                    || position >= occurrence_ordinal - 1
+                    // Root is source position 0; joined sources occupy 1..N.
+                    || position >= occurrence_ordinal
                     || last_union_position.is_some_and(|last| position <= last)
                 {
                     return Err(invalid());
@@ -251,7 +252,9 @@ fn current_role_schema(
         || schema
             .occurrence_union_arm_fields
             .keys()
-            .any(|position| *position + 1 >= schema.occurrence_id_fields.len())
+            // Source positions are the actual contributor positions: root is
+            // position 0 and joined sources occupy positions 1..N.
+            .any(|position| *position >= schema.occurrence_id_fields.len())
     {
         return Err(Error::InvalidStoredValue(
             "result occurrence source declarations are invalid",
