@@ -41,7 +41,12 @@ module.exports = function withJazzDeviceFixture(config) {
     application.$["android:networkSecurityConfig"] = "@xml/jazz_device_network_security";
     return mod;
   });
-  config = copyTemplate(config, "android", "android/jazz_device_network_security.xml", "app/src/main/res/xml/jazz_device_network_security.xml");
+  config = copyTemplate(
+    config,
+    "android",
+    "android/jazz_device_network_security.xml",
+    "app/src/main/res/xml/jazz_device_network_security.xml",
+  );
   const androidSource = "app/src/main/java/dev/jazz/rndeviceacceptance/";
   config = copyTemplate(
     config,
