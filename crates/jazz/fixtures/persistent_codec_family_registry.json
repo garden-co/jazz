@@ -335,7 +335,7 @@
       },
       "rejection_receipt": {
         "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "source_closure_storage_rejects_retired_tags_and_malformed_bytes"
+        "anchor": "source_closure_storage_rejects_unknown_tags_and_malformed_bytes"
       },
       "evidence": [
         {

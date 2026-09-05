@@ -95,13 +95,12 @@ The policy directory and known-state source-closure generation remain separate
 validated stores. The receiver rebuilds terminal results through local IVM over
 these covered source versions; no output row or result member is recovered.
 
-The fact bytes are ASCII `JPFK`, version byte `1`, then tag byte `3` for
-`ProgramSourceCoverage` or `14` for `CoveredInput`. Existing active tags remain
-unchanged; every other tag, including all retired output variants, rejects.
+The fact bytes are ASCII `JPFK`, version byte `1`, then dense tag byte `0` for
+`ProgramSourceCoverage` or `1` for `CoveredInput`. Every other tag rejects.
 There is no persisted result-member store, `JRME`, or `JRSE` format.
 
-- Tag `3`: source identity, then one boolean byte (`0` incomplete, `1` complete).
-- Tag `14`: source identity, version-table string, source-row UUID, version ref.
+- Tag `0`: source identity, then one boolean byte (`0` incomplete, `1` complete).
+- Tag `1`: source identity, version-table string, source-row UUID, version ref.
 - A string/byte field is little-endian `U32` byte length then exact bytes;
   strings must be UTF-8. UUIDs are exactly 16 bytes. A source identity is its
   table string followed by `U32` path length and ordered roles: `0` root,

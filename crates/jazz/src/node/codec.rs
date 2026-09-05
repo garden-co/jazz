@@ -3247,7 +3247,7 @@ pub(super) fn contribution_merge_from_storage_record(
 }
 
 // Only authority-approved source closure facts have a durable representation.
-// Keep the two existing explicit tags; all retired output tags fail closed.
+// V1 has exactly two dense tags; every other tag fails closed.
 const PROGRAM_FACT_STORAGE_MAGIC: &[u8; 4] = b"JPFK";
 const PROGRAM_FACT_STORAGE_VERSION: u8 = 1;
 const MAX_PROGRAM_FACT_STORAGE_BYTES: usize = 1024 * 1024;
@@ -3525,7 +3525,7 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
     bytes.push(PROGRAM_FACT_STORAGE_VERSION);
     match fact {
         ProgramFactEntry::ProgramSourceCoverage(v) => {
-            bytes.push(3);
+            bytes.push(0);
             program_fact_put_source(&mut bytes, &v.source)?;
             bytes.push(u8::from(v.complete));
         }
@@ -3535,7 +3535,7 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
                     "settled covered input identity is invalid",
                 ));
             }
-            bytes.push(14);
+            bytes.push(1);
             program_fact_put_source(&mut bytes, &v.source)?;
             program_fact_put_string(&mut bytes, v.version_table.as_str())?;
             program_fact_put_uuid(&mut bytes, v.source_row.0);
@@ -3571,7 +3571,7 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
     };
     let tag = r.u8()?;
     let fact = match tag {
-        3 => ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+        0 => ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
             source: program_fact_source(&mut r)?,
             complete: match r.u8()? {
                 0 => false,
@@ -3583,7 +3583,7 @@ pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramF
                 }
             },
         }),
-        14 => {
+        1 => {
             let input = CoveredInputEntry {
                 source: program_fact_source(&mut r)?,
                 version_table: r.string()?.into(),
@@ -4984,7 +4984,7 @@ mod authority_storage_codec_tests {
             .iter()
             .map(|fact| program_fact_storage_bytes(fact).unwrap())
             .collect::<Vec<_>>();
-        for (expected_tag, (fact, bytes)) in [3, 14].into_iter().zip(facts.iter().zip(&encoded)) {
+        for (expected_tag, (fact, bytes)) in [0, 1].into_iter().zip(facts.iter().zip(&encoded)) {
             assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
             assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
             assert_eq!(usize::from(bytes[5]), expected_tag);
@@ -4996,8 +4996,8 @@ mod authority_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "cf2f01f026edaec1097ee2d1463f1719561eeda83e671a3ff07af13c0f861d34",
-                "6f3af744b862a1da729a60506be303af633493fa0ba9987b759cbd33b46fe812",
+                "fd98cfd31889fdf348eb52bdfe3f3cbf6ad4e9edcb3b1a0480d31ba79fc0bad8",
+                "793d84bda68361aa771f48cb27dfc111207e982ea0a297abbc5b5515d94416c5",
             ]
         );
     }
@@ -5013,7 +5013,7 @@ mod authority_storage_codec_tests {
         let encoded = program_fact_storage_bytes(&fact).unwrap();
         assert_eq!(
             hex::encode(&encoded),
-            "4a50464b010e050000007461736b730600000000010400000073656c6602040000007365656403040000007374657004050000006974656d73050400000072656164050000007461736b73383838383838383838383838383838381f000000000000003333333333333333333333333333333301343434343434343434343434343434340201200000000000000035353535353535353535353535353535010100000036010100000037"
+            "4a50464b0101050000007461736b730600000000010400000073656c6602040000007365656403040000007374657004050000006974656d73050400000072656164050000007461736b73383838383838383838383838383838381f000000000000003333333333333333333333333333333301343434343434343434343434343434340201200000000000000035353535353535353535353535353535010100000036010100000037"
         );
         assert_eq!(program_fact_from_storage_bytes(&encoded).unwrap(), fact);
 
@@ -5045,7 +5045,7 @@ mod authority_storage_codec_tests {
     }
 
     #[test]
-    fn source_closure_storage_rejects_retired_tags_and_malformed_bytes() {
+    fn source_closure_storage_rejects_unknown_tags_and_malformed_bytes() {
         // Internal codec boundary: callers cannot inject raw store bytes publicly.
         let output = ProgramFactEntry::ResultPayload(crate::protocol::ResultMemberPayloadEntry {
             member: ResultMemberEntry::row((
@@ -5067,10 +5067,10 @@ mod authority_storage_codec_tests {
             complete: true,
         });
         let encoded = program_fact_storage_bytes(&fact).unwrap();
-        for tag in (0..=255).filter(|tag| ![3, 14].contains(tag)) {
-            let mut retired = encoded.clone();
-            retired[5] = tag;
-            assert!(program_fact_from_storage_bytes(&retired).is_err());
+        for tag in (0..=255).filter(|tag| ![0, 1].contains(tag)) {
+            let mut unknown = encoded.clone();
+            unknown[5] = tag;
+            assert!(program_fact_from_storage_bytes(&unknown).is_err());
         }
         let mut wrong_version = encoded.clone();
         wrong_version[4] += 1;
