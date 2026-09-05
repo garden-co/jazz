@@ -2607,6 +2607,14 @@ pub enum DbTickDiagnosticPhase {
     SubscriberNodeLockComplete,
     SubscriberCapabilityCompileStart,
     SubscriberCapabilityCompileComplete,
+    SubscriberClaimRebindStart,
+    SubscriberClaimRebindComplete,
+    SubscriberPostIngressStart,
+    SubscriberServeDirtyStart,
+    SubscriberInitialRehydrateNodeLockStart,
+    SubscriberInitialRehydrateNodeLockComplete,
+    SubscriberInitialRehydrateStart,
+    SubscriberInitialRehydrateComplete,
     NodeTickComplete,
 }
 
@@ -2636,6 +2644,18 @@ impl DbTickDiagnosticPhase {
             Self::SubscriberNodeLockComplete => "subscriber-node-lock-complete",
             Self::SubscriberCapabilityCompileStart => "subscriber-capability-compile-start",
             Self::SubscriberCapabilityCompileComplete => "subscriber-capability-compile-complete",
+            Self::SubscriberClaimRebindStart => "subscriber-claim-rebind-start",
+            Self::SubscriberClaimRebindComplete => "subscriber-claim-rebind-complete",
+            Self::SubscriberPostIngressStart => "subscriber-post-ingress-start",
+            Self::SubscriberServeDirtyStart => "subscriber-serve-dirty-start",
+            Self::SubscriberInitialRehydrateNodeLockStart => {
+                "subscriber-initial-rehydrate-node-lock-start"
+            }
+            Self::SubscriberInitialRehydrateNodeLockComplete => {
+                "subscriber-initial-rehydrate-node-lock-complete"
+            }
+            Self::SubscriberInitialRehydrateStart => "subscriber-initial-rehydrate-start",
+            Self::SubscriberInitialRehydrateComplete => "subscriber-initial-rehydrate-complete",
             Self::NodeTickComplete => "node-tick-complete",
         }
     }

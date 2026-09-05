@@ -1835,8 +1835,21 @@ where
         self.observe_shared_subscriber_dirty_epoch();
         let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
+        let is_subscriber = matches!(&self.link, ConnectionLink::Subscriber(_));
+        if is_subscriber {
+            report_peer_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::SubscriberClaimRebindStart,
+            );
+        }
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
+        if is_subscriber {
+            report_peer_tick_diagnostic(
+                observer,
+                DbTickDiagnosticPhase::SubscriberClaimRebindComplete,
+            );
+        }
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -4953,6 +4966,10 @@ where
                 // future. It contains the maintained-view serving graph and
                 // does not need to inflate the inbound message dispatcher.
                 return Box::pin(async {
+                report_peer_tick_diagnostic(
+                    observer,
+                    DbTickDiagnosticPhase::SubscriberPostIngressStart,
+                );
                 // A client upload arriving before its action-specific support
                 // view settles is retained by `PeerState`, not optimistically
                 // inserted into edge history.  Drive that state on every
@@ -5065,6 +5082,10 @@ where
                         ingest_context.trust,
                     )
                 {
+                    report_peer_tick_diagnostic(
+                        observer,
+                        DbTickDiagnosticPhase::SubscriberServeDirtyStart,
+                    );
                     let mut serve_again = false;
                     for (coverage, group) in coverage_groups.iter_mut() {
                         let group_subscription = coverage_group_subscription_key(coverage);
@@ -5275,7 +5296,15 @@ where
                                 .await
                                 .map(Some)
                             } else {
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberInitialRehydrateNodeLockStart,
+                                );
                                 let mut node = self.node.lock().await;
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberInitialRehydrateNodeLockComplete,
+                                );
                                 let mut node = node.scoped_active_session_claims(
                                     session_claim_binding.as_ref().expect("subscriber claims").0,
                                     session_claim_binding
@@ -5284,7 +5313,11 @@ where
                                             .1
                                             .clone(),
                                 );
-                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberInitialRehydrateStart,
+                                );
+                                let result = peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
@@ -5292,8 +5325,12 @@ where
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
                                 )
-                                .await
-                                .map(|update| {
+                                .await;
+                                report_peer_tick_diagnostic(
+                                    observer,
+                                    DbTickDiagnosticPhase::SubscriberInitialRehydrateComplete,
+                                );
+                                result.map(|update| {
                                     update.map(|update| retarget_view_update(update, subscription))
                                 })
                             };
