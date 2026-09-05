@@ -46,6 +46,11 @@ domain from `jazz-schema-v3-large-value-kinds` to
 `jazz-schema-v1-large-value-kinds`; the remaining twenty entries retain their
 logical payloads.
 
+The dense JPFK integration additionally changes the sole
+`jazz_settled_program_facts` key/value pair: source coverage is tag `0` and
+covered input is tag `1`; every other tag is unknown. Its derived direct-store
+key therefore changes together with its value.
+
 The RocksDB archive additionally records the final storage profile: internal
 column family `__groove_storage_internal_v1` and profile marker `raw-v1`.
 The binding ResultKey V1 codec is exercised by its separate golden fixture; this
@@ -56,7 +61,7 @@ Producer digests:
 
 | Artifact                          | SHA-256                                                            |
 | --------------------------------- | ------------------------------------------------------------------ |
-| logical pack                      | `a2d6bbdd96c3277147d800102b8851b6de873a93a993432285d187089685cfc3` |
-| SQLite payload                    | `421ccbeb742c85a13811b3468720f47e1b4eea16cbfd193aa32ee561e778014e` |
-| deterministic gzip SQLite archive | `305af9de09fe297f4d6fd161dacd0ccddbda64932121efde4a8ba74987d2eb46` |
-| RocksDB archive                   | `c718d70d9fe9f26f9af7d9430cf1240c00ca241786d72771d1b55c59f04276e0` |
+| logical pack                      | `4aec397721f146845becdf0d5268a2229242a88ffe8b882312345d0039482d65` |
+| SQLite payload                    | `68392b7e23153baece369a7905532c5ed52efb1f572a35383cbfedaefa3e251c` |
+| deterministic gzip SQLite archive | `8ad336a716f3166896cd9d5bcbc73140871bb2b6ed1dbe1e06589db924eb39ef` |
+| RocksDB archive                   | `d215f099b52e40da63ad1b8d9ea55efa44deb67fe6811f870b185fc63b4314d6` |
