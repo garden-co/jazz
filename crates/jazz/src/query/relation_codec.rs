@@ -154,7 +154,6 @@ where
         fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<T>, A::Error> {
             let mut values = Vec::new();
             while let Some(value) = sequence.next_element()? {
-                budget_node::<A::Error>()?;
                 if values.len() == MAX_RELATION_ITEMS {
                     return Err(de::Error::custom("relation-query collection limit"));
                 }
@@ -270,14 +269,14 @@ enum WireRelationExpr {
         left: Box<WireRelationExpr>,
         #[serde(deserialize_with = "deserialize_expr_box")]
         right: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_join_condition_vec")]
         on: Vec<WireRelationJoinCondition>,
         join_kind: WireRelationJoinKind,
     },
     Project {
         #[serde(deserialize_with = "deserialize_expr_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_project_column_vec")]
         columns: Vec<WireRelationProjectColumn>,
     },
     Gather {
@@ -285,21 +284,22 @@ enum WireRelationExpr {
         seed: Box<WireRelationExpr>,
         #[serde(deserialize_with = "deserialize_expr_box")]
         step: Box<WireRelationExpr>,
+        #[serde(deserialize_with = "deserialize_key")]
         frontier_key: WireRelationKeyRef,
         bound: WireRecursionBound,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_key_vec")]
         dedupe_key: Vec<WireRelationKeyRef>,
     },
     Distinct {
         #[serde(deserialize_with = "deserialize_expr_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_key_vec")]
         key: Vec<WireRelationKeyRef>,
     },
     OrderBy {
         #[serde(deserialize_with = "deserialize_expr_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_order_by_vec")]
         terms: Vec<WireRelationOrderBy>,
     },
     Offset {
@@ -326,6 +326,7 @@ enum WireRelationPredicate {
     Cmp {
         left: WireRelationColumnRef,
         op: WireRelationCmpOp,
+        #[serde(deserialize_with = "deserialize_value")]
         right: WireRelationValueRef,
     },
     IsNull {
@@ -336,11 +337,12 @@ enum WireRelationPredicate {
     },
     In {
         left: WireRelationColumnRef,
-        #[serde(deserialize_with = "deserialize_bounded_vec")]
+        #[serde(deserialize_with = "deserialize_value_vec")]
         values: Vec<WireRelationValueRef>,
     },
     Contains {
         left: WireRelationColumnRef,
+        #[serde(deserialize_with = "deserialize_value")]
         right: WireRelationValueRef,
     },
     EnumMatch {
@@ -581,6 +583,98 @@ fn deserialize_json_object<'de, D: de::Deserializer<'de>>(
     }
     deserializer.deserialize_seq(Entries)
 }
+
+macro_rules! bounded_node_vec {
+    ($function:ident, $seed:ident, $type:ty, $single:ident) => {
+        fn $function<'de, D: de::Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Vec<$type>, D::Error> {
+            struct $seed;
+            impl<'de> DeserializeSeed<'de> for $seed {
+                type Value = $type;
+                fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<$type, D::Error> {
+                    $single(d)
+                }
+            }
+            struct Values;
+            impl<'de> Visitor<'de> for Values {
+                type Value = Vec<$type>;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("bounded relation nodes")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+                    let mut values = Vec::new();
+                    while let Some(value) = s.next_element_seed($seed)? {
+                        if values.len() == MAX_RELATION_ITEMS {
+                            return Err(de::Error::custom("relation-query collection limit"));
+                        }
+                        values.push(value);
+                    }
+                    Ok(values)
+                }
+            }
+            deserializer.deserialize_seq(Values)
+        }
+    };
+}
+fn deserialize_value<'de, D: de::Deserializer<'de>>(
+    d: D,
+) -> Result<WireRelationValueRef, D::Error> {
+    budget_node::<D::Error>()?;
+    WireRelationValueRef::deserialize(d)
+}
+fn deserialize_key<'de, D: de::Deserializer<'de>>(d: D) -> Result<WireRelationKeyRef, D::Error> {
+    budget_node::<D::Error>()?;
+    WireRelationKeyRef::deserialize(d)
+}
+fn deserialize_join_condition<'de, D: de::Deserializer<'de>>(
+    d: D,
+) -> Result<WireRelationJoinCondition, D::Error> {
+    budget_node::<D::Error>()?;
+    WireRelationJoinCondition::deserialize(d)
+}
+fn deserialize_project_column<'de, D: de::Deserializer<'de>>(
+    d: D,
+) -> Result<WireRelationProjectColumn, D::Error> {
+    budget_node::<D::Error>()?;
+    WireRelationProjectColumn::deserialize(d)
+}
+fn deserialize_order_by<'de, D: de::Deserializer<'de>>(
+    d: D,
+) -> Result<WireRelationOrderBy, D::Error> {
+    budget_node::<D::Error>()?;
+    WireRelationOrderBy::deserialize(d)
+}
+bounded_node_vec!(
+    deserialize_value_vec,
+    ValueSeed,
+    WireRelationValueRef,
+    deserialize_value
+);
+bounded_node_vec!(
+    deserialize_key_vec,
+    KeySeed,
+    WireRelationKeyRef,
+    deserialize_key
+);
+bounded_node_vec!(
+    deserialize_join_condition_vec,
+    JoinSeed,
+    WireRelationJoinCondition,
+    deserialize_join_condition
+);
+bounded_node_vec!(
+    deserialize_project_column_vec,
+    ProjectSeed,
+    WireRelationProjectColumn,
+    deserialize_project_column
+);
+bounded_node_vec!(
+    deserialize_order_by_vec,
+    OrderSeed,
+    WireRelationOrderBy,
+    deserialize_order_by
+);
 
 impl TryFrom<&RelationQuery> for WireRelationQuery {
     type Error = RelationWireError;
