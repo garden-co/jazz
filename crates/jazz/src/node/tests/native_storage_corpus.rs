@@ -1705,7 +1705,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
         let read_only = rocksdb::DB::open_cf_for_read_only(&options, &rocks_path, &families, false)
             .expect("open committed RocksDB corpus read-only");
         assert!(
-            families.iter().any(|family| family == "__groove_storage_internal_v3"),
+            families.iter().any(|family| family == "__groove_storage_internal_v1"),
             "committed RocksDB corpus retains Groove's immutable internal family"
         );
         let rows = families
