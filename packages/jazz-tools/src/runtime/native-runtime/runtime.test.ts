@@ -133,7 +133,12 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 }
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
-  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  if (
+    occurrenceKey.length === 25 &&
+    occurrenceKey[0] === 1 &&
+    occurrenceKey.subarray(17).every((byte) => byte === 0)
+  )
+    return sourceId;
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
@@ -5432,7 +5437,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
       const bytes = new Uint8Array(50);
-      bytes[0] = 2;
+      bytes[0] = 1;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -5463,8 +5468,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:02"),
-      expect.stringContaining("result:02"),
+      expect.stringContaining("result:01"),
+      expect.stringContaining("result:01"),
     ]);
     runtime.close();
   });
@@ -7668,8 +7673,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const firstDelta = runtimeDeltaChanges(first.rootDelta);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:02"),
-    expect.stringContaining("result:02"),
+    expect.stringContaining("result:01"),
+    expect.stringContaining("result:01"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
