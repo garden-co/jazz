@@ -2722,3 +2722,10 @@ impl PeerState {
     }
 
 }
+
+#[cfg(test)]
+impl PeerState {
+    pub(crate) fn review_publication_count(&self) -> usize {
+        self.publication_states.len()
+    }
+}

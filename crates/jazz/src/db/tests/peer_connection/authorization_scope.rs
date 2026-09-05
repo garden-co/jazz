@@ -2474,3 +2474,107 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         "established siblings must converge even though the new clone was rejected"
     );
 }
+
+// Internal seam: deterministic cancellation between clause hydrations checks
+// temporary proof-owner retirement without relying on storage timing.
+#[test]
+fn review_cancelled_multiclause_authorization_releases_completed_clauses() {
+    review_multiclause_cleanup(0xa4);
+}
+
+#[test]
+fn review_failed_multiclause_authorization_releases_completed_clauses() {
+    review_multiclause_cleanup(0xa5);
+}
+
+fn review_multiclause_cleanup(mode: u8) {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("support_using"))
+            .table(PublicTableSchemaBuilder::new("support_check")),
+    );
+    let identity = AuthorSubject::for_test_bytes([mode; 16]);
+    let server = open_core(0xa6, AuthorSubject::SYSTEM, &schema);
+    server
+        .node()
+        .borrow_mut()
+        .mutate_current_schema_for_testing(|compiled| {
+            compiled
+                .tables
+                .iter_mut()
+                .find(|table| table.name == "todos")
+                .unwrap()
+                .write_policies = WritePolicies {
+                update_using: Some(Query::from("support_using")),
+                update_check: Some(Query::from("support_check")),
+                ..WritePolicies::default()
+            };
+        });
+    let action = PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(1),
+        patch: BTreeMap::new(),
+    };
+    let node = server.node();
+    assert_eq!(
+        node.borrow()
+            .authorization_support_scope(identity, &action)
+            .unwrap()
+            .subscriptions
+            .len(),
+        2
+    );
+    let mut peer = crate::peer::PeerState::relay();
+    let mut pending = VecDeque::new();
+    let mut hydrations = BTreeMap::new();
+    let mut count = 0;
+    let mut hook = crate::db::peer_connection::AuthorizationScopeTestHook {
+        fail: mode == 0xa5,
+        reached_second_clause: false,
+    };
+    let mut future = Box::pin(
+        crate::db::peer_connection::serve_authorization_scope_intent(
+            &node,
+            &mut peer,
+            &mut pending,
+            identity,
+            BTreeMap::new(),
+            1,
+            crate::protocol::PermissionAdviceRequestId([0xa7; 16]),
+            action,
+            crate::node::CommitUnitTrust::TrustedBackend,
+            &mut hydrations,
+            &mut count,
+            Some(&mut hook),
+        ),
+    );
+    let mut failed = false;
+    for _ in 0..256 {
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Pending => {}
+            Poll::Ready(Err(error)) if mode == 0xa5 => {
+                assert!(error.to_string().contains("later-clause storage failure"));
+                failed = true;
+                break;
+            }
+            result => panic!("unexpected hydration result: {result:?}"),
+        }
+    }
+    drop(future);
+    assert_eq!(failed, mode == 0xa5);
+    assert_eq!(count, 1);
+    assert!(
+        hook.reached_second_clause,
+        "the first clause completed before cancellation/error"
+    );
+    assert!(pending.is_empty(), "no incomplete proof was published");
+    assert_eq!(
+        peer.review_publication_count(),
+        0,
+        "cancelled whole proof must retire earlier successful clause owners"
+    );
+}
