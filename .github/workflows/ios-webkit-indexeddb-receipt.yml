@@ -14,6 +14,24 @@ on:
         required: false
         default: ""
         type: string
+      mode:
+        description: "Receipt to run"
+        required: false
+        default: "playwright-webkit"
+        type: choice
+        options:
+          - playwright-webkit
+          - safari-webdriver
+      safari_url:
+        description: "Public Safari diagnostic URL (used only by safari-webdriver)"
+        required: false
+        default: "https://thee-screenshots-attempts-applied.trycloudflare.com/"
+        type: string
+      safari_cycles:
+        description: "Reload/write repetitions, 1 through 12 (used only by safari-webdriver)"
+        required: false
+        default: "3"
+        type: string
 
 permissions:
   contents: read
@@ -31,6 +49,7 @@ jobs:
     # heavier WebKit setup on this explicit Blacksmith receipt, not routine CI.
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 25
+    if: ${{ inputs.mode != 'safari-webdriver' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -46,3 +65,65 @@ jobs:
         run: >-
           JAZZ_BROWSER=webkit pnpm --filter jazz-tools test:browser --
           tests/browser/indexeddb-physical-epoch.test.ts
+
+  safari-webdriver:
+    name: Safari hosted reload diagnostic
+    # A bounded, dispatch-only real-Safari receipt. It deliberately uses the
+    # public deployed diagnostic app and no Jazz build artifacts.
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 15
+    if: ${{ inputs.mode == 'safari-webdriver' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Record macOS and Safari versions
+        run: |
+          sw_vers
+          /Applications/Safari.app/Contents/MacOS/Safari --version || true
+          /usr/bin/safaridriver --version || true
+      - name: Enable and start Safari WebDriver
+        run: |
+          set -euo pipefail
+          # Apple's documented one-time enablement. Blacksmith images normally
+          # permit passwordless sudo; keep the direct invocation for images
+          # where the runner account is already authorized.
+          sudo /usr/bin/safaridriver --enable || /usr/bin/safaridriver --enable
+          /usr/bin/safaridriver --port 4444 > safaridriver.log 2>&1 &
+          echo $! > safaridriver.pid
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error http://127.0.0.1:4444/status > safaridriver-status.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat safaridriver.log || true
+          exit 1
+      - name: Run repeated hosted Safari write, restart, and reload receipt
+        env:
+          SAFARI_RECEIPT_URL: ${{ inputs.safari_url }}
+          SAFARI_RECEIPT_CYCLES: ${{ inputs.safari_cycles }}
+        run: >-
+          python3 dev/ci/safari_webdriver_receipt.py
+          --url "$SAFARI_RECEIPT_URL"
+          --cycles "$SAFARI_RECEIPT_CYCLES"
+          --output safari-webdriver-receipt
+      - name: Collect Safari WebDriver diagnostics
+        if: ${{ always() }}
+        run: |
+          mkdir -p safari-webdriver-receipt
+          if [ -f safaridriver.pid ]; then
+            kill "$(cat safaridriver.pid)" || true
+          fi
+          cp safaridriver.log safari-webdriver-receipt/ 2>/dev/null || true
+          cp safaridriver-status.json safari-webdriver-receipt/ 2>/dev/null || true
+          sw_vers > safari-webdriver-receipt/macos-version.txt || true
+          /Applications/Safari.app/Contents/MacOS/Safari --version > safari-webdriver-receipt/safari-version.txt 2>&1 || true
+          /usr/bin/safaridriver --version > safari-webdriver-receipt/safaridriver-version.txt 2>&1 || true
+      - name: Upload Safari WebDriver diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: safari-webdriver-receipt-${{ github.run_id }}
+          path: safari-webdriver-receipt
+          if-no-files-found: warn
