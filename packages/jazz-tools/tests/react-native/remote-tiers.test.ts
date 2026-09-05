@@ -204,12 +204,18 @@ it("keeps local and RemoteIfPossible reads usable across an established native s
           .poll(async () => db.all(app.todos, { tier: ReadTier.RemoteIfPossible }))
           .toEqual([local]);
 
-        const strict = db.all(app.todos, { tier: ReadTier.Remote });
-        await new Promise((resolve) => setTimeout(resolve, 100));
         let strictSettled = false;
-        void strict.then(() => {
-          strictSettled = true;
-        });
+        const strict = db.all(app.todos, { tier: ReadTier.Remote }).then(
+          (rows) => {
+            strictSettled = true;
+            return rows;
+          },
+          (error) => {
+            strictSettled = true;
+            throw error;
+          },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
         expect(strictSettled).toBe(false);
 
         server = await startLocalJazzServer({
