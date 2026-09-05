@@ -652,7 +652,6 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   assert.throws(() => stageNapiManifests(root), /missing provenance manifest/);
 });
 
-
 test("RN test bridge recipe changes NAPI provenance and fingerprint only", () => {
   const root = fixture();
   const previous = process.env.JAZZ_RN_TEST_BRIDGE;
