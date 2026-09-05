@@ -11,7 +11,11 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import { encodeRelationQueryV1, parseRelationQueryJsonLossless, type RelExpr } from "../../ir.js";
+import {
+  encodeRelationQueryPostcard,
+  parseRelationQueryJsonLossless,
+  type RelExpr,
+} from "../../ir.js";
 import type {
   TxId,
   InsertResult,
@@ -4606,7 +4610,7 @@ function relationQueryBytes(queryJson: string): Uint8Array {
   if (!relation_ir || typeof relation_ir !== "object") {
     throw new Error("Relation query is missing relation_ir");
   }
-  return encodeRelationQueryV1(relation_ir as RelExpr);
+  return encodeRelationQueryPostcard(relation_ir as RelExpr);
 }
 
 function relationIrContainsNativeOperator(value: unknown): boolean {

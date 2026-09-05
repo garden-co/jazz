@@ -595,3 +595,329 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   if (bytes.length > maxBytes) fail("byte limit");
   return Uint8Array.from(bytes);
 }
+
+/** Encode the typed Postcard relation tree used by native and peer query envelopes. */
+export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
+  const bytes: number[] = [];
+  const text = new TextEncoder();
+  const fail = (message: string): never => {
+    throw new Error(`invalid relation Postcard: ${message}`);
+  };
+  const u64 = (value: bigint | number) => {
+    let remaining = typeof value === "bigint" ? value : BigInt(value);
+    if (remaining < 0n || remaining > 0xffff_ffff_ffff_ffffn) fail("integer range");
+    do {
+      let byte = Number(remaining & 0x7fn);
+      remaining >>= 7n;
+      if (remaining) byte |= 0x80;
+      bytes.push(byte);
+    } while (remaining);
+  };
+  const i64 = (value: bigint) => u64(value < 0n ? (-value << 1n) - 1n : value << 1n);
+  const string = (value: string) => {
+    if (typeof value !== "string") fail("string");
+    assertNoUnpairedSurrogates(value);
+    const encoded = text.encode(value);
+    u64(encoded.length);
+    bytes.push(...encoded);
+  };
+  const option = (value: unknown, write: () => void) => {
+    if (value === undefined || value === null) bytes.push(0);
+    else {
+      bytes.push(1);
+      write();
+    }
+  };
+  const tagged = (value: object, tags: string[], kind: string) => {
+    const keys = Object.keys(value);
+    if (keys.length !== 1 || !tags.includes(keys[0]!)) fail(kind);
+  };
+  const dimension = (value: unknown) => {
+    if (value instanceof RawJsonNumber) {
+      if (!/^(?:0|[1-9]\d*)$/.test(value.text)) fail("dimension");
+      value = Number(value.text);
+    }
+    const dimensionValue = typeof value === "number" ? value : fail("dimension");
+    if (!Number.isSafeInteger(dimensionValue) || dimensionValue < 0 || dimensionValue > 0xffff_ffff)
+      fail("dimension");
+    u64(dimensionValue);
+  };
+  const column = (value: RelColumnRef) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof value.column !== "string" ||
+      (value.scope !== undefined && typeof value.scope !== "string")
+    )
+      fail("column");
+    option(value.scope, () => string(value.scope!));
+    string(value.column);
+  };
+  const rowId = (value: RelRowIdRef) =>
+    u64(
+      value === "Current" ? 0 : value === "Outer" ? 1 : value === "Frontier" ? 2 : fail("row id"),
+    );
+  const json = (value: unknown): void => {
+    if (value instanceof RawJsonNumber) {
+      if (/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value.text)) {
+        const integer = BigInt(value.text);
+        if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {
+          u64(2);
+          i64(integer);
+          return;
+        }
+        if (integer >= 0n && integer <= 0xffff_ffff_ffff_ffffn) {
+          u64(3);
+          u64(integer);
+          return;
+        }
+      }
+      value = Number(value.text);
+    }
+    if (value === null) {
+      u64(0);
+      return;
+    }
+    if (typeof value === "boolean") {
+      u64(1);
+      bytes.push(value ? 1 : 0);
+      return;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) fail("number");
+      if (Number.isInteger(value) && !Object.is(value, -0)) {
+        const decimal = JSON.stringify(value);
+        if (/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(decimal)) {
+          const integer = BigInt(decimal);
+          if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {
+            u64(2);
+            i64(integer);
+            return;
+          }
+          if (integer >= 0n && integer <= 0xffff_ffff_ffff_ffffn) {
+            u64(3);
+            u64(integer);
+            return;
+          }
+        }
+      }
+      u64(4);
+      const raw = new DataView(new ArrayBuffer(8));
+      raw.setFloat64(0, value, true);
+      for (let index = 0; index < 8; index++) bytes.push(raw.getUint8(index));
+      return;
+    }
+    if (typeof value === "string") {
+      u64(5);
+      string(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      u64(6);
+      u64(value.length);
+      value.forEach(json);
+      return;
+    }
+    if (!value || typeof value !== "object") fail("literal");
+    u64(7);
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => {
+      const a = text.encode(left);
+      const b = text.encode(right);
+      for (let i = 0; i < Math.min(a.length, b.length); i++)
+        if (a[i] !== b[i]) return a[i]! - b[i]!;
+      return a.length - b.length;
+    });
+    u64(entries.length);
+    for (const [key, child] of entries) {
+      string(key);
+      json(child);
+    }
+  };
+  const key = (value: RelKeyRef) => {
+    tagged(value, ["Column", "RowId"], "key");
+    if ("Column" in value) {
+      u64(0);
+      column(value.Column);
+    } else {
+      u64(1);
+      rowId(value.RowId);
+    }
+  };
+  const project = (value: RelProjectExpr) => {
+    tagged(value, ["Column", "RowId"], "project");
+    if ("Column" in value) {
+      u64(0);
+      column(value.Column);
+    } else {
+      u64(1);
+      rowId(value.RowId);
+    }
+  };
+  const valueRef = (value: RelValueRef) => {
+    tagged(
+      value,
+      ["Literal", "Param", "SessionRef", "OuterColumn", "FrontierColumn", "RowId"],
+      "value",
+    );
+    if ("Literal" in value) {
+      u64(0);
+      json(value.Literal);
+    } else if ("Param" in value) {
+      u64(1);
+      string(value.Param);
+    } else if ("SessionRef" in value) {
+      u64(2);
+      u64(value.SessionRef.length);
+      value.SessionRef.forEach(string);
+    } else if ("OuterColumn" in value) {
+      u64(3);
+      column(value.OuterColumn);
+    } else if ("FrontierColumn" in value) {
+      u64(4);
+      column(value.FrontierColumn);
+    } else {
+      u64(5);
+      rowId(value.RowId);
+    }
+  };
+  const predicate = (value: RelPredicateExpr): void => {
+    if (value === "True") {
+      u64(9);
+      return;
+    }
+    if (value === "False") {
+      u64(10);
+      return;
+    }
+    tagged(
+      value,
+      ["Cmp", "IsNull", "IsNotNull", "In", "Contains", "EnumMatch", "And", "Or", "Not"],
+      "predicate",
+    );
+    if ("Cmp" in value) {
+      u64(0);
+      column(value.Cmp.left);
+      u64(["Eq", "Ne", "Lt", "Le", "Gt", "Ge"].indexOf(value.Cmp.op));
+      valueRef(value.Cmp.right);
+    } else if ("IsNull" in value) {
+      u64(1);
+      column(value.IsNull.column);
+    } else if ("IsNotNull" in value) {
+      u64(2);
+      column(value.IsNotNull.column);
+    } else if ("In" in value) {
+      u64(3);
+      column(value.In.left);
+      u64(value.In.values.length);
+      value.In.values.forEach(valueRef);
+    } else if ("Contains" in value) {
+      u64(4);
+      column(value.Contains.left);
+      valueRef(value.Contains.right);
+    } else if ("EnumMatch" in value) {
+      u64(5);
+      column(value.EnumMatch.column);
+      string(value.EnumMatch.case);
+      predicate(value.EnumMatch.payload);
+    } else if ("And" in value) {
+      u64(6);
+      u64(value.And.length);
+      value.And.forEach(predicate);
+    } else if ("Or" in value) {
+      u64(7);
+      u64(value.Or.length);
+      value.Or.forEach(predicate);
+    } else {
+      u64(8);
+      predicate(value.Not);
+    }
+  };
+  const expr = (value: RelExpr): void => {
+    tagged(
+      value,
+      [
+        "TableScan",
+        "Filter",
+        "Union",
+        "Join",
+        "Project",
+        "Gather",
+        "Distinct",
+        "OrderBy",
+        "Offset",
+        "Limit",
+      ],
+      "expression",
+    );
+    if ("TableScan" in value) {
+      u64(0);
+      string(value.TableScan.table);
+      option(value.TableScan.alias, () => string(value.TableScan.alias!));
+    } else if ("Filter" in value) {
+      u64(1);
+      expr(value.Filter.input);
+      predicate(value.Filter.predicate);
+    } else if ("Union" in value) {
+      u64(2);
+      u64(value.Union.inputs.length);
+      value.Union.inputs.forEach((arm) => {
+        string(arm.label);
+        expr(arm.input);
+      });
+    } else if ("Join" in value) {
+      u64(3);
+      expr(value.Join.left);
+      expr(value.Join.right);
+      u64(value.Join.on.length);
+      value.Join.on.forEach((on) => {
+        column(on.left);
+        column(on.right);
+      });
+      u64(value.Join.join_kind === "Inner" ? 0 : 1);
+    } else if ("Project" in value) {
+      u64(4);
+      expr(value.Project.input);
+      u64(value.Project.columns.length);
+      value.Project.columns.forEach((columnValue) => {
+        string(columnValue.alias);
+        project(columnValue.expr);
+      });
+    } else if ("Gather" in value) {
+      u64(5);
+      expr(value.Gather.seed);
+      expr(value.Gather.step);
+      key(value.Gather.frontier_key);
+      if (value.Gather.bound === "Fixpoint") {
+        u64(0);
+      } else {
+        u64(1);
+        dimension(value.Gather.bound.MaxDepth);
+      }
+      u64(value.Gather.dedupe_key.length);
+      value.Gather.dedupe_key.forEach(key);
+    } else if ("Distinct" in value) {
+      u64(6);
+      expr(value.Distinct.input);
+      u64(value.Distinct.key.length);
+      value.Distinct.key.forEach(key);
+    } else if ("OrderBy" in value) {
+      u64(7);
+      expr(value.OrderBy.input);
+      u64(value.OrderBy.terms.length);
+      value.OrderBy.terms.forEach((term) => {
+        column(term.column);
+        u64(term.direction === "Asc" ? 0 : 1);
+      });
+    } else if ("Offset" in value) {
+      u64(8);
+      expr(value.Offset.input);
+      dimension(value.Offset.offset);
+    } else {
+      u64(9);
+      expr(value.Limit.input);
+      dimension(value.Limit.limit);
+    }
+  };
+  expr(relation);
+  return Uint8Array.from(bytes);
+}

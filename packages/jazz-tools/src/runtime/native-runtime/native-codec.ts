@@ -13,7 +13,7 @@ import {
   writeValueType,
 } from "./native-row-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
-import { encodeRelationQueryV1, type RelExpr } from "../../ir.js";
+import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -367,7 +367,7 @@ export function queryWithPredicates(
   if (relation == null) writer.none();
   else
     writer.some((relationWriter) =>
-      relationWriter.bytes(encodeRelationQueryV1(relation as RelExpr)),
+      relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr)),
     );
   return writer.finish();
 }

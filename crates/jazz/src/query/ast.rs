@@ -54,9 +54,11 @@ pub struct Query {
 }
 
 /// Human-readable query JSON retains the relation tree. Non-human serializers
-/// carry the explicit bounded JRQ v1 binary grammar.
+/// carry the typed Postcard relation tree.
 pub(crate) mod relation_query_wire {
-    use super::{decode_relation_query_v1_exact, encode_relation_query_v1, RelationQuery};
+    use super::{
+        relation_query_from_wire, relation_query_to_wire, RelationQuery, WireRelationQuery,
+    };
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(value: &Option<RelationQuery>, serializer: S) -> Result<S::Ok, S::Error>
@@ -66,7 +68,10 @@ pub(crate) mod relation_query_wire {
         if serializer.is_human_readable() {
             return value.serialize(serializer);
         }
-        value.as_ref().map(encode_relation_query_v1).transpose()
+        value
+            .as_ref()
+            .map(relation_query_to_wire)
+            .transpose()
             .map_err(serde::ser::Error::custom)?
             .serialize(serializer)
     }
@@ -78,15 +83,34 @@ pub(crate) mod relation_query_wire {
         if deserializer.is_human_readable() {
             return Option::<RelationQuery>::deserialize(deserializer);
         }
-        Option::<Vec<u8>>::deserialize(deserializer)?
-            .map(|encoded| decode_relation_query_v1_exact(&encoded).map_err(serde::de::Error::custom))
+        Option::<WireRelationQuery>::deserialize(deserializer)?
+            .map(|wire| relation_query_from_wire(wire).map_err(serde::de::Error::custom))
             .transpose()
     }
 
     pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer { if serializer.is_human_readable() { value.serialize(serializer) } else { encode_relation_query_v1(value).map_err(serde::ser::Error::custom)?.serialize(serializer) } }
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            relation_query_to_wire(value)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer)
+        }
+    }
     pub fn deserialize_required<'de, D>(deserializer: D) -> Result<RelationQuery, D::Error>
-    where D: Deserializer<'de> { if deserializer.is_human_readable() { RelationQuery::deserialize(deserializer) } else { let bytes=Vec::<u8>::deserialize(deserializer)?; decode_relation_query_v1_exact(&bytes).map_err(serde::de::Error::custom) } }
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            RelationQuery::deserialize(deserializer)
+        } else {
+            relation_query_from_wire(WireRelationQuery::deserialize(deserializer)?)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 /// Output-changing relational join syntax.

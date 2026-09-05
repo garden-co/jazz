@@ -481,60 +481,22 @@ event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 relation grammar, and uses the core relation resolver plus asynchronous canonical
 query preparation.
 
-### JRQ v1 relation-query bytes
+### Relation-query Postcard carrier
 
-JRQ v1 starts with the four bytes `JRQ\x01`. It is a closed grammar: all lengths
-are minimal unsigned LEB128, the payload must consume exactly the byte vector,
-and unknown tags are rejected. Strings are UTF-8 and at most 65,536 bytes;
-collections, total AST/value nodes, and nesting are each bounded by 4,096,
-4,096, and 128 respectively; the complete carrier is at most 1 MiB. Union
-labels are unique, UTF-8, NUL-free, and contain 1 through 4,096 bytes.
+Relation-query payloads use the same typed Postcard grammar as their enclosing
+`Query`, `ShapeAst`, and native command envelopes. `Query.relation` and
+`ShapeBody::Relation` recursively serialize the relation expression, predicate,
+column/key/project references, recursion bound, and a typed JSON literal tree.
+The literal tree explicitly distinguishes null, boolean, i64, u64, f64 bits,
+string, array, and object entries; it does not serialize `serde_json::Value`
+directly and does not embed JSON or a second custom byte codec. Direct native
+relation reads receive that same standalone Postcard relation payload.
 
-| Grammar family      | Tags in v1 order                                                                                                          |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Relation expression | `TableScan=0`, `Filter=1`, `Union=2`, `Join=3`, `Project=4`, `Gather=5`, `Distinct=6`, `OrderBy=7`, `Offset=8`, `Limit=9` |
-| Predicate           | `Cmp=0`, `IsNull=1`, `IsNotNull=2`, `In=3`, `Contains=4`, `EnumMatch=5`, `And=6`, `Or=7`, `Not=8`, `True=9`, `False=10`   |
-| Value reference     | `Literal=0`, `Param=1`, `SessionRef=2`, `OuterColumn=3`, `FrontierColumn=4`, `RowId=5`                                    |
-| JSON literal        | `Null=0`, `False=1`, `True=2`, `i64=3`, `u64=4`, raw little-endian `f64=5`, `String=6`, `Array=7`, `Object=8`             |
-
-Literal integers use signed zigzag `i64` when the public JSON number fits that
-domain, then `u64`; non-integral values use raw IEEE-754 `f64` bytes. Semantic
-dimensions (`Offset`, `Limit`, and `Gather.MaxDepth`) are capped at `u32::MAX`
-so native and WASM32 accept the same grammar. Encoders use checked byte sinks:
-they fail before an append would exceed the carrier limit.
-
-The raw `queryJson` adapter used by NAPI, WASM, and RN retains a literal
-numeric token until it selects that scalar tag. Thus raw `1`, `1.0`, and `1e0`
-remain respectively an integer, an `f64`, and an `f64`, matching Rust's
-`serde_json` relation-query input; a decimal integer outside the `i64` range
-uses `u64` when it fits, otherwise `f64`. The typed TypeScript relation encoder
-accepts JavaScript values and applies the public `JSON.stringify` numeric
-normalization before this classification. Both paths reject an unpaired UTF-16
-surrogate before UTF-8 encoding, rather than allowing `TextEncoder` to replace
-it.
-
-Each tag is followed by its fields in declaration order. `TableScan` is table
-string then alias-presence byte and optional alias string. Unary expressions
-carry their input first; `Filter` then carries its predicate, `Project` its
-counted alias/expression pairs, `Distinct` its counted keys, `OrderBy` its
-counted column/direction pairs, and `Offset`/`Limit` their dimension. `Union`
-carries counted label/input pairs. `Join` carries left, right, kind, then
-counted left/right column pairs. `Gather` carries seed, step, frontier key,
-bound tag plus optional dimension, then counted dedupe keys.
-
-A column is scope-presence byte, optional scope string, then column string.
-Keys and project expressions are tagged `Column=0` or `RowId=1`; row ids are
-`Current=0`, `Outer=1`, and `Frontier=2`. Predicates and value references use
-the fixed field order named by their public AST declarations. Every collection
-has exactly one preceding count and no implicit/default fields. Literal objects
-carry counted UTF-8-key/value pairs sorted by UTF-8 byte sequence; duplicate or
-out-of-order keys are invalid. A decoder accepts only bytes whose canonical
-re-encoding is byte-for-byte identical, including minimal varints and scalar
-tags.
-It shares the same coverage, row hydration, pending-operation, and cleanup path
-as ordinary option-bearing reads. As on the other native bindings, raw
-relation-IR one-shot reads require the default read view; transaction-local
-array includes continue to use the transaction-aware snapshot command.
+Relation payloads are capped at 1 MiB, nesting at 128, structural collections
+at 4,096, strings at 65,536 UTF-8 bytes, and semantic dimensions at `u32::MAX`.
+Union labels remain unique, UTF-8, NUL-free, and 1 through 4,096 bytes. Rows,
+cells, snapshots, and subscription deltas retain their existing native binding
+encodings; only the relation-query AST carrier changes.
 
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the

@@ -1,1287 +1,791 @@
-// JRQ v1 is a closed, explicit binary grammar for `RelationQuery`.
-// The opcodes below are the wire ABI; relation AST field/variant names are
-// deliberately never serialized. JSON is retained only as the public literal
-// envelope, with explicit scalar tags to avoid decimal-format differences.
-const MAGIC: &[u8] = b"JRQ\x01";
-const MAX_BYTES: usize = 1 << 20;
-const MAX_DEPTH: usize = 128;
-const MAX_ITEMS: usize = 4096;
-const MAX_STRING: usize = 1 << 16;
-const MAX_UNION_LABEL: usize = 4096;
-const MAX_DIMENSION: usize = u32::MAX as usize;
+// Typed Postcard representation for relation queries.
+//
+// `serde_json::Value` is deliberately kept out of the non-human serializer:
+// Postcard has no stable representation for it. `WireJson` is the complete,
+// typed recursive literal tree carried by the relation-query Postcard grammar.
 
-/// The sole JRQ encoder sink. Every append checks the configured byte budget
-/// before growing the backing allocation; callers surface a stored overflow at
-/// the public encoder boundary.
-struct JWriter {
-    bytes: Vec<u8>,
-    overflow: bool,
-}
-impl JWriter {
-    fn with_prefix(prefix: &[u8]) -> Self {
-        Self {
-            bytes: prefix.to_vec(),
-            overflow: prefix.len() > MAX_BYTES,
-        }
-    }
-    fn push(&mut self, byte: u8) {
-        if self.overflow || self.bytes.len() >= MAX_BYTES {
-            self.overflow = true;
-            return;
-        }
-        self.bytes.push(byte);
-    }
-    fn extend_from_slice(&mut self, bytes: &[u8]) {
-        if self.overflow
-            || self
-                .bytes
-                .len()
-                .checked_add(bytes.len())
-                .is_none_or(|length| length > MAX_BYTES)
-        {
-            self.overflow = true;
-            return;
-        }
-        self.bytes.extend_from_slice(bytes);
-    }
-    fn len(&self) -> usize {
-        self.bytes.len()
-    }
-    fn into_bytes(self) -> CodecResult<Vec<u8>> {
-        if self.overflow {
-            Err(bad("too large"))
-        } else {
-            Ok(self.bytes)
-        }
-    }
-}
+use serde::{Deserialize, Serialize};
 
+const MAX_RELATION_BYTES: usize = 1 << 20;
+const MAX_RELATION_DEPTH: usize = 128;
+const MAX_RELATION_ITEMS: usize = 4096;
+const MAX_RELATION_STRING_BYTES: usize = 1 << 16;
+
+/// Failure while converting a relation query to or from typed Postcard.
 #[derive(Debug, thiserror::Error)]
-/// Failure while encoding or decoding the bounded JRQ v1 carrier.
-pub enum RelationCodecError {
-    /// The payload violates the JRQ v1 grammar.
-    #[error("malformed relation query binary: {0}")]
-    Malformed(&'static str),
-    /// A literal cannot be represented by the public JSON envelope.
-    #[error("malformed relation query binary: {0}")]
-    Detail(String),
-}
-type CodecResult<T> = std::result::Result<T, RelationCodecError>;
-fn bad(message: &'static str) -> RelationCodecError {
-    RelationCodecError::Malformed(message)
-}
-
-#[derive(Default)]
-struct JState {
-    nodes: usize,
-    string_bytes: usize,
-}
-impl JState {
-    fn node(&mut self, depth: usize) -> CodecResult<()> {
-        if depth >= MAX_DEPTH {
-            return Err(bad("too deep"));
-        }
-        self.nodes += 1;
-        if self.nodes > MAX_ITEMS {
-            return Err(bad("too many nodes"));
-        }
-        Ok(())
-    }
-    fn string(&mut self, len: usize) -> CodecResult<()> {
-        if len > MAX_STRING {
-            return Err(bad("string too large"));
-        }
-        self.string_bytes = self
-            .string_bytes
-            .checked_add(len)
-            .ok_or_else(|| bad("too large"))?;
-        if self.string_bytes > MAX_BYTES {
-            return Err(bad("too large"));
-        }
-        Ok(())
-    }
-    fn collection(&self, len: usize) -> CodecResult<()> {
-        if len > MAX_ITEMS {
-            Err(bad("too many items"))
-        } else {
-            Ok(())
-        }
-    }
+pub enum RelationWireError {
+    /// The carrier exceeded its byte bound.
+    #[error("relation query is too large")]
+    TooLarge,
+    /// Postcard rejected the typed relation tree.
+    #[error("malformed Postcard relation query: {0}")]
+    Postcard(#[from] postcard::Error),
+    /// A JSON float cannot be represented.
+    #[error("relation query contains a non-finite JSON number")]
+    NonFiniteNumber,
+    /// A bounded relation-wire invariant failed.
+    #[error("relation query {0}")]
+    Invalid(&'static str),
 }
 
-fn jrq_put_len(out: &mut JWriter, mut value: usize) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if value == 0 {
-            return;
-        }
-    }
-}
-fn jrq_put_u64(out: &mut JWriter, mut value: u64) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if value == 0 {
-            return;
-        }
-    }
-}
-fn get_u64(input: &mut &[u8]) -> CodecResult<u64> {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    for index in 0..10 {
-        let byte = get_byte(input)?;
-        let part = (byte & 0x7f) as u64;
-        if shift >= 64 || part > (u64::MAX >> shift) {
-            return Err(bad("integer overflow"));
-        }
-        value |= part << shift;
-        if byte & 0x80 == 0 {
-            if index > 0 && part == 0 {
-                return Err(bad("nonminimal integer"));
-            }
-            return Ok(value);
-        }
-        shift += 7;
-    }
-    Err(bad("integer overflow"))
-}
-fn len_bytes(mut value: usize) -> usize {
-    let mut bytes = 1;
-    while value >= 128 {
-        value >>= 7;
-        bytes += 1;
-    }
-    bytes
-}
-fn ensure_room(out: &JWriter, additional: usize) -> CodecResult<()> {
-    if out
-        .len()
-        .checked_add(additional)
-        .is_none_or(|length| length > MAX_BYTES)
-    {
-        return Err(bad("too large"));
-    }
-    Ok(())
-}
-fn get_byte(input: &mut &[u8]) -> CodecResult<u8> {
-    let Some((&value, rest)) = input.split_first() else {
-        return Err(bad("truncated"));
-    };
-    *input = rest;
-    Ok(value)
-}
-fn get_len(input: &mut &[u8]) -> CodecResult<usize> {
-    let mut value = 0usize;
-    let mut shift = 0u32;
-    for index in 0..10 {
-        let byte = get_byte(input)?;
-        let part = (byte & 0x7f) as usize;
-        if shift >= usize::BITS || part > (usize::MAX >> shift) {
-            return Err(bad("length overflow"));
-        }
-        value |= part << shift;
-        if byte & 0x80 == 0 {
-            if index > 0 && part == 0 {
-                return Err(bad("nonminimal length"));
-            }
-            return Ok(value);
-        }
-        shift += 7;
-    }
-    Err(bad("length overflow"))
-}
-fn put_string(out: &mut JWriter, value: &str, state: &mut JState) -> CodecResult<()> {
-    state.string(value.len())?;
-    ensure_room(out, len_bytes(value.len()) + value.len())?;
-    jrq_put_len(out, value.len());
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-fn get_string(input: &mut &[u8], state: &mut JState) -> CodecResult<String> {
-    let len = get_len(input)?;
-    state.string(len)?;
-    if input.len() < len {
-        return Err(bad("truncated string"));
-    }
-    let (bytes, rest) = input.split_at(len);
-    *input = rest;
-    Ok(std::str::from_utf8(bytes)
-        .map_err(|_| bad("invalid utf8"))?
-        .to_owned())
-}
-fn put_count(out: &mut JWriter, len: usize, state: &JState) -> CodecResult<()> {
-    state.collection(len)?;
-    jrq_put_len(out, len);
-    Ok(())
-}
-fn get_count(input: &mut &[u8], state: &JState) -> CodecResult<usize> {
-    let len = get_len(input)?;
-    state.collection(len)?;
-    Ok(len)
-}
-fn put_dimension(out: &mut JWriter, value: usize) -> CodecResult<()> {
-    if value > MAX_DIMENSION {
-        return Err(bad("dimension too large"));
-    }
-    jrq_put_len(out, value);
-    Ok(())
-}
-fn get_dimension(input: &mut &[u8]) -> CodecResult<usize> {
-    let value = get_len(input)?;
-    if value > MAX_DIMENSION {
-        return Err(bad("dimension too large"));
-    }
-    Ok(value)
-}
-fn put_label(out: &mut JWriter, label: &str, state: &mut JState) -> CodecResult<()> {
-    if label.is_empty() || label.len() > MAX_UNION_LABEL || label.as_bytes().contains(&0) {
-        return Err(bad("invalid union label"));
-    }
-    put_string(out, label, state)
-}
-fn get_label(input: &mut &[u8], state: &mut JState) -> CodecResult<String> {
-    let label = get_string(input, state)?;
-    if label.is_empty() || label.len() > MAX_UNION_LABEL || label.as_bytes().contains(&0) {
-        return Err(bad("invalid union label"));
-    }
-    Ok(label)
+type WireResult<T> = Result<T, RelationWireError>;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireRelationQuery {
+    rel: WireRelationExpr,
 }
 
-fn put_column(out: &mut JWriter, value: &RelationColumnRef, state: &mut JState) -> CodecResult<()> {
-    match &value.scope {
-        None => out.push(0),
-        Some(scope) => {
-            out.push(1);
-            put_string(out, scope, state)?;
-        }
-    };
-    put_string(out, &value.column, state)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum WireRelationExpr {
+    TableScan {
+        table: String,
+        alias: Option<String>,
+    },
+    Filter {
+        input: Box<WireRelationExpr>,
+        predicate: WireRelationPredicate,
+    },
+    Union {
+        inputs: Vec<WireRelationUnionArm>,
+    },
+    Join {
+        left: Box<WireRelationExpr>,
+        right: Box<WireRelationExpr>,
+        on: Vec<WireRelationJoinCondition>,
+        join_kind: WireRelationJoinKind,
+    },
+    Project {
+        input: Box<WireRelationExpr>,
+        columns: Vec<WireRelationProjectColumn>,
+    },
+    Gather {
+        seed: Box<WireRelationExpr>,
+        step: Box<WireRelationExpr>,
+        frontier_key: WireRelationKeyRef,
+        bound: WireRecursionBound,
+        dedupe_key: Vec<WireRelationKeyRef>,
+    },
+    Distinct {
+        input: Box<WireRelationExpr>,
+        key: Vec<WireRelationKeyRef>,
+    },
+    OrderBy {
+        input: Box<WireRelationExpr>,
+        terms: Vec<WireRelationOrderBy>,
+    },
+    Offset {
+        input: Box<WireRelationExpr>,
+        offset: u32,
+    },
+    Limit {
+        input: Box<WireRelationExpr>,
+        limit: u32,
+    },
 }
-fn get_column(input: &mut &[u8], state: &mut JState) -> CodecResult<RelationColumnRef> {
-    let scope = match get_byte(input)? {
-        0 => None,
-        1 => Some(get_string(input, state)?),
-        _ => return Err(bad("column scope tag")),
-    };
-    Ok(RelationColumnRef {
-        scope,
-        column: get_string(input, state)?,
-    })
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct WireRelationUnionArm {
+    label: String,
+    input: WireRelationExpr,
 }
-fn put_row_id(out: &mut JWriter, value: RelationRowIdRef) {
-    out.push(match value {
-        RelationRowIdRef::Current => 0,
-        RelationRowIdRef::Outer => 1,
-        RelationRowIdRef::Frontier => 2,
-    });
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum WireRelationPredicate {
+    Cmp {
+        left: WireRelationColumnRef,
+        op: WireRelationCmpOp,
+        right: WireRelationValueRef,
+    },
+    IsNull {
+        column: WireRelationColumnRef,
+    },
+    IsNotNull {
+        column: WireRelationColumnRef,
+    },
+    In {
+        left: WireRelationColumnRef,
+        values: Vec<WireRelationValueRef>,
+    },
+    Contains {
+        left: WireRelationColumnRef,
+        right: WireRelationValueRef,
+    },
+    EnumMatch {
+        column: WireRelationColumnRef,
+        case: String,
+        payload: Box<WireRelationPredicate>,
+    },
+    And(Vec<WireRelationPredicate>),
+    Or(Vec<WireRelationPredicate>),
+    Not(Box<WireRelationPredicate>),
+    True,
+    False,
 }
-fn get_row_id(input: &mut &[u8]) -> CodecResult<RelationRowIdRef> {
-    match get_byte(input)? {
-        0 => Ok(RelationRowIdRef::Current),
-        1 => Ok(RelationRowIdRef::Outer),
-        2 => Ok(RelationRowIdRef::Frontier),
-        _ => Err(bad("row id tag")),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRelationCmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WireRelationColumnRef {
+    scope: Option<String>,
+    column: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum WireRelationValueRef {
+    Literal(WireJson),
+    Param(String),
+    SessionRef(Vec<String>),
+    OuterColumn(WireRelationColumnRef),
+    FrontierColumn(WireRelationColumnRef),
+    RowId(WireRelationRowIdRef),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRelationRowIdRef {
+    Current,
+    Outer,
+    Frontier,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRelationJoinKind {
+    Inner,
+    Left,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WireRelationJoinCondition {
+    left: WireRelationColumnRef,
+    right: WireRelationColumnRef,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRelationKeyRef {
+    Column(WireRelationColumnRef),
+    RowId(WireRelationRowIdRef),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRelationProjectExpr {
+    Column(WireRelationColumnRef),
+    RowId(WireRelationRowIdRef),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WireRelationProjectColumn {
+    alias: String,
+    expr: WireRelationProjectExpr,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WireRelationOrderBy {
+    column: WireRelationColumnRef,
+    direction: WireOrderDirection,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireOrderDirection {
+    Asc,
+    Desc,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum WireRecursionBound {
+    Fixpoint,
+    MaxDepth(u32),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum WireJson {
+    Null,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F64(u64),
+    String(String),
+    Array(Vec<WireJson>),
+    Object(Vec<(String, WireJson)>),
+}
+
+impl TryFrom<&RelationQuery> for WireRelationQuery {
+    type Error = RelationWireError;
+    fn try_from(value: &RelationQuery) -> WireResult<Self> {
+        Ok(Self {
+            rel: wire_expr(&value.rel)?,
+        })
+    }
+}
+impl TryFrom<WireRelationQuery> for RelationQuery {
+    type Error = RelationWireError;
+    fn try_from(value: WireRelationQuery) -> WireResult<Self> {
+        Ok(Self {
+            rel: relation_expr(value.rel)?,
+        })
     }
 }
 
-// Literal tags: null=0 false=1 true=2 i64=3 u64=4 f64-le=5 string=6 array=7 object=8.
-fn put_json(
-    out: &mut JWriter,
-    value: &serde_json::Value,
-    depth: usize,
-    state: &mut JState,
-) -> CodecResult<()> {
-    state.node(depth)?;
+fn u32_dimension(value: usize) -> WireResult<u32> {
+    u32::try_from(value).map_err(|_| RelationWireError::Invalid("dimension exceeds u32"))
+}
+fn wire_column(value: &RelationColumnRef) -> WireRelationColumnRef {
+    WireRelationColumnRef {
+        scope: value.scope.clone(),
+        column: value.column.clone(),
+    }
+}
+fn relation_column(value: WireRelationColumnRef) -> RelationColumnRef {
+    RelationColumnRef {
+        scope: value.scope,
+        column: value.column,
+    }
+}
+fn wire_row_id(value: RelationRowIdRef) -> WireRelationRowIdRef {
     match value {
-        serde_json::Value::Null => out.push(0),
-        serde_json::Value::Bool(false) => out.push(1),
-        serde_json::Value::Bool(true) => out.push(2),
-        serde_json::Value::Number(number) if number.is_i64() => {
-            out.push(3);
-            let n = number.as_i64().ok_or_else(|| bad("invalid integer"))?;
-            jrq_put_u64(out, ((n as u64) << 1) ^ ((n >> 63) as u64));
-        }
-        serde_json::Value::Number(number) if number.is_u64() => {
-            out.push(4);
-            jrq_put_u64(out, number.as_u64().ok_or_else(|| bad("invalid integer"))?);
-        }
-        serde_json::Value::Number(number) => {
-            out.push(5);
-            let n = number.as_f64().ok_or_else(|| bad("invalid float"))?;
-            if !n.is_finite() {
-                return Err(bad("invalid float"));
+        RelationRowIdRef::Current => WireRelationRowIdRef::Current,
+        RelationRowIdRef::Outer => WireRelationRowIdRef::Outer,
+        RelationRowIdRef::Frontier => WireRelationRowIdRef::Frontier,
+    }
+}
+fn relation_row_id(value: WireRelationRowIdRef) -> RelationRowIdRef {
+    match value {
+        WireRelationRowIdRef::Current => RelationRowIdRef::Current,
+        WireRelationRowIdRef::Outer => RelationRowIdRef::Outer,
+        WireRelationRowIdRef::Frontier => RelationRowIdRef::Frontier,
+    }
+}
+fn wire_key(value: &RelationKeyRef) -> WireRelationKeyRef {
+    match value {
+        RelationKeyRef::Column(column) => WireRelationKeyRef::Column(wire_column(column)),
+        RelationKeyRef::RowId(row_id) => WireRelationKeyRef::RowId(wire_row_id(*row_id)),
+    }
+}
+fn relation_key(value: WireRelationKeyRef) -> RelationKeyRef {
+    match value {
+        WireRelationKeyRef::Column(column) => RelationKeyRef::Column(relation_column(column)),
+        WireRelationKeyRef::RowId(row_id) => RelationKeyRef::RowId(relation_row_id(row_id)),
+    }
+}
+fn wire_json(value: &serde_json::Value) -> WireResult<WireJson> {
+    Ok(match value {
+        serde_json::Value::Null => WireJson::Null,
+        serde_json::Value::Bool(value) => WireJson::Bool(*value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                WireJson::I64(value)
+            } else if let Some(value) = value.as_u64() {
+                WireJson::U64(value)
+            } else {
+                WireJson::F64(
+                    value
+                        .as_f64()
+                        .ok_or(RelationWireError::NonFiniteNumber)?
+                        .to_bits(),
+                )
             }
-            out.extend_from_slice(&n.to_le_bytes());
         }
-        serde_json::Value::String(value) => {
-            out.push(6);
-            put_string(out, value, state)?;
-        }
+        serde_json::Value::String(value) => WireJson::String(value.clone()),
         serde_json::Value::Array(values) => {
-            out.push(7);
-            put_count(out, values.len(), state)?;
-            for value in values {
-                put_json(out, value, depth + 1, state)?;
-            }
+            WireJson::Array(values.iter().map(wire_json).collect::<WireResult<_>>()?)
         }
-        serde_json::Value::Object(values) => {
-            out.push(8);
-            put_count(out, values.len(), state)?;
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-            for (key, value) in entries {
-                put_string(out, key, state)?;
-                put_json(out, value, depth + 1, state)?;
-            }
-        }
-    }
-    Ok(())
+        serde_json::Value::Object(values) => WireJson::Object(
+            values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), wire_json(value)?)))
+                .collect::<WireResult<_>>()?,
+        ),
+    })
 }
-fn get_json(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<serde_json::Value> {
-    state.node(depth)?;
-    Ok(match get_byte(input)? {
-        0 => serde_json::Value::Null,
-        1 => serde_json::Value::Bool(false),
-        2 => serde_json::Value::Bool(true),
-        3 => {
-            let n = get_u64(input)?;
-            serde_json::Value::Number((((n >> 1) as i64) ^ -((n & 1) as i64)).into())
-        }
-        4 => serde_json::Value::Number(serde_json::Number::from(get_u64(input)?)),
-        5 => {
-            if input.len() < 8 {
-                return Err(bad("truncated float"));
-            }
-            let (bytes, rest) = input.split_at(8);
-            *input = rest;
-            let n = f64::from_le_bytes(bytes.try_into().expect("fixed float length"));
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(n).ok_or_else(|| bad("invalid float"))?,
-            )
-        }
-        6 => serde_json::Value::String(get_string(input, state)?),
-        7 => {
-            let len = get_count(input, state)?;
-            let mut values = Vec::with_capacity(len);
-            for _ in 0..len {
-                values.push(get_json(input, depth + 1, state)?);
-            }
-            serde_json::Value::Array(values)
-        }
-        8 => {
-            let len = get_count(input, state)?;
-            let mut values = serde_json::Map::new();
-            let mut previous: Option<Vec<u8>> = None;
-            for _ in 0..len {
-                let key = get_string(input, state)?;
-                if previous.as_deref() >= Some(key.as_bytes()) {
-                    return Err(bad("noncanonical object key"));
-                }
-                previous = Some(key.as_bytes().to_vec());
-                let value = get_json(input, depth + 1, state)?;
-                if values.insert(key, value).is_some() {
-                    return Err(bad("duplicate object key"));
-                }
-            }
-            serde_json::Value::Object(values)
-        }
-        _ => return Err(bad("json tag")),
+fn relation_json(value: WireJson) -> WireResult<serde_json::Value> {
+    Ok(match value {
+        WireJson::Null => serde_json::Value::Null,
+        WireJson::Bool(value) => serde_json::Value::Bool(value),
+        WireJson::I64(value) => serde_json::Value::Number(value.into()),
+        WireJson::U64(value) => serde_json::Value::Number(value.into()),
+        WireJson::F64(value) => serde_json::Value::Number(
+            serde_json::Number::from_f64(f64::from_bits(value))
+                .ok_or(RelationWireError::NonFiniteNumber)?,
+        ),
+        WireJson::String(value) => serde_json::Value::String(value),
+        WireJson::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(relation_json)
+                .collect::<WireResult<_>>()?,
+        ),
+        WireJson::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| Ok((key, relation_json(value)?)))
+                .collect::<WireResult<_>>()?,
+        ),
     })
 }
 
-fn put_key(out: &mut JWriter, value: &RelationKeyRef, state: &mut JState) -> CodecResult<()> {
-    match value {
-        RelationKeyRef::Column(value) => {
-            out.push(0);
-            put_column(out, value, state)
-        }
-        RelationKeyRef::RowId(value) => {
-            out.push(1);
-            put_row_id(out, *value);
-            Ok(())
-        }
-    }
-}
-fn get_key(input: &mut &[u8], state: &mut JState) -> CodecResult<RelationKeyRef> {
-    match get_byte(input)? {
-        0 => Ok(RelationKeyRef::Column(get_column(input, state)?)),
-        1 => Ok(RelationKeyRef::RowId(get_row_id(input)?)),
-        _ => Err(bad("key tag")),
-    }
-}
-fn put_project_expr(
-    out: &mut JWriter,
-    value: &RelationProjectExpr,
-    state: &mut JState,
-) -> CodecResult<()> {
-    match value {
-        RelationProjectExpr::Column(value) => {
-            out.push(0);
-            put_column(out, value, state)
-        }
-        RelationProjectExpr::RowId(value) => {
-            out.push(1);
-            put_row_id(out, *value);
-            Ok(())
-        }
-    }
-}
-fn get_project_expr(input: &mut &[u8], state: &mut JState) -> CodecResult<RelationProjectExpr> {
-    match get_byte(input)? {
-        0 => Ok(RelationProjectExpr::Column(get_column(input, state)?)),
-        1 => Ok(RelationProjectExpr::RowId(get_row_id(input)?)),
-        _ => Err(bad("project expression tag")),
-    }
-}
-
-fn jrq_put_value(
-    out: &mut JWriter,
-    value: &RelationValueRef,
-    depth: usize,
-    state: &mut JState,
-) -> CodecResult<()> {
-    state.node(depth)?;
-    match value {
-        RelationValueRef::Literal(value) => {
-            out.push(0);
-            put_json(out, value, depth + 1, state)
-        }
-        RelationValueRef::Param(value) => {
-            out.push(1);
-            put_string(out, value, state)
-        }
-        RelationValueRef::SessionRef(values) => {
-            out.push(2);
-            put_count(out, values.len(), state)?;
-            for value in values {
-                put_string(out, value, state)?;
-            }
-            Ok(())
-        }
+fn wire_value(value: &RelationValueRef) -> WireResult<WireRelationValueRef> {
+    Ok(match value {
+        RelationValueRef::Literal(value) => WireRelationValueRef::Literal(wire_json(value)?),
+        RelationValueRef::Param(value) => WireRelationValueRef::Param(value.clone()),
+        RelationValueRef::SessionRef(value) => WireRelationValueRef::SessionRef(value.clone()),
         RelationValueRef::OuterColumn(value) => {
-            out.push(3);
-            put_column(out, value, state)
+            WireRelationValueRef::OuterColumn(wire_column(value))
         }
         RelationValueRef::FrontierColumn(value) => {
-            out.push(4);
-            put_column(out, value, state)
+            WireRelationValueRef::FrontierColumn(wire_column(value))
         }
-        RelationValueRef::RowId(value) => {
-            out.push(5);
-            put_row_id(out, *value);
-            Ok(())
-        }
-    }
+        RelationValueRef::RowId(value) => WireRelationValueRef::RowId(wire_row_id(*value)),
+    })
 }
-fn get_value(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<RelationValueRef> {
-    state.node(depth)?;
-    match get_byte(input)? {
-        0 => Ok(RelationValueRef::Literal(get_json(
-            input,
-            depth + 1,
-            state,
-        )?)),
-        1 => Ok(RelationValueRef::Param(get_string(input, state)?)),
-        2 => {
-            let len = get_count(input, state)?;
-            let mut values = Vec::with_capacity(len);
-            for _ in 0..len {
-                values.push(get_string(input, state)?);
-            }
-            Ok(RelationValueRef::SessionRef(values))
+fn relation_value(value: WireRelationValueRef) -> WireResult<RelationValueRef> {
+    Ok(match value {
+        WireRelationValueRef::Literal(value) => RelationValueRef::Literal(relation_json(value)?),
+        WireRelationValueRef::Param(value) => RelationValueRef::Param(value),
+        WireRelationValueRef::SessionRef(value) => RelationValueRef::SessionRef(value),
+        WireRelationValueRef::OuterColumn(value) => {
+            RelationValueRef::OuterColumn(relation_column(value))
         }
-        3 => Ok(RelationValueRef::OuterColumn(get_column(input, state)?)),
-        4 => Ok(RelationValueRef::FrontierColumn(get_column(input, state)?)),
-        5 => Ok(RelationValueRef::RowId(get_row_id(input)?)),
-        _ => Err(bad("value tag")),
-    }
+        WireRelationValueRef::FrontierColumn(value) => {
+            RelationValueRef::FrontierColumn(relation_column(value))
+        }
+        WireRelationValueRef::RowId(value) => RelationValueRef::RowId(relation_row_id(value)),
+    })
 }
-
-// Predicate tags: cmp=0 is-null=1 is-not-null=2 in=3 contains=4 enum-match=5 and=6 or=7 not=8 true=9 false=10.
-fn put_predicate(
-    out: &mut JWriter,
-    value: &RelationPredicate,
-    depth: usize,
-    state: &mut JState,
-) -> CodecResult<()> {
-    state.node(depth)?;
-    match value {
-        RelationPredicate::Cmp { left, op, right } => {
-            out.push(0);
-            put_column(out, left, state)?;
-            out.push(match op {
-                RelationCmpOp::Eq => 0,
-                RelationCmpOp::Ne => 1,
-                RelationCmpOp::Lt => 2,
-                RelationCmpOp::Le => 3,
-                RelationCmpOp::Gt => 4,
-                RelationCmpOp::Ge => 5,
-            });
-            jrq_put_value(out, right, depth + 1, state)
-        }
-        RelationPredicate::IsNull { column } => {
-            out.push(1);
-            put_column(out, column, state)
-        }
-        RelationPredicate::IsNotNull { column } => {
-            out.push(2);
-            put_column(out, column, state)
-        }
-        RelationPredicate::In { left, values } => {
-            out.push(3);
-            put_column(out, left, state)?;
-            put_count(out, values.len(), state)?;
-            for value in values {
-                jrq_put_value(out, value, depth + 1, state)?;
-            }
-            Ok(())
-        }
-        RelationPredicate::Contains { left, right } => {
-            out.push(4);
-            put_column(out, left, state)?;
-            jrq_put_value(out, right, depth + 1, state)
-        }
+fn wire_predicate(value: &RelationPredicate) -> WireResult<WireRelationPredicate> {
+    Ok(match value {
+        RelationPredicate::Cmp { left, op, right } => WireRelationPredicate::Cmp {
+            left: wire_column(left),
+            op: match op {
+                RelationCmpOp::Eq => WireRelationCmpOp::Eq,
+                RelationCmpOp::Ne => WireRelationCmpOp::Ne,
+                RelationCmpOp::Lt => WireRelationCmpOp::Lt,
+                RelationCmpOp::Le => WireRelationCmpOp::Le,
+                RelationCmpOp::Gt => WireRelationCmpOp::Gt,
+                RelationCmpOp::Ge => WireRelationCmpOp::Ge,
+            },
+            right: wire_value(right)?,
+        },
+        RelationPredicate::IsNull { column } => WireRelationPredicate::IsNull {
+            column: wire_column(column),
+        },
+        RelationPredicate::IsNotNull { column } => WireRelationPredicate::IsNotNull {
+            column: wire_column(column),
+        },
+        RelationPredicate::In { left, values } => WireRelationPredicate::In {
+            left: wire_column(left),
+            values: values.iter().map(wire_value).collect::<WireResult<_>>()?,
+        },
+        RelationPredicate::Contains { left, right } => WireRelationPredicate::Contains {
+            left: wire_column(left),
+            right: wire_value(right)?,
+        },
         RelationPredicate::EnumMatch {
             column,
             case,
             payload,
-        } => {
-            out.push(5);
-            put_column(out, column, state)?;
-            put_string(out, case, state)?;
-            put_predicate(out, payload, depth + 1, state)
-        }
-        RelationPredicate::And(values) => {
-            out.push(6);
-            put_count(out, values.len(), state)?;
-            for value in values {
-                put_predicate(out, value, depth + 1, state)?;
-            }
-            Ok(())
-        }
-        RelationPredicate::Or(values) => {
-            out.push(7);
-            put_count(out, values.len(), state)?;
-            for value in values {
-                put_predicate(out, value, depth + 1, state)?;
-            }
-            Ok(())
-        }
+        } => WireRelationPredicate::EnumMatch {
+            column: wire_column(column),
+            case: case.clone(),
+            payload: Box::new(wire_predicate(payload)?),
+        },
+        RelationPredicate::And(values) => WireRelationPredicate::And(
+            values
+                .iter()
+                .map(wire_predicate)
+                .collect::<WireResult<_>>()?,
+        ),
+        RelationPredicate::Or(values) => WireRelationPredicate::Or(
+            values
+                .iter()
+                .map(wire_predicate)
+                .collect::<WireResult<_>>()?,
+        ),
         RelationPredicate::Not(value) => {
-            out.push(8);
-            put_predicate(out, value, depth + 1, state)
+            WireRelationPredicate::Not(Box::new(wire_predicate(value)?))
         }
-        RelationPredicate::True => {
-            out.push(9);
-            Ok(())
-        }
-        RelationPredicate::False => {
-            out.push(10);
-            Ok(())
-        }
-    }
+        RelationPredicate::True => WireRelationPredicate::True,
+        RelationPredicate::False => WireRelationPredicate::False,
+    })
 }
-fn get_predicate(
-    input: &mut &[u8],
-    depth: usize,
-    state: &mut JState,
-) -> CodecResult<RelationPredicate> {
-    state.node(depth)?;
-    Ok(match get_byte(input)? {
-        0 => {
-            let left = get_column(input, state)?;
-            let op = match get_byte(input)? {
-                0 => RelationCmpOp::Eq,
-                1 => RelationCmpOp::Ne,
-                2 => RelationCmpOp::Lt,
-                3 => RelationCmpOp::Le,
-                4 => RelationCmpOp::Gt,
-                5 => RelationCmpOp::Ge,
-                _ => return Err(bad("comparison tag")),
-            };
-            RelationPredicate::Cmp {
-                left,
-                op,
-                right: get_value(input, depth + 1, state)?,
-            }
-        }
-        1 => RelationPredicate::IsNull {
-            column: get_column(input, state)?,
+fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredicate> {
+    Ok(match value {
+        WireRelationPredicate::Cmp { left, op, right } => RelationPredicate::Cmp {
+            left: relation_column(left),
+            op: match op {
+                WireRelationCmpOp::Eq => RelationCmpOp::Eq,
+                WireRelationCmpOp::Ne => RelationCmpOp::Ne,
+                WireRelationCmpOp::Lt => RelationCmpOp::Lt,
+                WireRelationCmpOp::Le => RelationCmpOp::Le,
+                WireRelationCmpOp::Gt => RelationCmpOp::Gt,
+                WireRelationCmpOp::Ge => RelationCmpOp::Ge,
+            },
+            right: relation_value(right)?,
         },
-        2 => RelationPredicate::IsNotNull {
-            column: get_column(input, state)?,
+        WireRelationPredicate::IsNull { column } => RelationPredicate::IsNull {
+            column: relation_column(column),
         },
-        3 => {
-            let left = get_column(input, state)?;
-            let len = get_count(input, state)?;
-            let mut values = Vec::with_capacity(len);
-            for _ in 0..len {
-                values.push(get_value(input, depth + 1, state)?);
-            }
-            RelationPredicate::In { left, values }
-        }
-        4 => RelationPredicate::Contains {
-            left: get_column(input, state)?,
-            right: get_value(input, depth + 1, state)?,
+        WireRelationPredicate::IsNotNull { column } => RelationPredicate::IsNotNull {
+            column: relation_column(column),
         },
-        5 => RelationPredicate::EnumMatch {
-            column: get_column(input, state)?,
-            case: get_string(input, state)?,
-            payload: Box::new(get_predicate(input, depth + 1, state)?),
+        WireRelationPredicate::In { left, values } => RelationPredicate::In {
+            left: relation_column(left),
+            values: values
+                .into_iter()
+                .map(relation_value)
+                .collect::<WireResult<_>>()?,
         },
-        6 => {
-            let len = get_count(input, state)?;
-            let mut values = Vec::with_capacity(len);
-            for _ in 0..len {
-                values.push(get_predicate(input, depth + 1, state)?);
-            }
-            RelationPredicate::And(values)
+        WireRelationPredicate::Contains { left, right } => RelationPredicate::Contains {
+            left: relation_column(left),
+            right: relation_value(right)?,
+        },
+        WireRelationPredicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => RelationPredicate::EnumMatch {
+            column: relation_column(column),
+            case,
+            payload: Box::new(relation_predicate(*payload)?),
+        },
+        WireRelationPredicate::And(values) => RelationPredicate::And(
+            values
+                .into_iter()
+                .map(relation_predicate)
+                .collect::<WireResult<_>>()?,
+        ),
+        WireRelationPredicate::Or(values) => RelationPredicate::Or(
+            values
+                .into_iter()
+                .map(relation_predicate)
+                .collect::<WireResult<_>>()?,
+        ),
+        WireRelationPredicate::Not(value) => {
+            RelationPredicate::Not(Box::new(relation_predicate(*value)?))
         }
-        7 => {
-            let len = get_count(input, state)?;
-            let mut values = Vec::with_capacity(len);
-            for _ in 0..len {
-                values.push(get_predicate(input, depth + 1, state)?);
-            }
-            RelationPredicate::Or(values)
-        }
-        8 => RelationPredicate::Not(Box::new(get_predicate(input, depth + 1, state)?)),
-        9 => RelationPredicate::True,
-        10 => RelationPredicate::False,
-        _ => return Err(bad("predicate tag")),
+        WireRelationPredicate::True => RelationPredicate::True,
+        WireRelationPredicate::False => RelationPredicate::False,
     })
 }
 
-// Relation tags: table=0 filter=1 union=2 join=3 project=4 gather=5 distinct=6 order=7 offset=8 limit=9.
-fn put_expr(
-    out: &mut JWriter,
-    value: &RelationExpr,
-    depth: usize,
-    state: &mut JState,
-) -> CodecResult<()> {
-    state.node(depth)?;
-    match value {
-        RelationExpr::TableScan { table, alias } => {
-            out.push(0);
-            put_string(out, table, state)?;
-            match alias {
-                None => out.push(0),
-                Some(value) => {
-                    out.push(1);
-                    put_string(out, value, state)?;
-                }
-            };
-            Ok(())
-        }
-        RelationExpr::Filter { input, predicate } => {
-            out.push(1);
-            put_expr(out, input, depth + 1, state)?;
-            put_predicate(out, predicate, depth + 1, state)
-        }
-        RelationExpr::Union { inputs } => {
-            out.push(2);
-            put_count(out, inputs.len(), state)?;
-            let mut labels = BTreeSet::new();
-            for arm in inputs {
-                put_label(out, &arm.label, state)?;
-                if !labels.insert(&arm.label) {
-                    return Err(bad("duplicate union label"));
-                }
-                put_expr(out, &arm.input, depth + 1, state)?;
-            }
-            Ok(())
-        }
+fn wire_expr(value: &RelationExpr) -> WireResult<WireRelationExpr> {
+    Ok(match value {
+        RelationExpr::TableScan { table, alias } => WireRelationExpr::TableScan {
+            table: table.clone(),
+            alias: alias.clone(),
+        },
+        RelationExpr::Filter { input, predicate } => WireRelationExpr::Filter {
+            input: Box::new(wire_expr(input)?),
+            predicate: wire_predicate(predicate)?,
+        },
+        RelationExpr::Union { inputs } => WireRelationExpr::Union {
+            inputs: inputs
+                .iter()
+                .map(|arm| {
+                    Ok(WireRelationUnionArm {
+                        label: arm.label.clone(),
+                        input: wire_expr(&arm.input)?,
+                    })
+                })
+                .collect::<WireResult<_>>()?,
+        },
         RelationExpr::Join {
             left,
             right,
             on,
             join_kind,
-        } => {
-            out.push(3);
-            put_expr(out, left, depth + 1, state)?;
-            put_expr(out, right, depth + 1, state)?;
-            out.push(match join_kind {
-                RelationJoinKind::Inner => 0,
-                RelationJoinKind::Left => 1,
-            });
-            put_count(out, on.len(), state)?;
-            for condition in on {
-                put_column(out, &condition.left, state)?;
-                put_column(out, &condition.right, state)?;
-            }
-            Ok(())
-        }
-        RelationExpr::Project { input, columns } => {
-            out.push(4);
-            put_expr(out, input, depth + 1, state)?;
-            put_count(out, columns.len(), state)?;
-            // Alias length, project opcode, and row-id opcode are present for
-            // every entry, including an empty alias and the shortest expression.
-            ensure_room(
-                out,
-                columns
-                    .len()
-                    .checked_mul(3)
-                    .ok_or_else(|| bad("too large"))?,
-            )?;
-            for column in columns {
-                put_string(out, &column.alias, state)?;
-                put_project_expr(out, &column.expr, state)?;
-            }
-            Ok(())
-        }
+        } => WireRelationExpr::Join {
+            left: Box::new(wire_expr(left)?),
+            right: Box::new(wire_expr(right)?),
+            on: on
+                .iter()
+                .map(|condition| WireRelationJoinCondition {
+                    left: wire_column(&condition.left),
+                    right: wire_column(&condition.right),
+                })
+                .collect(),
+            join_kind: match join_kind {
+                RelationJoinKind::Inner => WireRelationJoinKind::Inner,
+                RelationJoinKind::Left => WireRelationJoinKind::Left,
+            },
+        },
+        RelationExpr::Project { input, columns } => WireRelationExpr::Project {
+            input: Box::new(wire_expr(input)?),
+            columns: columns
+                .iter()
+                .map(|column| WireRelationProjectColumn {
+                    alias: column.alias.clone(),
+                    expr: match &column.expr {
+                        RelationProjectExpr::Column(value) => {
+                            WireRelationProjectExpr::Column(wire_column(value))
+                        }
+                        RelationProjectExpr::RowId(value) => {
+                            WireRelationProjectExpr::RowId(wire_row_id(*value))
+                        }
+                    },
+                })
+                .collect(),
+        },
         RelationExpr::Gather {
             seed,
             step,
             frontier_key,
             bound,
             dedupe_key,
-        } => {
-            out.push(5);
-            put_expr(out, seed, depth + 1, state)?;
-            put_expr(out, step, depth + 1, state)?;
-            put_key(out, frontier_key, state)?;
-            match bound {
-                RecursionBound::Fixpoint => out.push(0),
+        } => WireRelationExpr::Gather {
+            seed: Box::new(wire_expr(seed)?),
+            step: Box::new(wire_expr(step)?),
+            frontier_key: wire_key(frontier_key),
+            bound: match bound {
+                RecursionBound::Fixpoint => WireRecursionBound::Fixpoint,
                 RecursionBound::MaxDepth(value) => {
-                    out.push(1);
-                    put_dimension(out, *value)?;
+                    WireRecursionBound::MaxDepth(u32_dimension(*value)?)
                 }
-            };
-            put_count(out, dedupe_key.len(), state)?;
-            for key in dedupe_key {
-                put_key(out, key, state)?;
-            }
-            Ok(())
-        }
-        RelationExpr::Distinct { input, key } => {
-            out.push(6);
-            put_expr(out, input, depth + 1, state)?;
-            put_count(out, key.len(), state)?;
-            for value in key {
-                put_key(out, value, state)?;
-            }
-            Ok(())
-        }
-        RelationExpr::OrderBy { input, terms } => {
-            out.push(7);
-            put_expr(out, input, depth + 1, state)?;
-            put_count(out, terms.len(), state)?;
-            for term in terms {
-                put_column(out, &term.column, state)?;
-                out.push(match term.direction {
-                    OrderDirection::Asc => 0,
-                    OrderDirection::Desc => 1,
-                });
-            }
-            Ok(())
-        }
-        RelationExpr::Offset { input, offset } => {
-            out.push(8);
-            put_expr(out, input, depth + 1, state)?;
-            put_dimension(out, *offset)?;
-            Ok(())
-        }
-        RelationExpr::Limit { input, limit } => {
-            out.push(9);
-            put_expr(out, input, depth + 1, state)?;
-            put_dimension(out, *limit)?;
-            Ok(())
-        }
-    }
+            },
+            dedupe_key: dedupe_key.iter().map(wire_key).collect(),
+        },
+        RelationExpr::Distinct { input, key } => WireRelationExpr::Distinct {
+            input: Box::new(wire_expr(input)?),
+            key: key.iter().map(wire_key).collect(),
+        },
+        RelationExpr::OrderBy { input, terms } => WireRelationExpr::OrderBy {
+            input: Box::new(wire_expr(input)?),
+            terms: terms
+                .iter()
+                .map(|term| WireRelationOrderBy {
+                    column: wire_column(&term.column),
+                    direction: match term.direction {
+                        OrderDirection::Asc => WireOrderDirection::Asc,
+                        OrderDirection::Desc => WireOrderDirection::Desc,
+                    },
+                })
+                .collect(),
+        },
+        RelationExpr::Offset { input, offset } => WireRelationExpr::Offset {
+            input: Box::new(wire_expr(input)?),
+            offset: u32_dimension(*offset)?,
+        },
+        RelationExpr::Limit { input, limit } => WireRelationExpr::Limit {
+            input: Box::new(wire_expr(input)?),
+            limit: u32_dimension(*limit)?,
+        },
+    })
 }
-fn get_expr(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<RelationExpr> {
-    state.node(depth)?;
-    Ok(match get_byte(input)? {
-        0 => {
-            let table = get_string(input, state)?;
-            let alias = match get_byte(input)? {
-                0 => None,
-                1 => Some(get_string(input, state)?),
-                _ => return Err(bad("alias tag")),
-            };
-            RelationExpr::TableScan { table, alias }
-        }
-        1 => RelationExpr::Filter {
-            input: Box::new(get_expr(input, depth + 1, state)?),
-            predicate: get_predicate(input, depth + 1, state)?,
+fn relation_expr(value: WireRelationExpr) -> WireResult<RelationExpr> {
+    Ok(match value {
+        WireRelationExpr::TableScan { table, alias } => RelationExpr::TableScan { table, alias },
+        WireRelationExpr::Filter { input, predicate } => RelationExpr::Filter {
+            input: Box::new(relation_expr(*input)?),
+            predicate: relation_predicate(predicate)?,
         },
-        2 => {
-            let len = get_count(input, state)?;
-            let mut labels = BTreeSet::new();
-            let mut inputs = Vec::with_capacity(len);
-            for _ in 0..len {
-                let label = get_label(input, state)?;
-                if !labels.insert(label.clone()) {
-                    return Err(bad("duplicate union label"));
-                }
-                inputs.push(RelationUnionArm {
-                    label,
-                    input: get_expr(input, depth + 1, state)?,
-                });
-            }
-            RelationExpr::Union { inputs }
-        }
-        3 => {
-            let left = Box::new(get_expr(input, depth + 1, state)?);
-            let right = Box::new(get_expr(input, depth + 1, state)?);
-            let join_kind = match get_byte(input)? {
-                0 => RelationJoinKind::Inner,
-                1 => RelationJoinKind::Left,
-                _ => return Err(bad("join tag")),
-            };
-            let len = get_count(input, state)?;
-            let mut on = Vec::with_capacity(len);
-            for _ in 0..len {
-                on.push(RelationJoinCondition {
-                    left: get_column(input, state)?,
-                    right: get_column(input, state)?,
-                });
-            }
-            RelationExpr::Join {
-                left,
-                right,
-                on,
-                join_kind,
-            }
-        }
-        4 => {
-            let relation_input = Box::new(get_expr(input, depth + 1, state)?);
-            let len = get_count(input, state)?;
-            let mut columns = Vec::with_capacity(len);
-            for _ in 0..len {
-                columns.push(RelationProjectColumn {
-                    alias: get_string(input, state)?,
-                    expr: get_project_expr(input, state)?,
-                });
-            }
-            RelationExpr::Project {
-                input: relation_input,
-                columns,
-            }
-        }
-        5 => {
-            let seed = Box::new(get_expr(input, depth + 1, state)?);
-            let step = Box::new(get_expr(input, depth + 1, state)?);
-            let frontier_key = get_key(input, state)?;
-            let bound = match get_byte(input)? {
-                0 => RecursionBound::Fixpoint,
-                1 => RecursionBound::MaxDepth(get_dimension(input)?),
-                _ => return Err(bad("recursion bound tag")),
-            };
-            let len = get_count(input, state)?;
-            let mut dedupe_key = Vec::with_capacity(len);
-            for _ in 0..len {
-                dedupe_key.push(get_key(input, state)?);
-            }
-            RelationExpr::Gather {
-                seed,
-                step,
-                frontier_key,
-                bound,
-                dedupe_key,
-            }
-        }
-        6 => {
-            let relation_input = Box::new(get_expr(input, depth + 1, state)?);
-            let len = get_count(input, state)?;
-            let mut key = Vec::with_capacity(len);
-            for _ in 0..len {
-                key.push(get_key(input, state)?);
-            }
-            RelationExpr::Distinct {
-                input: relation_input,
-                key,
-            }
-        }
-        7 => {
-            let relation_input = Box::new(get_expr(input, depth + 1, state)?);
-            let len = get_count(input, state)?;
-            let mut terms = Vec::with_capacity(len);
-            for _ in 0..len {
-                let column = get_column(input, state)?;
-                let direction = match get_byte(input)? {
-                    0 => OrderDirection::Asc,
-                    1 => OrderDirection::Desc,
-                    _ => return Err(bad("order direction tag")),
-                };
-                terms.push(RelationOrderBy { column, direction });
-            }
-            RelationExpr::OrderBy {
-                input: relation_input,
-                terms,
-            }
-        }
-        8 => RelationExpr::Offset {
-            input: Box::new(get_expr(input, depth + 1, state)?),
-            offset: get_dimension(input)?,
+        WireRelationExpr::Union { inputs } => RelationExpr::Union {
+            inputs: inputs
+                .into_iter()
+                .map(|arm| {
+                    Ok(RelationUnionArm {
+                        label: arm.label,
+                        input: relation_expr(arm.input)?,
+                    })
+                })
+                .collect::<WireResult<_>>()?,
         },
-        9 => RelationExpr::Limit {
-            input: Box::new(get_expr(input, depth + 1, state)?),
-            limit: get_dimension(input)?,
+        WireRelationExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => RelationExpr::Join {
+            left: Box::new(relation_expr(*left)?),
+            right: Box::new(relation_expr(*right)?),
+            on: on
+                .into_iter()
+                .map(|condition| RelationJoinCondition {
+                    left: relation_column(condition.left),
+                    right: relation_column(condition.right),
+                })
+                .collect(),
+            join_kind: match join_kind {
+                WireRelationJoinKind::Inner => RelationJoinKind::Inner,
+                WireRelationJoinKind::Left => RelationJoinKind::Left,
+            },
         },
-        _ => return Err(bad("expression tag")),
+        WireRelationExpr::Project { input, columns } => RelationExpr::Project {
+            input: Box::new(relation_expr(*input)?),
+            columns: columns
+                .into_iter()
+                .map(|column| RelationProjectColumn {
+                    alias: column.alias,
+                    expr: match column.expr {
+                        WireRelationProjectExpr::Column(value) => {
+                            RelationProjectExpr::Column(relation_column(value))
+                        }
+                        WireRelationProjectExpr::RowId(value) => {
+                            RelationProjectExpr::RowId(relation_row_id(value))
+                        }
+                    },
+                })
+                .collect(),
+        },
+        WireRelationExpr::Gather {
+            seed,
+            step,
+            frontier_key,
+            bound,
+            dedupe_key,
+        } => RelationExpr::Gather {
+            seed: Box::new(relation_expr(*seed)?),
+            step: Box::new(relation_expr(*step)?),
+            frontier_key: relation_key(frontier_key),
+            bound: match bound {
+                WireRecursionBound::Fixpoint => RecursionBound::Fixpoint,
+                WireRecursionBound::MaxDepth(value) => RecursionBound::MaxDepth(value as usize),
+            },
+            dedupe_key: dedupe_key.into_iter().map(relation_key).collect(),
+        },
+        WireRelationExpr::Distinct { input, key } => RelationExpr::Distinct {
+            input: Box::new(relation_expr(*input)?),
+            key: key.into_iter().map(relation_key).collect(),
+        },
+        WireRelationExpr::OrderBy { input, terms } => RelationExpr::OrderBy {
+            input: Box::new(relation_expr(*input)?),
+            terms: terms
+                .into_iter()
+                .map(|term| RelationOrderBy {
+                    column: relation_column(term.column),
+                    direction: match term.direction {
+                        WireOrderDirection::Asc => OrderDirection::Asc,
+                        WireOrderDirection::Desc => OrderDirection::Desc,
+                    },
+                })
+                .collect(),
+        },
+        WireRelationExpr::Offset { input, offset } => RelationExpr::Offset {
+            input: Box::new(relation_expr(*input)?),
+            offset: offset as usize,
+        },
+        WireRelationExpr::Limit { input, limit } => RelationExpr::Limit {
+            input: Box::new(relation_expr(*input)?),
+            limit: limit as usize,
+        },
     })
 }
 
-/// Encode a relation query into canonical JRQ v1 bytes.
-pub fn encode_relation_query_v1(query: &RelationQuery) -> CodecResult<Vec<u8>> {
-    let mut out = JWriter::with_prefix(MAGIC);
-    put_expr(&mut out, &query.rel, 0, &mut JState::default())?;
-    out.into_bytes()
+pub(crate) fn relation_query_to_wire(value: &RelationQuery) -> WireResult<WireRelationQuery> {
+    WireRelationQuery::try_from(value)
 }
-/// Decode exactly one JRQ v1 query, rejecting unknown and trailing bytes.
-pub fn decode_relation_query_v1_exact(bytes: &[u8]) -> CodecResult<RelationQuery> {
-    if bytes.len() > MAX_BYTES {
-        return Err(bad("too large"));
-    } else if !bytes.starts_with(MAGIC) {
-        return Err(bad("version"));
+pub(crate) fn relation_query_from_wire(value: WireRelationQuery) -> WireResult<RelationQuery> {
+    RelationQuery::try_from(value)
+}
+/// Encode the typed relation-query Postcard payload used by direct native reads.
+pub fn encode_relation_query_postcard(value: &RelationQuery) -> WireResult<Vec<u8>> {
+    let wire = relation_query_to_wire(value)?;
+    let bytes = postcard::to_allocvec(&wire)?;
+    if bytes.len() > MAX_RELATION_BYTES {
+        return Err(RelationWireError::TooLarge);
     }
-    let mut input = &bytes[MAGIC.len()..];
-    let rel = get_expr(&mut input, 0, &mut JState::default())?;
-    if !input.is_empty() {
-        return Err(bad("trailing bytes"));
+    validate_wire(&wire)?;
+    Ok(bytes)
+}
+/// Decode a typed relation-query Postcard payload used by direct native reads.
+pub fn decode_relation_query_postcard(bytes: &[u8]) -> WireResult<RelationQuery> {
+    if bytes.len() > MAX_RELATION_BYTES {
+        return Err(RelationWireError::TooLarge);
     }
-    let query = RelationQuery { rel };
-    if encode_relation_query_v1(&query)? != bytes {
-        return Err(bad("noncanonical encoding"));
+    let wire: WireRelationQuery = postcard::from_bytes(bytes)?;
+    validate_wire(&wire)?;
+    relation_query_from_wire(wire)
+}
+fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
+    fn text(value: &str, total: &mut usize) -> WireResult<()> {
+        if value.len() > MAX_RELATION_STRING_BYTES {
+            return Err(RelationWireError::Invalid("string exceeds limit"));
+        }
+        *total = total
+            .checked_add(value.len())
+            .ok_or(RelationWireError::TooLarge)?;
+        if *total > MAX_RELATION_BYTES {
+            return Err(RelationWireError::TooLarge);
+        }
+        Ok(())
     }
-    Ok(query)
+    fn expr(
+        value: &WireRelationExpr,
+        depth: usize,
+        nodes: &mut usize,
+        strings: &mut usize,
+    ) -> WireResult<()> {
+        if depth > MAX_RELATION_DEPTH {
+            return Err(RelationWireError::Invalid("depth exceeds limit"));
+        }
+        *nodes += 1;
+        if *nodes > MAX_RELATION_ITEMS {
+            return Err(RelationWireError::Invalid("node count exceeds limit"));
+        }
+        match value {
+            WireRelationExpr::TableScan { table, alias } => {
+                text(table, strings)?;
+                if let Some(alias) = alias {
+                    text(alias, strings)?
+                }
+            }
+            WireRelationExpr::Filter { input, .. }
+            | WireRelationExpr::Project { input, .. }
+            | WireRelationExpr::Distinct { input, .. }
+            | WireRelationExpr::OrderBy { input, .. }
+            | WireRelationExpr::Offset { input, .. }
+            | WireRelationExpr::Limit { input, .. } => expr(input, depth + 1, nodes, strings)?,
+            WireRelationExpr::Union { inputs } => {
+                if inputs.len() > MAX_RELATION_ITEMS {
+                    return Err(RelationWireError::Invalid("collection exceeds limit"));
+                }
+                let mut labels = BTreeSet::new();
+                for arm in inputs {
+                    text(&arm.label, strings)?;
+                    if arm.label.is_empty()
+                        || arm.label.len() > 4096
+                        || arm.label.contains('\0')
+                        || !labels.insert(&arm.label)
+                    {
+                        return Err(RelationWireError::Invalid("invalid union label"));
+                    }
+                    expr(&arm.input, depth + 1, nodes, strings)?
+                }
+            }
+            WireRelationExpr::Join { left, right, .. } => {
+                expr(left, depth + 1, nodes, strings)?;
+                expr(right, depth + 1, nodes, strings)?
+            }
+            WireRelationExpr::Gather { seed, step, .. } => {
+                expr(seed, depth + 1, nodes, strings)?;
+                expr(step, depth + 1, nodes, strings)?
+            }
+        }
+        Ok(())
+    }
+    let mut nodes = 0;
+    let mut strings = 0;
+    expr(&value.rel, 0, &mut nodes, &mut strings)
 }
 
 #[cfg(test)]
-mod relation_codec_tests {
+mod relation_postcard_tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
-
-    const CORPUS_PATH: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/relation_query_jrq_v1.json"
-    );
-    #[derive(Debug, Deserialize, Serialize)]
-    struct Corpus {
-        cases: Vec<CorpusCase>,
-    }
-    #[derive(Debug, Deserialize, Serialize)]
-    struct CorpusCase {
-        name: String,
-        relation: serde_json::Value,
-        jrq_hex: String,
-    }
-
-    fn col(name: &str) -> RelationColumnRef {
-        RelationColumnRef {
-            scope: Some("source".into()),
-            column: name.into(),
-        }
-    }
-    fn scan(name: &str) -> RelationExpr {
-        RelationExpr::TableScan {
-            table: name.into(),
-            alias: Some("source".into()),
-        }
-    }
-    fn round_trip(rel: RelationExpr) {
-        let query = RelationQuery { rel };
-        let bytes = encode_relation_query_v1(&query).unwrap();
-        assert_eq!(decode_relation_query_v1_exact(&bytes).unwrap(), query);
-        assert_eq!(
-            encode_relation_query_v1(&decode_relation_query_v1_exact(&bytes).unwrap()).unwrap(),
-            bytes
-        );
-    }
 
     #[test]
-    fn jrq_v1_shared_cross_language_corpus_is_rust_produced() {
-        let source = std::fs::read_to_string(CORPUS_PATH).unwrap();
-        let mut corpus: Corpus = serde_json::from_str(&source).unwrap();
-        for case in &mut corpus.cases {
-            let query: RelationQuery = serde_json::from_value(case.relation.clone()).unwrap();
-            case.jrq_hex = hex::encode(encode_relation_query_v1(&query).unwrap());
-        }
-        if std::env::var_os("JAZZ_UPDATE_JRQ_CORPUS").is_some() {
-            let committed: Corpus = serde_json::from_str(&source).unwrap();
-            assert_eq!(corpus.cases.len(), committed.cases.len());
-            let mut updated = source;
-            for (actual, expected) in corpus.cases.iter().zip(committed.cases) {
-                assert_eq!(actual.name, expected.name);
-                let before = format!(r#""jrq_hex": "{}""#, expected.jrq_hex);
-                let after = format!(r#""jrq_hex": "{}""#, actual.jrq_hex);
-                assert!(updated.contains(&before), "{}", actual.name);
-                updated = updated.replacen(&before, &after, 1);
-            }
-            std::fs::write(CORPUS_PATH, updated).unwrap();
-            return;
-        }
-        let committed: Corpus =
-            serde_json::from_str(include_str!("../../fixtures/relation_query_jrq_v1.json"))
-                .unwrap();
-        assert_eq!(corpus.cases.len(), committed.cases.len());
-        for (actual, expected) in corpus.cases.iter().zip(committed.cases) {
-            assert_eq!(actual.name, expected.name);
-            assert_eq!(actual.jrq_hex, expected.jrq_hex, "{}", actual.name);
-        }
-    }
-
-    #[test]
-    fn jrq_v1_round_trips_all_expression_predicate_and_value_variants() {
-        let literal =
-            RelationValueRef::Literal(serde_json::json!({"a": [null, true, -4, 1.5], "z": "text"}));
-        let values = vec![
-            literal.clone(),
-            RelationValueRef::Param("p".into()),
-            RelationValueRef::SessionRef(vec!["actor".into(), "role".into()]),
-            RelationValueRef::OuterColumn(col("outer")),
-            RelationValueRef::FrontierColumn(col("frontier")),
-            RelationValueRef::RowId(RelationRowIdRef::Outer),
-        ];
-        let predicates = vec![
-            RelationPredicate::Cmp {
-                left: col("cmp"),
-                op: RelationCmpOp::Ge,
-                right: literal.clone(),
-            },
-            RelationPredicate::IsNull {
-                column: col("null"),
-            },
-            RelationPredicate::IsNotNull {
-                column: col("not_null"),
-            },
-            RelationPredicate::In {
-                left: col("in"),
-                values,
-            },
-            RelationPredicate::Contains {
-                left: col("contains"),
-                right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
-            },
-            RelationPredicate::EnumMatch {
-                column: col("kind"),
-                case: "Case".into(),
-                payload: Box::new(RelationPredicate::True),
-            },
-            RelationPredicate::And(vec![RelationPredicate::True, RelationPredicate::False]),
-            RelationPredicate::Or(vec![RelationPredicate::True, RelationPredicate::False]),
-            RelationPredicate::Not(Box::new(RelationPredicate::True)),
-            RelationPredicate::True,
-            RelationPredicate::False,
-        ];
-        for predicate in predicates {
-            round_trip(RelationExpr::Filter {
-                input: Box::new(scan("rows")),
-                predicate,
-            });
-        }
-        round_trip(RelationExpr::Union {
-            inputs: vec![
-                RelationUnionArm {
-                    label: "one".into(),
-                    input: scan("one"),
-                },
-                RelationUnionArm {
-                    label: "two".into(),
-                    input: scan("two"),
-                },
-            ],
-        });
-        round_trip(RelationExpr::Join {
-            left: Box::new(scan("left")),
-            right: Box::new(scan("right")),
-            on: vec![RelationJoinCondition {
-                left: col("left"),
-                right: col("right"),
-            }],
-            join_kind: RelationJoinKind::Left,
-        });
-        round_trip(RelationExpr::Project {
-            input: Box::new(scan("rows")),
-            columns: vec![
-                RelationProjectColumn {
-                    alias: "column".into(),
-                    expr: RelationProjectExpr::Column(col("column")),
-                },
-                RelationProjectColumn {
-                    alias: "row".into(),
-                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
-                },
-            ],
-        });
-        round_trip(RelationExpr::Gather {
-            seed: Box::new(scan("seed")),
-            step: Box::new(scan("step")),
-            frontier_key: RelationKeyRef::Column(col("frontier")),
-            bound: RecursionBound::MaxDepth(3),
-            dedupe_key: vec![
-                RelationKeyRef::Column(col("dedupe")),
-                RelationKeyRef::RowId(RelationRowIdRef::Frontier),
-            ],
-        });
-        round_trip(RelationExpr::Distinct {
-            input: Box::new(scan("rows")),
-            key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
-        });
-        round_trip(RelationExpr::OrderBy {
-            input: Box::new(scan("rows")),
-            terms: vec![RelationOrderBy {
-                column: col("name"),
-                direction: OrderDirection::Desc,
-            }],
-        });
-        round_trip(RelationExpr::Offset {
-            input: Box::new(scan("rows")),
-            offset: 17,
-        });
-        round_trip(RelationExpr::Limit {
-            input: Box::new(scan("rows")),
-            limit: 19,
-        });
-    }
-
-    #[test]
-    fn jrq_v1_rejects_noncanonical_and_invalid_wire_forms() {
-        let valid = encode_relation_query_v1(&RelationQuery { rel: scan("rows") }).unwrap();
-        assert!(decode_relation_query_v1_exact(&[valid, vec![0]].concat()).is_err());
-        assert!(decode_relation_query_v1_exact(b"JRQ\x02").is_err());
-        assert!(decode_relation_query_v1_exact(b"JRQ\x01\x00\x81\x00a\x00").is_err());
-        let positive_literal = RelationQuery {
-            rel: RelationExpr::Filter {
-                input: Box::new(RelationExpr::TableScan {
-                    table: "t".into(),
-                    alias: None,
-                }),
-                predicate: RelationPredicate::Cmp {
-                    left: RelationColumnRef {
-                        scope: None,
-                        column: "c".into(),
-                    },
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::Literal(serde_json::json!(1)),
-                },
-            },
-        };
-        let mut noncanonical = encode_relation_query_v1(&positive_literal).unwrap();
-        assert_eq!(
-            &noncanonical,
-            b"JRQ\x01\x01\x00\x01t\x00\x00\x00\x01c\x00\x00\x03\x02"
-        );
-        let final_tag = noncanonical.len() - 2;
-        noncanonical[final_tag] = 4;
-        assert!(decode_relation_query_v1_exact(&noncanonical).is_err());
-        let duplicate = RelationQuery {
-            rel: RelationExpr::Union {
-                inputs: vec![
-                    RelationUnionArm {
-                        label: "x".into(),
-                        input: scan("a"),
-                    },
-                    RelationUnionArm {
-                        label: "x".into(),
-                        input: scan("b"),
-                    },
-                ],
-            },
-        };
-        assert!(encode_relation_query_v1(&duplicate).is_err());
-        let nul = RelationQuery {
-            rel: RelationExpr::Union {
-                inputs: vec![RelationUnionArm {
-                    label: "x\0".into(),
-                    input: scan("a"),
-                }],
-            },
-        };
-        assert!(encode_relation_query_v1(&nul).is_err());
-    }
-
-    #[test]
-    fn jrq_v1_uses_utf8_byte_order_for_literal_object_keys() {
+    fn typed_postcard_relation_round_trips_literal_kinds() {
         let query = RelationQuery {
             rel: RelationExpr::Filter {
                 input: Box::new(RelationExpr::TableScan {
-                    table: "t".into(),
+                    table: "rows".into(),
                     alias: None,
                 }),
-                predicate: RelationPredicate::Cmp {
-                    left: RelationColumnRef {
-                        scope: None,
-                        column: "c".into(),
-                    },
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::Literal(serde_json::json!({"猫": null, "é": null})),
-                },
-            },
-        };
-        assert_eq!(encode_relation_query_v1(&query).unwrap(), b"JRQ\x01\x01\x00\x01t\x00\x00\x00\x01c\x00\x00\x08\x02\x02\xc3\xa9\x00\x03\xe7\x8c\xab\x00");
-    }
-
-    #[test]
-    fn jrq_v1_rejects_project_growth_before_exceeding_the_byte_budget() {
-        let columns = vec![
-            RelationProjectColumn {
-                alias: String::new(),
-                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
-            };
-            MAX_ITEMS
-        ];
-        let mut rel = scan("rows");
-        for _ in 0..100 {
-            rel = RelationExpr::Project {
-                input: Box::new(rel),
-                columns: columns.clone(),
-            };
-        }
-        assert!(encode_relation_query_v1(&RelationQuery { rel }).is_err());
-    }
-
-    #[test]
-    fn jrq_v1_checked_writer_rejects_mixed_values_before_growing_past_budget() {
-        let mut values = Vec::new();
-        for _ in 0..3000 {
-            values.push(RelationValueRef::Param("x".repeat(346)));
-        }
-        for _ in 0..1095 {
-            values.push(RelationValueRef::RowId(RelationRowIdRef::Current));
-        }
-        let query = RelationQuery {
-            rel: RelationExpr::Filter {
-                input: Box::new(scan("rows")),
                 predicate: RelationPredicate::In {
-                    left: col("value"),
-                    values,
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "value".into(),
+                    },
+                    values: vec![
+                        RelationValueRef::Literal(serde_json::json!(-4)),
+                        RelationValueRef::Literal(serde_json::json!(4)),
+                        RelationValueRef::Literal(serde_json::json!({"nested": [true, null, 1.5]})),
+                    ],
                 },
             },
         };
-        assert!(encode_relation_query_v1(&query).is_err());
-    }
-
-    #[test]
-    fn jrq_v1_shape_body_relation_uses_the_same_carrier_and_preserves_identity() {
-        let query = RelationQuery { rel: scan("rows") };
-        let identity = canonical_relation_query_key(&query).unwrap();
-        let shape = crate::protocol::ShapeAst::new_relation(
-            query.clone(),
-            crate::ids::SchemaVersionId::from_bytes([0x44; 16]),
-        );
-        let bytes = postcard::to_allocvec(&shape).unwrap();
-        assert!(bytes.windows(MAGIC.len()).any(|window| window == MAGIC));
-        let decoded: crate::protocol::ShapeAst = postcard::from_bytes(&bytes).unwrap();
-        let crate::protocol::ShapeBody::Relation(decoded_query) = decoded.body else {
-            panic!("relation shape body");
-        };
-        assert_eq!(decoded_query, query);
-        assert_eq!(
-            canonical_relation_query_key(&decoded_query).unwrap(),
-            identity
-        );
+        let bytes = encode_relation_query_postcard(&query).unwrap();
+        assert_ne!(&bytes[..bytes.len().min(4)], b"JRQ\x01");
+        assert_eq!(decode_relation_query_postcard(&bytes).unwrap(), query);
     }
 }

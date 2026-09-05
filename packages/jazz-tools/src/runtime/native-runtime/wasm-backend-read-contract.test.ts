@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../../index.js";
-import { encodeRelationQueryV1, type RelExpr } from "../../ir.js";
+import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 import { createOpenTransactionId } from "../client.js";
 import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable } from "./native-codec.js";
@@ -26,7 +26,7 @@ describe("WASM backend read capability parity", () => {
         ),
       );
       const query = db.prepareQuery(queryFromTable("notes"));
-      const relation = encodeRelationQueryV1({
+      const relation = encodeRelationQueryPostcard({
         Project: {
           input: { TableScan: { table: "notes" } },
           columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
