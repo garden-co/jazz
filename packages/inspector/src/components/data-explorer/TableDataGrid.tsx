@@ -14,6 +14,7 @@ import {
   PersistedWriteRejectedError,
   type ColumnDescriptor,
   type ColumnType,
+  type QueryOptions,
   type TableProxy,
   type Value,
   type WriteResult,
