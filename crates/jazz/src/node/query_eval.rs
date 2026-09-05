@@ -1606,7 +1606,7 @@ where
         // it.  Flat rows still need this boundary to remove materializer-only
         // physical fields.
         if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
-            normalize_public_current_rows(&table_schema, &mut rows)?;
+            normalize_public_current_rows(shape.query(), &table_schema, &mut rows)?;
         }
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -4123,6 +4123,7 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 /// may retain physical schema/provenance fields while resolving a row, whereas
 /// subscriptions are emitted from the public app-row terminal directly.
 fn normalize_public_current_rows(
+    query: &crate::query::Query,
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
@@ -4132,7 +4133,46 @@ fn normalize_public_current_rows(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     for row in rows {
-        *row = row.project(table, &columns)?;
+        *row = if let Some(aggregate) = &query.aggregate {
+            // A grouped source and an aggregate result may share a public name.
+            // Select each synthetic table column through its declared role before
+            // projecting; a public-name lookup alone loses that distinction.
+            let mut bindings = BTreeMap::new();
+            if let Some(group) = &aggregate.group_by {
+                let index = row
+                    .publication_fields
+                    .iter()
+                    .position(|field| {
+                        matches!(field, CurrentRowPublicationField::StoredColumn { .. })
+                            && field.application_name() == Some(group)
+                    })
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate group has no source publication binding",
+                    ))?;
+                bindings.insert(group.clone(), index);
+            }
+            for output in &aggregate.aggregates {
+                let index = row
+                    .publication_fields
+                    .iter()
+                    .position(|field| {
+                        matches!(
+                            field,
+                            CurrentRowPublicationField::ResultField {
+                                visibility: CurrentRowResultVisibility::ApplicationCell,
+                                ..
+                            }
+                        ) && field.application_name() == Some(output.alias.as_str())
+                    })
+                    .ok_or(Error::InvalidStoredValue(
+                        "aggregate output has no result publication binding",
+                    ))?;
+                bindings.insert(aggregate_output_column(&output.alias), index);
+            }
+            row.project_with_column_binding(table, &columns, |name| bindings.get(name).copied())?
+        } else {
+            row.project(table, &columns)?
+        };
     }
     Ok(())
 }

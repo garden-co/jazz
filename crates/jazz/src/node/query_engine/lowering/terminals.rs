@@ -3200,7 +3200,9 @@ fn aggregate_app_row_descriptor(
                     aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
                 )
-                .with_identity(FieldIdentity::Name(output.output.name.clone())))
+                .with_identity(FieldIdentity::Name(aggregate_output_field(
+                    &output.output.name,
+                ))))
             })
             .collect::<CapabilityResult<Vec<_>>>()?,
     );

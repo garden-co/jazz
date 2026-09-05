@@ -207,3 +207,27 @@ that occurrence sidecars remain aligned. Restoring the old raw-to-missing
 conversion makes both new canaries fail; restoring the fix makes them pass.
 These receipts do not claim that aggregate subscription pagination is fixed;
 that expanded reproduction is tracked separately from the ordering repair.
+
+## Full-workspace publication regressions
+
+The exact main baseline passes all eleven `jazz-testkit` tests that failed or
+stalled on typed checkpoint `1c687468f7`. The repaired compiler preserves distinct
+source and result identities when a grouped column and aggregate alias both spell
+`sum_score`. Final projection selects their explicit publication roles.
+
+Joined projections derive nullability from the transformed graph, including keys
+unwrapped for equality. They remove only excess presence wrappers and restore
+only the declared output wrappers. A normal single wrapper uses the existing
+projection operator. The private flat-join contributor equality separately unwraps
+the declared public key type; it does not change the public value or admit null
+keys. This preserves both FK-reference and explicit-join source occurrences.
+
+The retained `JRPD` Current role now carries query-declared joined UUID fields and
+UNION discriminator fields, in explicit source order. Decoding validates the exact
+role descriptor before reading bytes, then checks arity, ordered UUIDs and UNION
+positions/labels against the member identity before exposing hidden runtime
+carriers. The direct codec negative test covers inputs that public queries cannot
+author: reordered declarations, swapped contributors, missing contributors and
+changed UNION labels/positions. This is runtime correctness; retained result
+persistence remains unfrozen and scheduled for removal in #2578. Active source
+storage gains no new format or persistence path.

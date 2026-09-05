@@ -1276,8 +1276,12 @@ fn lower_linear_plan_steps_cached(
                         );
                     }
                 }
-                let right_nullable_fields = lowered_right.nullable_fields.clone();
-                let right_nullable_field_depths = lowered_right.nullable_field_depths.clone();
+                for key in &unwrapped_left_keys {
+                    nullable_fields.remove(key);
+                    nullable_field_depths.remove(key);
+                }
+                let mut right_nullable_fields = lowered_right.nullable_fields.clone();
+                let mut right_nullable_field_depths = lowered_right.nullable_field_depths.clone();
                 let mut right_graph = lowered_right.graph;
                 let mut unwrapped_right_keys = BTreeSet::new();
                 for right_key in &right_keys {
@@ -1294,6 +1298,10 @@ fn lower_linear_plan_steps_cached(
                                 .unwrap_or(1),
                         );
                     }
+                }
+                for key in &unwrapped_right_keys {
+                    right_nullable_fields.remove(key);
+                    right_nullable_field_depths.remove(key);
                 }
                 if *mode == JoinMode::Semi {
                     // Route each left occurrence before applying the existence
@@ -1595,6 +1603,7 @@ fn lower_linear_plan_steps_cached(
                     .map(|_| nullable_field_depths.clone());
                 let mut unwrap_fields = BTreeMap::<String, usize>::new();
                 let mut projected_nullable_field_depths = BTreeMap::<String, usize>::new();
+                let mut wrap_after_project = BTreeMap::<String, usize>::new();
                 let project_fields = columns
                     .iter()
                     .map(|column| {
@@ -1603,10 +1612,14 @@ fn lower_linear_plan_steps_cached(
                             plan,
                             root_source,
                             &fields,
+                            &nullable_field_depths,
                             last_join_right.as_ref(),
                             &accumulated_join_fields,
                             request,
                         )?;
+                        if let Some((name, depth)) = field.wrap_after_project {
+                            wrap_after_project.insert(name, depth);
+                        }
                         for (source, depth) in field.unwrap_before_project {
                             unwrap_fields
                                 .entry(source)
@@ -1690,6 +1703,20 @@ fn lower_linear_plan_steps_cached(
                 fields.extend(retained_route_fields.iter().cloned());
                 if let Some(retained_fields) = retained_contributor_fields {
                     fields.extend(retained_fields);
+                }
+                for layer in 0..wrap_after_project.values().copied().max().unwrap_or(0) {
+                    graph = graph.project_fields(
+                        fields
+                            .iter()
+                            .map(|name| {
+                                if wrap_after_project.get(name).copied().unwrap_or(0) > layer {
+                                    ProjectField::nullable(name, name)
+                                } else {
+                                    ProjectField::named(name)
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 nullable_fields = projected_nullable_field_depths.keys().cloned().collect();
                 nullable_field_depths = projected_nullable_field_depths;
@@ -2433,6 +2460,7 @@ fn lower_projection_field(
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
     fields: &BTreeSet<String>,
+    field_nullable_depths: &BTreeMap<String, usize>,
     last_join_right: Option<&(
         RelationInputPlan,
         BTreeSet<String>,
@@ -2444,11 +2472,13 @@ fn lower_projection_field(
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeMap::new();
     let mut nullable_after_project = None;
+    let mut wrap_after_project = None;
     let project = match lower_projection_source(
         &column.value,
         plan,
         source,
         fields,
+        field_nullable_depths,
         last_join_right,
         accumulated_join_fields,
         request,
@@ -2457,12 +2487,23 @@ fn lower_projection_field(
             field,
             nullable_depth,
         } => {
-            if nullable_depth > 0 && !matches!(column.output.ty.clone(), ValueType::Nullable(_)) {
-                unwrap_before_project.insert(field.clone(), nullable_depth);
-            } else if nullable_depth > 0 {
-                nullable_after_project = Some((column.output.name.clone(), nullable_depth));
+            let output_depth = value_type_nullable_depth(&column.output.ty);
+            let unwrap_depth = nullable_depth.saturating_sub(output_depth);
+            if unwrap_depth > 0 {
+                unwrap_before_project.insert(field.clone(), unwrap_depth);
             }
-            ProjectField::renamed(field, column.output.name.clone())
+            if output_depth > 0 {
+                nullable_after_project = Some((column.output.name.clone(), output_depth));
+            }
+            if output_depth > nullable_depth {
+                let additional_layers = output_depth - nullable_depth - 1;
+                if additional_layers > 0 {
+                    wrap_after_project = Some((column.output.name.clone(), additional_layers));
+                }
+                ProjectField::nullable(field, column.output.name.clone())
+            } else {
+                ProjectField::renamed(field, column.output.name.clone())
+            }
         }
         ProjectionSource::Literal(value) => {
             ProjectField::literal(column.output.name.clone(), value)
@@ -2472,6 +2513,7 @@ fn lower_projection_field(
         project,
         unwrap_before_project,
         nullable_after_project,
+        wrap_after_project,
     })
 }
 
@@ -2489,6 +2531,7 @@ struct ProjectionFieldPlan {
     pub(super) project: ProjectField,
     pub(super) unwrap_before_project: BTreeMap<String, usize>,
     pub(super) nullable_after_project: Option<(String, usize)>,
+    pub(super) wrap_after_project: Option<(String, usize)>,
 }
 
 fn lower_projection_source(
@@ -2496,6 +2539,7 @@ fn lower_projection_source(
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
     fields: &BTreeSet<String>,
+    field_nullable_depths: &BTreeMap<String, usize>,
     last_join_right: Option<&(
         RelationInputPlan,
         BTreeSet<String>,
@@ -2506,11 +2550,7 @@ fn lower_projection_source(
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
-        let nullable_depth = if matches!(plan.root, LinearRoot::Source { .. }) {
-            source_field_nullable_depth(source, &field)
-        } else {
-            0
-        };
+        let nullable_depth = field_nullable_depths.get(&field).copied().unwrap_or(0);
         return Ok(ProjectionSource::Field {
             field: match last_join_right {
                 Some(_) => left_field(&field),
@@ -2531,7 +2571,8 @@ fn lower_projection_source(
             nullable_depth: 0,
         });
     }
-    if let Some((field, nullable_depth)) = accumulated_join_field(value, accumulated_join_fields) {
+    if let Some((field, _)) = accumulated_join_field(value, accumulated_join_fields) {
+        let nullable_depth = field_nullable_depths.get(&field).copied().unwrap_or(0);
         return Ok(ProjectionSource::Field {
             field: match last_join_right {
                 Some(_) => left_field(&field),
@@ -2863,20 +2904,17 @@ fn source_field_is_nullable(source: &ResolvedSource, field: &str) -> bool {
     source_field_nullable_depth(source, field) > 0
 }
 
-fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
+fn value_type_nullable_depth(mut value_type: &ValueType) -> usize {
     let mut depth = 0;
-    if source_field_type(source, field)
-        .is_some_and(|field_type| matches!(field_type, ValueType::Nullable(_)))
-    {
+    while let ValueType::Nullable(inner) = value_type {
         depth += 1;
-    }
-    let logical_field = field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field);
-    if source.table_schema.columns.iter().any(|column| {
-        column.name == logical_field && matches!(column.column_type, ColumnType::Nullable(_))
-    }) {
-        depth += 1;
+        value_type = inner;
     }
     depth
+}
+
+fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
+    source_field_type(source, field).map_or(0, value_type_nullable_depth)
 }
 
 pub(super) fn resolved_source_descriptor_index(
@@ -3100,7 +3138,7 @@ fn lower_aggregate_expr(
         distinct: false,
         output_name: Some(aggregate_output_field(&aggregate.output.name)),
         output_identity: Some(groove::records::FieldIdentity::Name(
-            aggregate.output.name.clone(),
+            aggregate_output_field(&aggregate.output.name),
         )),
     })
 }
