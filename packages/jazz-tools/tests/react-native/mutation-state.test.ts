@@ -143,3 +143,66 @@ it("closes an unfinished large upload without publication or late mutation callb
     expect(errors).not.toHaveBeenCalled();
   });
 });
+
+it.each(["finish", "abort"] as const)(
+  "keeps an upload retryable when %s admission reaches native capacity",
+  async (terminal) => {
+    await withNativeRelayFixture(app, async (fixture) => {
+      const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+      const runtime = fixture.nativeHost.openAttached(fixture.capability);
+      const native = new NativeForegroundDb(runtime, commands);
+      const execute = (command: Parameters<typeof commands.encodeNativeForegroundCommand>[0]) =>
+        commands.decodeNativeForegroundResponse(
+          runtime.execute(commands.encodeNativeForegroundCommand(command)),
+        );
+      const operations: number[] = [];
+      try {
+        const seed = native.insertEncoded(
+          "documents",
+          encodeCellsForRow(app.wasmSchema.documents!, {
+            title: { type: "Text", value: "capacity waiter" },
+          }),
+        );
+        await seed.wait("local");
+        const txId = Uint8Array.from(
+          seed.txId.match(/../g)!.map((byte) => Number.parseInt(byte, 16)),
+        );
+        const rowId = crypto.getRandomValues(new Uint8Array(16));
+        const upload = native.beginStreamingMutationEncoded(
+          "documents",
+          rowId,
+          encodeCellsForPatch(app.wasmSchema.documents!, {}),
+          "title",
+        );
+        await upload.push(new TextEncoder().encode("retryable upload"));
+        let saturated = false;
+        // Real edge waiters remain pending because this fixture has no authority.
+        // Stop at the host's reported bound rather than inventing pending handles.
+        for (let attempt = 0; attempt < 128; attempt++) {
+          const response = execute({ type: "waitForTransaction", txId, tier: "edge" });
+          if (response.type === "operationError") {
+            expect(response.reason).toContain("capacity");
+            saturated = true;
+            break;
+          }
+          expect(response.type).toBe("pending");
+          if (response.type === "pending") operations.push(response.operation);
+        }
+        expect(saturated).toBe(true);
+        await expect(upload[terminal]()).rejects.toThrow("capacity");
+        for (const operation of operations.splice(0)) execute({ type: "cancel", operation });
+        if (terminal === "finish") {
+          const write = await upload.finish();
+          expect(write.rowId).toEqual(rowId);
+          await write.wait("local");
+        } else {
+          expect(await upload.abort()).toBe(true);
+          expect(await upload.abort()).toBe(false);
+        }
+      } finally {
+        for (const operation of operations) execute({ type: "cancel", operation });
+        native.close();
+      }
+    });
+  },
+);

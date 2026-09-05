@@ -5420,13 +5420,13 @@ impl RelayWorker {
         if let Some((id, write)) = retained {
             // WriteHandle::wait is a snapshot check. The core callback API
             // owns the asynchronous waiter and preserves queued no-op aliases.
-            let (send, receive) = futures::channel::oneshot::channel();
-            self.foreground_client(client)?
-                .db
-                .wait_for_write_with(&write, tier, move |result| {
+            let db = Rc::clone(&self.foreground_client(client)?.db);
+            let future: ForegroundOperationFuture = Box::pin(async move {
+                // Register only after the bounded operation slot is admitted.
+                let (send, receive) = futures::channel::oneshot::channel();
+                db.wait_for_write_with(&write, tier, move |result| {
                     let _ = send.send(result);
                 });
-            let future: ForegroundOperationFuture = Box::pin(async move {
                 let _retained_write = write;
                 receive
                     .await

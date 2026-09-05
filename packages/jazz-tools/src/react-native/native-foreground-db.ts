@@ -658,6 +658,7 @@ export class NativeForegroundDb {
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();
         let finished = this.execute({ type: "finishStreamingMutation", upload });
+        if (finished.type === "operationError") throw new Error(finished.reason);
         closed = true;
         while (finished.type === "pending") {
           const operation = finished.operation;
@@ -672,10 +673,10 @@ export class NativeForegroundDb {
       },
       abort: async (): Promise<boolean> => {
         if (closed || this.closed) return false;
+        const admitted = this.execute({ type: "abortStreamingMutation", upload });
+        if (admitted.type === "operationError") throw new Error(admitted.reason);
         closed = true;
-        const aborted = await this.completeMutationOperation(
-          this.execute({ type: "abortStreamingMutation", upload }),
-        );
+        const aborted = await this.completeMutationOperation(admitted);
         if (aborted.type === "operationError") throw new Error(aborted.reason);
         if (aborted.type !== "streamingMutationAborted")
           return unexpected("abortStreamingMutation", aborted.type);
