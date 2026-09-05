@@ -978,25 +978,39 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
 });
 
 test("a clean checkout seals a Rust shadow source baseline", () => {
-  const receipt = path.join(os.tmpdir(), `jazz-rust-shadow-source-${process.pid}-${Date.now()}.json`);
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-shadow-source-"));
+  const receipt = path.join(os.tmpdir(), `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`);
   try {
-    const commit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
-    assert.equal(commit.status, 0, commit.stderr);
-    const result = spawnSync(
-      "node",
-      [
-        path.join(root, "dev/gates/rust-shadow-matrix.mjs"),
-        "clean-source-baseline",
-        receipt,
-        commit.stdout.trim(),
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
-    assert.equal(source.dirty, false);
-    assert.match(source.staged, /^[0-9a-f]{64}$/);
+    const gates = path.join(fixture, "dev/gates");
+    fs.mkdirSync(gates, { recursive: true });
+    for (const file of ["rust-shadow-matrix.mjs", "source-identity.mjs"])
+      fs.copyFileSync(path.join(root, "dev/gates", file), path.join(gates, file));
+    fs.writeFileSync(path.join(fixture, "synthetic-source.txt"), "committed fixture source\n");
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.email", "test@example.invalid"],
+      ["config", "user.name", "Test"],
+      ["add", "."],
+      ["commit", "--quiet", "-m", "fixture"],
+      ["rev-parse", "HEAD"],
+    ]) {
+      const result = spawnSync("git", args, { cwd: fixture, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      if (args[0] === "rev-parse") {
+        const baseline = spawnSync(
+          "node",
+          [path.join(gates, "rust-shadow-matrix.mjs"), "clean-source-baseline", receipt, result.stdout.trim()],
+          { cwd: fixture, encoding: "utf8" },
+        );
+        assert.equal(baseline.status, 0, baseline.stderr);
+        const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
+        assert.equal(source.commit, result.stdout.trim());
+        assert.equal(source.dirty, false);
+        assert.match(source.staged, /^[0-9a-f]{64}$/);
+      }
+    }
   } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
     fs.rmSync(receipt, { force: true });
   }
 });
