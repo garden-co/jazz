@@ -211,6 +211,27 @@ test("a sealed publication collision accepts the winner without leaking its priv
   }
 });
 
+test("atomic publication keeps only the private stage root writable until it is renamed", () => {
+  const root = fixture("darwin-publication", "a".repeat(64), "b".repeat(64));
+  try {
+    const snapshot = snapshotCorrectnessArtifacts(root, {
+      beforePublish({ stage }) {
+        assert.notEqual(statSync(stage).mode & 0o222, 0, "stage root must permit rename on macOS");
+        for (const entry of readdirSync(stage, { withFileTypes: true })) {
+          assert.equal(
+            statSync(join(stage, entry.name)).mode & 0o222,
+            0,
+            "staged descendants are sealed before publication",
+          );
+        }
+      },
+    });
+    assert.equal(statSync(join(snapshot.wasmPackage, "..")).mode & 0o222, 0);
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test("producer manifest binds sealed artifacts to every relevant source input", () => {
   const root = fixture("producer", "a".repeat(64), "b".repeat(64));
   try {

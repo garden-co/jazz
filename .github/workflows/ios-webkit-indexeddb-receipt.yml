@@ -144,6 +144,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-cache: "true"
+          rust-cache-workspace-crates: "true"
           rust-targets: wasm32-unknown-unknown
       - uses: ./.github/actions/install-rust-tool
         with:
@@ -175,6 +176,12 @@ jobs:
           done
           cat safaridriver-probe.log || true
           exit 1
+      - name: Verify macOS sealed artifact publication filesystem behavior
+        run: |
+          set -euo pipefail
+          mkdir -p safari-local-receipt
+          node dev/ci/verify-macos-sealed-publication.mjs \
+            | tee safari-local-receipt/macos-sealed-publication.log
       - name: Build selected-ref runtime and diagnostic page
         run: |
           set -euo pipefail

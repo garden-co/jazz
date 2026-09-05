@@ -235,9 +235,11 @@ function copyRealTree(source, destination, label) {
   walkRealFiles(destination, `copied ${label}`);
 }
 
-function sealSnapshot(destination) {
+function sealSnapshot(destination, { keepRootWritable = false } = {}) {
   // Seal leaf files before their directories. Existing executable bits are
-  // preserved, but no snapshot entry remains writable.
+  // preserved, but no published snapshot entry remains writable. macOS rejects
+  // rename when the source directory is write-disabled, so the private staging
+  // root stays writable until the atomic publish has completed.
   const files = walkRealFiles(destination, "staged snapshot");
   for (const path of files) {
     const mode = statSync(path).mode;
@@ -252,8 +254,17 @@ function sealSnapshot(destination) {
     }
   };
   visit(destination);
-  for (const directory of directories.reverse()) chmodSync(directory, 0o555);
-  walkRealFiles(destination, "sealed snapshot", { published: true });
+  for (const directory of directories.reverse()) {
+    if (keepRootWritable && directory === destination) continue;
+    chmodSync(directory, 0o555);
+  }
+  if (keepRootWritable) {
+    for (const entry of readdirSync(destination, { withFileTypes: true })) {
+      const path = join(destination, entry.name);
+      if (entry.isDirectory()) walkRealFiles(path, "sealed staged snapshot", { published: true });
+      else realFile(path, "sealed staged snapshot", { published: true });
+    }
+  } else walkRealFiles(destination, "sealed snapshot", { published: true });
 }
 
 function removeOwnedStage(stage) {
@@ -316,10 +327,13 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
       writeFileSync(join(stage, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, {
         mode: 0o600,
       });
-      sealSnapshot(stage);
+      sealSnapshot(stage, { keepRootWritable: true });
       beforePublish?.({ destination, stage });
       try {
         renameSync(stage, destination);
+        // The source root remains writable solely for Darwin's rename rule.
+        // Seal the published root before its pointer can be observed.
+        chmodSync(destination, 0o555);
       } catch (error) {
         if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
         removeOwnedStage(stage);
