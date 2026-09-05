@@ -33,4 +33,13 @@ describe("encodeRelationQueryV1", () => {
       "expression",
     );
   });
+
+  test("uses the integer tag for JSON-representable unsafe integers and rejects nonportable dimensions", () => {
+    expect([...encodeRelationQueryV1(filter(9_007_199_254_740_992))][15]).toBe(3);
+    expect(() =>
+      encodeRelationQueryV1({
+        Offset: { input: { TableScan: { table: "t" } }, offset: 0x1_0000_0000 },
+      }),
+    ).toThrow("dimension");
+  });
 });

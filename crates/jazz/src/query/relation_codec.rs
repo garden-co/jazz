@@ -8,6 +8,7 @@ const MAX_DEPTH: usize = 128;
 const MAX_ITEMS: usize = 4096;
 const MAX_STRING: usize = 1 << 16;
 const MAX_UNION_LABEL: usize = 4096;
+const MAX_DIMENSION: usize = u32::MAX as usize;
 
 #[derive(Debug, thiserror::Error)]
 /// Failure while encoding or decoding the bounded JRQ v1 carrier.
@@ -181,6 +182,20 @@ fn get_count(input: &mut &[u8], state: &JState) -> CodecResult<usize> {
     let len = get_len(input)?;
     state.collection(len)?;
     Ok(len)
+}
+fn put_dimension(out: &mut Vec<u8>, value: usize) -> CodecResult<()> {
+    if value > MAX_DIMENSION {
+        return Err(bad("dimension too large"));
+    }
+    jrq_put_len(out, value);
+    Ok(())
+}
+fn get_dimension(input: &mut &[u8]) -> CodecResult<usize> {
+    let value = get_len(input)?;
+    if value > MAX_DIMENSION {
+        return Err(bad("dimension too large"));
+    }
+    Ok(value)
 }
 fn put_label(out: &mut Vec<u8>, label: &str, state: &mut JState) -> CodecResult<()> {
     if label.is_empty() || label.len() > MAX_UNION_LABEL || label.as_bytes().contains(&0) {
@@ -694,7 +709,7 @@ fn put_expr(
                 RecursionBound::Fixpoint => out.push(0),
                 RecursionBound::MaxDepth(value) => {
                     out.push(1);
-                    jrq_put_len(out, *value);
+                    put_dimension(out, *value)?;
                 }
             };
             put_count(out, dedupe_key.len(), state)?;
@@ -728,13 +743,13 @@ fn put_expr(
         RelationExpr::Offset { input, offset } => {
             out.push(8);
             put_expr(out, input, depth + 1, state)?;
-            jrq_put_len(out, *offset);
+            put_dimension(out, *offset)?;
             Ok(())
         }
         RelationExpr::Limit { input, limit } => {
             out.push(9);
             put_expr(out, input, depth + 1, state)?;
-            jrq_put_len(out, *limit);
+            put_dimension(out, *limit)?;
             Ok(())
         }
     }
@@ -815,7 +830,7 @@ fn get_expr(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<
             let frontier_key = get_key(input, state)?;
             let bound = match get_byte(input)? {
                 0 => RecursionBound::Fixpoint,
-                1 => RecursionBound::MaxDepth(get_len(input)?),
+                1 => RecursionBound::MaxDepth(get_dimension(input)?),
                 _ => return Err(bad("recursion bound tag")),
             };
             let len = get_count(input, state)?;
@@ -863,11 +878,11 @@ fn get_expr(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<
         }
         8 => RelationExpr::Offset {
             input: Box::new(get_expr(input, depth + 1, state)?),
-            offset: get_len(input)?,
+            offset: get_dimension(input)?,
         },
         9 => RelationExpr::Limit {
             input: Box::new(get_expr(input, depth + 1, state)?),
-            limit: get_len(input)?,
+            limit: get_dimension(input)?,
         },
         _ => return Err(bad("expression tag")),
     })
@@ -1114,5 +1129,26 @@ mod relation_codec_tests {
             };
         }
         assert!(encode_relation_query_v1(&RelationQuery { rel }).is_err());
+    }
+
+    #[test]
+    fn jrq_v1_shape_body_relation_uses_the_same_carrier_and_preserves_identity() {
+        let query = RelationQuery { rel: scan("rows") };
+        let identity = canonical_relation_query_key(&query).unwrap();
+        let shape = crate::protocol::ShapeAst::new_relation(
+            query.clone(),
+            crate::ids::SchemaVersionId::from_bytes([0x44; 16]),
+        );
+        let bytes = postcard::to_allocvec(&shape).unwrap();
+        assert!(bytes.windows(MAGIC.len()).any(|window| window == MAGIC));
+        let decoded: crate::protocol::ShapeAst = postcard::from_bytes(&bytes).unwrap();
+        let crate::protocol::ShapeBody::Relation(decoded_query) = decoded.body else {
+            panic!("relation shape body");
+        };
+        assert_eq!(decoded_query, query);
+        assert_eq!(
+            canonical_relation_query_key(&decoded_query).unwrap(),
+            identity
+        );
     }
 }
