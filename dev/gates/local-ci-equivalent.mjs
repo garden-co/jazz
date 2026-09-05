@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -42,6 +43,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-differential": "test-rust-differential",
   "storage-compat": "test-storage-compat",
   typescript: "test-ts",
+  "react-native": "test-react-native",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -145,6 +147,50 @@ export const ciPartitions = Object.freeze({
       env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
     }),
   ]),
+  "react-native": Object.freeze([
+    // React Native's bridge is deliberately opt-in. This producer must be
+    // separate from the ordinary TypeScript partition so its manifest proves
+    // the native bridge was actually present when the RN suite ran.
+    command(
+      "React Native bridge correctness-artifact producer",
+      "pnpm",
+      ["build:correctness-artifacts"],
+      { env: { JAZZ_RN_TEST_BRIDGE: "1" } },
+    ),
+    command(
+      "admitted Jazz Tools build for React Native",
+      "node",
+      [
+        "dev/gates/run-correctness-consumer.mjs",
+        "--",
+        "pnpm",
+        "exec",
+        "turbo",
+        "run",
+        "build",
+        "--filter=jazz-tools",
+        "--only",
+      ],
+      { env: { JAZZ_RN_TEST_BRIDGE: "1" } },
+    ),
+    command(
+      "React Native bridge tests",
+      "node",
+      [
+        "dev/gates/run-correctness-consumer.mjs",
+        "--",
+        "pnpm",
+        "--dir",
+        "packages/jazz-tools",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.react-native.config.ts",
+      ],
+      { env: { JAZZ_RN_TEST_BRIDGE: "1" } },
+    ),
+  ]),
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
     command("native correctness-artifact producer", "node", [
@@ -211,6 +257,44 @@ export function assertArtifactBoundary(commands) {
     throw new Error("CI-equivalent TypeScript plan omits artifacts or test suites.");
   if (commands.indexOf(artifacts) > commands.indexOf(suites))
     throw new Error("CI-equivalent TypeScript plan runs tests before correctness artifacts.");
+}
+
+export function assertReactNativeBridgeBoundary(commands) {
+  const producer = commands.find(
+    ({ label }) => label === "React Native bridge correctness-artifact producer",
+  );
+  const toolsBuild = commands.find(
+    ({ label }) => label === "admitted Jazz Tools build for React Native",
+  );
+  const tests = commands.find(({ label }) => label === "React Native bridge tests");
+  if (!producer || !toolsBuild || !tests)
+    throw new Error("CI-equivalent React Native plan omits its bridge producer, build, or tests.");
+  for (const item of [producer, toolsBuild, tests]) {
+    if (item.env?.JAZZ_RN_TEST_BRIDGE !== "1")
+      throw new Error(
+        `CI-equivalent React Native plan omits JAZZ_RN_TEST_BRIDGE for ${item.label}.`,
+      );
+  }
+  if (commands.indexOf(producer) > commands.indexOf(toolsBuild))
+    throw new Error("CI-equivalent React Native plan builds Jazz Tools before bridge artifacts.");
+  if (commands.indexOf(toolsBuild) > commands.indexOf(tests))
+    throw new Error(
+      "CI-equivalent React Native plan runs tests before the admitted Jazz Tools build.",
+    );
+  if (!tests.args.includes("vitest.react-native.config.ts"))
+    throw new Error("CI-equivalent React Native plan omits the React Native Vitest configuration.");
+  if (tests.args.includes("--passWithNoTests"))
+    throw new Error("CI-equivalent React Native plan permits an empty React Native test run.");
+  const configPath = resolve(root, "packages/jazz-tools/vitest.react-native.config.ts");
+  if (!existsSync(configPath))
+    throw new Error(
+      "CI-equivalent React Native plan references a missing React Native Vitest configuration.",
+    );
+  const config = readFileSync(configPath, "utf8");
+  if (!/include:\s*\[\s*["']tests\/react-native\/\*\*\/\*\.test\.\{ts,tsx\}["']\s*\]/.test(config))
+    throw new Error(
+      "CI-equivalent React Native Vitest configuration does not select React Native tests.",
+    );
 }
 
 /**
@@ -295,8 +379,11 @@ async function main(argv) {
     if (mode === "ci-equivalent") {
       assertFullWorkspaceCoverage(commands);
       assertArtifactBoundary(commands);
+      assertReactNativeBridgeBoundary(commands);
       console.log("local-ci: CI-equivalent mode; running every CI command partition serially.");
     }
+    if (mode === "ci-equivalent" || partition === "react-native")
+      assertReactNativeBridgeBoundary(planFor({ partition: "react-native" }));
     await runPlan(commands, runCommand, baseEnvironment);
   } else {
     console.log("local-ci: focused mode only; this is NOT CI-equivalent.");
