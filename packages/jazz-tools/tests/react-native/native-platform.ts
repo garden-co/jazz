@@ -45,17 +45,20 @@ export function createPlatformHost() {
   const nativeHost = binding.__testRnHostNew();
   return {
     abiVersion,
-    admit: (config: string) => binding.__testRnHostAdmit(nativeHost, config),
+    // NAPI bytes originate in Node's realm; JSI constructs Uint8Array in the
+    // calling runtime. Preserve that contract when the renderer uses jsdom.
+    admit: (config: string) => new Uint8Array(binding.__testRnHostAdmit(nativeHost, config)),
     beginPrivateSession: (config: string) =>
-      binding.__testRnHostBeginPrivateSession(nativeHost, config),
+      new Uint8Array(binding.__testRnHostBeginPrivateSession(nativeHost, config)),
     attachCanonicalSchema: (capability: Uint8Array, schema: string) =>
-      binding.__testRnHostAttachCanonicalSchema(nativeHost, capability, schema),
+      new Uint8Array(binding.__testRnHostAttachCanonicalSchema(nativeHost, capability, schema)),
     revoke: (capability: Uint8Array) => binding.__testRnHostRevoke(nativeHost, capability),
     close: () => binding.__testRnHostClose(nativeHost),
     openAttached(capability: Uint8Array): NativeForegroundRuntime {
       const foreground = binding.__testRnHostOpenAttached(nativeHost, capability);
       return {
-        execute: (command) => binding.__testRnForegroundExecute(foreground, command),
+        execute: (command) =>
+          new Uint8Array(binding.__testRnForegroundExecute(foreground, command)),
         tick: () => binding.__testRnForegroundTick(foreground),
         isClosed: () => binding.__testRnForegroundIsClosed(foreground),
         setTickScheduler: (callback) =>
