@@ -82,20 +82,21 @@ export type RelExpr =
   | { Offset: { input: RelExpr; offset: number } }
   | { Limit: { input: RelExpr; limit: number } };
 
-export type PolicyOperationV2 = "Select" | "Insert" | "Update" | "Delete";
+export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
 
-export type PolicyExprV2 =
+/** A relational policy expression used by the query IR, distinct from the schema DSL AST. */
+export type PolicyIRExpr =
   | { Predicate: RelPredicateExpr }
   | { ExistsRel: { rel: RelExpr } }
   | {
       Inherits: {
-        operation: PolicyOperationV2;
+        operation: PolicyOperation;
         via_column: string;
         max_depth?: number;
       };
     }
-  | { And: PolicyExprV2[] }
-  | { Or: PolicyExprV2[] }
-  | { Not: PolicyExprV2 }
+  | { And: PolicyIRExpr[] }
+  | { Or: PolicyIRExpr[] }
+  | { Not: PolicyIRExpr }
   | "True"
   | "False";
