@@ -711,6 +711,9 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const preCheckout = shard.steps.find(
     (step) => step.name === "Reject pre-checkout source residue",
   );
+  const safeDirectory = shard.steps.find(
+    (step) => step.name === "Trust checked-out workspace for Git diagnostics",
+  );
   const normalizeCheckout = shard.steps.find(
     (step) => step.name === "Record checkout source state",
   );
@@ -732,6 +735,17 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.ok(
     shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
     "pre-checkout inspection must run before actions/checkout",
+  );
+  assert.ok(safeDirectory, "shadow must trust its exact container checkout before Git diagnostics");
+  assert.match(
+    safeDirectory.run,
+    /git config --global --add safe\.directory "\$\{GITHUB_WORKSPACE:\?GITHUB_WORKSPACE is required\}"/,
+    "the ownership exception must name only the Actions workspace",
+  );
+  assert.ok(
+    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory)
+      && shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
+    "the safe-directory setup must follow checkout and precede the first Git diagnostic",
   );
   assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
   assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);

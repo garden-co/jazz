@@ -78,6 +78,13 @@ jobs:
           # Do not perform checkout's preliminary clean/reset. Tracked residue
           # is guarded above because checkout itself later forces its branch.
           clean: false
+      # The checkout is owned by the runner while this job's container executes
+      # the source-integrity diagnostics. Trust only this exact workspace before
+      # the first diagnostic Git command; setup-blacksmith repeats the same
+      # scoped configuration for later tool invocations.
+      - name: Trust checked-out workspace for Git diagnostics
+        shell: bash
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
       - name: Record checkout source state
         # Never repair an unexpected checkout and then attest to the repaired
         # tree: the next baseline step must fail closed for any tracked, index,
