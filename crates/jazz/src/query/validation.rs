@@ -363,15 +363,32 @@ fn validate_retained_relation_union(
     schema: &RuntimeSchema,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let Some(inputs) = relation_union_arms(&relation.rel) else {
+    let Some(parts) = relation_union_parts(&relation.rel) else {
         return Err(QueryError::UnsupportedRelationQuery(
-            "retained relation query must be a union".to_owned(),
+            "retained relation query must be a union with global terminal operators in builder order"
+                .to_owned(),
         ));
     };
+    let inputs = parts.inputs;
     if inputs.is_empty() {
         return Err(QueryError::UnsupportedRelationQuery(
             "union requires at least one input".to_owned(),
         ));
+    }
+    if let Some(terms) = parts.order_by {
+        for term in terms {
+            if term.column.scope.as_deref().is_some_and(|scope| scope != output_table) {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "union order_by must be scoped to the union output table".to_owned(),
+                ));
+            }
+            let table = schema_table(schema, output_table)?;
+            planner_column_type(&table, &term.column.column)?;
+            reject_author_ordering(&[OrderBy {
+                column: term.column.column,
+                direction: term.direction,
+            }])?;
+        }
     }
     let mut labels = BTreeSet::new();
     for arm in inputs {

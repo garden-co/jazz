@@ -102,15 +102,51 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
     Ok(query)
 }
 
-/// Distribute output-preserving relation wrappers over a UNION ALL so each
-/// arm can reuse the legacy single-relation resolver. `Distinct` is excluded:
-/// it is a post-union multiplicity boundary and must lower as its own row-set
-/// node rather than being pushed into arms.
+/// A retained `UNION ALL` and the terminal operators which must execute over
+/// the complete union. Filter and project remain arm-local because they are
+/// output-preserving, while order and window operators deliberately remain
+/// above the union to retain UNION ALL multiplicity and global page semantics.
+#[derive(Clone, Debug)]
+pub(crate) struct RelationUnionParts {
+    pub(crate) inputs: Vec<RelationUnionArm>,
+    pub(crate) order_by: Option<Vec<RelationOrderBy>>,
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+}
+
+impl RelationUnionParts {
+    fn has_terminal_steps(&self) -> bool {
+        self.order_by.is_some() || self.offset.is_some() || self.limit.is_some()
+    }
+}
+
+/// Return the labeled union arms, distributing only output-preserving wrappers.
+/// Callers which also execute the relation tree should use
+/// [`relation_union_parts`] so terminal order/window operators stay global.
 pub(crate) fn relation_union_arms(expr: &RelationExpr) -> Option<Vec<RelationUnionArm>> {
+    relation_union_parts(expr).map(|parts| parts.inputs)
+}
+
+/// Split a public union into independently normalizable arms and its global
+/// terminal order/window operators. The accepted order is the public builder's
+/// `OrderBy` then optional `Offset` then optional `Limit`; other wrapper
+/// arrangements are rejected instead of changing their meaning by pushing
+/// them into every arm.
+pub(crate) fn relation_union_parts(expr: &RelationExpr) -> Option<RelationUnionParts> {
     match expr {
-        RelationExpr::Union { inputs } => Some(inputs.clone()),
-        RelationExpr::Filter { input, predicate } => relation_union_arms(input).map(|arms| {
-            arms
+        RelationExpr::Union { inputs } => Some(RelationUnionParts {
+            inputs: inputs.clone(),
+            order_by: None,
+            offset: None,
+            limit: None,
+        }),
+        RelationExpr::Filter { input, predicate } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.inputs = parts
+                .inputs
                 .into_iter()
                 .map(|arm| RelationUnionArm {
                     label: arm.label,
@@ -119,10 +155,16 @@ pub(crate) fn relation_union_arms(expr: &RelationExpr) -> Option<Vec<RelationUni
                         predicate: predicate.clone(),
                     },
                 })
-                .collect()
-        }),
-        RelationExpr::Project { input, columns } => relation_union_arms(input).map(|arms| {
-            arms
+                .collect();
+            Some(parts)
+        }
+        RelationExpr::Project { input, columns } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.inputs = parts
+                .inputs
                 .into_iter()
                 .map(|arm| RelationUnionArm {
                     label: arm.label,
@@ -131,15 +173,37 @@ pub(crate) fn relation_union_arms(expr: &RelationExpr) -> Option<Vec<RelationUni
                         columns: columns.clone(),
                     },
                 })
-                .collect()
-        }),
+                .collect();
+            Some(parts)
+        }
+        RelationExpr::OrderBy { input, terms } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.order_by = Some(terms.clone());
+            Some(parts)
+        }
+        RelationExpr::Offset { input, offset } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.offset.is_some() || parts.limit.is_some() {
+                return None;
+            }
+            parts.offset = Some(*offset);
+            Some(parts)
+        }
+        RelationExpr::Limit { input, limit } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.limit.is_some() {
+                return None;
+            }
+            parts.limit = Some(*limit);
+            Some(parts)
+        }
         RelationExpr::TableScan { .. }
         | RelationExpr::Join { .. }
         | RelationExpr::Gather { .. }
-        | RelationExpr::Distinct { .. }
-        | RelationExpr::OrderBy { .. }
-        | RelationExpr::Offset { .. }
-        | RelationExpr::Limit { .. } => None,
+        | RelationExpr::Distinct { .. } => None,
     }
 }
 
