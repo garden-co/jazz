@@ -196,12 +196,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
 
 function readResultKey(reader: PostcardReaderLike): Uint8Array {
   const key = reader.bytes();
-  if (key[0] === 1) {
-    if (key.length <= 1 || (key.length - 1) % 16 !== 0) throw new Error("malformed v1 ResultKey");
-    return key;
-  }
-  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
-    throw new Error("malformed v2 ResultKey");
+  if (key[0] !== 1 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed ResultKey v1");
   }
   return key;
 }
@@ -221,9 +217,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
   cursor += joined * 16;
   const discriminators = readU32(cursor);
   cursor += 4;
-  // v2 is reserved for typed union occurrences. A zero-arm v2 value would
-  // normalize to the same ordered UUID key as a v1 occurrence.
-  if (discriminators === 0 || discriminators > joined) return false;
+  if (discriminators > joined) return false;
   let previousPosition = -1;
   for (let index = 0; index < discriminators; index++) {
     if (cursor + 8 > bytes.length) return false;

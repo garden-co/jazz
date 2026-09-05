@@ -89,7 +89,7 @@ describe("binding codec golden contract", () => {
   it("keeps added, updated, removed, and both ResultKey wire versions aligned", () => {
     const fixture = bindingCodecGoldenFixture();
     const deltaCase = fixture.subscription_deltas.find(
-      (candidate) => candidate.name === "added_updated_removed_with_v1_and_v2_occurrence_keys",
+      (candidate) => candidate.name === "added_updated_removed_with_complete_v1_occurrence_keys",
     )!;
     const delta = readNativeSubscriptionDelta(
       new PostcardReader(hexToBytes(deltaCase.payload_hex)),
@@ -133,7 +133,7 @@ describe("binding codec golden contract", () => {
     ).toThrow("relation snapshot has trailing postcard bytes");
 
     const delta = fixture.subscription_deltas.find(
-      (candidate) => candidate.name === "added_updated_removed_with_v1_and_v2_occurrence_keys",
+      (candidate) => candidate.name === "added_updated_removed_with_complete_v1_occurrence_keys",
     )!;
     const deltaWithSuffix = Uint8Array.from([...hexToBytes(delta.payload_hex), 0]);
     expect(() => readNativeSubscriptionDelta(new PostcardReader(deltaWithSuffix))).toThrow(
