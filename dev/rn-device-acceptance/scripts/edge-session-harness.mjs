@@ -236,10 +236,8 @@ function assertEndpointRefused(port) {
 
 /** Fail closed: a stopped process alone is insufficient if a descendant still
  * serves Edge. Preserve the original endpoint for the native SQLite scope. */
-export async function stopForOfflineRestart(child, port) {
-  if (child.exitCode === null && !child.signalCode) {
-    await terminateHarness(child);
-  }
+export async function stopForOfflineRestart(child, port, terminate = terminateHarness) {
+  await terminate(child);
   await new Promise((resolve, reject) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     socket.setTimeout(1_000);

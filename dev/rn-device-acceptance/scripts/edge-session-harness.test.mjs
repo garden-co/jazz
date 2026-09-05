@@ -350,6 +350,16 @@ test("offline restart rejects a live endpoint even after its claimed parent exit
   await stopForOfflineRestart(stoppedChild, port);
 });
 
+test("offline restart terminates a live group even when Cargo has already exited", async () => {
+  let terminated = 0;
+  const exitedCargoParent = { exitCode: 0, signalCode: null, pid: 45 };
+  await stopForOfflineRestart(exitedCargoParent, 65_534, async (child) => {
+    assert.equal(child, exitedCargoParent);
+    terminated++;
+  });
+  assert.equal(terminated, 1);
+});
+
 test("both drivers establish offline provenance before reopening the unchanged scope", () => {
   for (const platform of ["android", "ios"]) {
     const driver = readFileSync(new URL(`./run-${platform}.mjs`, import.meta.url), "utf8");
