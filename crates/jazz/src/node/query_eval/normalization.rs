@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::node::query_engine::{CoverageScope, InheritedContribution};
-use crate::query::{RelationExpr, RelationQuery};
+use crate::query::RelationQuery;
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -3411,7 +3411,7 @@ where
         binding: &Binding,
         schema: &RuntimeSchema,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let RelationExpr::Union { inputs } = &relation.rel else {
+        let Some(inputs) = crate::query::relation_union_arms(&relation.rel) else {
             return Err(Error::QueryCapability(
                 "retained relation body must be a UNION ALL".to_owned(),
             ));

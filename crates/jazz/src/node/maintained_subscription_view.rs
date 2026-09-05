@@ -1488,6 +1488,12 @@ fn rebind_terminal_operation_to_layout(
     if operation.root_descriptor == layout.root_descriptor {
         return Ok(operation.clone());
     }
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE terminal_descriptor_mismatch operation={:?} layout={:?}",
+            operation.root_descriptor, layout.root_descriptor,
+        );
+    }
     if !terminal_descriptor_can_rebind_to_layout(
         &operation.root_descriptor,
         &layout.root_descriptor,
@@ -1928,6 +1934,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
         AppRowCarrier::CurrentRow => 0,
         AppRowCarrier::Logical => 1,
     }]);
+    hasher.update(&[u8::from(rows.root_union_arm)]);
     for field in &public_fields {
         hasher.update(field.name.as_bytes());
         hasher.update(&[0]);
@@ -1951,6 +1958,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
             AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
             AppRowCarrier::Logical => TerminalRootCarrier::Logical,
         },
+        root_union_arm: rows.root_union_arm,
     }
 }
 
@@ -3483,6 +3491,7 @@ mod tests {
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
             terminal: crate::node::query_engine::AppRowTerminal::RootCollector,
+            root_union_arm: false,
         };
         let layout = terminal_root_layout(&rows);
         assert_eq!(
@@ -3536,6 +3545,7 @@ mod tests {
             root_descriptor: descriptor,
             public_fields: Vec::new(),
             carrier: TerminalRootCarrier::Logical,
+            root_union_arm: false,
         }
     }
 
@@ -4772,6 +4782,7 @@ mod terminal_role_hash_tests {
             field_carriers: BTreeMap::new(),
             public_field_names: BTreeMap::new(),
             terminal: AppRowTerminal::RootCollector,
+            root_union_arm: false,
         }
     }
 

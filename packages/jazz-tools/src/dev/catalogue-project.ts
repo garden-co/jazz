@@ -775,7 +775,7 @@ interface MigrationPublicationFile {
 }
 
 interface MigrationPublicationJournal {
-  version: 2;
+  version: 1;
   files: Array<{
     stagedName: string;
     finalRelativePath: string;
@@ -917,7 +917,7 @@ async function recoverMigrationPublication(storage: MigrationStorage): Promise<v
   }
   await assertNoSymlinkComponents(journalPath);
   const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationPublicationJournal;
-  if (journal.version !== 2 || !Array.isArray(journal.files) || journal.files.length === 0) {
+  if (journal.version !== 1 || !Array.isArray(journal.files) || journal.files.length === 0) {
     throw new Error(`Invalid interrupted migration publication journal: ${journalPath}`);
   }
   for (const file of journal.files) {
@@ -999,7 +999,7 @@ async function publishMigrationFilesRecoverably(
   await assertNoSymlinkComponents(journalPath, true);
   await mkdir(stageDir, { recursive: true });
   await assertNoSymlinkComponents(stageDir);
-  const journal: MigrationPublicationJournal = { version: 2, files: [] };
+  const journal: MigrationPublicationJournal = { version: 1, files: [] };
   for (const [index, file] of files.entries()) {
     await assertNoSymlinkComponents(dirname(file.finalPath), true);
     await assertNoSymlinkComponents(file.finalPath, true);

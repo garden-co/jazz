@@ -524,9 +524,15 @@ source-id vector above. A `UNION ALL` relation arm additionally contributes its
 stable normalized arm label immediately before that arm's source-row id. This
 typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
-`ResultKey`. Row-only keys retain the version-1 UUID-vector encoding byte for
-byte; keys with derivation discriminators use the version-2 typed encoding.
-Empty, duplicate-position, or out-of-range discriminators are malformed.
+`ResultKey`. Every ResultKey uses one complete version-1 typed encoding:
+`1 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
+(position:u32be | label_length:u32be | label:utf8)*`, where source position
+zero is the root and joined sources are positions one through `joined_count`.
+Ordinary results carry
+zero joined rows and arms; ordinary joins carry zero arms; union occurrences
+carry their ordered arm records. Empty, duplicate-position, or out-of-range
+discriminators are malformed. The former concatenated-UUID and tag-2 encodings
+are unreleased superseded formats and MUST be rejected.
 Nested non-recursive unions compose their stable semantic arm labels into one
 typed path component; sibling insertion or reordering therefore does not rekey
 unchanged arms. Sibling arm labels MUST be non-empty and unique within their

@@ -611,7 +611,9 @@ fn canonical_relation_query_key(query: &crate::query::RelationQuery) -> Result<V
             serde_json::Value::Array(values) => { out.push(b'['); put_len(out, values.len()); for value in values { write(value, out); } }
             serde_json::Value::Object(values) => {
                 out.push(b'{'); put_len(out, values.len());
-                for (key, value) in values { put_str(out, key); write(value, out); }
+                let mut entries = values.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                for (key, value) in entries { put_str(out, key); write(value, out); }
             }
         }
     }

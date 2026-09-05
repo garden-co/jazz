@@ -82,7 +82,7 @@ function typedResultKey(
   joined: readonly Uint8Array[],
   discriminators: ReadonlyArray<readonly [number, string]>,
 ): Uint8Array {
-  const bytes = [2, ...root];
+  const bytes = [1, ...root];
   pushU32Be(bytes, joined.length);
   for (const value of joined) bytes.push(...value);
   pushU32Be(bytes, discriminators.length);
@@ -96,7 +96,7 @@ function typedResultKey(
 }
 
 function occurrenceKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...uuidBytes(id)]);
+  return Uint8Array.from([1, ...uuidBytes(id), 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function runtimeAddedRecord(
@@ -311,11 +311,10 @@ describe("SubscriptionManager", () => {
           emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "typed", 1, sidecar)] }),
           transform,
         ),
-      ).toThrow(/malformed or noncanonical typed terminal occurrence key/);
+      ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
       expect(manager.all()).toEqual([]);
     };
 
-    rejectSidecar(typedResultKey(root, [joined], []));
     rejectSidecar(
       typedResultKey(
         root,
