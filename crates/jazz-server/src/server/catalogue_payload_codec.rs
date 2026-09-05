@@ -17,8 +17,9 @@ use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef,
-    RowDescriptor, RowIdRef, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelUnionArm,
+    RelValueRef, RowDescriptor, RowIdRef, Schema, SchemaHash, TableName, TablePolicies,
+    TableSchema, Value,
 };
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
@@ -883,6 +884,11 @@ const REL_UNION: u8 = 3;
 const REL_JOIN: u8 = 4;
 const REL_PROJECT: u8 = 5;
 const REL_GATHER: u8 = 6;
+/// Version-one labeled UNION ALL grammar: count, canonical labels, then arms.
+/// The former unlabeled `REL_UNION` spelling is rejected rather than assigning
+/// traversal-derived labels to persisted policy expressions.
+const REL_UNION_LABELED: u8 = 7;
+const MAX_RELATION_UNION_ARM_LABEL_BYTES: usize = 4096;
 
 const REL_PREDICATE_CMP: u8 = 1;
 const REL_PREDICATE_IS_NULL: u8 = 2;
@@ -934,10 +940,19 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                 tasks.push(RelationEncodeTask::Expr(input));
             }
             RelationEncodeTask::Expr(RelExpr::Union { inputs }) => {
-                buf.push(REL_UNION);
+                buf.push(REL_UNION_LABELED);
                 write_u32(buf, inputs.len() as u32);
-                for input in inputs.iter().rev() {
-                    tasks.push(RelationEncodeTask::Expr(input));
+                for arm in inputs {
+                    assert!(
+                        !arm.label.is_empty()
+                            && arm.label.len() <= MAX_RELATION_UNION_ARM_LABEL_BYTES
+                            && !arm.label.contains('\0'),
+                        "relation union arm labels must be 1..=4096 bytes and NUL-free"
+                    );
+                    write_string(buf, &arm.label);
+                }
+                for arm in inputs.iter().rev() {
+                    tasks.push(RelationEncodeTask::Expr(&arm.input));
                 }
             }
             RelationEncodeTask::Expr(RelExpr::Join {
@@ -1071,7 +1086,7 @@ enum RelationDecodeTask {
     Expr(usize),
     Pred(usize),
     FilterDone,
-    UnionDone(usize),
+    UnionDone(Vec<String>),
     JoinTail,
     JoinDone,
     ProjectTail,
@@ -1114,9 +1129,29 @@ fn decode_relation_expr_body_iterative(
                         tasks.push(RelationDecodeTask::Expr(depth + 1));
                     }
                     REL_UNION => {
+                        return Err(CatalogueEncodingError::DecodeError {
+                            message: "unlabeled relation union grammar is unsupported".to_owned(),
+                        });
+                    }
+                    REL_UNION_LABELED => {
                         let count = read_count(data, offset, "relation_union")?;
                         budget.reserve(count)?;
-                        tasks.push(RelationDecodeTask::UnionDone(count));
+                        let mut labels = Vec::with_capacity(count);
+                        let mut seen = BTreeSet::new();
+                        for _ in 0..count {
+                            let label = read_string(data, offset, "relation_union_label")?;
+                            if label.is_empty()
+                                || label.len() > MAX_RELATION_UNION_ARM_LABEL_BYTES
+                                || label.contains('\0')
+                                || !seen.insert(label.clone())
+                            {
+                                return Err(CatalogueEncodingError::DecodeError {
+                                    message: "relation union labels must be unique, NUL-free, and 1..=4096 bytes".to_owned(),
+                                });
+                            }
+                            labels.push(label);
+                        }
+                        tasks.push(RelationDecodeTask::UnionDone(labels));
                         for _ in 0..count {
                             tasks.push(RelationDecodeTask::Expr(depth + 1));
                         }
@@ -1165,10 +1200,13 @@ fn decode_relation_expr_body_iterative(
                     predicate,
                 }));
             }
-            RelationDecodeTask::UnionDone(count) => {
-                let mut inputs = Vec::with_capacity(count);
-                for _ in 0..count {
-                    inputs.push(pop_expr(&mut values)?);
+            RelationDecodeTask::UnionDone(labels) => {
+                let mut inputs = Vec::with_capacity(labels.len());
+                for label in labels.into_iter().rev() {
+                    inputs.push(RelUnionArm {
+                        label,
+                        input: pop_expr(&mut values)?,
+                    });
                 }
                 inputs.reverse();
                 values.push(RelationDecodeValue::Expr(RelExpr::Union { inputs }));
@@ -3656,7 +3694,7 @@ mod tests {
             })
         );
 
-        let mut wide_expr = vec![NESTED_CODEC_VERSION, REL_UNION];
+        let mut wide_expr = vec![NESTED_CODEC_VERSION, REL_UNION_LABELED];
         write_u32(&mut wide_expr, MAX_POLICY_EXPRESSION_NODES as u32);
         wide_expr.extend(std::iter::repeat_n(0, MAX_POLICY_EXPRESSION_NODES));
         assert!(matches!(
@@ -3690,7 +3728,7 @@ mod tests {
     fn catalogue_policy_budget_spans_outer_and_relation_subtree() {
         // Each side is below the 16,384-node ceiling on its own. Their sum is
         // not: do not let ExistsRel start a fresh accounting root.
-        let mut relation = vec![NESTED_CODEC_VERSION, REL_UNION];
+        let mut relation = vec![NESTED_CODEC_VERSION, REL_UNION_LABELED];
         write_u32(&mut relation, 8_191);
         relation.extend(std::iter::repeat_n(0, 8_191));
 
@@ -3743,12 +3781,15 @@ mod tests {
             seed: Box::new(RelExpr::Project {
                 input: Box::new(RelExpr::Join {
                     left: Box::new(RelExpr::Union {
-                        inputs: vec![RelExpr::Filter {
-                            input: Box::new(RelExpr::TableScan {
-                                table: TableName::new("documents"),
-                                alias: Some("d".to_owned()),
-                            }),
-                            predicate,
+                        inputs: vec![RelUnionArm {
+                            label: "documents".to_owned(),
+                            input: RelExpr::Filter {
+                                input: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("documents"),
+                                    alias: Some("d".to_owned()),
+                                }),
+                                predicate,
+                            },
                         }],
                     }),
                     right: Box::new(RelExpr::TableScan {
@@ -3784,6 +3825,57 @@ mod tests {
             encode_permissions(&decode_permissions(&encoded).unwrap()),
             encoded
         );
+    }
+
+    #[test]
+    fn labeled_relation_union_uses_explicit_canonical_wire_grammar() {
+        let relation = RelExpr::Union {
+            inputs: vec![
+                RelUnionArm {
+                    label: "a".to_owned(),
+                    input: RelExpr::TableScan {
+                        table: TableName::new("a"),
+                        alias: None,
+                    },
+                },
+                RelUnionArm {
+                    label: "b".to_owned(),
+                    input: RelExpr::TableScan {
+                        table: TableName::new("b"),
+                        alias: None,
+                    },
+                },
+            ],
+        };
+        let mut encoded = Vec::new();
+        encode_canonical_relation_expr(&mut encoded, &relation);
+        assert_eq!(
+            hex(&encoded),
+            "010702000000010000006101000000620101000000610001010000006200"
+        );
+        let mut offset = 0;
+        assert_eq!(
+            decode_canonical_relation_expr(
+                &encoded,
+                &mut offset,
+                &mut PolicyExpressionDecodeBudget::default(),
+            )
+            .expect("labeled union grammar decodes"),
+            relation
+        );
+        assert_eq!(offset, encoded.len());
+
+        let mut legacy = vec![NESTED_CODEC_VERSION, REL_UNION];
+        write_u32(&mut legacy, 0);
+        let mut offset = 0;
+        assert!(matches!(
+            decode_canonical_relation_expr(
+                &legacy,
+                &mut offset,
+                &mut PolicyExpressionDecodeBudget::default(),
+            ),
+            Err(CatalogueEncodingError::DecodeError { .. })
+        ));
     }
 
     #[test]
