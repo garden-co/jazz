@@ -20,7 +20,8 @@ struct RelationFacadeJoin {
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
-    if let Some(inputs) = relation_union_arms(&query.rel) {
+    if let Some(parts) = relation_union_parts(&query.rel) {
+        let inputs = parts.inputs;
         if inputs.is_empty() {
             return Err(relation_unification_error(
                 "union requires at least one labeled input",
@@ -102,6 +103,23 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
     Ok(query)
 }
 
+/// The order used when materializing a retained public UNION ALL result set.
+/// The row-set compiler owns terminal pagination; callers use this only to
+/// restore the ordered Vec after identity-keyed result storage.
+pub(crate) fn relation_union_presentation_order(relation: &RelationQuery) -> Option<Vec<OrderBy>> {
+    relation_union_parts(&relation.rel).and_then(|parts| {
+        parts.order_by.map(|terms| {
+            terms
+                .into_iter()
+                .map(|term| OrderBy {
+                    column: term.column.column,
+                    direction: term.direction,
+                })
+                .collect()
+        })
+    })
+}
+
 /// A retained `UNION ALL` and the terminal operators which must execute over
 /// the complete union. Filter and project remain arm-local because they are
 /// output-preserving, while order and window operators deliberately remain
@@ -118,13 +136,6 @@ impl RelationUnionParts {
     fn has_terminal_steps(&self) -> bool {
         self.order_by.is_some() || self.offset.is_some() || self.limit.is_some()
     }
-}
-
-/// Return the labeled union arms, distributing only output-preserving wrappers.
-/// Callers which also execute the relation tree should use
-/// [`relation_union_parts`] so terminal order/window operators stay global.
-pub(crate) fn relation_union_arms(expr: &RelationExpr) -> Option<Vec<RelationUnionArm>> {
-    relation_union_parts(expr).map(|parts| parts.inputs)
 }
 
 /// Split a public union into independently normalizable arms and its global
