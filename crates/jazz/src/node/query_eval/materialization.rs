@@ -1137,7 +1137,15 @@ where
         // Groove lowering owns membership/windowing, but one-shot APIs still
         // return a deterministic Vec. Re-apply ordering to the selected rows
         // without re-applying pagination.
-        self.apply_query_order_in_schema(query, schema_version, rows)
+        let mut presentation_query = query.clone();
+        if presentation_query.order_by.is_empty() {
+            if let Some(relation) = &presentation_query.relation {
+                if let Some(order_by) = crate::query::relation_union_presentation_order(relation) {
+                    presentation_query.order_by = order_by;
+                }
+            }
+        }
+        self.apply_query_order_in_schema(&presentation_query, schema_version, rows)
     }
 
     pub(super) fn query_output_table(

@@ -1350,7 +1350,7 @@ function encodeSubscriptionDelta({
   writer.vec(() => undefined, 0);
   for (const rows of [added, updated]) {
     writer.vec((key, index) => {
-      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId]));
+      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId, 0, 0, 0, 0, 0, 0, 0, 0]));
     }, rows.length);
   }
   writer.vec(() => undefined, 0);

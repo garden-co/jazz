@@ -1474,6 +1474,7 @@ fn align_collect_root_window(
             .iter()
             .chain(&path.output_steps)
             .collect::<Vec<_>>(),
+        AnalyzedQueryPlan::Union(union) => union.terminal_steps.iter().collect::<Vec<_>>(),
         _ => Vec::new(),
     };
     for step in steps {
@@ -1630,6 +1631,20 @@ fn collect_root_input_for_value(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<String> {
+    if let NormalizedValueRef::SourceField { field, .. } = value
+        && field == "__root_union_arm"
+    {
+        return layout
+            .root_fields
+            .iter()
+            .find(|candidate| candidate.source_field.as_deref() == Some(field))
+            .map(|candidate| candidate.input.clone())
+            .ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Operator(
+                    "collector root union-arm tie-breaker is missing".to_owned(),
+                ))
+            });
+    }
     match collect_window_source_field(source, value).and_then(|field| field.name.as_deref()) {
         Some(field) => layout
             .root_fields
@@ -2557,6 +2572,7 @@ fn projected_multisource_terminal(
 fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
     match plan {
         AnalyzedQueryPlan::Linear(plan) => Some(&plan.steps),
+        AnalyzedQueryPlan::Union(union) => Some(&union.terminal_steps),
         _ => None,
     }
 }
