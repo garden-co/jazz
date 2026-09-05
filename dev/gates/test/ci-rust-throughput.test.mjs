@@ -1762,8 +1762,14 @@ test("React Native CI has a separate bridge-enabled producer and real Vitest adm
   const reactNative = job("test-react-native");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(reactNative, /local-ci-equivalent\.mjs --ci-partition react-native/);
-  assert.match(localCi, /React Native bridge correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/);
-  assert.match(localCi, /admitted Jazz Tools build for React Native[\s\S]*run-correctness-consumer\.mjs/);
+  assert.match(
+    localCi,
+    /React Native bridge correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/,
+  );
+  assert.match(
+    localCi,
+    /admitted Jazz Tools build for React Native[\s\S]*run-correctness-consumer\.mjs/,
+  );
   assert.match(localCi, /React Native bridge tests[\s\S]*vitest\.react-native\.config\.ts/);
   assert.match(localCi, /JAZZ_RN_TEST_BRIDGE: "1"/);
 });
