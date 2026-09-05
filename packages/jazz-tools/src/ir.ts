@@ -103,9 +103,16 @@ export type PolicyIRExpr =
 
 /** Encode the Rust-owned closed JRQ v1 relation grammar. */
 export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
-  const bytes: number[] = [0x4a, 0x52, 0x51, 0x01];
-  const text = new TextEncoder();
   const maxBytes = 1 << 20;
+  class JBytes extends Array<number> {
+    override push(...items: number[]): number {
+      if (this.length + items.length > maxBytes) throw new Error("invalid JRQ: byte limit");
+      return super.push(...items);
+    }
+  }
+  const bytes = new JBytes();
+  bytes.push(0x4a, 0x52, 0x51, 0x01);
+  const text = new TextEncoder();
   const maxDepth = 128;
   const maxItems = 4096;
   const maxString = 1 << 16;

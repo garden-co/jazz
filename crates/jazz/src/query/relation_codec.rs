@@ -10,6 +10,52 @@ const MAX_STRING: usize = 1 << 16;
 const MAX_UNION_LABEL: usize = 4096;
 const MAX_DIMENSION: usize = u32::MAX as usize;
 
+/// The sole JRQ encoder sink. Every append checks the configured byte budget
+/// before growing the backing allocation; callers surface a stored overflow at
+/// the public encoder boundary.
+struct JWriter {
+    bytes: Vec<u8>,
+    overflow: bool,
+}
+impl JWriter {
+    fn with_prefix(prefix: &[u8]) -> Self {
+        Self {
+            bytes: prefix.to_vec(),
+            overflow: prefix.len() > MAX_BYTES,
+        }
+    }
+    fn push(&mut self, byte: u8) {
+        if self.overflow || self.bytes.len() >= MAX_BYTES {
+            self.overflow = true;
+            return;
+        }
+        self.bytes.push(byte);
+    }
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        if self.overflow
+            || self
+                .bytes
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|length| length > MAX_BYTES)
+        {
+            self.overflow = true;
+            return;
+        }
+        self.bytes.extend_from_slice(bytes);
+    }
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+    fn into_bytes(self) -> CodecResult<Vec<u8>> {
+        if self.overflow {
+            Err(bad("too large"))
+        } else {
+            Ok(self.bytes)
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 /// Failure while encoding or decoding the bounded JRQ v1 carrier.
 pub enum RelationCodecError {
@@ -63,7 +109,7 @@ impl JState {
     }
 }
 
-fn jrq_put_len(out: &mut Vec<u8>, mut value: usize) {
+fn jrq_put_len(out: &mut JWriter, mut value: usize) {
     loop {
         let mut byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -76,7 +122,7 @@ fn jrq_put_len(out: &mut Vec<u8>, mut value: usize) {
         }
     }
 }
-fn jrq_put_u64(out: &mut Vec<u8>, mut value: u64) {
+fn jrq_put_u64(out: &mut JWriter, mut value: u64) {
     loop {
         let mut byte = (value & 0x7f) as u8;
         value >>= 7;
@@ -117,7 +163,7 @@ fn len_bytes(mut value: usize) -> usize {
     }
     bytes
 }
-fn ensure_room(out: &[u8], additional: usize) -> CodecResult<()> {
+fn ensure_room(out: &JWriter, additional: usize) -> CodecResult<()> {
     if out
         .len()
         .checked_add(additional)
@@ -154,7 +200,7 @@ fn get_len(input: &mut &[u8]) -> CodecResult<usize> {
     }
     Err(bad("length overflow"))
 }
-fn put_string(out: &mut Vec<u8>, value: &str, state: &mut JState) -> CodecResult<()> {
+fn put_string(out: &mut JWriter, value: &str, state: &mut JState) -> CodecResult<()> {
     state.string(value.len())?;
     ensure_room(out, len_bytes(value.len()) + value.len())?;
     jrq_put_len(out, value.len());
@@ -173,7 +219,7 @@ fn get_string(input: &mut &[u8], state: &mut JState) -> CodecResult<String> {
         .map_err(|_| bad("invalid utf8"))?
         .to_owned())
 }
-fn put_count(out: &mut Vec<u8>, len: usize, state: &JState) -> CodecResult<()> {
+fn put_count(out: &mut JWriter, len: usize, state: &JState) -> CodecResult<()> {
     state.collection(len)?;
     jrq_put_len(out, len);
     Ok(())
@@ -183,7 +229,7 @@ fn get_count(input: &mut &[u8], state: &JState) -> CodecResult<usize> {
     state.collection(len)?;
     Ok(len)
 }
-fn put_dimension(out: &mut Vec<u8>, value: usize) -> CodecResult<()> {
+fn put_dimension(out: &mut JWriter, value: usize) -> CodecResult<()> {
     if value > MAX_DIMENSION {
         return Err(bad("dimension too large"));
     }
@@ -197,7 +243,7 @@ fn get_dimension(input: &mut &[u8]) -> CodecResult<usize> {
     }
     Ok(value)
 }
-fn put_label(out: &mut Vec<u8>, label: &str, state: &mut JState) -> CodecResult<()> {
+fn put_label(out: &mut JWriter, label: &str, state: &mut JState) -> CodecResult<()> {
     if label.is_empty() || label.len() > MAX_UNION_LABEL || label.as_bytes().contains(&0) {
         return Err(bad("invalid union label"));
     }
@@ -211,7 +257,7 @@ fn get_label(input: &mut &[u8], state: &mut JState) -> CodecResult<String> {
     Ok(label)
 }
 
-fn put_column(out: &mut Vec<u8>, value: &RelationColumnRef, state: &mut JState) -> CodecResult<()> {
+fn put_column(out: &mut JWriter, value: &RelationColumnRef, state: &mut JState) -> CodecResult<()> {
     match &value.scope {
         None => out.push(0),
         Some(scope) => {
@@ -232,7 +278,7 @@ fn get_column(input: &mut &[u8], state: &mut JState) -> CodecResult<RelationColu
         column: get_string(input, state)?,
     })
 }
-fn put_row_id(out: &mut Vec<u8>, value: RelationRowIdRef) {
+fn put_row_id(out: &mut JWriter, value: RelationRowIdRef) {
     out.push(match value {
         RelationRowIdRef::Current => 0,
         RelationRowIdRef::Outer => 1,
@@ -250,7 +296,7 @@ fn get_row_id(input: &mut &[u8]) -> CodecResult<RelationRowIdRef> {
 
 // Literal tags: null=0 false=1 true=2 i64=3 u64=4 f64-le=5 string=6 array=7 object=8.
 fn put_json(
-    out: &mut Vec<u8>,
+    out: &mut JWriter,
     value: &serde_json::Value,
     depth: usize,
     state: &mut JState,
@@ -353,7 +399,7 @@ fn get_json(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<
     })
 }
 
-fn put_key(out: &mut Vec<u8>, value: &RelationKeyRef, state: &mut JState) -> CodecResult<()> {
+fn put_key(out: &mut JWriter, value: &RelationKeyRef, state: &mut JState) -> CodecResult<()> {
     match value {
         RelationKeyRef::Column(value) => {
             out.push(0);
@@ -374,7 +420,7 @@ fn get_key(input: &mut &[u8], state: &mut JState) -> CodecResult<RelationKeyRef>
     }
 }
 fn put_project_expr(
-    out: &mut Vec<u8>,
+    out: &mut JWriter,
     value: &RelationProjectExpr,
     state: &mut JState,
 ) -> CodecResult<()> {
@@ -399,7 +445,7 @@ fn get_project_expr(input: &mut &[u8], state: &mut JState) -> CodecResult<Relati
 }
 
 fn jrq_put_value(
-    out: &mut Vec<u8>,
+    out: &mut JWriter,
     value: &RelationValueRef,
     depth: usize,
     state: &mut JState,
@@ -463,7 +509,7 @@ fn get_value(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult
 
 // Predicate tags: cmp=0 is-null=1 is-not-null=2 in=3 contains=4 enum-match=5 and=6 or=7 not=8 true=9 false=10.
 fn put_predicate(
-    out: &mut Vec<u8>,
+    out: &mut JWriter,
     value: &RelationPredicate,
     depth: usize,
     state: &mut JState,
@@ -618,7 +664,7 @@ fn get_predicate(
 
 // Relation tags: table=0 filter=1 union=2 join=3 project=4 gather=5 distinct=6 order=7 offset=8 limit=9.
 fn put_expr(
-    out: &mut Vec<u8>,
+    out: &mut JWriter,
     value: &RelationExpr,
     depth: usize,
     state: &mut JState,
@@ -890,12 +936,9 @@ fn get_expr(input: &mut &[u8], depth: usize, state: &mut JState) -> CodecResult<
 
 /// Encode a relation query into canonical JRQ v1 bytes.
 pub fn encode_relation_query_v1(query: &RelationQuery) -> CodecResult<Vec<u8>> {
-    let mut out = MAGIC.to_vec();
+    let mut out = JWriter::with_prefix(MAGIC);
     put_expr(&mut out, &query.rel, 0, &mut JState::default())?;
-    if out.len() > MAX_BYTES {
-        return Err(bad("too large"));
-    }
-    Ok(out)
+    out.into_bytes()
 }
 /// Decode exactly one JRQ v1 query, rejecting unknown and trailing bytes.
 pub fn decode_relation_query_v1_exact(bytes: &[u8]) -> CodecResult<RelationQuery> {
@@ -1129,6 +1172,27 @@ mod relation_codec_tests {
             };
         }
         assert!(encode_relation_query_v1(&RelationQuery { rel }).is_err());
+    }
+
+    #[test]
+    fn jrq_v1_checked_writer_rejects_mixed_values_before_growing_past_budget() {
+        let mut values = Vec::new();
+        for _ in 0..3000 {
+            values.push(RelationValueRef::Param("x".repeat(346)));
+        }
+        for _ in 0..1095 {
+            values.push(RelationValueRef::RowId(RelationRowIdRef::Current));
+        }
+        let query = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(scan("rows")),
+                predicate: RelationPredicate::In {
+                    left: col("value"),
+                    values,
+                },
+            },
+        };
+        assert!(encode_relation_query_v1(&query).is_err());
     }
 
     #[test]

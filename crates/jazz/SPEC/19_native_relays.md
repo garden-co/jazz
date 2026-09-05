@@ -480,6 +480,28 @@ event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 `AllRelationQuery` accepts JRQ v1 `query_bytes`, the explicit bounded binary
 relation grammar, and uses the core relation resolver plus asynchronous canonical
 query preparation.
+
+### JRQ v1 relation-query bytes
+
+JRQ v1 starts with the four bytes `JRQ\x01`. It is a closed grammar: all lengths
+are minimal unsigned LEB128, the payload must consume exactly the byte vector,
+and unknown tags are rejected. Strings are UTF-8 and at most 65,536 bytes;
+collections, total AST/value nodes, and nesting are each bounded by 4,096,
+4,096, and 128 respectively; the complete carrier is at most 1 MiB. Union
+labels are unique, UTF-8, NUL-free, and contain 1 through 4,096 bytes.
+
+| Grammar family      | Tags in v1 order                                                                                                          |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Relation expression | `TableScan=0`, `Filter=1`, `Union=2`, `Join=3`, `Project=4`, `Gather=5`, `Distinct=6`, `OrderBy=7`, `Offset=8`, `Limit=9` |
+| Predicate           | `Cmp=0`, `IsNull=1`, `IsNotNull=2`, `In=3`, `Contains=4`, `EnumMatch=5`, `And=6`, `Or=7`, `Not=8`, `True=9`, `False=10`   |
+| Value reference     | `Literal=0`, `Param=1`, `SessionRef=2`, `OuterColumn=3`, `FrontierColumn=4`, `RowId=5`                                    |
+| JSON literal        | `Null=0`, `False=1`, `True=2`, `i64=3`, `u64=4`, raw little-endian `f64=5`, `String=6`, `Array=7`, `Object=8`             |
+
+Literal integers use signed zigzag `i64` when the public JSON number fits that
+domain, then `u64`; non-integral values use raw IEEE-754 `f64` bytes. Semantic
+dimensions (`Offset`, `Limit`, and `Gather.MaxDepth`) are capped at `u32::MAX`
+so native and WASM32 accept the same grammar. Encoders use checked byte sinks:
+they fail before an append would exceed the carrier limit.
 It shares the same coverage, row hydration, pending-operation, and cleanup path
 as ordinary option-bearing reads. As on the other native bindings, raw
 relation-IR one-shot reads require the default read view; transaction-local

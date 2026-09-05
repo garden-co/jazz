@@ -42,4 +42,19 @@ describe("encodeRelationQueryV1", () => {
       }),
     ).toThrow("dimension");
   });
+
+  test("checked writer rejects mixed values at the byte boundary", () => {
+    const values = [
+      ...Array.from({ length: 3000 }, () => ({ Param: "x".repeat(346) }) as const),
+      ...Array.from({ length: 1095 }, () => ({ RowId: "Current" }) as const),
+    ];
+    expect(() =>
+      encodeRelationQueryV1({
+        Filter: {
+          input: { TableScan: { table: "rows" } },
+          predicate: { In: { left: { column: "value" }, values } },
+        },
+      }),
+    ).toThrow("byte limit");
+  });
 });
