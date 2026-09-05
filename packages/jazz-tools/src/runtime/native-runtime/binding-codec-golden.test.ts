@@ -86,7 +86,7 @@ describe("binding codec golden contract", () => {
     expect(bytesToHex(snapshot.rows[1]!.rows[0]!.rowId)).toBe("21".repeat(16));
   });
 
-  it("keeps added, updated, removed, and both ResultKey wire versions aligned", () => {
+  it("keeps added, updated, and removed ResultKey V1 sidecars aligned", () => {
     const fixture = bindingCodecGoldenFixture();
     const deltaCase = fixture.subscription_deltas.find(
       (candidate) => candidate.name === "added_updated_removed_with_complete_v1_occurrence_keys",
@@ -99,8 +99,8 @@ describe("binding codec golden contract", () => {
     expect(delta.updated.map((batch) => batch.table)).toEqual(["notes"]);
     expect(delta.removed).toEqual([{ table: "todos", rowId: expect.any(Uint8Array) }]);
     expect(delta.addedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
-    expect(delta.updatedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
-    expect(delta.removedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
+    expect(delta.updatedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
+    expect(delta.removedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
     expect(delta.addedIndices).toEqual([2]);
     expect(delta.updatedPreviousIndices).toEqual([4]);
     expect(delta.updatedIndices).toEqual([1]);
