@@ -815,7 +815,79 @@ fn lower_union_plan(
             Some(("__root_union_arm".to_owned(), "__root_union_row".to_owned()));
         lowered.push(input);
     }
-    lower_union_inputs(lowered, request)
+    let lowered = lower_union_inputs(lowered, request)?;
+    lower_union_terminal_steps(lowered, &union.terminal_steps, root_source, request)
+}
+
+fn lower_union_terminal_steps(
+    mut input: LoweredRelationInput,
+    steps: &[LinearStep],
+    root_source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    if steps.is_empty() {
+        return Ok(input);
+    }
+    let root = input.root_source.as_ref().unwrap_or(root_source);
+    let plan = LinearCurrentRoot {
+        root: LinearRoot::Source {
+            source: root.row_shape.source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+        steps: Vec::new(),
+    };
+    let mut pending_order = None;
+    for step in steps {
+        match step {
+            LinearStep::OrderBy(keys) => pending_order = Some(keys.clone()),
+            LinearStep::Slice {
+                partition_by,
+                limit,
+                offset,
+                tie_breaker,
+                ..
+            } => {
+                let order = pending_order.take().unwrap_or_default();
+                input.graph = lower_window(
+                    input.graph,
+                    &order,
+                    partition_by,
+                    &root.routing_fields,
+                    *limit,
+                    *offset,
+                    tie_breaker,
+                    &plan,
+                    root,
+                    request,
+                )?;
+            }
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::Project(_)
+            | LinearStep::Aggregate { .. } => {
+                return Err(UnsupportedReason::Operator(
+                    "only global order/window operators may wrap a public UNION ALL".to_owned(),
+                ));
+            }
+        }
+    }
+    if let Some(order) = pending_order {
+        input.graph = lower_window(
+            input.graph,
+            &order,
+            &[],
+            &root.routing_fields,
+            None,
+            0,
+            &[NormalizedValueRef::RowId(RowIdRef::Source(
+                root.row_shape.source.clone(),
+            ))],
+            &plan,
+            root,
+            request,
+        )?;
+    }
+    Ok(input)
 }
 
 fn lower_union_inputs(

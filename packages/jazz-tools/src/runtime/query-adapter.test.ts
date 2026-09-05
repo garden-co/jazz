@@ -45,19 +45,55 @@ describe("translateQuery", () => {
     const second = app.todos.where({
       metadata: { eq: new Date("2026-01-02T00:00:00.000Z") },
     } as any);
+    const bigint = app.todos.where({ metadata: { eq: 9_007_199_254_740_993n } } as any);
     const bytes = app.todos.where({ attachment: { eq: new Uint8Array([1, 2, 3]) } } as any);
     const wide = app.todos.where({ metadata: { eq: "x".repeat(10_000) } } as any);
-    const union = app.union([first, second, bytes, wide]) as any;
+    const union = app.union([first, second, bigint, bytes, wide]) as any;
     const labels = union._unionVal.union.inputs.map((arm: any) => arm.label);
-    expect(labels).toHaveLength(4);
-    expect(new Set(labels).size).toBe(4);
-    expect(labels.every((label: string) => label.length <= 4096)).toBe(true);
+    expect(labels).toHaveLength(5);
+    expect(new Set(labels).size).toBe(5);
+    expect(
+      labels.every((label: string) => new TextEncoder().encode(label).byteLength <= 4096),
+    ).toBe(true);
+
+    const reordered = app.union([wide, bytes, bigint, second, first]) as any;
+    expect(new Set(reordered._unionVal.union.inputs.map((arm: any) => arm.label))).toEqual(
+      new Set(labels),
+    );
+    const inserted = app.union([first, app.todos.where({ title: "inserted" }), second]) as any;
+    expect(inserted._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
+      labels[0],
+      expect.any(String),
+      labels[1],
+    ]);
 
     const named = app.union({ duplicate: first, second });
     expect((named as any)._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
       "duplicate",
       "second",
     ]);
+    expect(() => app.union({ ["é".repeat(2049)]: first })).toThrow(/1..=4096 bytes/);
+
+    const nestedForward = app.union({
+      outer: app.union({ z: first, ä: second }),
+    }) as any;
+    const nestedReverse = app.union({
+      outer: app.union({ ä: second, z: first }),
+    }) as any;
+    expect(nestedForward._unionVal.union.inputs[0].input.union.inputs).not.toEqual(
+      nestedReverse._unionVal.union.inputs[0].input.union.inputs,
+    );
+    expect(nestedForward._unionVal.union.inputs[0].label).toEqual(
+      nestedReverse._unionVal.union.inputs[0].label,
+    );
+  });
+
+  it("rejects public union modifiers that retained relation lowering cannot compose", () => {
+    const union = app.union([app.todos.where({ done: false }), app.todos.where({ title: "a" })]);
+    expect(() => union.select("title")).toThrow(/select\(\.\.\.\) is not supported/);
+    expect(() => union.include({})).toThrow(/include\(\.\.\.\) is not supported/);
+    expect(() => union.requireIncludes()).toThrow(/requireIncludes\(\) is not supported/);
+    expect(() => union.includeDeleted()).toThrow(/includeDeleted\(\) is not supported/);
   });
 
   it("rejects colliding externally supplied relation schemas during query lowering", () => {

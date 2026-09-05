@@ -1061,6 +1061,7 @@ export class TypedTableQueryBuilder<
   select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
   ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("select(...)");
     const clone = this._clone<TInclude, NewSelection, TRequired>();
     const first = selection[0];
     clone._select =
@@ -1073,12 +1074,14 @@ export class TypedTableQueryBuilder<
   include<NewInclude extends BuilderInclude<TMeta>>(
     relations: NewInclude,
   ): MetaQueryHandle<TMeta, TInclude & NewInclude, TSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("include(...)");
     const clone = this._clone<TInclude & NewInclude, TSelection, TRequired>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
   requireIncludes(): MetaQueryHandle<TMeta, TInclude, TSelection, true> {
+    this._rejectUnsupportedUnionModifier("requireIncludes()");
     const clone = this._clone<TInclude, TSelection, true>();
     clone._requireIncludes = true;
     return clone;
@@ -1106,6 +1109,7 @@ export class TypedTableQueryBuilder<
   }
 
   includeDeleted(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("includeDeleted()");
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._includeDeleted = true;
     return clone;
@@ -1291,6 +1295,14 @@ export class TypedTableQueryBuilder<
       }
     }
     return built;
+  }
+
+  private _rejectUnsupportedUnionModifier(modifier: string): void {
+    if (this._unionVal) {
+      throw new Error(
+        `union(...) currently supports only orderBy(...), offset(...), limit(...), and gather(...); ${modifier} is not supported.`,
+      );
+    }
   }
 
   _serializeRelation(): BuiltRelation {
@@ -1690,7 +1702,7 @@ function createAppForTables(
       }
       const labels = new Set<string>();
       for (const { label } of arms) {
-        if (!label || label.length > 4096 || label.includes("\0") || labels.has(label)) {
+        if (!label || utf8ByteLength(label) > 4096 || label.includes("\0") || labels.has(label)) {
           throw new Error(
             "union(...) arm labels must be 1..=4096 bytes, NUL-free, and unique; use named arms for duplicate relations.",
           );
@@ -1719,12 +1731,29 @@ function createAppForTables(
   } as App<Schema<SchemaDefinition>>;
 }
 
+const utf8 = new TextEncoder();
+
+function utf8ByteLength(value: string): number {
+  return utf8.encode(value).byteLength;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
 function derivedUnionArmLabel(relation: BuiltRelation): string {
   // Labels are public durable input and therefore have a fixed small bound.
   // Hash the typed canonical relation instead of embedding JSON: Date, bigint
   // and byte values have non-JSON semantics, and a large literal must not turn
   // a valid array union into an overlong inferred label.
-  return `derived:${bytesToHex(blake3(new TextEncoder().encode(canonicalUnionRelation(relation))))}`;
+  return `derived:${bytesToHex(blake3(utf8.encode(canonicalUnionRelation(relation))))}`;
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
@@ -1739,7 +1768,7 @@ function canonicalUnionRelation(relation: BuiltRelation): string {
       ? {
           union: relation.union.inputs
             .map((arm) => ({ label: arm.label, input: canonicalUnionRelation(arm.input) }))
-            .sort((left, right) => left.label.localeCompare(right.label)),
+            .sort((left, right) => compareUtf8(left.label, right.label)),
         }
       : {}),
   };
