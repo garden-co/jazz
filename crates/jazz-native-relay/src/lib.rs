@@ -4101,7 +4101,7 @@ impl Drop for SocketUpstreamLease {
             let generation = self.generation;
             match self
                 .relay
-                .run_teardown(move |worker| Ok(worker.retire_socket_upstream(generation)))
+                .run_teardown(move |worker| worker.retire_socket_upstream(generation))
             {
                 Err(RelayError::OwnerQueueFull) => {
                     thread::sleep(std::time::Duration::from_millis(1))
@@ -4189,7 +4189,7 @@ async fn run_native_relay_socket_worker(
                 return;
             }
             match relay.run(move |worker| {
-                worker.poll_upstream_transition();
+                worker.poll_upstream_transition()?;
                 if worker.socket_generation != generation || worker.socket_wire.is_none() {
                     return Err(RelayError::Closed);
                 }
@@ -4707,10 +4707,13 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Option<(
-                Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
-                NativeRelayWire,
-            )>,
+            Output = Result<
+                Option<(
+                    Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+                    NativeRelayWire,
+                )>,
+                RelayError,
+            >,
         >,
     >,
 >;
@@ -4807,22 +4810,26 @@ impl RelayWorker {
         let previous = Rc::clone(&self._upstream);
         self.upstream_attached = false;
         self.upstream_transition = Some(Box::pin(async move {
-            persistent.detach_connection_async(&previous).await;
+            persistent
+                .detach_connection_async(&previous)
+                .await
+                .map_err(RelayError::Db)?;
             let connection = persistent
-                .connect_upstream(Box::new(QueueTransport {
+                .try_connect_upstream(Box::new(QueueTransport {
                     wire: next_wire.clone(),
                     session_context,
                 }))
-                .await;
-            Some((connection, next_wire))
+                .await
+                .map_err(RelayError::Db)?;
+            Ok(Some((connection, next_wire)))
         }));
-        self.poll_upstream_transition();
+        self.poll_upstream_transition()?;
         Ok((self.socket_generation, wire))
     }
 
-    fn retire_socket_upstream(&mut self, generation: u64) -> bool {
+    fn retire_socket_upstream(&mut self, generation: u64) -> Result<bool, RelayError> {
         if generation != self.socket_generation || self.socket_wire.is_none() {
-            return false;
+            return Ok(false);
         }
         self.socket_wire.take().unwrap().retire_connection();
         self.persistent_tick = None;
@@ -4832,21 +4839,24 @@ impl RelayWorker {
         let previous = Rc::clone(&self._upstream);
         self.upstream_attached = false;
         self.upstream_transition = Some(Box::pin(async move {
-            persistent.detach_connection_async(&previous).await;
-            None
+            persistent
+                .detach_connection_async(&previous)
+                .await
+                .map_err(RelayError::Db)?;
+            Ok(None)
         }));
-        self.poll_upstream_transition();
-        true
+        self.poll_upstream_transition()?;
+        Ok(true)
     }
 
-    fn poll_upstream_transition(&mut self) {
+    fn poll_upstream_transition(&mut self) -> Result<(), RelayError> {
         let Some(mut transition) = self.upstream_transition.take() else {
-            return;
+            return Ok(());
         };
         let waker = Waker::from(Arc::clone(&self.wake));
         match transition.as_mut().poll(&mut Context::from_waker(&waker)) {
             Poll::Pending => self.upstream_transition = Some(transition),
-            Poll::Ready(Some((connection, wire))) => {
+            Poll::Ready(Ok(Some((connection, wire)))) => {
                 self.upstream_io = RelayPeerIo::new(
                     connection
                         .try_lock()
@@ -4857,8 +4867,15 @@ impl RelayWorker {
                 self._upstream = connection;
                 self.upstream_attached = true;
             }
-            Poll::Ready(None) => {}
+            Poll::Ready(Ok(None)) => {}
+            Poll::Ready(Err(error)) => {
+                if let Some(wire) = self.socket_wire.take() {
+                    wire.retire_connection();
+                }
+                return Err(error);
+            }
         }
+        Ok(())
     }
 
     fn retire_foreground(&mut self, id: u64) -> Result<(), RelayError> {
@@ -5000,7 +5017,7 @@ impl RelayWorker {
 
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
-        self.poll_upstream_transition();
+        self.poll_upstream_transition()?;
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
@@ -8205,10 +8222,10 @@ mod tests {
                     encoded_title_cells("accepted while install waits"),
                     "{}".into(),
                 )?;
-                assert!(worker.retire_socket_upstream(generation));
+                assert!(worker.retire_socket_upstream(generation)?);
                 assert!(worker.upstream_transition.is_some());
                 worker.clients.get_mut(&id).unwrap().tick = None;
-                worker.poll_upstream_transition();
+                worker.poll_upstream_transition()?;
                 assert!(worker.upstream_transition.is_none());
                 assert!(!worker.upstream_attached);
                 Ok((generation, wire, committed))
@@ -8221,7 +8238,7 @@ mod tests {
         assert!(replacement > generation);
         assert!(
             !relay
-                .run(move |worker| Ok(worker.retire_socket_upstream(generation)))
+                .run(move |worker| worker.retire_socket_upstream(generation))
                 .unwrap()
         );
         assert!(fresh.take_outbound().is_ok());
@@ -8267,13 +8284,13 @@ mod tests {
         assert!(matches!(stale.take_outbound(), Err(RelayError::Closed)));
         assert!(
             !relay
-                .run(move |worker| Ok(worker.retire_socket_upstream(first)))
+                .run(move |worker| worker.retire_socket_upstream(first))
                 .unwrap()
         );
         assert!(fresh.take_outbound().is_ok());
         assert!(
             relay
-                .run(move |worker| Ok(worker.retire_socket_upstream(second)))
+                .run(move |worker| worker.retire_socket_upstream(second))
                 .unwrap()
         );
         assert!(matches!(fresh.take_outbound(), Err(RelayError::Closed)));
