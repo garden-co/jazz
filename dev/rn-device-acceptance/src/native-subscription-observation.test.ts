@@ -18,7 +18,7 @@ const fixture = JSON.parse(
 const encoded = Uint8Array.from(
   Buffer.from(
     fixture.subscription_deltas.find(
-      ({ name }) => name === "added_updated_removed_with_v1_and_v2_occurrence_keys",
+      ({ name }) => name === "added_updated_removed_with_complete_v1_occurrence_keys",
     )!.payload_hex,
     "hex",
   ),
