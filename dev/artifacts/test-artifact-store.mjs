@@ -328,6 +328,8 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
         mode: 0o600,
       });
       sealSnapshot(stage, { keepRootWritable: true });
+      // Test-only hook: descendants are sealed, but the private stage root is
+      // still writable for Darwin's rename rule. It is not an admission point.
       beforePublish?.({ destination, stage });
       try {
         renameSync(stage, destination);

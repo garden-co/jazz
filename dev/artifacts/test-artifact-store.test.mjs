@@ -227,6 +227,7 @@ test("atomic publication keeps only the private stage root writable until it is 
       },
     });
     assert.equal(statSync(join(snapshot.wasmPackage, "..")).mode & 0o222, 0);
+    assert.equal(readCorrectnessArtifactSnapshot(root).fingerprint, snapshot.fingerprint);
   } finally {
     removeFixture(root);
   }
