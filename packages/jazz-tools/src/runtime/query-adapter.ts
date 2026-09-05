@@ -730,7 +730,10 @@ function translateBuiltRelationToRelExpr(
     return {
       expr: {
         Union: {
-          inputs: inputs.map((input) => input.expr),
+          inputs: relation.union.inputs.map((arm, index) => ({
+            label: arm.label,
+            input: inputs[index]!.expr,
+          })),
         },
       },
       outputTable: first.outputTable,
