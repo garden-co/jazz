@@ -1400,12 +1400,22 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
-    union<TTable extends string>(
+    union<TTable extends TableName<TSchema>>(
       relations: readonly RelationSeedQuery<TTable>[],
-    ): TypedTableQueryBuilder<any, any, any, any>;
-    union<TTable extends string>(
+    ): TypedTableQueryBuilder<
+      SchemaMeta<TTable, TSchema>,
+      {},
+      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      false
+    >;
+    union<TTable extends TableName<TSchema>>(
       relations: Readonly<Record<string, RelationSeedQuery<TTable>>>,
-    ): TypedTableQueryBuilder<any, any, any, any>;
+    ): TypedTableQueryBuilder<
+      SchemaMeta<TTable, TSchema>,
+      {},
+      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      false
+    >;
     wasmSchema: WasmSchema;
     /** Authoring metadata retained for local tooling; not a runtime contract. */
     schemaAst?: SchemaAst;
