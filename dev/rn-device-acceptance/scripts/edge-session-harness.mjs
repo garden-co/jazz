@@ -184,7 +184,21 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
 /** Cargo can be a parent of the actual fixture. Close its control reader and
  * terminate the whole Unix process group, escalating if it does not exit. */
 export async function terminateHarness(child, timeoutMs = 5_000, processInfo = process) {
-  if (child.exitCode !== null || child.signalCode) return;
+  const groupAlive = () => {
+    if (processInfo.platform === "win32" || !child.pid)
+      return child.exitCode === null && !child.signalCode;
+    try {
+      processInfo.kill(-child.pid, 0);
+      return true;
+    } catch (error) {
+      // Permission still proves a process group exists; only ESRCH proves it
+      // disappeared. Do not confuse Cargo's parent exit with group cleanup.
+      if (error?.code === "ESRCH") return false;
+      if (error?.code === "EPERM") return true;
+      throw error;
+    }
+  };
+  if (!groupAlive()) return;
   child.stdin?.end();
   const signal = (name) => {
     try {
@@ -194,16 +208,18 @@ export async function terminateHarness(child, timeoutMs = 5_000, processInfo = p
       if (error?.code !== "ESRCH") throw error;
     }
   };
-  const waitForExit = (ms) => new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
-  });
+  const waitForGroupExit = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (groupAlive()) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+    }
+    return true;
+  };
   signal("SIGTERM");
-  await waitForExit(timeoutMs);
-  if (child.exitCode === null && !child.signalCode) {
+  if (!(await waitForGroupExit(timeoutMs))) {
     signal("SIGKILL");
-    await waitForExit(timeoutMs);
-    if (child.exitCode === null && !child.signalCode) {
+    if (!(await waitForGroupExit(timeoutMs))) {
       throw new Error("local Edge/Core harness process group survived SIGKILL");
     }
   }

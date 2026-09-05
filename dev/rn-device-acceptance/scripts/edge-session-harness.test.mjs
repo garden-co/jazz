@@ -259,6 +259,7 @@ test("Core observer cannot seed the device marker and a separate Core writer wai
 
 test("harness termination escalates its process group and rejects a surviving group", async () => {
   const signals = [];
+  let groupAlive = true;
   const child = Object.assign(new EventEmitter(), {
     exitCode: null,
     signalCode: null,
@@ -269,7 +270,16 @@ test("harness termination escalates its process group and rejects a surviving gr
     platform: "linux",
     kill(pid, signal) {
       signals.push([pid, signal]);
+      if (signal === 0) {
+        if (!groupAlive) {
+          const error = new Error("missing group");
+          error.code = "ESRCH";
+          throw error;
+        }
+        return;
+      }
       if (signal === "SIGKILL") {
+        groupAlive = false;
         child.exitCode = 137;
         setTimeout(() => child.emit("exit", 137, "SIGKILL"), 0);
       }
@@ -277,7 +287,7 @@ test("harness termination escalates its process group and rejects a surviving gr
   };
   await terminateHarness(child, 1, processInfo);
   assert.equal(child.stdin.ended, true);
-  assert.deepEqual(signals, [[-42, "SIGTERM"], [-42, "SIGKILL"]]);
+  assert.deepEqual(signals.filter(([, signal]) => signal !== 0), [[-42, "SIGTERM"], [-42, "SIGKILL"]]);
 
   const survivor = Object.assign(new EventEmitter(), {
     exitCode: null,
@@ -293,7 +303,38 @@ test("harness termination escalates its process group and rejects a surviving gr
     }),
     /survived SIGKILL/,
   );
-  assert.deepEqual(survivorSignals, [[-43, "SIGTERM"], [-43, "SIGKILL"]]);
+  assert.deepEqual(
+    survivorSignals.filter(([, signal]) => signal !== 0),
+    [[-43, "SIGTERM"], [-43, "SIGKILL"]],
+  );
+
+  let orphanedGroupAlive = true;
+  const exitedParent = Object.assign(new EventEmitter(), {
+    exitCode: 0,
+    signalCode: null,
+    pid: 44,
+    stdin: { end() {} },
+  });
+  const orphanedSignals = [];
+  await assert.rejects(
+    terminateHarness(exitedParent, 1, {
+      platform: "linux",
+      kill(pid, signal) {
+        orphanedSignals.push([pid, signal]);
+        if (signal === 0 && !orphanedGroupAlive) {
+          const error = new Error("missing group");
+          error.code = "ESRCH";
+          throw error;
+        }
+      },
+    }),
+    /survived SIGKILL/,
+  );
+  assert.equal(orphanedGroupAlive, true);
+  assert.deepEqual(
+    orphanedSignals.filter(([, signal]) => signal !== 0),
+    [[-44, "SIGTERM"], [-44, "SIGKILL"]],
+  );
 });
 
 test("offline restart rejects a live endpoint even after its claimed parent exited", async () => {
