@@ -1834,7 +1834,7 @@ pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v3-large-value-kinds");
+    put_str(&mut bytes, "jazz-schema-v1-large-value-kinds");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);

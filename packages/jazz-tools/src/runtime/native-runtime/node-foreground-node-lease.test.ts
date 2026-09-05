@@ -167,7 +167,7 @@ describe("Node foreground node leases", () => {
     await writeFile(
       join(directory, "active", deadNode),
       JSON.stringify({
-        format: "jazz-node-foreground-node-leases-v2",
+        format: "jazz-node-foreground-node-leases-v1",
         node: deadNode,
         token: "00000000-0000-4000-8000-000000000000",
       }),
