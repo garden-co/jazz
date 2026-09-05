@@ -36,7 +36,6 @@ pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 /// Direct groove record store used for persisted settled result memberships.
-pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
@@ -628,22 +627,6 @@ impl RuntimeSchema {
                 ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
-                SETTLED_RESULT_MEMBERS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                    ("member_digest", ValueType::Bytes),
-                ]),
-                // Result members may contain synthetic application values or
-                // rich path identities. Their fixed digest is the ordered
-                // key; the complete canonical member belongs in this value
-                // cell where backends can use value-overflow storage.
-                RecordDescriptor::new([("member", ValueType::Bytes)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
                 SETTLED_PROGRAM_FACTS_STORE,
                 RecordDescriptor::new([
                     ("shape_id", ValueType::Uuid),
@@ -651,10 +634,9 @@ impl RuntimeSchema {
                     ("read_view_id", ValueType::Uuid),
                     ("policy_scope", ValueType::U8),
                     ("policy_binding_digest", ValueType::Bytes),
-                    // Program facts can contain an application result payload.
-                    // Keep their durable identity bounded so a promoted large
-                    // value is stored in the record body (where the backend
-                    // can use value overflow), not in an ordered B-tree key.
+                    // Canonical source closure facts are addressed by digest.
+                    // Their exact source roles and version references remain
+                    // in the validated record body.
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),

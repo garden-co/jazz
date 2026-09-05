@@ -6,6 +6,12 @@ separates actual durable byte changes from changes to diagnostic test rendering.
 
 ## Explicit codecs and identity ownership
 
+Inactive result persistence has been removed by the #2578 follow-up. The
+retained storage/runtime inventory and call-path proof are in
+[inactive-result-persistence-cleanup.md](inactive-result-persistence-cleanup.md).
+`JRPD` and synthetic member identities below are runtime publication contracts;
+they are not stored output caches.
+
 - `protocol::version_record_wire_row` owns the `JVRR` v1 row blob. The outer
   immutable receipt keeps schema UUID, logical table, branch, and authored
   column identity. Its nested descriptor never serializes compiler slots.
@@ -28,7 +34,6 @@ The codec tests pin these deterministic BLAKE3 fixtures:
 | -------------------------------------------- | ------------------------------------------------------------------ |
 | `JVRR` nested immutable row                  | `49f95ea224a6eb504d45a80ec11f003fa4717998d4d477198716237c865d0875` |
 | `JRPD` duplicate group/value name descriptor | `89fb1b80e90645fc68aaeccf9fbcd4082bcefdd2b606c8ed859827bd99465fff` |
-| Enclosing aggregate `JPFK` payload fixture   | `612a52116020e1219c5b75f67dd18d491485a9b1579a06cadf7d16c18a84631a` |
 | Root publication layout fixture              | `0d6d813bb94f2ded6db0616b3a2d55d7e9c8bd8173ebc6395f766a18ca7d114f` |
 
 The aggregate row fixture is exactly
@@ -92,7 +97,9 @@ cargo nextest run -p jazz -p groove --no-default-features \
 Output paths must not exist. The export variable skips the old diagnostic golden
 comparison, not candidate validation. The current producer fixture and its
 checksums are updated; committed historical epoch packs and binary native
-fixtures remain unchanged and retain their independent historical-open tests.
+fixtures remain unchanged. After #2578 removes the retired required-codec
+profile, they prove historical rejection; new current-profile physical fixtures
+retain the positive reopen tests.
 The native corpus does not by itself prove every result-payload role: those
 boundaries have separate strict codec and maintained/query differential tests.
 

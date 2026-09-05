@@ -601,17 +601,7 @@ where
                 registered_bindings: BTreeMap::new(),
                 authority_results: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
-                settled_result_sets: BTreeMap::new(),
                 retained_root_window_sources: BTreeMap::new(),
-                settled_result_row_index: BTreeMap::new(),
-                settled_program_facts: BTreeMap::new(),
-                settled_through_by_binding_view: BTreeMap::new(),
-                authorization_progress_by_binding_view: BTreeMap::new(),
-                known_state_declared_binding_views: BTreeSet::new(),
-                initial_hydration_binding_views: BTreeSet::new(),
-                deferred_publication_binding_views: BTreeSet::new(),
-                pending_authoritative_reset_binding_views: BTreeSet::new(),
-                pending_opening_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_transactions: BTreeMap::new(),
@@ -1592,81 +1582,7 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.authority_results.clear();
-        self.query.settled_result_sets.clear();
         self.query.retained_root_window_sources.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
-        self.query.known_state_declared_binding_views.clear();
-        self.query.initial_hydration_binding_views.clear();
-        self.query.deferred_publication_binding_views.clear();
-        self.query.pending_authoritative_reset_binding_views.clear();
-        self.query.pending_opening_binding_views.clear();
-    }
-
-    fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
-        member.output_occurrence_id()
-    }
-
-    fn insert_settled_result_member_indexed(
-        &mut self,
-        authority_result_key: AuthorityResultKey,
-        member: ResultMemberEntry,
-    ) {
-        let state = self
-            .query
-            .authority_results
-            .entry(authority_result_key)
-            .or_default();
-        if let Some(row_key) = Self::result_member_row_key(&member) {
-            state.settled_result_row_index.insert(row_key, member.clone());
-        }
-        state.settled_result_set.insert(member);
-    }
-
-    fn remove_settled_result_member_indexed(
-        &mut self,
-        authority_result_key: AuthorityResultKey,
-        member: &ResultMemberEntry,
-    ) -> bool {
-        let removed = self
-            .query
-            .authority_results
-            .get_mut(&authority_result_key)
-            .is_some_and(|state| state.settled_result_set.remove(member));
-        if removed
-            && let Some(row_key) = Self::result_member_row_key(member)
-            && self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .and_then(|state| state.settled_result_row_index.get(&row_key))
-                == Some(member)
-            && let Some(state) = self
-                .query
-                .authority_results
-                .get_mut(&authority_result_key)
-        {
-            state.settled_result_row_index.remove(&row_key);
-        }
-        removed
-    }
-
-    fn remove_settled_result_member_for_occurrence_indexed(
-        &mut self,
-        authority_result_key: AuthorityResultKey,
-        occurrence_id: ResultRowMembershipKey,
-    ) -> Option<ResultMemberEntry> {
-        let previous = self
-            .query
-            .authority_results
-            .get_mut(&authority_result_key)
-            .and_then(|state| state.settled_result_row_index.remove(&occurrence_id))?;
-        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
-            state.settled_result_set.remove(&previous);
-        }
-        Some(previous)
     }
 
     fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
@@ -1677,8 +1593,6 @@ where
         // second reset restart its generation at one and let one scoped reset
         // erase another stream's progress through the binding-only facade.
         if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
-            state.settled_result_set.clear();
-            state.settled_result_row_index.clear();
             state.settled_program_facts.clear();
             state.covered_input_sources.clear();
             state.covered_input_versions.clear();

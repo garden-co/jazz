@@ -1,5 +1,11 @@
 # Typed field identity compatibility evidence (#2558)
 
+Historical experiment report: the selected typed path subsequently removed
+inactive member/output persistence in #2578. See
+[inactive-result-persistence-cleanup.md](inactive-result-persistence-cleanup.md)
+for the retained format inventory; the historical codec claims below are not
+current freeze requirements.
+
 Historical experiment record: the governing decision is now the all-in typed
 format. See Jazz SPEC 16 and [durable role receipts](typed-identity-durable-roles.md)
 for the current boundary; the comparisons below do not impose a compatibility goal.
