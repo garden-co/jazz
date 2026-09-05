@@ -338,35 +338,52 @@ test("React Native is a distinct bridge-enabled CI partition with an admitted bu
     ],
   );
   for (const command of reactNative)
-    assert.equal(command.env?.JAZZ_RN_TEST_BRIDGE, "1", `${command.label} must enable the RN bridge`);
+    assert.equal(
+      command.env?.JAZZ_RN_TEST_BRIDGE,
+      "1",
+      `${command.label} must enable the RN bridge`,
+    );
 
   const missingTests = reactNative.filter(({ label }) => label !== "React Native bridge tests");
-  assert.throws(() => assertReactNativeBridgeBoundary(missingTests), /omits its bridge producer, build, or tests/);
+  assert.throws(
+    () => assertReactNativeBridgeBoundary(missingTests),
+    /omits its bridge producer, build, or tests/,
+  );
 
   const noConfig = reactNative.map((item) =>
     item.label === "React Native bridge tests"
       ? { ...item, args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts") }
       : item,
   );
-  assert.throws(() => assertReactNativeBridgeBoundary(noConfig), /omits the React Native Vitest configuration/);
+  assert.throws(
+    () => assertReactNativeBridgeBoundary(noConfig),
+    /omits the React Native Vitest configuration/,
+  );
 
   const emptySuccess = reactNative.map((item) =>
     item.label === "React Native bridge tests"
       ? { ...item, args: [...item.args, "--passWithNoTests"] }
       : item,
   );
-  assert.throws(() => assertReactNativeBridgeBoundary(emptySuccess), /permits an empty React Native test run/);
+  assert.throws(
+    () => assertReactNativeBridgeBoundary(emptySuccess),
+    /permits an empty React Native test run/,
+  );
 
   const seen = [];
   await assert.rejects(
     () =>
       runPlan(reactNative, async (item) => {
         seen.push(item.label);
-        if (item.label === "React Native bridge tests") throw new Error("planted RN bridge failure");
+        if (item.label === "React Native bridge tests")
+          throw new Error("planted RN bridge failure");
       }),
     /planted RN bridge failure/,
   );
-  assert.deepEqual(seen, reactNative.map(({ label }) => label));
+  assert.deepEqual(
+    seen,
+    reactNative.map(({ label }) => label),
+  );
 });
 
 test("a successful native producer remains visible when a TypeScript consumer fails", async () => {
