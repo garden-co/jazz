@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Todo App - Jazz TypeScript Client</title>
+    <style>
+      body {
+        font-family: system-ui;
+        max-width: 600px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      .done {
+        text-decoration: line-through;
+        opacity: 0.6;
+      }
+      li {
+        padding: 0.5rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .delete-btn {
+        margin-left: auto;
+        cursor: pointer;
+      }
+      small {
+        color: #666;
+      }
+      form {
+        margin-bottom: 1rem;
+        display: flex;
+        gap: 0.5rem;
+      }
+      #error-message {
+        margin: 0 0 1rem;
+        color: #b91c1c;
+        font-weight: 600;
+      }
+      #receipt {
+        border: 1px solid #94a3b8;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        padding: 0.75rem;
+      }
+      #receipt p {
+        margin: 0.35rem 0;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <section id="receipt" aria-label="Safari private-browsing check">
+      <strong>Jazz Safari private-browsing check</strong>
+      <p>Candidate: <code>bea3674ea70539017f3058a680fb5136fc9562d7</code></p>
+      <p>
+        Add one disposable task, reload this same tab, then use “Restart storage” and confirm the
+        task remains.
+      </p>
+      <p id="receipt-status" role="status">Attaching worker and reading local data…</p>
+      <button id="restart-storage" type="button" disabled>Restart storage</button>
+      <p id="startup-error" role="alert" hidden></p>
+    </section>
+    <div id="app"></div>
+    <script type="module">
+      // This page-local wrapper observes only lifecycle metadata. It must run
+      // before Jazz imports so a pre-ready worker failure is visible too.
+      const started = performance.now();
+      const trace = [];
+      const pageRun = Number(sessionStorage.getItem("jazz-safari-receipt-page-run") || "0") + 1;
+      sessionStorage.setItem("jazz-safari-receipt-page-run", String(pageRun));
+      const post = (event) => {
+        trace.push({
+          origin: "page",
+          pageRun,
+          elapsedMs: Math.round(performance.now() - started),
+          ...event,
+        });
+        if (trace.length > 64) trace.shift();
+        navigator.sendBeacon("/__safari_trace", JSON.stringify({ events: trace.slice(-1) }));
+      };
+      const metadata = (message) => {
+        const type = typeof message?.type === "string" ? message.type : "unknown";
+        if (type !== "frames") return { messageType: type };
+        const frames = Array.isArray(message.frames) ? message.frames : [];
+        return {
+          messageType: type,
+          frameCount: frames.length,
+          frameBytes: frames.reduce((total, frame) => total + (frame?.byteLength ?? 0), 0),
+        };
+      };
+      const NativeSharedWorker = window.SharedWorker;
+      if (NativeSharedWorker) {
+        window.SharedWorker = class extends NativeSharedWorker {
+          constructor(...args) {
+            super(...args);
+            post({ phase: "shared-worker-constructed" });
+            const send = this.port.postMessage.bind(this.port);
+            this.port.postMessage = (message, transfer) => {
+              post({ phase: "worker-message", direction: "out", ...metadata(message) });
+              return send(message, transfer);
+            };
+            this.port.addEventListener("message", (event) => {
+              post({ phase: "worker-message", direction: "in", ...metadata(event.data) });
+            });
+          }
+        };
+      } else {
+        post({ phase: "shared-worker-unavailable" });
+      }
+      window.__jazzSafariReceiptTrace__ = { record: post };
+      window.addEventListener("error", () => post({ phase: "page-error" }));
+      window.addEventListener("unhandledrejection", () =>
+        post({ phase: "page-unhandled-rejection" }),
+      );
+      const internalTrace = new BroadcastChannel("jazz-safari-receipt-trace");
+      internalTrace.addEventListener("message", (event) => {
+        const value = event.data;
+        if (!value || typeof value.event !== "string") return;
+        post({
+          phase: `worker-${value.event}`,
+          frameCount: Number.isSafeInteger(value.frameCount) ? value.frameCount : undefined,
+          frameBytes: Number.isSafeInteger(value.frameBytes) ? value.frameBytes : undefined,
+          workerElapsedMs: Number.isSafeInteger(value.elapsedMs) ? value.elapsedMs : undefined,
+          errorKind: ["idb-open", "wasm-open", "owner", "other"].includes(value.errorKind)
+            ? value.errorKind
+            : undefined,
+          role: value.role === "tab" || value.role === "worker" ? value.role : undefined,
+          origin: "worker",
+        });
+      });
+      const [{ startApp }, { safariReceiptRuntimeSources }] = await Promise.all([
+        import("/src/main.ts"),
+        import("/src/safari-receipt-runtime.ts"),
+      ]);
+      const app = document.getElementById("app");
+      const status = document.getElementById("receipt-status");
+      const error = document.getElementById("startup-error");
+      const restart = document.getElementById("restart-storage");
+      const config = {
+        driver: { type: "persistent", dbName: "safari-private-check-alpha54" },
+        runtimeSources: safariReceiptRuntimeSources,
+        logLevel: "trace",
+      };
+      let running;
+
+      async function open() {
+        restart.disabled = true;
+        status.textContent = "Attaching worker and reading local data…";
+        error.hidden = true;
+        try {
+          running = await startApp(app, config);
+          status.textContent =
+            "Persistent runtime ready after local read. Add a disposable task, then reload this same tab.";
+          restart.disabled = false;
+        } catch (cause) {
+          const detail = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+          status.textContent = "Persistent runtime unavailable.";
+          error.textContent = detail;
+          error.hidden = false;
+        }
+      }
+
+      restart.addEventListener("click", async () => {
+        if (!running) return;
+        status.textContent = "Shutting down and reopening persistent storage…";
+        try {
+          await running.destroy();
+          await open();
+        } catch (cause) {
+          const detail = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+          status.textContent = "Persistent runtime shutdown/retry failed.";
+          error.textContent = detail;
+          error.hidden = false;
+        }
+      });
+      open();
+    </script>
+  </body>
+</html>

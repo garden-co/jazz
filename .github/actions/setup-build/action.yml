@@ -32,6 +32,10 @@ inputs:
     description: "Forwarded to Swatinem/rust-cache cache-bin."
     required: false
     default: "false"
+  rust-cache-workspace-crates:
+    description: "Forwarded to Swatinem/rust-cache cache-workspace-crates."
+    required: false
+    default: "false"
   setup-node:
     description: "Install Node.js + pnpm and run `pnpm install --frozen-lockfile`."
     required: false
@@ -127,6 +131,7 @@ runs:
       with:
         cache-on-failure: true
         cache-bin: ${{ inputs.rust-cache-bin }}
+        cache-workspace-crates: ${{ inputs.rust-cache-workspace-crates }}
         prefix-key: rocksdb-v1
         key: ${{ inputs.rust-cache-key != '' && inputs.rust-cache-key || format('repo-{0}', env.CACHE_SCOPE_REPOSITORY_ID) }}
 

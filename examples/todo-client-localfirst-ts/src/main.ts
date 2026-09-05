@@ -1,5 +1,6 @@
 import { createDb, BrowserAuthSecretStore, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
+import { traceSafariReceipt } from "./safari-receipt-trace.js";
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -64,6 +65,19 @@ export async function startApp(
 
   // #region context-setup-ts-client
   const db = await createDb(resolvedConfig);
+  let initialTodos: Todo[];
+  try {
+    // Do not claim startup until the attached runtime has served a local read.
+    traceSafariReceipt({ phase: "local-read-start" });
+    initialTodos = await db.all(app.todos, { tier: "local" });
+    traceSafariReceipt({ phase: "local-read", outcome: "fulfilled" });
+  } catch (error) {
+    traceSafariReceipt({ phase: "local-read", outcome: "rejected" });
+    // Preserve the attachment/read error even when shutdown itself is unhealthy.
+    void db.shutdown().catch(() => undefined);
+    container.innerHTML = "";
+    throw error;
+  }
   // #endregion context-setup-ts-client
   let sessionUserId = db.getAuthState().session?.user ?? null;
 
@@ -84,9 +98,13 @@ export async function startApp(
   btn.textContent = "Add";
   const syncAuthState = (userId: string | null) => {
     sessionUserId = userId;
-    btn.disabled = !sessionUserId;
+    btn.disabled = mutationInFlight || !sessionUserId;
+    if (!sessionUserId) {
+      mutationStatus.textContent = "Authentication is not ready; saving is disabled";
+    } else if (!mutationStatus.textContent) {
+      mutationStatus.textContent = "Ready to save locally";
+    }
   };
-  syncAuthState(sessionUserId);
   const parentSelect = document.createElement("select");
   parentSelect.id = "parent-select";
   const noParentOption = document.createElement("option");
@@ -98,6 +116,18 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
+  const startupStatus = document.createElement("p");
+  startupStatus.id = "startup-status";
+  startupStatus.setAttribute("role", "status");
+  startupStatus.textContent = "Loading local data…";
+  container.appendChild(startupStatus);
+
+  const mutationStatus = document.createElement("p");
+  mutationStatus.id = "mutation-status";
+  mutationStatus.setAttribute("role", "status");
+  mutationStatus.textContent = "";
+  container.appendChild(mutationStatus);
+
   const errorMessage = document.createElement("p");
   errorMessage.id = "error-message";
   errorMessage.hidden = true;
@@ -106,6 +136,7 @@ export async function startApp(
 
   const list = document.createElement("ul");
   list.id = "todo-list";
+  list.dataset.ready = "false";
   container.appendChild(list);
 
   const setErrorMessage = (message: string) => {
@@ -118,9 +149,56 @@ export async function startApp(
     errorMessage.hidden = true;
   };
 
-  // Subscribe to all todos.
-  const query = app.todos;
-  const unsubscribe = db.subscribe(query, (todos) => {
+  const safeFailureDetail = (failure: unknown): string => {
+    const name = failure instanceof Error ? failure.name : "MutationError";
+    const code =
+      typeof failure === "object" && failure !== null && "code" in failure
+        ? (failure as { code?: unknown }).code
+        : undefined;
+    const message = failure instanceof Error && failure.message ? `: ${failure.message}` : "";
+    return typeof code === "string" ? `${name} (${code})${message}` : `${name}${message}`;
+  };
+
+  let mutationInFlight = false;
+  const syncMutationControls = () => {
+    const disabled = mutationInFlight;
+    input.disabled = disabled;
+    parentSelect.disabled = disabled;
+    btn.disabled = disabled || !sessionUserId;
+    list.inert = disabled;
+  };
+  syncAuthState(sessionUserId);
+
+  const showMutationFailure = (failure: unknown) => {
+    mutationStatus.textContent = "Save failed";
+    setErrorMessage(`Save failed: ${safeFailureDetail(failure)}. Edit and submit again.`);
+  };
+
+  const runMutation = async (
+    action: () => { wait: (options: { tier: "local" }) => Promise<unknown> },
+    onSaved?: () => void,
+  ): Promise<void> => {
+    if (mutationInFlight) return;
+    mutationInFlight = true;
+    syncMutationControls();
+    mutationStatus.textContent = "Saving locally (pending)…";
+    clearErrorMessage();
+    try {
+      traceSafariReceipt({ phase: "local-write-wait-start" });
+      await action().wait({ tier: "local" });
+      traceSafariReceipt({ phase: "local-write-wait", outcome: "fulfilled" });
+      mutationStatus.textContent = "Saved locally";
+      onSaved?.();
+    } catch (failure) {
+      traceSafariReceipt({ phase: "local-write-wait", outcome: "rejected" });
+      showMutationFailure(failure);
+    } finally {
+      mutationInFlight = false;
+      syncMutationControls();
+    }
+  };
+
+  const renderTodos = (todos: Todo[]) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.replaceChildren(noParentOption);
     for (const todo of todos) {
@@ -161,49 +239,57 @@ export async function startApp(
       items.appendChild(item);
     }
     list.replaceChildren(items);
-  });
+    list.dataset.ready = "true";
+    startupStatus.textContent = "Ready";
+  };
+
+  // Render the local readiness snapshot before returning to the receipt page.
+  renderTodos(initialTodos);
+  const query = app.todos;
+  const unsubscribe = db.subscribe(query, renderTodos);
   const stopAuthSync = db.onAuthChanged(({ session }) => {
     syncAuthState(session?.user ?? null);
+  });
+
+  const stopMutationErrorSync = db.onMutationError((event) => {
+    // Writes in this app await their local receipt. Keep this hook for any
+    // asynchronous rejection that arrives outside an active receipt wait.
+    showMutationFailure(event);
   });
 
   // Add todo form
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!sessionUserId) return;
-    clearErrorMessage();
-    const selectedParentId = parentSelect.value;
-    db.insert(app.todos, {
-      title: input.value,
-      done: false,
-      owner_id: sessionUserId,
-      ...(selectedParentId ? { parentId: selectedParentId } : {}),
-    });
-    input.value = "";
-    parentSelect.value = "";
+    const title = input.value;
+    const parentId = parentSelect.value;
+    const ownerId = sessionUserId;
+    void runMutation(
+      () =>
+        db.insert(app.todos, {
+          title,
+          done: false,
+          owner_id: ownerId,
+          ...(parentId ? { parentId } : {}),
+        }),
+      () => {
+        input.value = "";
+        parentSelect.value = "";
+      },
+    );
   });
 
   // Event delegation for toggle and delete
-  list.addEventListener("click", async (e) => {
+  list.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
     const id = target.dataset.id;
     if (!id) return;
 
     if (target.classList.contains("toggle")) {
-      const checkbox = target as HTMLInputElement;
-      try {
-        db.update(app.todos, id, { done: checkbox.checked });
-        clearErrorMessage();
-      } catch {
-        checkbox.checked = !checkbox.checked;
-        setErrorMessage("You don't have permission to update this task");
-      }
+      const done = (target as HTMLInputElement).checked;
+      void runMutation(() => db.update(app.todos, id, { done }));
     } else if (target.classList.contains("delete-btn")) {
-      try {
-        db.delete(app.todos, id);
-        clearErrorMessage();
-      } catch {
-        setErrorMessage("You don't have permission to delete this task");
-      }
+      void runMutation(() => db.delete(app.todos, id));
     }
   });
 
@@ -212,6 +298,7 @@ export async function startApp(
     destroy: async () => {
       unsubscribe();
       stopAuthSync();
+      stopMutationErrorSync();
       await db.shutdown();
       container.innerHTML = "";
     },

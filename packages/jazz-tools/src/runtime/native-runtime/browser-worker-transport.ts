@@ -19,11 +19,31 @@ export type AuxiliaryRelayTrace = Readonly<{
   storageError?: "unavailable" | "locator-conflict" | "integrity" | "backend";
 }>;
 
+export type BrowserPumpDiagnostic = Readonly<{
+  event:
+    | "pump-scheduled"
+    | "pump-start"
+    | "pump-receive-enqueued"
+    | "pump-route-start"
+    | "pump-route-complete"
+    | "pump-progress-before"
+    | "pump-progress-after"
+    | "pump-progress-error"
+    | "pump-outbound-drain"
+    | "core-tick-start"
+    | "core-tick-complete"
+    | "core-tick-error";
+  frameCount?: number;
+}>;
+
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void;
   notifyPeerTransportActivity?(): void;
   progressPeerTransport(): Promise<void>;
   retirePeerTransport(transport: Transport): Promise<void>;
+  setPeerTransportDiagnosticObserver?(
+    observer: ((event: BrowserPumpDiagnostic) => void) | null,
+  ): void;
 }
 
 export class BrowserWorkerTransportPump {
@@ -48,11 +68,13 @@ export class BrowserWorkerTransportPump {
     private readonly sendFrames: (frames: Uint8Array[]) => void,
     private readonly onError: (error: unknown) => void,
     private readonly onAuxiliaryTrace?: (entries: AuxiliaryRelayTrace[]) => void,
+    private readonly onDiagnostic?: (event: BrowserPumpDiagnostic) => void,
   ) {
     // The evaluator notifies every peer after a pass. This pump drains its
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
     this.removeWorkListener = runtime.onPeerTransportWork(this.handleRuntimeWork);
+    runtime.setPeerTransportDiagnosticObserver?.(this.onDiagnostic ?? null);
     this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
     this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
     void this.watchAuxiliaryOutbound().catch((error) => {
@@ -63,6 +85,7 @@ export class BrowserWorkerTransportPump {
 
   receive(frames: readonly Uint8Array[]): void {
     if (this.closed || frames.length === 0) return;
+    this.emit("pump-receive-enqueued", { frameCount: frames.length });
     const operation = this.inboundRouting.then(() => this.routeInboundFrames(frames));
     this.inboundRouting = operation.catch((error) => {
       if (!this.closed) this.onError(error);
@@ -78,8 +101,10 @@ export class BrowserWorkerTransportPump {
     }
     if (this.scheduled) return;
     this.scheduled = true;
+    this.emit("pump-scheduled");
     queueMicrotask(() => {
       this.scheduled = false;
+      this.emit("pump-start");
       void this.pump().catch((error) => {
         if (!this.closed) this.onError(error);
       });
@@ -92,6 +117,7 @@ export class BrowserWorkerTransportPump {
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();
     this.transport.setAuxiliaryTraceEnabled?.(false);
+    this.runtime.setPeerTransportDiagnosticObserver?.(null);
     void this.runtime.retirePeerTransport(this.transport).catch(this.onError);
     for (const waiter of this.flushWaiters) waiter.resolve();
     this.flushWaiters.clear();
@@ -108,7 +134,10 @@ export class BrowserWorkerTransportPump {
   drainOutboundFrames(): boolean {
     if (this.closed) return false;
     const frames = normalizeTransportFrames(this.transport.recvWireFrames());
-    if (frames.length > 0) this.sendFrames(frames);
+    if (frames.length > 0) {
+      this.emit("pump-outbound-drain", { frameCount: frames.length });
+      this.sendFrames(frames);
+    }
     const auxiliary = this.transport.recvAuxiliaryWireFrames;
     if (!auxiliary) return false;
     const auxiliaryFrames = normalizeTransportFrames(
@@ -118,7 +147,10 @@ export class BrowserWorkerTransportPump {
         MAX_AUXILIARY_BYTES_PER_PORT_MESSAGE,
       ),
     );
-    if (auxiliaryFrames.length > 0) this.sendFrames(auxiliaryFrames);
+    if (auxiliaryFrames.length > 0) {
+      this.emit("pump-outbound-drain", { frameCount: auxiliaryFrames.length });
+      this.sendFrames(auxiliaryFrames);
+    }
     this.publishAuxiliaryTrace();
     return auxiliaryFrames.length > 0;
   }
@@ -138,7 +170,14 @@ export class BrowserWorkerTransportPump {
     const generation = this.requestedGeneration;
     try {
       this.drainOutboundFrames();
-      await this.runtime.progressPeerTransport();
+      this.emit("pump-progress-before");
+      try {
+        await this.runtime.progressPeerTransport();
+        this.emit("pump-progress-after");
+      } catch (error) {
+        this.emit("pump-progress-error");
+        throw error;
+      }
       if (this.closed) return;
       this.drainOutboundFrames();
     } finally {
@@ -159,6 +198,7 @@ export class BrowserWorkerTransportPump {
 
   private async routeInboundFrames(frames: readonly Uint8Array[]): Promise<void> {
     if (this.closed) return;
+    this.emit("pump-route-start", { frameCount: frames.length });
     const canonical: Uint8Array[] = [];
     for (const frame of frames) {
       const routed = this.transport.routeAuxiliaryWireFrame
@@ -167,6 +207,7 @@ export class BrowserWorkerTransportPump {
       if (routed != null) canonical.push(normalizeTransportFrame(routed));
     }
     if (this.closed) return;
+    this.emit("pump-route-complete", { frameCount: canonical.length });
     if (canonical.length > 0) {
       if (this.transport.sendWireFrames) {
         this.transport.sendWireFrames(canonical);
@@ -180,6 +221,17 @@ export class BrowserWorkerTransportPump {
     this.runtime.notifyPeerTransportActivity?.();
     this.publishAuxiliaryTrace();
     this.schedule();
+  }
+
+  private emit(
+    event: BrowserPumpDiagnostic["event"],
+    detail: Omit<BrowserPumpDiagnostic, "event"> = {},
+  ): void {
+    try {
+      this.onDiagnostic?.({ event, ...detail });
+    } catch {
+      // Test diagnostics are observational and cannot affect transport progress.
+    }
   }
 
   private publishAuxiliaryTrace(): void {

@@ -1295,6 +1295,16 @@ test("on-demand WebKit IndexedDB receipt scopes build caches to its repository",
   );
 });
 
+test("setup-build keeps workspace Rust artifact caching opt-in", () => {
+  const setupBuild = parse(setupBuildAction);
+
+  assert.equal(setupBuild.inputs["rust-cache-workspace-crates"].default, "false");
+  assert.match(
+    setupBuildAction,
+    /cache-workspace-crates: \$\{\{ inputs\.rust-cache-workspace-crates \}\}/,
+  );
+});
+
 test("integration workspace check contract rejects planted failure suppression", () => {
   const typescript = job("test-ts");
   const check =

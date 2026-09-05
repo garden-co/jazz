@@ -60,6 +60,7 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import type { BrowserPumpDiagnostic } from "./browser-worker-transport.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
@@ -765,6 +766,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
+  private peerTransportDiagnosticObserver: ((event: BrowserPumpDiagnostic) => void) | null = null;
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
@@ -984,6 +986,24 @@ export class NativeRuntimeAdapter implements Runtime {
     // Require a distinct post-admission pass; routine end-of-pass work remains
     // coalescible and therefore cannot create a self-sustaining pump loop.
     this.notifyPeerTransportWork(true);
+  }
+
+  setPeerTransportDiagnosticObserver(
+    observer: ((event: BrowserPumpDiagnostic) => void) | null,
+  ): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.setPeerTransportDiagnosticObserver(observer);
+    this.peerTransportDiagnosticObserver = observer;
+  }
+
+  private emitPeerTransportDiagnostic(
+    event: "core-tick-start" | "core-tick-complete" | "core-tick-error",
+  ): void {
+    try {
+      this.peerTransportDiagnosticObserver?.({ event });
+    } catch {
+      // Test-only transport observation must not alter runtime progress.
+    }
   }
 
   async progressPeerTransport(): Promise<void> {
@@ -3449,7 +3469,14 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
-        await this.db.tick();
+        this.emitPeerTransportDiagnostic("core-tick-start");
+        try {
+          await this.db.tick();
+          this.emitPeerTransportDiagnostic("core-tick-complete");
+        } catch (error) {
+          this.emitPeerTransportDiagnostic("core-tick-error");
+          throw error;
+        }
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();
