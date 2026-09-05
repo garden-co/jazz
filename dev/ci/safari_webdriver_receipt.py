@@ -219,7 +219,12 @@ def wait_ready(driver: Driver, marker: str, events: list[dict[str, Any]], phase:
         latest = driver.execute(STATUS, [marker])
         if isinstance(latest, dict) and (latest.get("startupError") or latest.get("applicationError")):
             raise WebDriverError(f"{phase}: page reported error: {latest}")
-        if isinstance(latest, dict) and latest.get("restartEnabled") and latest.get("addEnabled"):
+        if (
+            isinstance(latest, dict)
+            and latest.get("restartEnabled")
+            and latest.get("addEnabled")
+            and str(latest.get("readyStatus") or "").startswith("Persistent runtime ready")
+        ):
             event(events, phase, result="ready", status=latest)
             return
         time.sleep(0.5)
@@ -302,6 +307,10 @@ def main() -> int:
                 event(events, "local-ack-write-dispatch", cycle=cycle, marker=acknowledged)
                 driver.execute(ADD_MARKER, [acknowledged])
                 wait_local_ack(driver, acknowledged, events)
+                driver.execute("document.getElementById('restart-storage')?.click(); return true;")
+                event(events, "local-ack-restart-dispatch", cycle=cycle)
+                wait_ready(driver, acknowledged, events, "local-ack-post-restart-ready")
+                wait_for(driver, acknowledged, 20, events, "local-ack-post-restart-marker")
                 driver.refresh()
                 event(events, "local-ack-reload-complete", cycle=cycle)
                 wait_ready(driver, acknowledged, events, "local-ack-post-reload-ready")

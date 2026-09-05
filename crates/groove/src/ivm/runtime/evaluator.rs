@@ -967,7 +967,41 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
-        Box::pin(self.update_subgraph(node))
+        // The postorder driver has already evaluated ordinary inputs. Check
+        // their memo before entering another evaluator future: even a cache
+        // hit inside update_one_node would recursively poll that wide future
+        // beneath its parent, overflowing Safari's WebAssembly call stack.
+        match self.cached_node_records(node) {
+            Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+            Ok(None) => Box::pin(self.update_subgraph(node)),
+        }
+    }
+
+    fn cached_node_records(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
+        let signature = self.input_signature(node)?;
+        let memo_key = self.memo_key(node, &signature)?;
+        let current_watermark = self.input_generation(node);
+        let requires_state_rebuild = (self.context.hydrate_arrangements
+            && self.node_depends_on_aggregate(node)?
+            && !self.aggregate_arrangements_are_current(node)?)
+            || (self.context.eval_mode == EvalMode::Tick
+                && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
+        if !requires_state_rebuild
+            && let Some(entry) = self.eval_memo.get_mut(&memo_key)
+            && entry.input_watermark == current_watermark
+        {
+            *self.memo_use_clock += 1;
+            entry.last_used = *self.memo_use_clock;
+            if self.context.eval_mode == EvalMode::Hydrate {
+                self.metrics.hydration_memo_hits += 1;
+            }
+            return Ok(Some(Arc::clone(&entry.records)));
+        }
+        Ok(None)
     }
 
     fn update_one_node(
@@ -975,6 +1009,9 @@ impl TickEvaluator<'_> {
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         Box::pin(async move {
+            if let Some(records) = self.cached_node_records(node)? {
+                return Ok(records);
+            }
             let graph_node = self
                 .graph
                 .node(node)
@@ -982,22 +1019,6 @@ impl TickEvaluator<'_> {
             let signature = self.input_signature(node)?;
             let memo_key = self.memo_key(node, &signature)?;
             let current_watermark = self.input_generation(node);
-            let requires_state_rebuild = (self.context.hydrate_arrangements
-                && self.node_depends_on_aggregate(node)?
-                && !self.aggregate_arrangements_are_current(node)?)
-                || (self.context.eval_mode == EvalMode::Tick
-                    && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
-            if !requires_state_rebuild
-                && let Some(entry) = self.eval_memo.get_mut(&memo_key)
-                && entry.input_watermark == current_watermark
-            {
-                *self.memo_use_clock += 1;
-                entry.last_used = *self.memo_use_clock;
-                if self.context.eval_mode == EvalMode::Hydrate {
-                    self.metrics.hydration_memo_hits += 1;
-                }
-                return Ok(Arc::clone(&entry.records));
-            }
 
             if self.context.eval_mode == EvalMode::Hydrate {
                 self.metrics.hydration_memo_computes += 1;

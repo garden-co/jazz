@@ -56,7 +56,7 @@
   <body>
     <section id="receipt" aria-label="Safari private-browsing check">
       <strong>Jazz Safari private-browsing check</strong>
-      <p>Candidate: <code>bea3674ea70539017f3058a680fb5136fc9562d7</code></p>
+      <p>Candidate: <code id="receipt-version">Loading build identity…</code></p>
       <p>
         Add one disposable task, reload this same tab, then use “Restart storage” and confirm the
         task remains.
@@ -69,6 +69,8 @@
     <script type="module">
       // This page-local wrapper observes only lifecycle metadata. It must run
       // before Jazz imports so a pre-ready worker failure is visible too.
+      document.getElementById("receipt-version").textContent =
+        import.meta.env.VITE_SAFARI_RECEIPT_VERSION || "unversioned local build";
       const started = performance.now();
       const trace = [];
       const pageRun = Number(sessionStorage.getItem("jazz-safari-receipt-page-run") || "0") + 1;
@@ -178,6 +180,7 @@
 
       restart.addEventListener("click", async () => {
         if (!running) return;
+        restart.disabled = true;
         status.textContent = "Shutting down and reopening persistent storage…";
         try {
           await running.destroy();
