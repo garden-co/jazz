@@ -76,6 +76,20 @@ fn budget_enter<E: de::Error>() -> Result<(), E> {
         }
     })
 }
+fn budget_node<E: de::Error>() -> Result<(), E> {
+    DESERIALIZE_BUDGET.with(|state| {
+        let mut state = state.borrow_mut();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| E::custom("relation-query budget missing"))?;
+        state.nodes += 1;
+        if state.nodes > MAX_RELATION_ITEMS {
+            Err(E::custom("relation-query node limit"))
+        } else {
+            Ok(())
+        }
+    })
+}
 fn budget_leave() {
     DESERIALIZE_BUDGET.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
@@ -140,6 +154,7 @@ where
         fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<T>, A::Error> {
             let mut values = Vec::new();
             while let Some(value) = sequence.next_element()? {
+                budget_node::<A::Error>()?;
                 if values.len() == MAX_RELATION_ITEMS {
                     return Err(de::Error::custom("relation-query collection limit"));
                 }
