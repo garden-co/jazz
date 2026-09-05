@@ -14,6 +14,15 @@ use crate::node::{CurrentRow, CurrentRowPublicationField, RelationSnapshot};
 use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
 
+/// Encode only the descriptor portion of the named-cell input role. This is
+/// also the owner for cross-language descriptor corpus generation.
+pub fn encode_named_cell_descriptor(
+    descriptor: &groove::records::RecordDescriptor,
+) -> Result<Vec<u8>, String> {
+    postcard::to_allocvec(&publication_type::NativeDescriptor(descriptor))
+        .map_err(|error| error.to_string())
+}
+
 /// Encode the named-cell input ABI used by both native hosts. The descriptor
 /// contains names and recursive value types, never compiler field identities.
 pub fn encode_named_cells(record: &groove::records::OwnedRecord) -> Result<Vec<u8>, String> {

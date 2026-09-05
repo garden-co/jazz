@@ -135,3 +135,21 @@ response. A fresh-empty-receiver mutation fails the full nested-value equality;
 the persisted-receiver version passes. These complementary receipts cover real
 wire/local-ID translation, exact nested slot rebinding, and cold receiver
 reconstruction without claiming that one test combines every topology.
+
+## Current wire and host-fixture receipts
+
+The current `wire_message_frames.json` manifest retains exactly 25 families.
+Only `authority_publication_two_complete_transactions` (frame 918 → 1998 bytes)
+and `view_update_mixed_version_carrier_runs` (1820 → 3980 bytes) change: their
+immutable row carriers now use `JVRR` plus explicit persisted descriptors.
+The owning fixture test recreates the same semantic messages, verifies current
+writer bytes, decodes all manifest messages to their expected values, and runs
+the host-frame rejection corpus. All 11 wire-fixture tests pass.
+`native_row_codec.json` remains byte-identical; its Rust fixture producer now
+uses the explicit shared binding descriptor encoder instead of recursive
+execution-type serde.
+
+Two TypeScript mock producers now explicitly declare source output names and
+provenance/hidden roles while retaining their private `user_*` carrier spellings.
+Their behavioral assertions are unchanged; the input fixtures no longer assume
+that a consumer reconstructs public identity by stripping a carrier prefix.

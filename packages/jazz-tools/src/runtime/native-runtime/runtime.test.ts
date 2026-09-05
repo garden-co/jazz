@@ -77,6 +77,26 @@ function physicalNativeDescriptor(
   });
 }
 
+/** Current-row fixtures declare public names independently of carrier spelling. */
+function currentNativeDescriptor(
+  descriptor: readonly DescriptorField[],
+  sourceNames: Readonly<Record<string, string>>,
+): NativeRowDescriptorField[] {
+  return descriptor.map((field, index) => {
+    const name = field.name;
+    if (name === undefined) throw new Error("current fixture field requires a name");
+    const outputName = sourceNames[name];
+    if (outputName !== undefined) {
+      return { id: index + 1, outputName, valueType: field.valueType, kind: "stored-column" };
+    }
+    if (name === "row_uuid") return { name, valueType: field.valueType, kind: "hidden-metadata" };
+    if (["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"].includes(name)) {
+      return { name, valueType: field.valueType, kind: "result-field" };
+    }
+    throw new Error(`current fixture field has no declared publication role: ${name}`);
+  });
+}
+
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
     tables: WasmSchema;
@@ -7816,7 +7836,10 @@ function encodeUserWrappedSubscriptionDelta(row: {
   const delta = new PostcardWriter();
   delta.vec((batch) => {
     batch.string(row.table);
-    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
+    writeNativeRowDescriptor(
+      batch,
+      currentNativeDescriptor(descriptor, { user_title: "title", user_note: "note" }),
+    );
     batch.vec((encodedRow) => {
       encodedRow.bytes(row.rowId);
       encodedRow.bool(false);
@@ -7887,7 +7910,14 @@ function writeTeamGatherBatches(
   writer.vec(
     (batch) => {
       batch.string("teams");
-      writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
+      writeNativeRowDescriptor(
+        batch,
+        currentNativeDescriptor(descriptor, {
+          user_name: "name",
+          user_org_id: "org_id",
+          user_parent_id: "parent_id",
+        }),
+      );
       batch.vec((row, index) => {
         const source = rows[index]!;
         row.bytes(source.rowId);

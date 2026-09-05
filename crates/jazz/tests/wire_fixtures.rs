@@ -1346,13 +1346,8 @@ fn assert_artifact_execution_is_exhaustive(
 fn native_row_codec_fixture_round_trips_every_groove_value_type() {
     if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
         let (descriptor, values) = exhaustive_native_row_codec_case();
-        let descriptor_fields = descriptor
-            .fields()
-            .iter()
-            .map(|field| (field.name.clone(), field.value_type.clone()))
-            .collect::<Vec<_>>();
-        let descriptor_bytes =
-            postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+        let descriptor_bytes = jazz::binding_codec::encode_named_cell_descriptor(&descriptor)
+            .expect("explicit binding descriptor encodes");
         let record = descriptor.create(&values).expect("record encodes");
         let fields = descriptor
             .fields()
@@ -1394,12 +1389,8 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
         .iter()
         .find(|case| case.name == "all_value_types_depth_three")
         .expect("all ValueType fixture is present");
-    let descriptor_fields = descriptor
-        .fields()
-        .iter()
-        .map(|field| (field.name.clone(), field.value_type.clone()))
-        .collect::<Vec<_>>();
-    let descriptor_bytes = postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+    let descriptor_bytes = jazz::binding_codec::encode_named_cell_descriptor(&descriptor)
+        .expect("explicit binding descriptor encodes");
     let record = descriptor.create(&values).expect("record encodes");
 
     assert_eq!(hex(&descriptor_bytes), case.descriptor_hex.concat());
