@@ -1492,6 +1492,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly shutdownAbort = new AbortController();
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
@@ -1700,6 +1701,7 @@ export class Db {
   }
 
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1735,6 +1737,7 @@ export class Db {
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
@@ -1798,6 +1801,7 @@ export class Db {
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
+    this.assertOpen();
     return this.connection.getClient(schema);
   }
 
@@ -1806,7 +1810,8 @@ export class Db {
   }
 
   protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal);
+    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+    this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
@@ -2327,6 +2332,7 @@ export class Db {
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+    this.assertOpen();
     const context = this.getRuntimeOperationContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
@@ -2898,8 +2904,15 @@ export class Db {
     return this.shutdownPromise;
   }
 
+  private assertOpen(): void {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot operate on a Db that is shutting down or closed.");
+    }
+  }
+
   private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.shutdownAbort.abort();
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
       this.localFirstRefreshTimer = null;
@@ -3119,7 +3132,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 }
 
 /** Keep server-only admission credentials out of every client runtime factory. */
-function assertNoClientBackendSecret(config: object): void {
+export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
       "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",

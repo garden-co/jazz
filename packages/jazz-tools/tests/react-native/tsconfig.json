@@ -2,6 +2,7 @@
   "extends": "../../tsconfig.tests.json",
   "include": [
     "./*.ts",
+    "./*.tsx",
     "../../src/types/fs-native-extensions.d.ts",
     "../../src/types/jazz-wasm-mutation-error.d.ts"
   ]

@@ -31,6 +31,11 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        Ok(self.database.pending_large_value_uploads().await?.len())
+    }
+
     /// Open or create a node over the supplied storage.
     pub async fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
     where

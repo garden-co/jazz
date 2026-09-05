@@ -40,12 +40,29 @@ The relay is a normal non-history-complete `Db`:
 - No binding may read directly from SQLite or bypass a `Db` to answer an app
   query.
 
+Each successful socket handshake installs a fresh core upstream connection
+with the connector's unchanged authenticated session context before any frames
+are delivered. Its queue belongs to that socket generation, not to the relay's
+lifetime. Termination immediately closes that queue to stale bridge traffic and
+retains exact-generation core detach until the owner becomes available; a late
+terminal notification cannot detach a replacement. Core detach owns receipt
+demotion and pending advice/outbox handoff. Foreground operations and accepted
+local transactions remain owned throughout reconnect. Socket cancellation during
+installation retains the same cleanup even before Connected is reported. Native
+installation uses the fallible core upstream entry point: peer owners are
+acquired in stable registry order, and parked replay units are loaded before
+admission changes receipts or outbox. A read error does not admit a successor.
+The legacy core attach entry retains its historical empty-upload fallback on
+replay read errors; native socket installation must not use that fallback.
+
 One admitted persistent scope owns exactly one authenticated upstream socket
 worker. Foregrounds are leases on that relay, not socket owners: opening a
 second foreground reuses the scope worker and cannot create a competing bearer
 connection to the same SQLite store. The worker stays alive across a clean
-foreground handoff and is stopped only by trusted scope revocation or host
-teardown. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
+foreground handoff. Explicit foreground disconnect synchronously cancels and
+joins that worker before publishing offline state; reconnect restarts it using
+the retained native admission. Trusted scope revocation and host teardown
+stop the worker and retire the admission. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
 host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O failures and
 handshake timeouts leave local relay work available while the worker retries.
@@ -59,6 +76,16 @@ A failed bridge, owner pump, or established transport is also recorded as a
 scope terminal error and surfaced to
 foreground ticks until a later authenticated reconnect clears it; it may never
 silently degrade into an indefinitely pending foreground operation.
+
+Opening a foreground returns its in-memory client handle synchronously. If
+the persistent owner is busy, the host retains normal subscriber admission as
+a future and pumps it without blocking the UI thread. Its identity and claims
+are captured from the admitted scope before it is queued; the persistent
+subscriber is registered only after admission succeeds. Closing the foreground
+or revoking its scope cancels admission and discards its queued traffic, so
+no late subscriber can be installed. An admission failure is retained and
+surfaced by that foreground's operations and ticks while sibling foregrounds
+continue to progress.
 
 The scope key has no token material. Trusted platform code derives an opaque
 non-empty `auth_scope` only after authentication and admits the complete scope config to
@@ -363,6 +390,100 @@ before opening a foreground. Unknown or malformed command/response bytes fail
 closed, with no partially returned buffer. Command outputs are copied into
 JS-owned memory before Rust frees its response allocation.
 
+**V1 foreground extension registry.** Existing request ordinals 0–17 and
+response ordinals 0–16 remain byte-for-byte unchanged. The additional request
+ordinals, in declaration/field order, are:
+
+| Ordinal | Request                        | Ordered fields                                                                                                   |
+| ------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| 18      | AllWithOptions                 | query u64, options_json string, transaction option u64                                                           |
+| 19      | AllRelationSnapshotWithOptions | query u64, options_json string, transaction option u64                                                           |
+| 20      | SubscribeWithOptions           | query u64, options_json string                                                                                   |
+| 21      | WaitForTransaction             | tx_id 16 raw bytes, tier string                                                                                  |
+| 22      | StageMutation                  | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
+| 23      | DisconnectNativeUpstream       | none                                                                                                             |
+| 24      | ReconnectNativeUpstream        | none                                                                                                             |
+| 25      | NativeConnectionStatus         | none                                                                                                             |
+
+The following ordinals are reserved for the coordinated V1 continuation.
+Reservation alone does not imply that a native artifact implements a handler;
+unsupported operations must fail closed until their acceptance gates pass.
+
+| Request ordinal | Reserved request                                         | Response ordinal / payload                              |
+| --------------- | -------------------------------------------------------- | ------------------------------------------------------- |
+| 26              | NativeSessionMetadata (no fields)                        | 18 NativeSessionMetadata: issuer string, user_id string |
+| 27              | WriteState: tx_id 16 raw bytes                           | 19 WriteState: state_json string                        |
+| 28              | DrainMutationErrors (no fields)                          | 20 MutationErrors: events_json string                   |
+| 29              | BeginStreamingMutation                                   | 21 StreamingMutationOpened: upload u64                  |
+| 30              | PushStreamingMutation: upload u64, chunk byte vector     | 22 StreamingMutationPushed (no fields)                  |
+| 31              | FinishStreamingMutation: upload u64                      | existing 14 TransactionCommitted                        |
+| 32              | AbortStreamingMutation: upload u64                       | 23 StreamingMutationAborted: aborted bool               |
+| 33              | AllRelationQuery: query_json string, options_json string | existing 3 Rows                                         |
+
+BeginStreamingMutation has ordered fields mutation enum, table string,
+row_id 16 raw bytes, cells byte vector, column string, options_json string.
+Request 34 is LocalCurrentRow: table string, row_id 16 raw bytes; its response
+is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
+16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
+u64; its response is existing 14 TransactionCommitted. The continuation bytes
+are pinned by `foreground_continuation_v1_byte_contract`.
+Request 37 is SubscribeRelationQuery: query_json string, options_json string;
+its response is existing 4 Subscribed. It uses the same asynchronous canonical
+relation preparation as request 33, then the ordinary deferred subscription
+opener and event codec. It requires the default read view.
+
+Request 36 is DirectMutation: mutation enum, table string, optional row_id 16 raw
+bytes, cells byte vector, options_json string. Response 24 is MutationCommitted:
+tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's
+queued admission and return its reserved write identity before suspended owner
+work completes. Synchronous LocalCurrentRow and WriteState report an explicit
+transient busy error when the semantic owner is unavailable; they never invent
+an empty row or an unobserved write state. Invalid target option keys are rejected
+at the byte boundary, including null-valued keys. Canceling a finish or abort
+operation retires its result handle; the already admitted operation continues
+through bounded foreground cleanup. Finish and abort use first-closing-wins;
+canceling a result does not roll back a finish. Canceling a push leaves its
+partial upload available for an explicit abort. Foreground close retires all
+pending operations and uploads. Subscription event ordinal 3 is reserved for
+StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
+terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
+terminal operations use `binding_codec::terminal_operations_to_json`.
+
+The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
+Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
+configured, explicitly_offline, connected. All fields use postcard 1's existing
+canonical V1 envelope: unsigned varints, UTF-8 strings/byte vectors prefixed by
+varint byte length, options with a 0/1 presence byte, and raw fixed arrays.
+Options strings reuse the established native binding JSON option vocabulary;
+validation belongs to the shared native option parser, never the host bridge.
+A supported discriminant does not grant capabilities or change admission identity.
+The byte-level Rust contract is pinned by
+`foreground_extension_v1_byte_contract`; additive handler availability must be
+verified by the corresponding real C ABI acceptance tests.
+
+`AllWithOptions` and `AllRelationSnapshotWithOptions` attach ordinary core
+coverage with the supplied read options before evaluating. An optional
+foreground-owned transaction handle selects the opening snapshot and staged
+write overlay through the existing transaction read APIs; it cannot select a
+sibling foreground's transaction or replace its opening identity/claims.
+The pending future awaits owner admission and coverage without blocking the
+owner thread. Completion or cancellation queues a bounded coverage cleanup;
+ordinary owner turns acquire the node asynchronously before releasing its pins.
+The read admission budget includes retained reads and queued cleanups, and
+foreground retirement cancels those local obligations after cancelling retained
+ticks and reads. Relation
+snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
+`StructuredDelta`, appends the existing terminal-operation JSON codec to the
+ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
+event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
+
+`AllRelationQuery` accepts the existing native `relation_ir` JSON wrapper and
+uses the core relation resolver plus asynchronous canonical query preparation.
+It shares the same coverage, row hydration, pending-operation, and cleanup path
+as ordinary option-bearing reads. As on the other native bindings, raw
+relation-IR one-shot reads require the default read view; transaction-local
+array includes continue to use the transaction-aware snapshot command.
+
 **V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
@@ -372,7 +493,16 @@ is the existing `binding_codec::encode_rows` payload and subscription deltas
 are the existing `binding_codec::encode_subscription_delta` payload. Query and
 subscription identifiers are owner-thread-local opaque u64 handles allocated
 once across every foreground attached to that relay, so a value copied from a
-sibling foreground cannot alias a same-number local resource.
+sibling foreground cannot alias a same-number local resource. JavaScript handle
+responses require one complete, minimally encoded postcard u64 and reject
+trailing bytes or values above `Number.MAX_SAFE_INTEGER`; they never round or
+truncate an opaque native handle.
+`PrepareQuery` retains asynchronous canonical preparation behind its ordinary
+query handle when a retained tick already owns the node. Reads await that same
+preparation; subscription opening is likewise retained behind its ordinary
+subscription handle, and drain polls it with the live relay wake. Cancelling an
+unopened subscription retires its opener before it can publish events. Neither
+preparation nor subscription admission may block or reenter the node owner.
 `All` and `DrainSubscription` first poll their foreground-owned operation and
 return its ordinary rows/events only when ready. If physical large-value
 hydration needs chunk or peer I/O, they instead return an opaque pending
@@ -424,9 +554,52 @@ do not need a new pending protocol: requests which would require asynchronous
 large-value hydration are not representable by this codec. Existing `Pending`
 and `Poll` remain the async path for query/subscription materialization.
 
+Explicit foreground transactions admit begin, staging, reads, commit and rollback
+onto the existing core FIFO without blocking the native owner thread. Returned
+transaction/row identifiers acknowledge admission; asynchronous staging failures
+surface through the committed write's ordinary settlement/error channel. Byte
+request and response tags are unchanged. A read is queued at command arrival,
+including its deferred preparation and transaction-scoped coverage, so a later
+stage or commit cannot overtake it. If coverage is awaiting delivery without
+holding the node owner, tick maintenance continues while the FIFO head stays
+retained; a cold operation retaining the owner still yields the native turn.
+Cancelling a read drops its coverage and releases that FIFO fence, but does not
+roll back a later admitted commit. Rollback and foreground close enqueue cleanup
+after already-admitted transaction work and immediately retire the public handle.
+The relay worker retains removed foreground owners until their ordinary local
+`Db::close` drain finishes, including accepted commits; bounded cleanup turns run
+without callbacks into the closed JavaScript runtime. It does not wait for all
+peer frames or strengthen foreground close into a relay/network flush primitive.
+Retirement drops retained query-preparation futures before attempting HLC
+handoff. The HLC read is a single bounded poll: a contended owner makes the
+handoff uncertain and permanently retires that node identity; a later foreground
+receives a different node rather than guessing a safe clock floor. Accepted local
+work remains with the closing owner. Peer-I/O errors do not skip local close
+progress, and an abandonment error is reported only after close ownership has
+been retained. Final relay shutdown still awaits the accepted local close drain;
+this does not promise bounded completion of a never-ready storage operation.
+
+**Permission advice.** Command 38 appends `PermissionAdvice { action }`, with
+action ordinals Insert=0 (table, encoded cells), Read=1 (table, 16-byte row id),
+Update=2 (table, row id, encoded patch), and Delete=3 (table, row id). Response 25
+appends the advice enum Allowed=0, Denied=1, Unknown=2. Strings and byte vectors
+use the existing V1 postcard framing. Pending responses use the existing
+foreground-owned operation handle and poll/cancel/close lifecycle.
+
+An admitted foreground requests advice through its scope's persistent ordinary
+`Db`, whose upstream carries the authenticated scope subject. Its immediate
+foreground-to-relay link cannot supply authoritative advice: the relay remains
+a partial replica. The native admission must match the foreground author to the
+persistent scope author before enabling this route. Generic peer attachments
+cannot use it. Advice still comes only from the upstream authority, contains no
+supporting rows or policy reasons, and never stages a mutation. The requesting
+foreground owns delivery and cancellation even though the request uses the
+scope's shared upstream. Offline/timeouts resolve Unknown; synchronous local
+advice remains Unknown.
+
 The V1 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation
-terminal operations, permission advice, and any not-yet-shared mutation
+terminal operations and any not-yet-shared mutation
 contract rather than silently receiving a distinct RN meaning. The admitted
 native scope continues to own schema, canonical session/author identity,
 claims, and ordinary peer synchronization; JavaScript only provides canonical

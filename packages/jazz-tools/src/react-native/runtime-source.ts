@@ -2,6 +2,8 @@ import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
+import type { Session } from "../runtime/context.js";
+import { markTrustedReservedSession } from "../runtime/client-session.js";
 import type { AppContext } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
@@ -60,8 +62,11 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
+  private admittedSession: Session | null = null;
+  private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
+  private lifecycleForeground: NativeForegroundDb | null = null;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (config.sqliteStorage !== undefined) {
@@ -69,11 +74,57 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     }
     if (shouldRequireSqliteDriver(config)) {
       if (config.nativeRelay) {
+        if (this.admittedCapability) return;
         assertNativeRelay(config.nativeRelay);
-        resolveNativeSession(config);
+        // Capture before the first await: caller-owned bytes must never select
+        // a different scope after native identity preflight.
+        const capability = new Uint8Array(config.nativeRelay.capability);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
+        const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
+          if (this.lifecycleForeground) return run(this.lifecycleForeground);
+          // Connectivity is available before the lazy schema client exists.
+          const temporary = new NativeForegroundDb(
+            this.foregroundFactory!.openAttached(capability),
+            foreground,
+          );
+          try {
+            return run(temporary);
+          } finally {
+            temporary.close();
+          }
+        };
+        const opened = new NativeForegroundDb(
+          this.foregroundFactory.openAttached(capability),
+          foreground,
+        );
+        try {
+          const metadata = opened.nativeSessionMetadata();
+          const configured = opened.nativeConnectionStatus().configured;
+          // The admitted scope's transport configuration is immutable. Lifecycle
+          // actions use the application owner, rather than opening a recovery
+          // foreground merely to inspect or change connectivity.
+          this.nativeConnection = {
+            configured: () => configured,
+            disconnect: () => withForeground((db) => db.disconnectNativeUpstream()),
+            reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
+          };
+          this.admittedSession = markTrustedReservedSession({
+            issuer: metadata.issuer,
+            user_id: metadata.userId,
+            claims: {},
+            authMode:
+              metadata.issuer === "urn:jazz:local-first"
+                ? "local-first"
+                : metadata.issuer === "urn:jazz:anonymous"
+                  ? "anonymous"
+                  : "external",
+          });
+        } finally {
+          opened.close();
+        }
+        this.admittedCapability = capability;
         return;
       }
       // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
@@ -90,16 +141,35 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   }
 
+  override assertAuthUpdateAllowed(): never {
+    throw new Error(
+      "React Native authentication is native-admission bound; revoke the old native scope, admit the new scope, and create a new Db",
+    );
+  }
+
+  override admitConfig(config: ReactNativeDbConfig): void {
+    if (!this.admittedSession) throw new Error("React Native native session is not admitted");
+    // Public identity is derived from the native admission. Caller metadata
+    // neither chooses authorization nor overrides the displayed identity.
+    delete config.jwtToken;
+    delete config.secret;
+    delete config.adminSecret;
+    config.cookieSession = this.admittedSession;
+    setTrustedReservedSession(config, this.admittedSession);
+  }
+
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
-    if (context.config.nativeRelay) {
+    if (this.admittedCapability) {
       const factory = this.foregroundFactory;
       const module = this.foregroundModule;
-      const relay = context.config.nativeRelay;
-      if (!factory || !module || !relay)
+      const capability = this.admittedCapability;
+      if (!factory || !module)
         throw new Error("React Native native foreground runtime is not loaded");
       const session = resolveNativeSession(context.config);
+      const foreground = new NativeForegroundDb(factory.openAttached(capability), module);
+      this.lifecycleForeground = foreground;
       const runtime = NativeRuntimeAdapter.fromDb(
-        new NativeForegroundDb(factory.openAttached(relay.capability), module),
+        foreground,
         context.schema,
         randomNativeNodeBytes(),
         authorBytesForSession(session),

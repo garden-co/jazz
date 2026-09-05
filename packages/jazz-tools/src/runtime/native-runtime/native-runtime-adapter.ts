@@ -185,6 +185,14 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   /** Native foreground capabilities are bound to admission-time auth. */
   rejectAuthUpdate?(): never;
+  isNativeForegroundClosed?(): boolean;
+  disconnectNativeUpstream?(): void;
+  reconnectNativeUpstream?(): void;
+  nativeConnectionStatus?(): {
+    configured: boolean;
+    explicitlyOffline: boolean;
+    connected: boolean;
+  };
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
   beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
@@ -2200,6 +2208,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
+    if (this.db?.reconnectNativeUpstream) {
+      // The admitted native host owns the endpoint and credentials. The JS
+      // connection manager controls lifecycle only, never a parallel socket.
+      this.db.reconnectNativeUpstream();
+      return;
+    }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
@@ -2352,10 +2366,21 @@ export class NativeRuntimeAdapter implements Runtime {
     return features;
   }
 
+  nativeUpstreamConfigured(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.nativeUpstreamConfigured();
+    // Configured authority remains configured during explicit disconnect;
+    // exclusive confirmation must wait for it rather than settle locally.
+    return this.db.nativeConnectionStatus?.().configured === true;
+  }
+
   async disconnect(
     options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    if (this.db?.disconnectNativeUpstream) {
+      this.db.disconnectNativeUpstream();
+      return;
+    }
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
     if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;
@@ -3285,7 +3310,10 @@ export class NativeRuntimeAdapter implements Runtime {
     start: () => NativePermissionAdviceResult,
   ): Promise<PermissionAdvice> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
-    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+    if (
+      this.closed ||
+      ((!this.serverTransport || !this.serverCarrier) && !this.nativeUpstreamConfigured())
+    ) {
       return Promise.resolve("unknown");
     }
     const started = start();
@@ -3383,7 +3411,18 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      void this.runCoreTick().catch(reportAsyncRuntimeError);
+      void this.runCoreTick().catch((error) => {
+        // Native revocation can retire a foreground after its wake crossed
+        // into the JS queue. Native liveness distinguishes that stale wake
+        // from a still-live scope with an actual transport/core failure.
+        try {
+          if (this.db.isNativeForegroundClosed?.()) return;
+        } catch (livenessError) {
+          reportAsyncRuntimeError(livenessError);
+          return;
+        }
+        reportAsyncRuntimeError(error);
+      });
     });
   }
 
@@ -4417,6 +4456,7 @@ function readOptions(
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
   const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
   if (includeDeleted) readOptions.include_deleted = true;
+  if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;
