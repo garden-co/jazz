@@ -515,7 +515,7 @@ pub enum ForegroundDbCommandRequest {
         upload: u64,
     },
     AllRelationQuery {
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     },
     LocalCurrentRow {
@@ -537,7 +537,7 @@ pub enum ForegroundDbCommandRequest {
         options_json: String,
     },
     SubscribeRelationQuery {
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     },
     PermissionAdvice {
@@ -2697,14 +2697,14 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             }
         }
         ForegroundDbCommandRequest::AllRelationQuery {
-            query_json,
+            query_bytes,
             options_json,
         } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
                 Err(status) => return status,
             };
-            match client.start_foreground_relation_read(query_json, options_json) {
+            match client.start_foreground_relation_read(query_bytes, options_json) {
                 Ok(poll) => foreground_operation_response(poll),
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
@@ -2754,14 +2754,14 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             }
         }
         ForegroundDbCommandRequest::SubscribeRelationQuery {
-            query_json,
+            query_bytes,
             options_json,
         } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
                 Err(status) => return status,
             };
-            match client.subscribe_foreground_relation_query(query_json, options_json) {
+            match client.subscribe_foreground_relation_query(query_bytes, options_json) {
                 Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
@@ -3356,12 +3356,12 @@ impl NativeRelayClient {
 
     fn start_foreground_relation_read(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
         self.relay
-            .run(move |worker| worker.start_foreground_relation_read(id, query_json, options_json))
+            .run(move |worker| worker.start_foreground_relation_read(id, query_bytes, options_json))
     }
 
     fn local_current_foreground_row(
@@ -3413,12 +3413,12 @@ impl NativeRelayClient {
 
     fn subscribe_foreground_relation_query(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     ) -> Result<u64, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            worker.subscribe_foreground_relation_query(id, query_json, options_json)
+            worker.subscribe_foreground_relation_query(id, query_bytes, options_json)
         })
     }
 
@@ -5489,7 +5489,7 @@ impl RelayWorker {
     fn start_foreground_relation_read(
         &mut self,
         client: u64,
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let opts = foreground_read_opts_from_json(&options_json)?;
@@ -5498,7 +5498,7 @@ impl RelayWorker {
                 "relation reads require the current/default read_view".to_owned(),
             ));
         }
-        let relation = foreground_relation_query_from_json(&query_json)?;
+        let relation = foreground_relation_query_from_bytes(&query_bytes)?;
         let state = self.foreground_client(client)?;
         if state.read_cleanups.borrow().len()
             + usize::from(state.read_cleanup.is_some())
@@ -5551,7 +5551,7 @@ impl RelayWorker {
     fn subscribe_foreground_relation_query(
         &mut self,
         client: u64,
-        query_json: String,
+        query_bytes: Vec<u8>,
         options_json: String,
     ) -> Result<u64, RelayError> {
         let opts = foreground_read_opts_from_json(&options_json)?;
@@ -5560,7 +5560,7 @@ impl RelayWorker {
                 "relation subscriptions require the current/default read_view".to_owned(),
             ));
         }
-        let relation = foreground_relation_query_from_json(&query_json)?;
+        let relation = foreground_relation_query_from_bytes(&query_bytes)?;
         let db = Rc::clone(&self.foreground_client(client)?.db);
         let opener: ForegroundSubscriptionOpen = Box::pin(async move {
             let prepared = db
@@ -6268,20 +6268,11 @@ impl Drop for ForegroundReadCoverage {
     }
 }
 
-fn foreground_relation_query_from_json(
-    query_json: &str,
+fn foreground_relation_query_from_bytes(
+    query_bytes: &[u8],
 ) -> Result<jazz::query::RelationQuery, RelayError> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|error| RelayError::ForegroundCommand(format!("decode query json: {error}")))?;
-    let rel = value.get("relation_ir").ok_or_else(|| {
-        RelayError::ForegroundCommand("relation query json is missing relation_ir".to_owned())
-    })?;
-    let relation = jazz::query::RelationQuery {
-        rel: serde_json::from_value(rel.clone()).map_err(|error| {
-            RelayError::ForegroundCommand(format!("decode relation_ir: {error}"))
-        })?,
-    };
-    Ok(relation)
+    jazz::query::decode_relation_query_v1_exact(query_bytes)
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode relation query: {error}")))
 }
 
 fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
@@ -11220,7 +11211,7 @@ mod tests {
     #[test]
     fn relation_subscription_command_preserves_append_only_byte_contract() {
         let command = ForegroundDbCommandRequest::SubscribeRelationQuery {
-            query_json: "{}".to_owned(),
+            query_bytes: b"JRQ\x01\x06\x00".to_vec(),
             options_json: "{}".to_owned(),
         };
         let expected = [37, 2, b'{', b'}', 2, b'{', b'}'];
@@ -14034,7 +14025,7 @@ mod tests {
             ),
             (
                 ForegroundDbCommandRequest::AllRelationQuery {
-                    query_json: "{}".into(),
+                    query_bytes: b"JRQ\x01\x06\x00".to_vec(),
                     options_json: "{}".into(),
                 },
                 vec![33, 2, 123, 125, 2, 123, 125],

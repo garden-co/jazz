@@ -11,6 +11,7 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
+import { encodeRelationQueryV1, type RelExpr } from "../../ir.js";
 import type {
   TxId,
   InsertResult,
@@ -213,7 +214,7 @@ type NativeDb = {
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
   allRelationQuery?(
-    queryJson: string,
+    queryBytes: Uint8Array,
     opts: unknown,
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
@@ -254,15 +255,18 @@ type NativeDb = {
   ): ReadableStream<unknown> | Subscription;
   /** Authority-serving subscription owned by an explicit backend open. */
   subscribeForBackend?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeRelationQuery?(queryJson: string, opts: unknown): ReadableStream<unknown> | Subscription;
+  subscribeRelationQuery?(
+    queryBytes: Uint8Array,
+    opts: unknown,
+  ): ReadableStream<unknown> | Subscription;
   subscribeRelationQueryForIdentity?(
-    queryJson: string,
+    queryBytes: Uint8Array,
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
   /** Authority-serving relation subscription owned by an explicit backend open. */
   subscribeRelationQueryForBackend?(
-    queryJson: string,
+    queryBytes: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
   insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
@@ -2026,7 +2030,11 @@ export class NativeRuntimeAdapter implements Runtime {
       this.applySessionClaims(session);
       await this.waitForStrictRemoteQueryTransport(tier);
       if (this.closed) return [];
-      const payload = await this.readRelationQueryForContext(coreQueryJson, opts, readContext);
+      const payload = await this.readRelationQueryForContext(
+        relationQueryBytes(coreQueryJson),
+        opts,
+        readContext,
+      );
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
@@ -2095,7 +2103,11 @@ export class NativeRuntimeAdapter implements Runtime {
       this.applySessionClaims(session);
       try {
         if (usesNativeRelationApi) {
-          immediateSource = this.subscribeRelationForContext(queryJson, opts, readContext);
+          immediateSource = this.subscribeRelationForContext(
+            relationQueryBytes(queryJson),
+            opts,
+            readContext,
+          );
         } else {
           immediateQuery = this.prepareQuery(queryJson);
           immediateSource = this.subscribeForContext(immediateQuery, opts, readContext);
@@ -2691,7 +2703,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readRelationQueryForContext(
-    queryJson: string,
+    queryBytes: Uint8Array,
     opts: unknown,
     context: NativeReadContext,
   ): Promise<Uint8Array> {
@@ -2699,7 +2711,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not support relation queries");
     }
     return this.awaitNativeRead(
-      this.db.allRelationQuery(queryJson, opts, this.nativeReadAuthor(context)),
+      this.db.allRelationQuery(queryBytes, opts, this.nativeReadAuthor(context)),
     );
   }
 
@@ -2740,7 +2752,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private subscribeRelationForContext(
-    queryJson: string,
+    queryBytes: Uint8Array,
     opts: unknown,
     context: NativeReadContext,
   ): ReadableStream<unknown> | Subscription {
@@ -2751,19 +2763,19 @@ export class NativeRuntimeAdapter implements Runtime {
             "Native runtime does not support backend authority relation subscriptions",
           );
         }
-        return this.db.subscribeRelationQueryForBackend(queryJson, opts);
+        return this.db.subscribeRelationQueryForBackend(queryBytes, opts);
       case "session-authority":
         if (!this.db.subscribeRelationQueryForIdentity) {
           throw new Error(
             "Native runtime does not support session-authority relation subscriptions",
           );
         }
-        return this.db.subscribeRelationQueryForIdentity(queryJson, context.identity, opts);
+        return this.db.subscribeRelationQueryForIdentity(queryBytes, context.identity, opts);
       case "client-local":
         if (!this.db.subscribeRelationQuery) {
           throw new Error("Native runtime does not support relation query subscriptions");
         }
-        return this.db.subscribeRelationQuery(queryJson, opts);
+        return this.db.subscribeRelationQuery(queryBytes, opts);
     }
   }
 
@@ -4581,6 +4593,19 @@ function queryUsesNativeRelationApi(queryJson: string): boolean {
   } catch {
     return false;
   }
+}
+
+function relationQueryBytes(queryJson: string): Uint8Array {
+  let relation_ir: unknown;
+  try {
+    relation_ir = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
+  } catch {
+    throw new Error("Relation query is not valid runtime query JSON");
+  }
+  if (!relation_ir || typeof relation_ir !== "object") {
+    throw new Error("Relation query is missing relation_ir");
+  }
+  return encodeRelationQueryV1(relation_ir as RelExpr);
 }
 
 function relationIrContainsNativeOperator(value: unknown): boolean {

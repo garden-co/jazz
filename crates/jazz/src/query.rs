@@ -25,6 +25,7 @@ pub(crate) fn is_implicit_row_id_alias(table: &TableSchema, column: &str) -> boo
 
 // Stable public syntax and relation-facade vocabulary.
 include!("query/ast.rs");
+include!("query/relation_codec.rs");
 
 // Relation-facade validation and name resolution into the stable query vocabulary.
 // Executable lowering and normalization remain in `node::query_eval`.

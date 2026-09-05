@@ -2534,7 +2534,13 @@ pub enum ShapeBody {
     /// Ordinary root-table query.
     Query(Query),
     /// Output-changing relation query, normalized by the query compiler.
-    Relation(RelationQuery),
+    Relation(
+        #[serde(
+            serialize_with = "crate::query::relation_query_wire::serialize_required",
+            deserialize_with = "crate::query::relation_query_wire::deserialize_required"
+        )]
+        RelationQuery,
+    ),
 }
 
 impl ShapeAst {
