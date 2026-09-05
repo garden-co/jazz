@@ -17,7 +17,7 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
@@ -3567,7 +3567,7 @@ type PendingForegroundWakes = Arc<Mutex<BTreeMap<u64, PendingForegroundWake>>>;
 
 #[derive(Clone)]
 struct OwnerWakeNotifier {
-    commands: mpsc::SyncSender<RelayCommand>,
+    commands: Weak<mpsc::SyncSender<RelayCommand>>,
     queued: Arc<AtomicBool>,
 }
 
@@ -3576,8 +3576,11 @@ impl OwnerWakeNotifier {
         if self.queued.swap(true, Ordering::AcqRel) {
             return;
         }
-        if self
-            .commands
+        let Some(commands) = self.commands.upgrade() else {
+            self.queued.store(false, Ordering::Release);
+            return;
+        };
+        if commands
             .try_send(RelayCommand::FlushForegroundWakes)
             .is_err()
         {
@@ -3728,7 +3731,7 @@ pub struct NativeRelay {
 }
 
 struct RelayInner {
-    jobs: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
+    jobs: Mutex<Option<Arc<mpsc::SyncSender<RelayCommand>>>>,
     normal_queue_depth: Arc<AtomicUsize>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     liveness: Arc<RelayLiveness>,
@@ -4831,7 +4834,7 @@ struct RelayWorker {
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     owner_wake_queued: Arc<AtomicBool>,
-    owner_commands: mpsc::SyncSender<RelayCommand>,
+    owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     upstream_attached: bool,
     socket_generation: u64,
@@ -4865,7 +4868,7 @@ impl RelayWorker {
         wire: NativeRelayWire,
         liveness: Arc<RelayLiveness>,
         owner_wake_queued: Arc<AtomicBool>,
-        owner_commands: mpsc::SyncSender<RelayCommand>,
+        owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     ) -> Result<Self, RelayError> {
         let column_families = config.schema.column_families();
         let refs = column_families
@@ -6311,13 +6314,14 @@ impl NativeRelay {
         let (commands, receiver) = mpsc::sync_channel::<RelayCommand>(
             NATIVE_RELAY_OWNER_COMMAND_MAX + NATIVE_RELAY_OWNER_TEARDOWN_RESERVE + 1,
         );
+        let commands = Arc::new(commands);
         let normal_queue_depth = Arc::new(AtomicUsize::new(0));
         let owner_wake_queued = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
         let owner_liveness = Arc::clone(&liveness);
         let owner_wake_queued_for_worker = Arc::clone(&owner_wake_queued);
-        let owner_commands = commands.clone();
+        let owner_commands = Arc::downgrade(&commands);
         #[cfg(test)]
         if let Some(counter) = &config.thread_start_counter {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -6343,19 +6347,16 @@ impl NativeRelay {
                     }
                 };
                 loop {
-                    // The owner retains coalesced wake notifiers, so channel
-                    // disconnection alone is not its terminal authority.
-                    // Bound the wait and observe explicit lifecycle terminal
-                    // state even after external command handles are dropped.
-                    let command = receiver.recv_timeout(std::time::Duration::from_millis(1));
+                    let command = if worker.closing.is_empty() {
+                        receiver
+                            .recv()
+                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                    } else {
+                        receiver.recv_timeout(std::time::Duration::from_millis(1))
+                    };
                     let command = match command {
                         Ok(command) => command,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if !worker.liveness.is_alive() {
-                                worker.finish_foreground_retirement();
-                                return;
-                            }
-                            worker.flush_foreground_wakes();
                             let _ = worker.pump();
                             continue;
                         }
