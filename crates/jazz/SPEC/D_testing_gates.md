@@ -40,8 +40,11 @@ For ordinary Rust/core work, the full gate set is:
 
 For a benchmark edit, locally run
 `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`; it is a targeted debug
-compile check. Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`, which
-executes deterministic core and jazz-sim scenario assertions. The realistic
+compile check. The standalone `dev/gates/benchmark-smoke.sh --ci` executes the
+deterministic core and jazz-sim scenario assertions for callers that need it.
+The ordinary PR workspace partition runs those same named cases in its broad
+Nextest selection with CI's feature set, first failing closed if the selected
+inventory omits either smoke binary or any named scenario case. The realistic
 benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
 all maintained benchmark APIs on same-repository benchmark-labeled PRs,
 non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the

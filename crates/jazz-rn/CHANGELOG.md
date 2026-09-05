@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- f72ea1d: Ship the React Native relay package together with sealed Android and iOS native relay artifacts in alpha and preview builds.
+
 ## 2.0.0-alpha.53
 
 ### Patch Changes
