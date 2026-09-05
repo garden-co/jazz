@@ -4326,6 +4326,9 @@ pub struct TerminalRootLayout {
     pub public_fields: Vec<TerminalRootPublicField>,
     /// Physical representation used for public cells.
     pub carrier: TerminalRootCarrier,
+    /// The collector key contains an arm discriminator immediately after its
+    /// physical root UUID, which denotes source position zero.
+    pub root_union_arm: bool,
 }
 
 /// One public root field's immutable physical slot identity.
@@ -5009,7 +5012,12 @@ fn apply_maintained_update_to_snapshot(
                 .iter()
                 .filter(|operation| operation.path.is_empty())
             {
-                if terminal_root_occurrence_id(&operation.root_key).is_ok() {
+                if terminal_root_occurrence_id_with_root_union(
+                    &operation.root_key,
+                    layout.root_union_arm,
+                )
+                .is_ok()
+                {
                     continue;
                 }
                 let root_bytes = operation
@@ -5026,7 +5034,10 @@ fn apply_maintained_update_to_snapshot(
                         occurrence_overrides.insert(operation.root_key.clone(), candidate.clone());
                     }
                     [] => {
-                        terminal_root_occurrence_id(&operation.root_key)?;
+                        terminal_root_occurrence_id_with_root_union(
+                            &operation.root_key,
+                            layout.root_union_arm,
+                        )?;
                     }
                     _ => {
                         return Err(Error::new(
@@ -5246,7 +5257,12 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .and_then(|overrides| overrides.get(operation.root_key.as_slice()))
                 .cloned()
                 .map(Ok)
-                .unwrap_or_else(|| terminal_root_occurrence_id(&operation.root_key))?;
+                .unwrap_or_else(|| {
+                    terminal_root_occurrence_id_with_root_union(
+                        &operation.root_key,
+                        layout.root_union_arm,
+                    )
+                })?;
             root_operations.push((occurrence_id, operation));
         } else {
             descendant_operations.push(operation);
@@ -5401,6 +5417,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
         &occurrences,
         &affected,
         &descendant_operations,
+        layout.root_union_arm,
     )?;
 
     let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
@@ -5471,12 +5488,14 @@ fn apply_descendant_terminal_operations_to_snapshot(
     occurrences: &[OutputOccurrenceId],
     roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
+    root_union_arm: bool,
 ) -> Result<(), Error> {
     for operation in operations {
         if operation.path.is_empty() {
             continue;
         }
-        let occurrence = terminal_root_occurrence_id(&operation.root_key)?;
+        let occurrence =
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
         let Some(root_index) = occurrences
             .iter()
             .position(|candidate| candidate == &occurrence)
@@ -5734,9 +5753,14 @@ pub(crate) fn terminal_root_binding_field_names(
 }
 
 /// Decode the Groove ordered key used to address one root output occurrence.
-/// Plain joins are UUID sequences. A union-derived joined source is preceded
-/// by its ordered UTF-8 discriminator.
-pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
+/// Plain joins are UUID sequences; joined-source discriminators precede their
+/// UUIDs at source positions one and above. Root-union collector keys retain
+/// their physical UUID first and need the prepared layout to identify the
+/// following `(label, actual-root-row)` pair as source position zero.
+pub(crate) fn terminal_root_occurrence_id_with_root_union(
+    encoded: &[u8],
+    root_union_arm: bool,
+) -> Result<OutputOccurrenceId, Error> {
     fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
         if encoded.get(*cursor).copied() != Some(10) {
             return None;
@@ -5785,6 +5809,27 @@ pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurr
     })?;
     let mut joined = Vec::new();
     let mut union_arms = Vec::new();
+    if root_union_arm {
+        let label = ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root key contains an invalid root union discriminator",
+            )
+        })?;
+        let actual_root = uuid_at(encoded, &mut cursor).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root key contains no root union contributor",
+            )
+        })?;
+        if actual_root != root {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "terminal root key root union contributor disagrees with root UUID",
+            ));
+        }
+        union_arms.push((0, label));
+    }
     while cursor < encoded.len() {
         let discriminator = if encoded[cursor] == 6 {
             Some(ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
@@ -5803,7 +5848,7 @@ pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurr
             )
         })?;
         if let Some(discriminator) = discriminator {
-            union_arms.push((joined.len(), discriminator));
+            union_arms.push((joined.len() + 1, discriminator));
         }
         joined.push(joined_id);
     }

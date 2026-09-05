@@ -20,7 +20,7 @@ struct RelationFacadeJoin {
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
-    if let RelationExpr::Union { inputs } = &query.rel {
+    if let Some(inputs) = relation_union_arms(&query.rel) {
         if inputs.is_empty() {
             return Err(relation_unification_error(
                 "union requires at least one labeled input",
@@ -28,10 +28,14 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         }
         let mut labels = BTreeSet::new();
         let mut output = None;
-        for arm in inputs {
-            if arm.label.is_empty() || arm.label.contains('\0') || !labels.insert(&arm.label) {
+        for arm in &inputs {
+            if arm.label.is_empty()
+                || arm.label.len() > 4096
+                || arm.label.contains('\0')
+                || !labels.insert(&arm.label)
+            {
                 return Err(relation_unification_error(
-                    "union arm labels must be non-empty, NUL-free, and unique",
+                    "union arm labels must be 1..=4096 bytes, NUL-free, and unique",
                 ));
             }
             let arm_query = relation_query_to_query(&RelationQuery {
@@ -96,6 +100,47 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         query = query.offset(plan.offset);
     }
     Ok(query)
+}
+
+/// Distribute output-preserving relation wrappers over a UNION ALL so each
+/// arm can reuse the legacy single-relation resolver. `Distinct` is excluded:
+/// it is a post-union multiplicity boundary and must lower as its own row-set
+/// node rather than being pushed into arms.
+pub(crate) fn relation_union_arms(expr: &RelationExpr) -> Option<Vec<RelationUnionArm>> {
+    match expr {
+        RelationExpr::Union { inputs } => Some(inputs.clone()),
+        RelationExpr::Filter { input, predicate } => relation_union_arms(input).map(|arms| {
+            arms
+                .into_iter()
+                .map(|arm| RelationUnionArm {
+                    label: arm.label,
+                    input: RelationExpr::Filter {
+                        input: Box::new(arm.input),
+                        predicate: predicate.clone(),
+                    },
+                })
+                .collect()
+        }),
+        RelationExpr::Project { input, columns } => relation_union_arms(input).map(|arms| {
+            arms
+                .into_iter()
+                .map(|arm| RelationUnionArm {
+                    label: arm.label,
+                    input: RelationExpr::Project {
+                        input: Box::new(arm.input),
+                        columns: columns.clone(),
+                    },
+                })
+                .collect()
+        }),
+        RelationExpr::TableScan { .. }
+        | RelationExpr::Join { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. }
+        | RelationExpr::OrderBy { .. }
+        | RelationExpr::Offset { .. }
+        | RelationExpr::Limit { .. } => None,
+    }
 }
 
 /// Normalize the canonical public `gather` shape into the ordinary recursive

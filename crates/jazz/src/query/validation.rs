@@ -235,6 +235,7 @@ fn validate_query_canonical_parts(
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
     if let Some(relation) = &query.relation {
+        validate_retained_relation_outer_query(query)?;
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
         let normalized = normalize_query(&resolved_query);
         let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
@@ -328,6 +329,31 @@ fn validate_query_canonical_parts(
     Ok((normalized, params, canonical))
 }
 
+/// Relation output is already complete row-set syntax. Keeping ordinary query
+/// clauses beside it would make policy or result modifiers disappear behind
+/// the retained-relation validation fast path, so reject that unlowered mix.
+fn validate_retained_relation_outer_query(query: &Query) -> Result<(), QueryError> {
+    let has_outer_clause = !query.filters.is_empty()
+        || !query.joins.is_empty()
+        || query.flat_join.is_some()
+        || !query.policy_branches.is_empty()
+        || !query.reachable.is_empty()
+        || !query.inherits.is_empty()
+        || !query.includes.is_empty()
+        || !query.array_subqueries.is_empty()
+        || query.select.is_some()
+        || !query.order_by.is_empty()
+        || query.aggregate.is_some()
+        || query.limit.is_some()
+        || query.offset != 0;
+    if has_outer_clause {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "relation query cannot be combined with ordinary query clauses".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate every relation UNION arm through the established single-relation
 /// facade, then merge its inferred parameter domain. The outer union itself
 /// stays retained for row-set normalization so its labels remain observable.
@@ -337,7 +363,7 @@ fn validate_retained_relation_union(
     schema: &RuntimeSchema,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
-    let RelationExpr::Union { inputs } = &relation.rel else {
+    let Some(inputs) = relation_union_arms(&relation.rel) else {
         return Err(QueryError::UnsupportedRelationQuery(
             "retained relation query must be a union".to_owned(),
         ));
@@ -349,9 +375,13 @@ fn validate_retained_relation_union(
     }
     let mut labels = BTreeSet::new();
     for arm in inputs {
-        if arm.label.is_empty() || arm.label.contains('\0') || !labels.insert(&arm.label) {
+        if arm.label.is_empty()
+            || arm.label.len() > 4096
+            || arm.label.contains('\0')
+            || !labels.insert(arm.label.clone())
+        {
             return Err(QueryError::UnsupportedRelationQuery(
-                "union arm labels must be non-empty, NUL-free, and unique".to_owned(),
+                "union arm labels must be 1..=4096 bytes, NUL-free, and unique".to_owned(),
             ));
         }
         let arm_query = relation_query_to_query(&RelationQuery {

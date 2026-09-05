@@ -84,7 +84,16 @@ impl LocalMaintainedViewSubscription {
         self.maintained
             .decoded_terminal_records()
             .iter()
-            .map(|(key, record)| Ok((crate::db::terminal_root_occurrence_id(key)?, record.clone())))
+            .map(|(key, record)| {
+                Ok((
+                    crate::db::terminal_root_occurrence_id_with_root_union(
+                        key,
+                        self.terminal_root_layout()
+                            .is_some_and(|layout| layout.root_union_arm),
+                    )?,
+                    record.clone(),
+                ))
+            })
             .collect()
     }
 

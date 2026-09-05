@@ -48,7 +48,9 @@ pub(super) fn source_requirements(
     if let Some(app_rows) = &output.app_rows {
         if !matches!(
             plan,
-            AnalyzedQueryPlan::Linear(_) | AnalyzedQueryPlan::CorrelatedPath(_)
+            AnalyzedQueryPlan::Linear(_)
+                | AnalyzedQueryPlan::Union(_)
+                | AnalyzedQueryPlan::CorrelatedPath(_)
         ) {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Operator(
