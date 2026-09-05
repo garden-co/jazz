@@ -163,7 +163,7 @@ describe("Vanilla TS Todo App E2E", () => {
       "Parent todo should appear",
     );
 
-    addTodoWithParent(el, "Child task", "Parent task");
+    await addTodoWithParent(el, "Child task", "Parent task");
 
     await waitFor(
       () => el.querySelectorAll("#todo-list li").length === 2,

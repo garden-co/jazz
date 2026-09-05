@@ -38,6 +38,15 @@
         color: #b91c1c;
         font-weight: 600;
       }
+      #receipt {
+        border: 1px solid #94a3b8;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        padding: 0.75rem;
+      }
+      #receipt p {
+        margin: 0.35rem 0;
+      }
       input[type="text"] {
         flex: 1;
         padding: 0.5rem;
@@ -45,10 +54,66 @@
     </style>
   </head>
   <body>
+    <section id="receipt" aria-label="Safari private-browsing check">
+      <strong>Jazz Safari private-browsing check</strong>
+      <p>Candidate: <code>bea3674ea70539017f3058a680fb5136fc9562d7</code></p>
+      <p>
+        Add one disposable task, reload this same tab, then use “Restart storage” and confirm the
+        task remains.
+      </p>
+      <p id="receipt-status" role="status">Starting persistent IndexedDB runtime…</p>
+      <button id="restart-storage" type="button" disabled>Restart storage</button>
+      <p id="startup-error" role="alert" hidden></p>
+    </section>
     <div id="app"></div>
     <script type="module">
       import { startApp } from "/src/main.ts";
-      startApp(document.getElementById("app"));
+      const app = document.getElementById("app");
+      const status = document.getElementById("receipt-status");
+      const error = document.getElementById("startup-error");
+      const restart = document.getElementById("restart-storage");
+      const config = { driver: { type: "persistent", dbName: "safari-private-check-alpha54" } };
+      let running;
+
+      function diagnostic(cause, action) {
+        const name = cause instanceof Error ? cause.name : "StartupError";
+        const code =
+          cause && typeof cause === "object" && typeof cause.code === "string"
+            ? ` (${cause.code})`
+            : "";
+        const message = cause instanceof Error && cause.message ? `: ${cause.message}` : "";
+        return `${action}: ${name}${code}${message}`;
+      }
+
+      async function open() {
+        restart.disabled = true;
+        status.textContent = "Starting persistent IndexedDB runtime…";
+        error.hidden = true;
+        try {
+          running = await startApp(app, config);
+          status.textContent =
+            "Persistent runtime ready. Add a disposable task, then reload this same tab.";
+          restart.disabled = false;
+        } catch (cause) {
+          status.textContent = "Persistent runtime unavailable.";
+          error.textContent = diagnostic(cause, "Startup failed");
+          error.hidden = false;
+        }
+      }
+
+      restart.addEventListener("click", async () => {
+        if (!running) return;
+        status.textContent = "Shutting down and reopening persistent storage…";
+        try {
+          await running.destroy();
+          await open();
+        } catch (cause) {
+          status.textContent = "Persistent runtime shutdown/retry failed.";
+          error.textContent = diagnostic(cause, "Restart failed");
+          error.hidden = false;
+        }
+      });
+      open();
     </script>
   </body>
 </html>
