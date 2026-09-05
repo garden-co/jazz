@@ -105,7 +105,7 @@ const benchmarkSmokeMode = (mode) => {
   return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
 };
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
-  const cpu = jobName === "test-ts" ? 16 : 4;
+  const cpu = ["test-ts", "test-react-native"].includes(jobName) ? 16 : 4;
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
   assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
@@ -1756,6 +1756,16 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("React Native CI has a separate bridge-enabled producer and real Vitest admission", () => {
+  const reactNative = job("test-react-native");
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
+  assert.match(reactNative, /local-ci-equivalent\.mjs --ci-partition react-native/);
+  assert.match(localCi, /React Native bridge correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/);
+  assert.match(localCi, /admitted Jazz Tools build for React Native[\s\S]*run-correctness-consumer\.mjs/);
+  assert.match(localCi, /React Native bridge tests[\s\S]*vitest\.react-native\.config\.ts/);
+  assert.match(localCi, /JAZZ_RN_TEST_BRIDGE: "1"/);
 });
 
 test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {
