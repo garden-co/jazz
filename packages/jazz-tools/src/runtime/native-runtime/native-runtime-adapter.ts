@@ -6378,12 +6378,26 @@ function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
 }
 
 function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
-  if (bytes.length === 17 && bytes[0] === 1 && table && sourceId) return rowKey(table, sourceId);
+  if (
+    bytes.length === 25 &&
+    bytes[0] === 1 &&
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(17) === 0 &&
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(21) === 0 &&
+    table &&
+    sourceId
+  )
+    return rowKey(table, sourceId);
   return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 17 && bytes[0] === 1) return formatUuid(bytes.subarray(1));
+  if (
+    bytes.length === 25 &&
+    bytes[0] === 1 &&
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(17) === 0 &&
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(21) === 0
+  )
+    return formatUuid(bytes.subarray(1, 17));
   return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
 }
 
