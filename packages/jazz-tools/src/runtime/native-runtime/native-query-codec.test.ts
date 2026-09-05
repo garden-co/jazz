@@ -25,18 +25,18 @@ describe("native query codec", () => {
         ]),
       ),
     ).toBe(
-      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f04000000000000000000000000",
+      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f0400000000000000000000000000",
     );
   });
 
   it("pins forward, reverse, nested, projected, and required relation query layouts", () => {
     const fixture = nativeQueryCodecFixture();
-    for (const [name, table, arraySubqueries, select, orderBy] of queryCases()) {
+    for (const [name, table, arraySubqueries, select, orderBy, relation] of queryCases()) {
       const expected = fixture.cases.find((candidate) => candidate.name === name);
       expect(expected, `${name} fixture is present`).toBeDefined();
-      expect(bytesToHex(queryWithPredicates(table, [], { arraySubqueries, select, orderBy }))).toBe(
-        expected!.query_hex,
-      );
+      expect(
+        bytesToHex(queryWithPredicates(table, [], { arraySubqueries, select, orderBy, relation })),
+      ).toBe(expected!.query_hex);
     }
   });
 
@@ -68,7 +68,7 @@ describe("native query codec", () => {
 });
 
 function queryCases(): Array<
-  [string, string, QueryArraySubquery[], string[] | undefined, QueryOrder[]]
+  [string, string, QueryArraySubquery[], string[] | undefined, QueryOrder[], unknown?]
 > {
   return [
     [
@@ -132,6 +132,40 @@ function queryCases(): Array<
       ],
       undefined,
       [],
+    ],
+    [
+      "labeled_union_relation_json_literal",
+      "todos",
+      [],
+      undefined,
+      [],
+      {
+        Limit: {
+          input: {
+            Union: {
+              inputs: [
+                { label: "first", input: { TableScan: { table: "todos", alias: "left" } } },
+                {
+                  label: "second",
+                  input: {
+                    Filter: {
+                      input: { TableScan: { table: "todos" } },
+                      predicate: {
+                        Cmp: {
+                          left: { scope: "todos", column: "metadata" },
+                          op: "Eq",
+                          right: { Literal: { type: "Json", value: { nested: [true, null, 7] } } },
+                        },
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          limit: 1,
+        },
+      },
     ],
   ];
 }
