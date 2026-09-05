@@ -11,6 +11,7 @@ import {
   ALLOWED_INHERITED_CI_JAZZ_ENV,
   assertArtifactBoundary,
   assertFullWorkspaceCoverage,
+  assertReactNativeBridgeBoundary,
   ciPartitionJobs,
   ciPartitions,
   commandEnvironment,
@@ -323,6 +324,35 @@ test("the generated-artifact boundary fails before Node/browser tests can use st
     "all Rust workspace target classes",
     "native correctness-artifact producer",
   ]);
+});
+
+test("React Native is a distinct bridge-enabled CI partition with an admitted build", async () => {
+  const reactNative = planFor({ partition: "react-native" });
+  assert.doesNotThrow(() => assertReactNativeBridgeBoundary(reactNative));
+  assert.deepEqual(
+    reactNative.map(({ label }) => label),
+    [
+      "React Native bridge correctness-artifact producer",
+      "admitted Jazz Tools build for React Native",
+      "React Native bridge tests",
+    ],
+  );
+  for (const command of reactNative)
+    assert.equal(command.env?.JAZZ_RN_TEST_BRIDGE, "1", `${command.label} must enable the RN bridge`);
+
+  const missingTests = reactNative.filter(({ label }) => label !== "React Native bridge tests");
+  assert.throws(() => assertReactNativeBridgeBoundary(missingTests), /omits its bridge producer, build, or tests/);
+
+  const seen = [];
+  await assert.rejects(
+    () =>
+      runPlan(reactNative, async (item) => {
+        seen.push(item.label);
+        if (item.label === "React Native bridge tests") throw new Error("planted RN bridge failure");
+      }),
+    /planted RN bridge failure/,
+  );
+  assert.deepEqual(seen, reactNative.map(({ label }) => label));
 });
 
 test("a successful native producer remains visible when a TypeScript consumer fails", async () => {
