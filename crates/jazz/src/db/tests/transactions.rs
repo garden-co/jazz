@@ -2678,6 +2678,9 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
 
     db.commit_mergeable_handle(open).unwrap();
     let committed = db.local_current_row("todos", target).unwrap().unwrap();
+    crate::binding_codec::encode_rows(std::slice::from_ref(&committed))
+        .expect("exact local write-merge rows must carry resolved publication identities");
+
     let table = &schema.tables[0];
     assert_eq!(committed.cell(table, "done"), Some(Value::Bool(true)));
     assert_eq!(

@@ -364,6 +364,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn named_cell_input_rejects_ambiguous_and_unbounded_descriptors_and_decodes_payload_enums() {
+        use groove::records::{DescriptorField, EnumCase, EnumSchema, EnumValue};
+        for descriptor in [
+            RecordDescriptor::new([("same", ValueType::U64), ("same", ValueType::U64)]),
+            RecordDescriptor::new_with_fields([DescriptorField {
+                name: None,
+                value_type: ValueType::U64,
+                identity: None,
+            }]),
+        ] {
+            let raw = descriptor
+                .create(&vec![Value::U64(1); descriptor.fields().len()])
+                .unwrap();
+            assert!(
+                decode_named_cells(
+                    &encode_named_cells(&OwnedRecord::new(raw, descriptor)).unwrap()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            decode_named_cells(b"\x01\x01\x01x\x12").is_err(),
+            "unknown type tag"
+        );
+        let mut deep = b"\x01\x01\x01x".to_vec();
+        deep.extend(std::iter::repeat_n(14, 128));
+        deep.push(0);
+        assert!(decode_named_cells(&deep).is_err(), "recursive type bound");
+        let wide = RecordDescriptor::new_with_fields(
+            (0..1025).map(|i| DescriptorField::new(format!("field{i}"), ValueType::U8)),
+        );
+        let record = OwnedRecord::new(wide.create(&vec![Value::U8(1); 1025]).unwrap(), wide);
+        assert!(
+            decode_named_cells(&encode_named_cells(&record).unwrap()).is_err(),
+            "total node bound"
+        );
+        let payload = RecordDescriptor::new([("literal", ValueType::U64)]);
+        let enum_schema = EnumSchema::new("choice", [EnumCase::new("selected", payload)])
+            .unwrap()
+            .with_registry_id(7);
+        let descriptor =
+            RecordDescriptor::new([("choice", ValueType::Enum(Box::new(enum_schema.clone())))]);
+        let value = Value::Enum(EnumValue::create(0, payload, &[Value::U64(42)]).unwrap());
+        let record = OwnedRecord::new(
+            descriptor.create(std::slice::from_ref(&value)).unwrap(),
+            descriptor,
+        );
+        assert_eq!(
+            decode_named_cells(&encode_named_cells(&record).unwrap())
+                .unwrap()
+                .get("choice"),
+            Some(&value)
+        );
+    }
+
     /// The contained 4c6eafaef5 binding enum, independently declared to pin
     /// its postcard variant order and fields before migrating publication.
     #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

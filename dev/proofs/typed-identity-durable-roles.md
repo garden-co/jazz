@@ -109,3 +109,29 @@ Jazz testing/zstd feature selection: **2503 tests passed, 4 skipped** across Jaz
 and Groove library targets. Workspace `cargo check --workspace --all-targets
 --features jazz/testing,jazz/transport-compression-zstd` also passed. These are
 Rust receipts, not a claim that the complete local CI-equivalent workflow ran.
+
+## Host input and recovered receiver follow-up
+
+The explicit named-cell input role in SPEC 18 is shared by NAPI and WASM.
+A literal input fixture and nested Array<Record> case reject execution-descriptor
+serde; restoring that old generic decoder makes the literal test fail. Additional
+cases exercise duplicate/absent names, unknown tags, bounded depth/node count,
+and payload-enum input. The exact local write-merge row reader binds its source
+publication identities through the requested schema before the host encoder;
+its real Db transaction canary failed with unresolved publication roles before
+that correction.
+
+The shifted-local-column-ID catalogue test now serializes and decodes its actual
+immutable update through `JVRR` before applying it and reopening RocksDB. The
+nested aggregate codec canary independently moves nested execution slots and
+rejects changed nested names/types or a mismatched replacement identity.
+
+`maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_without_authority`
+uses a serialized authority closure, records complete nested results and grouped
+counts, then drops both nodes. The receiver reopens RocksDB and compiles fresh
+maintained graphs before comparing root/child identities, all nested values,
+and aggregate group identities/values. No authority survives to provide a fresh
+response. A fresh-empty-receiver mutation fails the full nested-value equality;
+the persisted-receiver version passes. These complementary receipts cover real
+wire/local-ID translation, exact nested slot rebinding, and cold receiver
+reconstruction without claiming that one test combines every topology.
