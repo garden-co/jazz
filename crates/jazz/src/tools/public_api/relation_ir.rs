@@ -132,7 +132,7 @@ pub enum RelExpr {
         predicate: PredicateExpr,
     },
     Union {
-        inputs: Vec<RelExpr>,
+        inputs: Vec<UnionArm>,
     },
     Join {
         left: Box<RelExpr>,
@@ -151,6 +151,12 @@ pub enum RelExpr {
         bound: RecursionBound,
         dedupe_key: Vec<KeyRef>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnionArm {
+    pub label: String,
+    pub input: RelExpr,
 }
 
 #[cfg(test)]

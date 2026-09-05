@@ -948,9 +948,10 @@ type BuiltRelation = {
   hops?: string[];
   gather?: BuiltGather;
   union?: {
-    inputs: BuiltRelation[];
+    inputs: BuiltUnionArm[];
   };
 };
+type BuiltUnionArm = { label: string; input: BuiltRelation };
 type BuiltGather = {
   seed?: BuiltRelation;
   max_depth: number;
@@ -977,7 +978,10 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.union
       ? {
           union: {
-            inputs: relation.union.inputs.map(cloneBuiltRelation),
+            inputs: relation.union.inputs.map((arm) => ({
+              label: arm.label,
+              input: cloneBuiltRelation(arm.input),
+            })),
           },
         }
       : {}),
@@ -1385,6 +1389,9 @@ export type App<TSchema extends SchemaLike> = Simplify<
     union<TTable extends string>(
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
+    union<TTable extends string>(
+      relations: Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    ): TypedTableQueryBuilder<any, any, any, any>;
     wasmSchema: WasmSchema;
     /** Authoring metadata retained for local tooling; not a runtime contract. */
     schemaAst?: SchemaAst;
@@ -1665,12 +1672,30 @@ function createAppForTables(
 
   return {
     ...tables,
-    union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
-      if (relations.length === 0) {
+    union<TTable extends string>(
+      relations:
+        | readonly RelationSeedQuery<TTable>[]
+        | Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    ) {
+      const arms = Array.isArray(relations)
+        ? relations.map((relation) => ({
+            relation,
+            label: derivedUnionArmLabel(relation._serializeRelation()),
+          }))
+        : Object.entries(relations).map(([label, relation]) => ({ label, relation }));
+      if (arms.length === 0) {
         throw new Error("union(...) requires at least one relation.");
       }
-
-      const first = relations[0]!;
+      const labels = new Set<string>();
+      for (const { label } of arms) {
+        if (!label || label.includes("\0") || labels.has(label)) {
+          throw new Error(
+            "union(...) arm labels must be non-empty, NUL-free, and unique; use named arms for duplicate relations.",
+          );
+        }
+        labels.add(label);
+      }
+      const first = arms[0]!.relation;
       const builder = new TypedTableQueryBuilder(
         first._table,
         wasmSchema,
@@ -1679,7 +1704,10 @@ function createAppForTables(
       );
       (builder as any)._unionVal = {
         union: {
-          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+          inputs: arms.map(({ label, relation }) => ({
+            label,
+            input: relation._serializeRelation() as BuiltRelation,
+          })),
         },
       };
       return builder;
@@ -1687,6 +1715,41 @@ function createAppForTables(
     wasmSchema,
     schemaAst,
   } as App<Schema<SchemaDefinition>>;
+}
+
+function derivedUnionArmLabel(relation: BuiltRelation): string {
+  return `derived:${canonicalUnionRelation(relation)}`;
+}
+
+function canonicalUnionRelation(relation: BuiltRelation): string {
+  const normalized = {
+    ...(relation.table ? { table: relation.table } : {}),
+    conditions: [...(relation.conditions ?? [])]
+      .map((condition) => canonicalJson(condition))
+      .sort(),
+    hops: relation.hops ?? [],
+    ...(relation.gather ? { gather: relation.gather } : {}),
+    ...(relation.union
+      ? {
+          union: relation.union.inputs
+            .map((arm) => ({ label: arm.label, input: canonicalUnionRelation(arm.input) }))
+            .sort((left, right) => left.label.localeCompare(right.label)),
+        }
+      : {}),
+  };
+  return canonicalJson(normalized);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

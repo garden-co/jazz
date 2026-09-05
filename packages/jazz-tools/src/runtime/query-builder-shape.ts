@@ -12,8 +12,13 @@ export interface BuiltRelation {
   hops?: string[];
   gather?: BuiltGather;
   union?: {
-    inputs: BuiltRelation[];
+    inputs: BuiltUnionArm[];
   };
+}
+
+export interface BuiltUnionArm {
+  label: string;
+  input: BuiltRelation;
 }
 
 export interface BuiltGather {
@@ -191,7 +196,10 @@ function normalizeBuiltRelation(value: unknown): BuiltRelation {
 
   if (isPlainObject(value.union) && Array.isArray(value.union.inputs)) {
     normalized.union = {
-      inputs: value.union.inputs.map((input) => normalizeBuiltRelation(input)),
+      inputs: value.union.inputs.flatMap((input) => {
+        if (!isPlainObject(input) || typeof input.label !== "string") return [];
+        return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
+      }),
     };
   }
 
