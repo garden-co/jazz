@@ -240,3 +240,10 @@ the separately declared root identity so both direct and prepared terminals emit
 one carrier. The native foreground input decoder delegates to the same explicit
 named-cell codec as NAPI/WASM; native fixture consumers read publication roles,
 and a literal U64 envelope pins the shared input ABI.
+
+Independent execution review also found that a retained contributor carrier could
+become raw while its advertised nullable depth remained one. No public failure
+was demonstrated. Contributor projection now restores the exact wrappers removed
+from each retained source carrier, using the pre-projection declared depth; public
+aliases retain their separately computed result types. The retained-graph canary
+checks the actual Groove descriptor against its advertised contributor metadata.

@@ -970,3 +970,18 @@ pub(crate) struct LoweredTerminal {
     /// Typed terminal output contract.
     pub(crate) output: OutputTerminalSchema,
 }
+
+#[cfg(test)]
+pub(crate) fn retained_projection_graph_for_test(
+    request: &QueryProgramRequest,
+    sources: &ResolvedQuerySources,
+) -> (GraphBuilder, BTreeMap<String, usize>) {
+    let plan = analyze_relation_input_node(
+        &request.input.shape.root,
+        &request.input.shape.nodes,
+        &mut BTreeSet::new(),
+    )
+    .unwrap();
+    let lowered = lower_relation_input_for_contributor(&plan, sources, request).unwrap();
+    (lowered.graph, lowered.nullable_field_depths)
+}

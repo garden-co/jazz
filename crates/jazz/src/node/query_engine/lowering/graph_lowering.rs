@@ -1655,8 +1655,8 @@ fn lower_linear_plan_steps_cached(
                         field.project
                     })
                     .collect::<Vec<_>>();
-                for (field, depth) in unwrap_fields {
-                    for _ in 0..depth {
+                for (field, depth) in &unwrap_fields {
+                    for _ in 0..*depth {
                         graph = graph.unwrap_nullable(field.clone());
                     }
                 }
@@ -1708,10 +1708,28 @@ fn lower_linear_plan_steps_cached(
                         .unwrap_or("");
                     for field in retained_fields {
                         if projected_outputs.insert(field.clone()) {
-                            project_fields.push(ProjectField::renamed(
-                                format!("{retained_prefix}{field}"),
-                                field.clone(),
-                            ));
+                            let source_field = format!("{retained_prefix}{field}");
+                            let declared_depth = retained_contributor_nullable_depths
+                                .as_ref()
+                                .and_then(|depths| depths.get(field))
+                                .copied()
+                                .unwrap_or(0);
+                            let removed_layers = unwrap_fields
+                                .get(&source_field)
+                                .copied()
+                                .unwrap_or(0)
+                                .min(declared_depth);
+                            // Contributor carriers promise the pre-projection
+                            // source layout, independently of public aliases.
+                            // Restore wrappers removed by shared source unwraps.
+                            if removed_layers > 0 {
+                                project_fields.push(ProjectField::nullable(source_field, field));
+                                if removed_layers > 1 {
+                                    wrap_after_project.insert(field.clone(), removed_layers - 1);
+                                }
+                            } else {
+                                project_fields.push(ProjectField::renamed(source_field, field));
+                            }
                         }
                     }
                 }

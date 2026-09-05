@@ -2427,6 +2427,34 @@ fn review_same_source_projection_preserves_each_output_nullable_depth() {
                     input,
                     output: row_set_output(BTreeSet::new()),
                 };
+                if source_field == "title" && include_raw {
+                    let mut resolver = InlineCollectorResolver::new(None);
+                    let mut sources = BTreeMap::new();
+                    for source_request in query_program_source_requests(&request).unwrap() {
+                        let source = resolver
+                            .prepare_source_graph(&source_request)
+                            .resolve()
+                            .unwrap();
+                        sources.insert(source_request.source, source);
+                    }
+                    let (graph, depths) = retained_projection_graph_for_test(&request, &sources);
+                    let mut database =
+                        Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+                            .unwrap();
+                    let retained = database.query_graph(graph).unwrap();
+                    let index = retained
+                        .descriptor
+                        .fields()
+                        .iter()
+                        .position(|field| field.name.as_deref() == Some("_app_title"))
+                        .expect("retained source carrier");
+                    assert_eq!(depths.get("_app_title"), Some(&1));
+                    assert_eq!(
+                        retained.descriptor.fields()[index].value_type,
+                        ValueType::Nullable(Box::new(ValueType::String)),
+                        "retained source carrier must preserve the nullable depth advertised to contributor equality"
+                    );
+                }
                 let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
                     .expect("duplicate source projection lowers");
                 let selected = std::cell::RefCell::new(None);
