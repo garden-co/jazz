@@ -303,6 +303,7 @@ enum WireRelationExpr {
 struct WireRelationUnionArm {
     #[serde(deserialize_with = "deserialize_bounded_string")]
     label: String,
+    #[serde(deserialize_with = "deserialize_expr")]
     input: WireRelationExpr,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1028,12 +1029,21 @@ fn relation_expr(value: WireRelationExpr) -> WireResult<RelationExpr> {
 
 pub(crate) fn relation_query_to_wire(value: &RelationQuery) -> WireResult<WireRelationQuery> {
     let wire = WireRelationQuery::try_from(value)?;
+    ensure_wire_size(&wire)?;
     validate_wire(&wire)?;
     Ok(wire)
 }
 pub(crate) fn relation_query_from_wire(value: WireRelationQuery) -> WireResult<RelationQuery> {
+    ensure_wire_size(&value)?;
     validate_wire(&value)?;
     RelationQuery::try_from(value)
+}
+fn ensure_wire_size(value: &WireRelationQuery) -> WireResult<()> {
+    if postcard::experimental::serialized_size(value)? > MAX_RELATION_BYTES {
+        Err(RelationWireError::TooLarge)
+    } else {
+        Ok(())
+    }
 }
 /// Encode the typed relation-query Postcard payload used by direct native reads.
 pub fn encode_relation_query_postcard(value: &RelationQuery) -> WireResult<Vec<u8>> {
@@ -1435,6 +1445,14 @@ mod relation_postcard_tests {
             .is_ok()
         );
         assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
+
+        let mut union = Vec::new();
+        for _ in 0..=MAX_RELATION_DEPTH {
+            union.extend([2, 1, 1, b'x']);
+        }
+        union.extend([0, 1, b't', 0]);
+        assert!(std::panic::catch_unwind(|| decode_relation_query_postcard(&union)).is_ok());
+        assert!(decode_relation_query_postcard(&union).is_err());
     }
 
     #[test]
