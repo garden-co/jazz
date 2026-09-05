@@ -271,22 +271,30 @@ export function assertReactNativeBridgeBoundary(commands) {
     throw new Error("CI-equivalent React Native plan omits its bridge producer, build, or tests.");
   for (const item of [producer, toolsBuild, tests]) {
     if (item.env?.JAZZ_RN_TEST_BRIDGE !== "1")
-      throw new Error(`CI-equivalent React Native plan omits JAZZ_RN_TEST_BRIDGE for ${item.label}.`);
+      throw new Error(
+        `CI-equivalent React Native plan omits JAZZ_RN_TEST_BRIDGE for ${item.label}.`,
+      );
   }
   if (commands.indexOf(producer) > commands.indexOf(toolsBuild))
     throw new Error("CI-equivalent React Native plan builds Jazz Tools before bridge artifacts.");
   if (commands.indexOf(toolsBuild) > commands.indexOf(tests))
-    throw new Error("CI-equivalent React Native plan runs tests before the admitted Jazz Tools build.");
+    throw new Error(
+      "CI-equivalent React Native plan runs tests before the admitted Jazz Tools build.",
+    );
   if (!tests.args.includes("vitest.react-native.config.ts"))
     throw new Error("CI-equivalent React Native plan omits the React Native Vitest configuration.");
   if (tests.args.includes("--passWithNoTests"))
     throw new Error("CI-equivalent React Native plan permits an empty React Native test run.");
   const configPath = resolve(root, "packages/jazz-tools/vitest.react-native.config.ts");
   if (!existsSync(configPath))
-    throw new Error("CI-equivalent React Native plan references a missing React Native Vitest configuration.");
+    throw new Error(
+      "CI-equivalent React Native plan references a missing React Native Vitest configuration.",
+    );
   const config = readFileSync(configPath, "utf8");
   if (!/include:\s*\[\s*["']tests\/react-native\/\*\*\/\*\.test\.\{ts,tsx\}["']\s*\]/.test(config))
-    throw new Error("CI-equivalent React Native Vitest configuration does not select React Native tests.");
+    throw new Error(
+      "CI-equivalent React Native Vitest configuration does not select React Native tests.",
+    );
 }
 
 /**
