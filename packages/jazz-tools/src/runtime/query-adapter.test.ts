@@ -38,6 +38,28 @@ describe("translateQuery", () => {
     expect(JSON.stringify(translated.relation_ir)).toContain('"Union"');
   });
 
+  it("derives bounded, typed-distinct union labels", () => {
+    const first = app.todos.where({
+      metadata: { eq: new Date("2026-01-01T00:00:00.000Z") },
+    } as any);
+    const second = app.todos.where({
+      metadata: { eq: new Date("2026-01-02T00:00:00.000Z") },
+    } as any);
+    const bytes = app.todos.where({ attachment: { eq: new Uint8Array([1, 2, 3]) } } as any);
+    const wide = app.todos.where({ metadata: { eq: "x".repeat(10_000) } } as any);
+    const union = app.union([first, second, bytes, wide]) as any;
+    const labels = union._unionVal.union.inputs.map((arm: any) => arm.label);
+    expect(labels).toHaveLength(4);
+    expect(new Set(labels).size).toBe(4);
+    expect(labels.every((label: string) => label.length <= 4096)).toBe(true);
+
+    const named = app.union({ duplicate: first, second });
+    expect((named as any)._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
+      "duplicate",
+      "second",
+    ]);
+  });
+
   it("rejects colliding externally supplied relation schemas during query lowering", () => {
     const ambiguousRelationsSchema = {
       users: {

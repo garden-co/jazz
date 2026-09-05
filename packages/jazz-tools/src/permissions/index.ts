@@ -21,6 +21,8 @@ import type {
   RelProjectColumn,
   RelValueRef,
 } from "../ir.js";
+import { blake3 } from "@noble/hashes/blake3.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -1263,7 +1265,13 @@ function createUnionRelation(
       outputTable: firstState.outputTable,
       base: {
         Union: {
-          inputs: states.map((state) => relationStateToRelExpr(state)),
+          inputs: states.map((state) => {
+            const input = relationStateToRelExpr(state);
+            return {
+              label: `permission:${bytesToHex(blake3(new TextEncoder().encode(JSON.stringify(input))))}`,
+              input,
+            };
+          }),
         },
       },
       initialScope: "",
