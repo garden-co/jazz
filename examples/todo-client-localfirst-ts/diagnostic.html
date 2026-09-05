@@ -129,6 +129,7 @@
           errorKind: ["idb-open", "wasm-open", "owner", "other"].includes(value.errorKind)
             ? value.errorKind
             : undefined,
+          role: value.role === "tab" || value.role === "worker" ? value.role : undefined,
           origin: "worker",
         });
       });
@@ -143,6 +144,7 @@
       const config = {
         driver: { type: "persistent", dbName: "safari-private-check-alpha54" },
         runtimeSources: safariReceiptRuntimeSources,
+        logLevel: "trace",
       };
       let running;
 

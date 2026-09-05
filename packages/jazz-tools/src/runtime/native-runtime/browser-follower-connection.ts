@@ -106,6 +106,14 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
               );
             }
           : undefined,
+        traceRelay
+          ? (event) => {
+              this.port.postMessage({
+                type: "diagnostic-pump",
+                ...event,
+              } satisfies BrowserFollowerPortRequest);
+            }
+          : undefined,
       );
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
     })();

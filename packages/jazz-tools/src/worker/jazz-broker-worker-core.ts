@@ -191,7 +191,20 @@ export type BrowserDiagnosticEvent = {
     | "worker-frames-sent"
     | "flush-local-received"
     | "flush-local-observed"
-    | "flush-local-complete";
+    | "flush-local-complete"
+    | "pump-scheduled"
+    | "pump-start"
+    | "pump-receive-enqueued"
+    | "pump-route-start"
+    | "pump-route-complete"
+    | "pump-progress-before"
+    | "pump-progress-after"
+    | "pump-progress-error"
+    | "pump-outbound-drain"
+    | "core-tick-start"
+    | "core-tick-complete"
+    | "core-tick-error";
+  role?: "tab" | "worker";
   elapsedMs: number;
   frameCount?: number;
   frameBytes?: number;
@@ -1285,6 +1298,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     );
     return;
   }
+  if (message.type === "diagnostic-pump") {
+    if (isBrowserPumpDiagnosticEvent(message.event)) {
+      recordDiagnostic(message.event, {
+        role: "tab",
+        ...(Number.isSafeInteger(message.frameCount) ? { frameCount: message.frameCount } : {}),
+      });
+    }
+    return;
+  }
   if (message.type === "storage-reset-observed") {
     observeStorageReset(peer, message.resetId);
     return;
@@ -1850,6 +1872,13 @@ function attachPeerTransport(
           });
         }
       : undefined,
+    diagnosticHooks
+      ? (event) =>
+          recordDiagnostic(event.event, {
+            role: "worker",
+            ...(event.frameCount !== undefined ? { frameCount: event.frameCount } : {}),
+          })
+      : undefined,
   );
   return peer.pump;
 }
@@ -1887,6 +1916,25 @@ function frameMetadata(
     frameCount: frames.length,
     frameBytes: frames.reduce((bytes, frame) => bytes + frame.byteLength, 0),
   };
+}
+
+function isBrowserPumpDiagnosticEvent(
+  event: string,
+): event is Extract<BrowserDiagnosticEvent["event"], `pump-${string}` | `core-tick-${string}`> {
+  return new Set([
+    "pump-scheduled",
+    "pump-start",
+    "pump-receive-enqueued",
+    "pump-route-start",
+    "pump-route-complete",
+    "pump-progress-before",
+    "pump-progress-after",
+    "pump-progress-error",
+    "pump-outbound-drain",
+    "core-tick-start",
+    "core-tick-complete",
+    "core-tick-error",
+  ]).has(event);
 }
 
 function diagnosticErrorKind(error: unknown): NonNullable<BrowserDiagnosticEvent["errorKind"]> {

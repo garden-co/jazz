@@ -386,6 +386,8 @@ export type BrowserFollowerPortRequest =
       peerActivityEpoch: number;
       peerProcessedActivityEpoch: number;
     }
+  /** @internal Trace-only transport-pump progress with no wire payloads. */
+  | { type: "diagnostic-pump"; event: string; frameCount?: number }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
