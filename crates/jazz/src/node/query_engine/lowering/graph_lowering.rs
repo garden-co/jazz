@@ -3786,6 +3786,12 @@ fn lower_value_ref(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
+        } if value_source == source_id && field == "__root_union_arm" => {
+            Ok(LoweredValueRef::Field(field.clone()))
+        }
+        NormalizedValueRef::SourceField {
+            source: value_source,
+            field,
         } if value_source == source_id => Ok(LoweredValueRef::Field(
             require_source_field(source, field)
                 .or_else(|_| require_source_field(source, &user_column_field(field)))?,
