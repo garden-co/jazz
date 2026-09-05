@@ -4791,7 +4791,7 @@ mod terminal_role_hash_tests {
         let first = terminal_root_layout(&schema(1, 10, "_app_1"));
         assert_eq!(
             first.id,
-            "terminal:0d6d813bb94f2ded6db0616b3a2d55d7e9c8bd8173ebc6395f766a18ca7d114f"
+            "terminal:4091a932120f6c4bc4648cf92acff0530eded569f67b9fc0a4efabb739bfe69f"
         );
         let second = terminal_root_layout(&schema(99, 900, "_app_99"));
         assert_eq!(first.id, second.id);
