@@ -44,6 +44,7 @@ export async function seedHighLevelForegroundRuntime(
   const client = await createJazzClient(clientConfig(capability));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
+  let recoveredObserved = false;
   let completed = false;
   let failed = false;
   let unsubscribe = () => {};
@@ -51,6 +52,7 @@ export async function seedHighLevelForegroundRuntime(
     markFailure("public-client-subscribe-failed");
     unsubscribe = client.db.subscribe(app.todos, (todos) => {
       observed ||= todos.some((todo) => todo.title === title);
+      recoveredObserved ||= todos.some((todo) => todo.title === `${title}:recovered-by-core`);
     });
     markFailure("public-client-write-failed");
     const write = client.db.insert(app.todos, { title });
@@ -74,6 +76,19 @@ export async function seedHighLevelForegroundRuntime(
     boundary?.("js-before-core-await");
     await waitForCoreObservation();
     boundary?.("js-core-await-returned");
+    markFailure("public-client-reconnect-failed");
+    if (!(await waitForPublication(() => recoveredObserved))) {
+      throw new Error(
+        "original installed subscription did not receive Core's post-recovery marker",
+      );
+    }
+    const recoveredRows = await client.db.all(app.todos);
+    if (!recoveredRows.some((row) => row.title === `${title}:recovered-by-core`)) {
+      throw new Error("original installed foreground did not read Core's post-recovery marker");
+    }
+    // A second native acknowledgement is issued only after the same original
+    // subscription has observed the Core-authored marker.
+    await waitForCoreObservation();
     completed = true;
   } catch (error) {
     failed = true;

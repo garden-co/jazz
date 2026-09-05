@@ -111,7 +111,7 @@ function assertAndroidHarnessStartupContract(driver, harness) {
   );
   assert.match(
     harness,
-    /stdio: \["ignore", "pipe", "pipe"\]/,
+    /stdio: \["pipe", "pipe", "pipe"\]/,
     "harness stdout and stderr must both be retained for a bounded failure diagnostic",
   );
   assert.match(harness, /child\.once\("exit", \(code, signal\) =>/);

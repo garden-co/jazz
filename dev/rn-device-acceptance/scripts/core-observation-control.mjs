@@ -50,7 +50,10 @@ export async function startCoreObservationControl({ session, expected, host }) {
       status.coreWaitStarted++;
       try {
         await session.waitForCoreObservation();
-        await session.interruptAndRecover();
+        // Only the first acknowledgement performs the outage. The second is
+        // requested by the still-running original subscription after it has
+        // seen the Core-authored recovery marker.
+        if (status.requests === 1) await session.interruptAndRecover();
         status.coreWaitSucceeded++;
       } catch {
         status.coreWaitFailed++;

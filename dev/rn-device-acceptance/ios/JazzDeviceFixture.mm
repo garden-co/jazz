@@ -49,6 +49,7 @@ static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
     @"public-client-read-failed",
     @"public-client-publish-failed",
     @"public-client-core-observation-failed",
+    @"public-client-reconnect-failed",
     @"core-observation-cleartext-denied",
     @"public-client-shutdown-failed",
     @"public-client-relay-readback-failed",

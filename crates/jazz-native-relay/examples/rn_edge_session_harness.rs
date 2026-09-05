@@ -3,6 +3,7 @@
 //! material only to its direct parent process, never to a checked-in fixture.
 
 use std::{
+    collections::HashMap,
     io::{BufRead, Write},
     time::Duration,
 };
@@ -123,11 +124,13 @@ async fn run() {
     // The installed-app driver owns this narrow control protocol. It lets the
     // existing foreground stay alive while Edge is genuinely absent, then
     // recreates Edge at the identical configured endpoint.
-    let mut line = String::new();
-    assert_eq!(
-        std::io::stdin().lock().read_line(&mut line).unwrap(),
-        "interrupt-edge\n".len()
-    );
+    let mut line = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        line
+    })
+    .await
+    .expect("join control reader");
     assert_eq!(line.trim(), "interrupt-edge");
     let edge_port = edge.port();
     assert_eq!(
@@ -136,11 +139,13 @@ async fn run() {
     );
     println!("JAZZ_RN_EDGE_INTERRUPTED {{\"edge_port\":{edge_port}}}");
     std::io::stdout().flush().expect("flush Edge interruption");
-    line.clear();
-    assert_eq!(
-        std::io::stdin().lock().read_line(&mut line).unwrap(),
-        "recover-edge\n".len()
-    );
+    line = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        line
+    })
+    .await
+    .expect("join control reader");
     assert_eq!(line.trim(), "recover-edge");
     let edge = JazzServer::builder()
         .with_port(edge_port)
@@ -162,6 +167,22 @@ async fn run() {
         edge.server_state().edge_upstream_health(),
         EdgeUpstreamHealth::Connected
     );
+    let (_, _, transaction) = observer
+        .insert(
+            "todos",
+            HashMap::from([(
+                "title".to_owned(),
+                Value::Text(format!("{title}:recovered-by-core")),
+            )]),
+        )
+        .expect("Core observer writes post-recovery marker");
+    observer
+        .wait_for_transaction(
+            transaction.expect("Core write owns a transaction"),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("Core commits post-recovery marker");
     println!("JAZZ_RN_EDGE_RECOVERED {{\"edge_port\":{edge_port}}}");
     std::io::stdout().flush().expect("flush Edge recovery");
 

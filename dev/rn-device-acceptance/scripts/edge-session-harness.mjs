@@ -72,10 +72,14 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
   let stderr = "";
   const waitForLine = (prefix, timeoutMs = 15_000) =>
     new Promise((resolve, reject) => {
-      const deadline = setTimeout(() => reject(new Error(`harness did not emit ${prefix}`)), timeoutMs);
+      let settled = false;
+      const finish = (run) => { if (!settled) { settled = true; clearTimeout(deadline); run(); } };
+      const deadline = setTimeout(() => finish(() => reject(new Error(`harness did not emit ${prefix}`))), timeoutMs);
       const poll = () => {
+        if (settled) return;
         const line = stdout.split(/\r?\n/).find((item) => item.startsWith(prefix));
-        if (line) { clearTimeout(deadline); resolve(line); }
+        if (line) finish(() => resolve(line));
+        else if (child.exitCode !== null || child.signalCode) finish(() => reject(new Error(`harness exited before ${prefix}`)));
         else setTimeout(poll, 20);
       };
       poll();

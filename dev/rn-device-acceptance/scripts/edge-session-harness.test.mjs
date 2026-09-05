@@ -190,16 +190,13 @@ function assertCoreObserverContract(source) {
   assert.ok(context, "observer must use an explicit isolated client context");
   assert.match(context, /server_url: core\.base_url\(\)/, "observer must connect directly to Core");
   assert.match(context, /storage: ClientStorage::Memory/);
-  assert.doesNotMatch(
-    source,
-    /\.insert\(|\.insert_with_id\(|\.update\(|\.upsert\(/,
-    "observer harness cannot manufacture the device write",
-  );
+  assert.match(source, /Core observer writes post-recovery marker/);
+  assert.match(source, /wait_for_transaction\([\s\S]*DurabilityTier::GlobalServer/);
   assert.match(source, /wait_for_query\(\s*&observer,/);
   assert.match(source, /values\.contains\(&Value::Text\(title\.clone\(\)\)\)/);
 }
 
-test("observer source stays read-only and Core-connected; planted Edge reader and writer fail", () => {
+test("observer source stays Core-connected and commits its recovery marker", () => {
   const source = readFileSync(
     new URL(
       "../../../crates/jazz-native-relay/examples/rn_edge_session_harness.rs",
@@ -216,8 +213,8 @@ test("observer source stays read-only and Core-connected; planted Edge reader an
     /directly to Core/,
   );
   assert.throws(
-    () => assertCoreObserverContract(`${source}\n observer.insert("todos", fake);`),
-    /cannot manufacture/,
+    () => assertCoreObserverContract(source.replace("Core observer writes post-recovery marker", "forged writer")),
+    /post-recovery marker/,
   );
 });
 
