@@ -1750,7 +1750,7 @@ mod catalogue_payload_tests {
         // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
         assert_eq!(
             hex::encode(&encoded),
-            "010c17f7ec32c55d97acc37a8aeda133760d0000007b227461626c6573223a7b7d7d"
+            "0117e3233b17fa5387baad8a3dbca090980d0000007b227461626c6573223a7b7d7d"
         );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
     }

@@ -773,18 +773,28 @@ function terminalKeyId(encoded: readonly number[]): string {
   }
   // Groove terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
-  // occurrence sidecar uses the equivalent v1 ResultKey (`1, uuid, uuid,
-  // …`). Normalize only this exact physical form so terminal patches meet the
-  // same full occurrence identity that seeded the subscription state.
+  // occurrence sidecar uses the equivalent V1 ResultKey (`1, root UUID,
+  // joined count, joined UUIDs, label count`). Normalize only this exact
+  // physical form so terminal patches meet the same full occurrence identity
+  // that seeded the subscription state.
   if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
-    const occurrence = [1];
+    const uuids: number[][] = [];
     for (let offset = 0; offset < bytes.length; offset += 17) {
       if (bytes[offset] !== 10) {
         return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
       }
-      occurrence.push(...bytes.subarray(offset + 1, offset + 17));
+      uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
-    return publicResultKey(Uint8Array.from(occurrence));
+    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16);
+    occurrence[0] = 1;
+    occurrence.set(uuids[0]!, 1);
+    new DataView(occurrence.buffer).setUint32(17, uuids.length - 1);
+    let cursor = 21;
+    for (const uuid of uuids.slice(1)) {
+      occurrence.set(uuid, cursor);
+      cursor += 16;
+    }
+    return publicResultKey(occurrence);
   }
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -920,12 +930,7 @@ function readUuid(bytes: Uint8Array, offset: number): string {
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (
-    bytes.length === 25 &&
-    bytes[0] === 1 &&
-    readU32Be(bytes, 17) === 0 &&
-    readU32Be(bytes, 21) === 0
-  )
+  if (bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0))
     return readUuid(bytes, 1);
   return `result:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
