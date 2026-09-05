@@ -20,6 +20,37 @@ struct RelationFacadeJoin {
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
+    if let RelationExpr::Union { inputs } = &query.rel {
+        if inputs.is_empty() {
+            return Err(relation_unification_error(
+                "union requires at least one labeled input",
+            ));
+        }
+        let mut labels = BTreeSet::new();
+        let mut output = None;
+        for arm in inputs {
+            if arm.label.is_empty() || arm.label.contains('\0') || !labels.insert(&arm.label) {
+                return Err(relation_unification_error(
+                    "union arm labels must be non-empty, NUL-free, and unique",
+                ));
+            }
+            let arm_query = relation_query_to_query(&RelationQuery {
+                rel: arm.input.clone(),
+            })?;
+            match &output {
+                Some(table) if table != &arm_query.table => {
+                    return Err(relation_unification_error(
+                        "union inputs must output the same table",
+                    ));
+                }
+                None => output = Some(arm_query.table),
+                _ => {}
+            }
+        }
+        let mut output_query = Query::from(output.expect("non-empty union has an output table"));
+        output_query.relation = Some(query.clone());
+        return Ok(output_query);
+    }
     if let Some(query) = relation_gather_to_query(&query.rel)? {
         return Ok(query);
     }
