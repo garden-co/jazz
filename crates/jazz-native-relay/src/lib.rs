@@ -6343,16 +6343,19 @@ impl NativeRelay {
                     }
                 };
                 loop {
-                    let command = if worker.closing.is_empty() {
-                        receiver
-                            .recv()
-                            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                    } else {
-                        receiver.recv_timeout(std::time::Duration::from_millis(1))
-                    };
+                    // The owner retains coalesced wake notifiers, so channel
+                    // disconnection alone is not its terminal authority.
+                    // Bound the wait and observe explicit lifecycle terminal
+                    // state even after external command handles are dropped.
+                    let command = receiver.recv_timeout(std::time::Duration::from_millis(1));
                     let command = match command {
                         Ok(command) => command,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if !worker.liveness.is_alive() {
+                                worker.finish_foreground_retirement();
+                                return;
+                            }
+                            worker.flush_foreground_wakes();
                             let _ = worker.pump();
                             continue;
                         }
