@@ -1477,9 +1477,30 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
 
 test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
   const workspace = job("test-rust-workspace");
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
+  assert.match(
+    localCi,
+    /--require-nextest-test[\s\S]*jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke[\s\S]*jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke/,
+  );
+  assert.match(
+    localCi,
+    /--require-nextest-test[\s\S]*jazz-sim::scenario_smoke=s1_saas_smoke[\s\S]*jazz-sim::scenario_smoke=s9_durable_execution_smoke/,
+  );
+  assert.doesNotMatch(
+    localCi,
+    /command\("benchmark deterministic scenario smoke", "bash", \[[\s\S]*benchmark-smoke\.sh[\s\S]*"--ci"/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        localCi.replace('"jazz-sim::scenario_smoke=s9_durable_execution_smoke",', ""),
+        /jazz-sim::scenario_smoke=s9_durable_execution_smoke/,
+      ),
+    /s9_durable_execution_smoke/,
+  );
   assert.match(
     realisticWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
