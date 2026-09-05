@@ -925,6 +925,17 @@ where
         self.node.connect_upstream(transport).await
     }
 
+    /// Attach after asynchronously loading parked replay units. Read failure
+    /// or cancellation before admission leaves runtime receipts and outbox
+    /// unchanged. Native socket installation uses this strict entry point;
+    /// `connect_upstream` retains its historical empty-upload error fallback.
+    pub async fn try_connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        self.node.try_connect_upstream(transport).await
+    }
+
     /// Attach an upstream with a test-only opaque handle for staging inbound
     /// protocol frames and observing the frames emitted by that same link.
     ///

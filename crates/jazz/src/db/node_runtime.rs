@@ -9,7 +9,7 @@ use super::peer_connection::{
 };
 use super::*;
 
-type DetachPeerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
+type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
@@ -1717,288 +1717,344 @@ where
         demote_authority_receipt_subscriptions(&self.subscriptions, &BTreeSet::new());
     }
 
-    /// Attach this node to an upstream peer over a binding-supplied transport.
+    /// Attach using the historical replay-error fallback (an empty upload).
     pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        // Connection installation mutates runtime metadata synchronously, but
-        // first needs a coherent view of storage-owning node state. Evaluation
-        // may temporarily own that state across an async hydration boundary,
-        // so wait for it instead of using the synchronous borrow escape hatch.
-        let node = self.node.lock().await;
-        let local_receiver = !node.is_history_complete();
-        let confirmation_floor = node.committed_global_time();
-        drop(node);
-        let session_context = transport.connection_session_context();
-        let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
-        let upstream_upload_destination =
-            session_context.map(|context| UpstreamUploadDestination {
-                remote_node: *context.remote.node.as_bytes(),
-                link_identity: context.link_identity,
-            });
-        let transferred_large_value_uploads = upstream_upload_destination
-            .and_then(|destination| {
-                self.detached_large_value_uploads
-                    .borrow_mut()
-                    .remove(&destination)
-            })
-            .unwrap_or_default();
-        let connection_epoch = session_context
-            .map(|context| context.local.epoch)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
-        // Durable settled-view state remains available for known-state
-        // payload repair, but a new upstream (including an edge switch) owns
-        // no settlement receipts until it sends a fresh ViewUpdate.
-        *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
-            connection_epoch,
-            confirmation_floor,
-            subscriptions: BTreeSet::new(),
-            binding_views: BTreeSet::new(),
-        });
-        // A replacement link invalidates the prior link's receipt before the
-        // new transport can deliver anything. Publish that demotion now rather
-        // than letting cached rows remain settled until the next tick.
-        self.demote_authority_receipt_subscriptions();
-        let expected_scope_authority = session_context
-            .filter(|context| {
-                context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0
-            })
-            .map(|context| AuthorityContext {
-                authority: *context.remote.node.as_bytes(),
-                link: context.link_identity,
-                connection_id: connection_epoch,
-                connection_epoch: context.remote.epoch,
-                claims_revision: 0,
-                policy_epoch: 0,
-                authorization_progress: 0,
-                settled_through: 0,
-            });
-        // Keep every admitted link eligible, but bind each downstream route
-        // to one stable selected owner. A newly connected parallel upstream
-        // must not silently replace the owner (or settle its parked writes).
-        if let Some(context) = expected_scope_authority {
-            let mut eligible = self.admitted_upstream_authorities.borrow_mut();
-            if !eligible.contains(&context) {
-                eligible.push(context);
+        self.connect_upstream_inner(transport, false)
+            .await
+            .expect("legacy replay fallback is infallible")
+    }
+
+    /// Attach only after every parked replay unit can be loaded.
+    pub async fn try_connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        self.connect_upstream_inner(transport, true).await
+    }
+
+    async fn connect_upstream_inner(
+        &self,
+        transport: Box<dyn Transport>,
+        strict_replay: bool,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        loop {
+            // Connection installation mutates runtime metadata synchronously, but
+            // first needs a coherent view of storage-owning node state. Evaluation
+            // may temporarily own that state across an async hydration boundary,
+            // so wait for it instead of using the synchronous borrow escape hatch.
+            let peers = self.connections.borrow().clone();
+            let peer_guards = Self::acquire_peer_inventory(&peers).await;
+            let mut node = self.node.lock().await;
+            if !self.peer_inventory_matches(&peers) {
+                drop(node);
+                drop(peer_guards);
+                continue;
             }
-            if self.admitted_upstream_authority.borrow().is_none() {
-                *self.admitted_upstream_authority.borrow_mut() = Some(context);
-                // Routes parked while no authority was connected retain their
-                // downstream obligation. Bind them to this first successor
-                // and restore each commit to the shared outbox: the former
-                // authority may already have suppressed its upload, while
-                // this newly connected successor has not seen it.
-                let mut routes = self.edge_fate_routes.borrow_mut();
-                let routed_txs = routes.keys().copied().collect::<Vec<_>>();
-                for obligation in routes.values_mut() {
-                    for route in obligation.routes.iter_mut() {
-                        route.authority = Some(context);
+            let session_context = transport.connection_session_context();
+            let mut replay_units = BTreeMap::new();
+            if self.admitted_upstream_authority.borrow().is_none()
+                && session_context.is_some_and(|context| {
+                    context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                        != 0
+                })
+            {
+                let transactions: Vec<_> = self.edge_fate_routes.borrow().keys().copied().collect();
+                for tx_id in transactions {
+                    let unit = node.commit_unit_for(tx_id).await;
+                    // The legacy entry point retained an empty upload on read
+                    // failure. The strict binding entry fails before admission.
+                    let unit = if strict_replay {
+                        Some(unit?)
+                    } else {
+                        unit.ok()
+                    };
+                    replay_units.insert(tx_id, unit);
+                }
+            }
+            let local_receiver = !node.is_history_complete();
+            let confirmation_floor = node.committed_global_time();
+            drop(node);
+            let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+            let upstream_upload_destination =
+                session_context.map(|context| UpstreamUploadDestination {
+                    remote_node: *context.remote.node.as_bytes(),
+                    link_identity: context.link_identity,
+                });
+            let transferred_large_value_uploads = upstream_upload_destination
+                .and_then(|destination| {
+                    self.detached_large_value_uploads
+                        .borrow_mut()
+                        .remove(&destination)
+                })
+                .unwrap_or_default();
+            let connection_epoch = session_context
+                .map(|context| context.local.epoch)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+            // Durable settled-view state remains available for known-state
+            // payload repair, but a new upstream (including an edge switch) owns
+            // no settlement receipts until it sends a fresh ViewUpdate.
+            *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
+                connection_epoch,
+                confirmation_floor,
+                subscriptions: BTreeSet::new(),
+                binding_views: BTreeSet::new(),
+            });
+            // A replacement link invalidates the prior link's receipt before the
+            // new transport can deliver anything. Publish that demotion now rather
+            // than letting cached rows remain settled until the next tick.
+            self.demote_authority_receipt_subscriptions();
+            let expected_scope_authority = session_context
+                .filter(|context| {
+                    context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                        != 0
+                })
+                .map(|context| AuthorityContext {
+                    authority: *context.remote.node.as_bytes(),
+                    link: context.link_identity,
+                    connection_id: connection_epoch,
+                    connection_epoch: context.remote.epoch,
+                    claims_revision: 0,
+                    policy_epoch: 0,
+                    authorization_progress: 0,
+                    settled_through: 0,
+                });
+            // Keep every admitted link eligible, but bind each downstream route
+            // to one stable selected owner. A newly connected parallel upstream
+            // must not silently replace the owner (or settle its parked writes).
+            if let Some(context) = expected_scope_authority {
+                let mut eligible = self.admitted_upstream_authorities.borrow_mut();
+                if !eligible.contains(&context) {
+                    eligible.push(context);
+                }
+                if self.admitted_upstream_authority.borrow().is_none() {
+                    *self.admitted_upstream_authority.borrow_mut() = Some(context);
+                    // Routes parked while no authority was connected retain their
+                    // downstream obligation. Bind them to this first successor
+                    // and restore each commit to the shared outbox: the former
+                    // authority may already have suppressed its upload, while
+                    // this newly connected successor has not seen it.
+                    let mut routes = self.edge_fate_routes.borrow_mut();
+                    let routed_txs = routes.keys().copied().collect::<Vec<_>>();
+                    for obligation in routes.values_mut() {
+                        for route in obligation.routes.iter_mut() {
+                            route.authority = Some(context);
+                        }
+                    }
+                    drop(routes);
+                    let mut outbox = self.outbox.borrow_mut();
+                    for tx_id in routed_txs {
+                        outbox.push(PendingUpload {
+                            tx_id,
+                            unit: replay_units
+                                .remove(&tx_id)
+                                .expect("preloaded upstream replay"),
+                        });
                     }
                 }
-                drop(routes);
-                let mut outbox = self.outbox.borrow_mut();
-                for tx_id in routed_txs {
-                    outbox.push(PendingUpload {
-                        tx_id,
-                        unit: crate::db::block_on(self.node.borrow_mut().commit_unit_for(tx_id))
-                            .ok(),
-                    });
-                }
             }
-        }
-        // Carry queued and already-registered subscriptions upstream immediately.
-        let mut pending = self
-            .upstream_subscriptions
-            .borrow_mut()
-            .drain(..)
-            .collect::<Vec<_>>();
-        let mut pending_subscriptions = pending
-            .iter()
-            .filter_map(|command| {
-                let PendingUpstreamCommand::Subscribe(subscription) = command else {
-                    return None;
-                };
-                Some(subscription.subscription)
-            })
-            .collect::<BTreeSet<_>>();
-        for registration in self.query_coverage_registrations.borrow().values() {
-            if pending_subscriptions.insert(registration.subscription.subscription) {
-                pending.push(PendingUpstreamCommand::Subscribe(
-                    registration.subscription.clone(),
-                ));
-            }
-        }
-        for state_rc in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
-            {
-                let state = state_rc.borrow();
-                if !state.propagates_upstream {
-                    continue;
-                }
-                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
-                let opts = self.upstream_register_shape_options(
-                    state.read_tier,
-                    state.read_view.clone(),
-                    state.remote_propagate_upstream,
-                );
-                let coverage = coverage_key(shape, binding, opts.clone());
-                let subscription = self
-                    .upstream_subscription_owners
-                    .borrow()
-                    .iter()
-                    .find_map(|(subscription, owners)| {
-                        owners
-                            .iter()
-                            .any(|owner| {
-                                owner
-                                    .upgrade()
-                                    .is_some_and(|owner| Rc::ptr_eq(&owner, &state_rc))
-                            })
-                            .then_some(*subscription)
-                    })
-                    .unwrap_or_else(|| self.next_subscription_key(shape, opts.read_view_key()));
-                self.latest_coverage_subscriptions
-                    .borrow_mut()
-                    .insert(coverage, subscription);
-                if pending_subscriptions.insert(subscription) {
+            // Carry queued and already-registered subscriptions upstream immediately.
+            let mut pending = self
+                .upstream_subscriptions
+                .borrow_mut()
+                .drain(..)
+                .collect::<Vec<_>>();
+            let mut pending_subscriptions = pending
+                .iter()
+                .filter_map(|command| {
+                    let PendingUpstreamCommand::Subscribe(subscription) = command else {
+                        return None;
+                    };
+                    Some(subscription.subscription)
+                })
+                .collect::<BTreeSet<_>>();
+            for registration in self.query_coverage_registrations.borrow().values() {
+                if pending_subscriptions.insert(registration.subscription.subscription) {
                     pending.push(PendingUpstreamCommand::Subscribe(
-                        PendingUpstreamSubscription {
-                            subscription,
-                            shape: shape.clone(),
-                            binding: binding.clone(),
-                            opts,
-                            identity: state.author,
-                            policy_binding: None,
-                        },
+                        registration.subscription.clone(),
                     ));
                 }
             }
-        }
-        // Relay-owned coverage is not represented by the public subscription
-        // list above: it is retained by the downstream connection that it
-        // serves. Replacing an upstream transport drops that transport's wire
-        // subscriptions, while the downstream browser is still connected and
-        // therefore will not send a fresh Subscribe. Replay every live relay
-        // owner onto the successor authority, using its stable usage-site key.
-        //
-        // The owner map is the lifecycle authority here. A rejected coverage
-        // group can briefly remain on its downstream link while its rejection
-        // waits to be delivered; replaying that orphan would resurrect a
-        // subscription that is already being retired.
-        let relay_subscriptions = {
-            let owners = self.relay_upstream_subscription_owners.borrow();
-            self.connections
-                .borrow()
-                .iter()
-                .flat_map(|connection| {
-                    let connection = connection.borrow();
-                    let ConnectionLink::Subscriber(subscriber) = &connection.link else {
-                        return Vec::new();
-                    };
-                    subscriber
-                        .coverage_groups
+            for state_rc in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+                {
+                    let state = state_rc.borrow();
+                    if !state.propagates_upstream {
+                        continue;
+                    }
+                    let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
+                    let opts = self.upstream_register_shape_options(
+                        state.read_tier,
+                        state.read_view.clone(),
+                        state.remote_propagate_upstream,
+                    );
+                    let coverage = coverage_key(shape, binding, opts.clone());
+                    let subscription = self
+                        .upstream_subscription_owners
+                        .borrow()
                         .iter()
-                        .filter_map(|(coverage, group)| {
-                            let owner = owners.get(&(
-                                group.upstream_subscription,
-                                connection.connection_epoch,
-                                coverage.opts.read_view_key(),
-                            ))?;
-                            (group.upstream_opts.propagate_upstream
-                                && owner.downstream_connection_epoch == connection.connection_epoch
-                                && owner.coverage == *coverage)
-                                .then(|| PendingUpstreamSubscription {
-                                    subscription: group.upstream_subscription,
-                                    shape: group.shape.clone(),
-                                    binding: group.binding.clone(),
-                                    opts: group.upstream_opts.clone(),
-                                    // This usage is forwarded under the
-                                    // subscription's topology-admitted
-                                    // policy binding, never the relay
-                                    // transport. A relay has no link
-                                    // permission subject to fall back to.
-                                    identity: group.policy_binding.0,
-                                    policy_binding: Some(group.policy_binding.clone()),
+                        .find_map(|(subscription, owners)| {
+                            owners
+                                .iter()
+                                .any(|owner| {
+                                    owner
+                                        .upgrade()
+                                        .is_some_and(|owner| Rc::ptr_eq(&owner, &state_rc))
                                 })
+                                .then_some(*subscription)
                         })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        };
-        for subscription in relay_subscriptions {
-            if pending_subscriptions.insert(subscription.subscription) {
-                pending.push(PendingUpstreamCommand::Subscribe(subscription));
+                        .unwrap_or_else(|| self.next_subscription_key(shape, opts.read_view_key()));
+                    self.latest_coverage_subscriptions
+                        .borrow_mut()
+                        .insert(coverage, subscription);
+                    if pending_subscriptions.insert(subscription) {
+                        pending.push(PendingUpstreamCommand::Subscribe(
+                            PendingUpstreamSubscription {
+                                subscription,
+                                shape: shape.clone(),
+                                binding: binding.clone(),
+                                opts,
+                                identity: state.author,
+                                policy_binding: None,
+                            },
+                        ));
+                    }
+                }
             }
-        }
-        let connection = Rc::new(LocalMutex::new(PeerConnection {
-            transport,
-            staged_inbound: VecDeque::new(),
-            node: Rc::clone(&self.node),
-            subscriptions: Rc::clone(&self.subscriptions),
-            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
-            relay_upstream_subscription_owners: Rc::clone(&self.relay_upstream_subscription_owners),
-            pending_relay_subscription_rejections: Rc::clone(
-                &self.pending_relay_subscription_rejections,
-            ),
-            latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
-            awaiting_initial_authority_coverage: Rc::clone(
-                &self.awaiting_initial_authority_coverage,
-            ),
-            query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
-            active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
-            coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
-            scheduler: Rc::clone(&self.scheduler),
-            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
-            upstream_upload_destination,
-            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
-            write_state_waiters: Rc::clone(&self.write_state_waiters),
-            permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
-            edge_fate_routes: Rc::clone(&self.edge_fate_routes),
-            local_fate_routes: Rc::clone(&self.local_fate_routes),
-            admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
-            downstream_fates: Rc::new(RefCell::new(Vec::new())),
-            mutation_errors: Rc::clone(&self.mutation_errors),
-            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
-            subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
-            #[cfg(any(test, feature = "testing"))]
-            fail_next_subscription_refresh: Cell::new(false),
-            observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
-            observed_session_claim_revision: Cell::new(0),
-            connection_epoch,
-            startup_error: None,
-            released_outbox_tx_ids: Vec::new(),
-            pending_chunk_response: None,
-            pending_control_responses: VecDeque::new(),
-            link: ConnectionLink::Upstream(UpstreamConnectionState {
-                local_receiver,
-                pending,
-                upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
-                announced_shapes: BTreeSet::new(),
-                sent_session_claim_revisions: BTreeMap::new(),
-                outbox: Rc::clone(&self.outbox),
-                uploaded: BTreeSet::new(),
-                large_value_uploads: transferred_large_value_uploads,
-                awaiting_large_value_uploads: BTreeMap::new(),
-                failed_large_value_uploads: BTreeSet::new(),
-                pending_row_version_fetches: VecDeque::new(),
-                pending_row_version_repairs: VecDeque::new(),
-                scope_view_cuts: BTreeMap::new(),
-                scope_receipts: BTreeMap::new(),
-                expected_scope_authority,
-                scope_lease_manager: AuthorizationScopeLeaseManager::default(),
-            }),
-            last_resume_bytes: None,
-            auxiliary_pump: PeerIoPump::new(
-                self.chunk_resolver.clone(),
-                self.local_chunk_reader.clone(),
+            // Relay-owned coverage is not represented by the public subscription
+            // list above: it is retained by the downstream connection that it
+            // serves. Replacing an upstream transport drops that transport's wire
+            // subscriptions, while the downstream browser is still connected and
+            // therefore will not send a fresh Subscribe. Replay every live relay
+            // owner onto the successor authority, using its stable usage-site key.
+            //
+            // The owner map is the lifecycle authority here. A rejected coverage
+            // group can briefly remain on its downstream link while its rejection
+            // waits to be delivered; replaying that orphan would resurrect a
+            // subscription that is already being retired.
+            let relay_subscriptions = {
+                let owners = self.relay_upstream_subscription_owners.borrow();
+                self.connections
+                    .borrow()
+                    .iter()
+                    .flat_map(|connection| {
+                        let connection = peer_guards
+                            .get(&(Rc::as_ptr(connection) as usize))
+                            .expect("stable upstream peer inventory");
+                        let ConnectionLink::Subscriber(subscriber) = &connection.link else {
+                            return Vec::new();
+                        };
+                        subscriber
+                            .coverage_groups
+                            .iter()
+                            .filter_map(|(coverage, group)| {
+                                let owner = owners.get(&(
+                                    group.upstream_subscription,
+                                    connection.connection_epoch,
+                                    coverage.opts.read_view_key(),
+                                ))?;
+                                (group.upstream_opts.propagate_upstream
+                                    && owner.downstream_connection_epoch
+                                        == connection.connection_epoch
+                                    && owner.coverage == *coverage)
+                                    .then(|| PendingUpstreamSubscription {
+                                        subscription: group.upstream_subscription,
+                                        shape: group.shape.clone(),
+                                        binding: group.binding.clone(),
+                                        opts: group.upstream_opts.clone(),
+                                        // This usage is forwarded under the
+                                        // subscription's topology-admitted
+                                        // policy binding, never the relay
+                                        // transport. A relay has no link
+                                        // permission subject to fall back to.
+                                        identity: group.policy_binding.0,
+                                        policy_binding: Some(group.policy_binding.clone()),
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for subscription in relay_subscriptions {
+                if pending_subscriptions.insert(subscription.subscription) {
+                    pending.push(PendingUpstreamCommand::Subscribe(subscription));
+                }
+            }
+            let connection = Rc::new(LocalMutex::new(PeerConnection {
+                transport,
+                staged_inbound: VecDeque::new(),
+                node: Rc::clone(&self.node),
+                subscriptions: Rc::clone(&self.subscriptions),
+                upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+                relay_upstream_subscription_owners: Rc::clone(
+                    &self.relay_upstream_subscription_owners,
+                ),
+                pending_relay_subscription_rejections: Rc::clone(
+                    &self.pending_relay_subscription_rejections,
+                ),
+                latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
+                awaiting_initial_authority_coverage: Rc::clone(
+                    &self.awaiting_initial_authority_coverage,
+                ),
+                query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
+                active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
+                coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
+                scheduler: Rc::clone(&self.scheduler),
+                upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+                upstream_upload_destination,
+                large_value_upload_retry_deadlines: Rc::clone(
+                    &self.large_value_upload_retry_deadlines,
+                ),
+                write_state_waiters: Rc::clone(&self.write_state_waiters),
+                permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+                edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+                local_fate_routes: Rc::clone(&self.local_fate_routes),
+                admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
+                downstream_fates: Rc::new(RefCell::new(Vec::new())),
+                mutation_errors: Rc::clone(&self.mutation_errors),
+                browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
+                subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+                #[cfg(any(test, feature = "testing"))]
+                fail_next_subscription_refresh: Cell::new(false),
+                observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+                observed_session_claim_revision: Cell::new(0),
                 connection_epoch,
-                PeerIoPumpRole::Upstream,
-                wire_inbound_context,
-            ),
-        }));
-        self.connections.borrow_mut().push(Rc::clone(&connection));
-        self.schedule_tick(TickUrgency::Immediate);
-        connection
+                startup_error: None,
+                released_outbox_tx_ids: Vec::new(),
+                pending_chunk_response: None,
+                pending_control_responses: VecDeque::new(),
+                link: ConnectionLink::Upstream(UpstreamConnectionState {
+                    local_receiver,
+                    pending,
+                    upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
+                    announced_shapes: BTreeSet::new(),
+                    sent_session_claim_revisions: BTreeMap::new(),
+                    outbox: Rc::clone(&self.outbox),
+                    uploaded: BTreeSet::new(),
+                    large_value_uploads: transferred_large_value_uploads,
+                    awaiting_large_value_uploads: BTreeMap::new(),
+                    failed_large_value_uploads: BTreeSet::new(),
+                    pending_row_version_fetches: VecDeque::new(),
+                    pending_row_version_repairs: VecDeque::new(),
+                    scope_view_cuts: BTreeMap::new(),
+                    scope_receipts: BTreeMap::new(),
+                    expected_scope_authority,
+                    scope_lease_manager: AuthorizationScopeLeaseManager::default(),
+                }),
+                last_resume_bytes: None,
+                auxiliary_pump: PeerIoPump::new(
+                    self.chunk_resolver.clone(),
+                    self.local_chunk_reader.clone(),
+                    connection_epoch,
+                    PeerIoPumpRole::Upstream,
+                    wire_inbound_context,
+                ),
+            }));
+            self.connections.borrow_mut().push(Rc::clone(&connection));
+            self.schedule_tick(TickUrgency::Immediate);
+            return Ok(connection);
+        }
     }
 
     /// Accept a subscriber connection served under `identity`.
@@ -2428,6 +2484,21 @@ where
         self.detach_connection_with_guards(connection, connection_ref, node, None, None)
     }
 
+    async fn acquire_peer_inventory(
+        peers: &[Rc<LocalMutex<PeerConnection<S>>>],
+    ) -> PeerOwnerGuards<'_, S> {
+        let mut guards = BTreeMap::new();
+        for peer in peers {
+            guards.insert(Rc::as_ptr(peer) as usize, peer.lock().await);
+        }
+        guards
+    }
+
+    fn peer_inventory_matches(&self, peers: &[Rc<LocalMutex<PeerConnection<S>>>]) -> bool {
+        let current = self.connections.borrow();
+        current.len() == peers.len() && current.iter().zip(peers).all(|(a, b)| Rc::ptr_eq(a, b))
+    }
+
     /// Await a stable peer inventory and preload replay before detach mutation.
     pub async fn detach_connection_async(
         &self,
@@ -2440,16 +2511,9 @@ where
             }
             // Every concurrent detach uses registry order, never target-first.
             // No node guard is held while waiting for a peer owner.
-            let mut guards = BTreeMap::new();
-            for peer in &peers {
-                guards.insert(Rc::as_ptr(peer) as usize, peer.lock().await);
-            }
+            let mut guards = Self::acquire_peer_inventory(&peers).await;
             let mut node = self.node.lock().await;
-            let unchanged = {
-                let current = self.connections.borrow();
-                current.len() == peers.len()
-                    && current.iter().zip(&peers).all(|(a, b)| Rc::ptr_eq(a, b))
-            };
+            let unchanged = self.peer_inventory_matches(&peers);
             if !unchanged {
                 drop(node);
                 drop(guards);
@@ -2502,7 +2566,7 @@ where
 
     fn with_detach_peer<T>(
         peer: &Rc<LocalMutex<PeerConnection<S>>>,
-        guards: &mut Option<DetachPeerGuards<'_, S>>,
+        guards: &mut Option<PeerOwnerGuards<'_, S>>,
         run: impl FnOnce(&mut PeerConnection<S>) -> T,
     ) -> T {
         match guards {
@@ -2518,7 +2582,7 @@ where
         connection: &Rc<LocalMutex<PeerConnection<S>>>,
         mut connection_ref: futures::lock::MutexGuard<'_, PeerConnection<S>>,
         mut node: futures::lock::MutexGuard<'_, NodeState<S>>,
-        mut sibling_guards: Option<DetachPeerGuards<'_, S>>,
+        mut sibling_guards: Option<PeerOwnerGuards<'_, S>>,
         replay_units: Option<BTreeMap<TxId, SyncMessage>>,
     ) -> bool {
         if !self

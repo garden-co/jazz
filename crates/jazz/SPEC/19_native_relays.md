@@ -48,7 +48,12 @@ retains exact-generation core detach until the owner becomes available; a late
 terminal notification cannot detach a replacement. Core detach owns receipt
 demotion and pending advice/outbox handoff. Foreground operations and accepted
 local transactions remain owned throughout reconnect. Socket cancellation during
-installation retains the same cleanup even before Connected is reported.
+installation retains the same cleanup even before Connected is reported. Native
+installation uses the fallible core upstream entry point: peer owners are
+acquired in stable registry order, and parked replay units are loaded before
+admission changes receipts or outbox. A read error does not admit a successor.
+The legacy core attach entry retains its historical empty-upload fallback on
+replay read errors; native socket installation must not use that fallback.
 
 One admitted persistent scope owns exactly one authenticated upstream socket
 worker. Foregrounds are leases on that relay, not socket owners: opening a

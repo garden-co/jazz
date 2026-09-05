@@ -253,6 +253,170 @@ fn async_peer_detach_cold_replay_yields_and_cancellation_preserves_routes() {
 }
 
 #[test]
+fn strict_upstream_install_cold_replay_cancellation_and_error_leave_admission_unchanged() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd9; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&refs);
+    let reopen = storage.clone();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xd9; 16]),
+        author,
+    };
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .unwrap();
+    let tx_id = db
+        .insert(
+            "todos",
+            cells("cold replay", false, author),
+            Default::default(),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    let SyncMessage::CommitUnit { tx, versions } =
+        block_on(db.node.node.borrow_mut().commit_unit_for(tx_id)).unwrap()
+    else {
+        panic!("commit unit");
+    };
+    block_on(db.close()).unwrap();
+    drop(db);
+    let storage = block_on(reopen.reopen(families)).unwrap();
+    let control = storage.control();
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
+    }))
+    .unwrap();
+    let (a, _aw) = duplex_with_admitted_session_context(
+        author,
+        identity.node,
+        1,
+        NodeUuid::from_bytes([0x5d; 16]),
+        1,
+    );
+    let first = block_on(db.connect_upstream(a));
+    let selected = *db.node.admitted_upstream_authority.borrow();
+    let queue = Rc::new(RefCell::new(Vec::new()));
+    db.node.edge_fate_routes.borrow_mut().insert(
+        tx_id,
+        EdgeFateObligation {
+            identity: EdgeFateCommitIdentity::new(&tx, &versions),
+            routes: vec![EdgeFateRoute {
+                authority: selected,
+                queue: Rc::downgrade(&queue),
+                edge_acknowledged: false,
+            }],
+        },
+    );
+    assert!(block_on(db.detach_connection_async(&first)).unwrap());
+    let outbox_before = db.node.outbox.borrow().len();
+    let new_transport = || {
+        duplex_with_admitted_session_context(
+            author,
+            identity.node,
+            2,
+            NodeUuid::from_bytes([0x5e; 16]),
+            1,
+        )
+    };
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let (transport, _wire) = new_transport();
+    let mut install = Box::pin(db.try_connect_upstream(transport));
+    assert!(
+        std::future::Future::poll(
+            install.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending()
+    );
+    assert!(db.node.connections.borrow().is_empty());
+    assert!(db.node.admitted_upstream_authority.borrow().is_none());
+    assert!(db.node.active_authority_view_receipts.borrow().is_none());
+    drop(install);
+    assert!(db.node.node.try_lock().is_some());
+    let suspended_operation = *control.observed().last().unwrap();
+    control.resume();
+    control.fail_next(suspended_operation);
+    let (transport, _wire2) = new_transport();
+    let result = block_on(db.try_connect_upstream(transport));
+    assert!(matches!(result, Err(error) if error.message.contains("injected")));
+    assert!(db.node.connections.borrow().is_empty());
+    assert!(db.node.admitted_upstream_authority.borrow().is_none());
+    assert!(db.node.active_authority_view_receipts.borrow().is_none());
+    assert!(
+        db.node.edge_fate_routes.borrow()[&tx_id].routes[0]
+            .authority
+            .is_none()
+    );
+    assert_eq!(db.node.outbox.borrow().len(), outbox_before);
+    let (transport, _wire3) = new_transport();
+    assert!(block_on(db.try_connect_upstream(transport)).is_ok());
+    assert_eq!(db.node.connections.borrow().len(), 1);
+    assert!(db.node.admitted_upstream_authority.borrow().is_some());
+    assert!(
+        db.node.edge_fate_routes.borrow()[&tx_id].routes[0]
+            .authority
+            .is_some()
+    );
+}
+
+#[test]
+fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission() {
+    let author = AuthorSubject::for_test_bytes([0xdb; 16]);
+    let db = open_db(0xdb, author, &schema());
+    let transport = |epoch| {
+        duplex_with_admitted_session_context(
+            author,
+            NodeUuid::from_bytes([0xdb; 16]),
+            epoch,
+            NodeUuid::from_bytes([0x5d; 16]),
+            epoch,
+        )
+    };
+    let (first_transport, _first_wire) = transport(1);
+    let first = block_on(db.connect_upstream(first_transport));
+    let selected = *db.node.admitted_upstream_authority.borrow();
+    let held = block_on(first.lock());
+    let (next_transport, _next_wire) = transport(2);
+    let mut install = Box::pin(db.try_connect_upstream(next_transport));
+    assert!(
+        std::future::Future::poll(
+            install.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending()
+    );
+    assert_eq!(*db.node.admitted_upstream_authority.borrow(), selected);
+    assert_eq!(db.node.connections.borrow().len(), 1);
+    drop(install);
+    let write = db
+        .insert(
+            "todos",
+            cells("local during cancelled install", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(block_on(write.wait(DurabilityTier::Local)).is_ok());
+    drop(held);
+    let (next_transport, _retry_wire) = transport(3);
+    assert!(block_on(db.try_connect_upstream(next_transport)).is_ok());
+    assert_eq!(db.node.connections.borrow().len(), 2);
+    assert_eq!(*db.node.admitted_upstream_authority.borrow(), selected);
+}
+
+#[test]
 fn restarted_edge_forwards_complete_publication_without_original_clients() {
     // Internal topology test: inspect exact merge authorship and the durable
     // outbox while exercising the real peer-connection scheduler/storage.
