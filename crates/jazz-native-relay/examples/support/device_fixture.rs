@@ -61,6 +61,7 @@ pub fn fixture() -> serde_json::Value {
     serde_json::json!({
         "schema": schema(),
         "scopeQuery": postcard::to_allocvec(&Query::from("scope_rows")).unwrap(),
+        "todosQuery": postcard::to_allocvec(&Query::from("todos")).unwrap(),
         "scopeCells": {"a": cells("a"), "b": cells("b")}
     })
 }
