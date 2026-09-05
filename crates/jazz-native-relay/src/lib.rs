@@ -11214,7 +11214,7 @@ mod tests {
             query_bytes: b"JRQ\x01\x06\x00".to_vec(),
             options_json: "{}".to_owned(),
         };
-        let expected = [37, 2, b'{', b'}', 2, b'{', b'}'];
+        let expected = [37, 6, b'J', b'R', b'Q', 1, 6, 0, 2, b'{', b'}'];
         assert_eq!(postcard::to_allocvec(&command).unwrap(), expected);
         assert_eq!(
             postcard::from_bytes::<ForegroundDbCommandRequest>(&expected).unwrap(),
@@ -14028,7 +14028,7 @@ mod tests {
                     query_bytes: b"JRQ\x01\x06\x00".to_vec(),
                     options_json: "{}".into(),
                 },
-                vec![33, 2, 123, 125, 2, 123, 125],
+                vec![33, 6, b'J', b'R', b'Q', 1, 6, 0, 2, b'{', b'}'],
             ),
             (
                 ForegroundDbCommandRequest::LocalCurrentRow {

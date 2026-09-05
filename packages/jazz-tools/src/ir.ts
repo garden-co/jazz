@@ -114,15 +114,19 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   const fail = (message: string): never => {
     throw new Error(`invalid JRQ: ${message}`);
   };
+  const room = (additional: number) => {
+    if (!Number.isSafeInteger(additional) || additional < 0 || bytes.length + additional > maxBytes)
+      fail("byte limit");
+  };
   const node = (depth: number) => {
     if (depth >= maxDepth || ++nodes > maxItems) fail("tree limit");
   };
   const length = (value: number) => {
     if (!Number.isSafeInteger(value) || value < 0) fail("length");
     do {
-      let byte = value & 0x7f;
+      let byte = value % 128;
       value = Math.floor(value / 128);
-      if (value) byte |= 0x80;
+      if (value) byte += 128;
       bytes.push(byte);
     } while (value);
   };
@@ -131,6 +135,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     length(value);
   };
   const string = (value: string) => {
+    if (typeof value !== "string") fail("string");
     const encoded = text.encode(value);
     if (encoded.length > maxString || (stringBytes += encoded.length) > maxBytes)
       fail("string limit");
@@ -143,11 +148,28 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     string(value);
   };
   const unsigned = (value: bigint) => {
-    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) fail("integer range");
-    length(Number(value));
+    if (value < 0n || value > 0xffff_ffff_ffff_ffffn) fail("integer range");
+    do {
+      let byte = Number(value & 0x7fn);
+      value >>= 7n;
+      if (value) byte |= 0x80;
+      bytes.push(byte);
+    } while (value);
   };
   const signed = (value: bigint) => unsigned((value << 1n) ^ (value >> 63n));
+  const tagged = (value: object, tags: string[], kind: string) => {
+    const keys = Object.keys(value);
+    if (keys.length !== 1 || !tags.includes(keys[0]!)) fail(kind);
+  };
   const column = (value: RelColumnRef) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Object.keys(value).some((key) => key !== "scope" && key !== "column") ||
+      typeof value.column !== "string" ||
+      (value.scope !== undefined && typeof value.scope !== "string")
+    )
+      fail("column");
     if (value.scope === undefined) bytes.push(0);
     else {
       bytes.push(1);
@@ -160,6 +182,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
       value === "Current" ? 0 : value === "Outer" ? 1 : value === "Frontier" ? 2 : fail("row id"),
     );
   const key = (value: RelKeyRef) => {
+    tagged(value, ["Column", "RowId"], "key");
     if ("Column" in value) {
       bytes.push(0);
       column(value.Column);
@@ -169,6 +192,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     }
   };
   const project = (value: RelProjectExpr) => {
+    tagged(value, ["Column", "RowId"], "project expression");
     if ("Column" in value) {
       bytes.push(0);
       column(value.Column);
@@ -193,14 +217,11 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     }
     if (typeof value === "number") {
       if (!Number.isFinite(value)) fail("number");
-      if (Number.isSafeInteger(value)) {
-        if (value < 0) {
-          bytes.push(3);
-          signed(BigInt(value));
-        } else {
-          bytes.push(4);
-          unsigned(BigInt(value));
-        }
+      // serde_json parses ordinary JSON integers as i64 where possible, so JS
+      // safe integers use the signed tag too. -0 remains a distinct f64 value.
+      if (Number.isSafeInteger(value) && !Object.is(value, -0)) {
+        bytes.push(3);
+        signed(BigInt(value));
         return;
       }
       bytes.push(5);
@@ -241,6 +262,11 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const value = (input: RelValueRef, depth: number): void => {
     node(depth);
+    tagged(
+      input,
+      ["Literal", "Param", "SessionRef", "OuterColumn", "FrontierColumn", "RowId"],
+      "value",
+    );
     if ("Literal" in input) {
       bytes.push(0);
       json(input.Literal, depth + 1);
@@ -272,6 +298,11 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
       bytes.push(10);
       return;
     }
+    tagged(
+      input,
+      ["Cmp", "IsNull", "IsNotNull", "In", "Contains", "EnumMatch", "And", "Or", "Not"],
+      "predicate",
+    );
     if ("Cmp" in input) {
       bytes.push(0);
       column(input.Cmp.left);
@@ -312,6 +343,22 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const expr = (input: RelExpr, depth: number): void => {
     node(depth);
+    tagged(
+      input,
+      [
+        "TableScan",
+        "Filter",
+        "Union",
+        "Join",
+        "Project",
+        "Gather",
+        "Distinct",
+        "OrderBy",
+        "Offset",
+        "Limit",
+      ],
+      "expression",
+    );
     if ("TableScan" in input) {
       bytes.push(0);
       string(input.TableScan.table);
@@ -354,6 +401,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
       bytes.push(4);
       expr(input.Project.input, depth + 1);
       count(input.Project.columns.length);
+      room(input.Project.columns.length * 3);
       input.Project.columns.forEach((item) => {
         string(item.alias);
         project(item.expr);
