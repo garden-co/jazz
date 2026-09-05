@@ -19,6 +19,52 @@ const run = (command, args) => {
   const value = spawnSync(command, args, { cwd: root, encoding: "utf8" });
   return value.status === 0 ? value.stdout.trim() : "unavailable";
 };
+const isPlainMap = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const inventoryStatuses = new Set(["matches", "mismatch"]);
+const selectedInventory = (output) => {
+  let document;
+  try {
+    document = JSON.parse(output);
+  } catch {
+    throw new Error("Nextest inventory did not return JSON");
+  }
+  if (
+    !isPlainMap(document) ||
+    !Number.isInteger(document["test-count"]) ||
+    document["test-count"] < 0
+  )
+    throw new Error("Nextest inventory is missing a non-negative test-count");
+  if (!isPlainMap(document["rust-suites"]))
+    throw new Error("Nextest inventory is missing rust-suites");
+  const all = new Set(),
+    selected = new Set(),
+    ignored = new Set();
+  for (const suite of Object.values(document["rust-suites"])) {
+    if (
+      !isPlainMap(suite) ||
+      typeof suite["binary-id"] !== "string" ||
+      !isPlainMap(suite.testcases)
+    )
+      throw new Error("Nextest inventory has an invalid rust suite");
+    for (const [test, testcase] of Object.entries(suite.testcases)) {
+      if (!isPlainMap(testcase) || !isPlainMap(testcase["filter-match"]))
+        throw new Error("Nextest inventory has an invalid testcase");
+      const status = testcase["filter-match"].status;
+      if (!inventoryStatuses.has(status))
+        throw new Error(`Nextest inventory has unsupported filter status: ${String(status)}`);
+      if (typeof testcase.ignored !== "boolean")
+        throw new Error("Nextest inventory testcase is missing boolean ignored");
+      const id = `${suite["binary-id"]}=${test}`;
+      if (all.has(id)) throw new Error(`Nextest inventory has duplicate testcase: ${id}`);
+      all.add(id);
+      if (testcase.ignored) ignored.add(id);
+      else if (status === "matches") selected.add(id);
+    }
+  }
+  if (all.size !== document["test-count"])
+    throw new Error("Nextest inventory test-count disagrees with testcases");
+  return { selected, ignored };
+};
 const usage = () =>
   console.log(`Usage: node dev/gates/run-rust-tests.mjs [options] -- [cargo test arguments]
 
@@ -112,27 +158,13 @@ if (requiredNextestTests.length) {
   );
   if (inventory.status !== 0)
     throw new Error(`Nextest inventory failed: ${inventory.stderr.trim()}`);
-  let suites;
-  try {
-    suites = JSON.parse(inventory.stdout)["rust-suites"];
-  } catch {
-    throw new Error("Nextest inventory did not return JSON");
-  }
-  if (!suites || typeof suites !== "object" || Array.isArray(suites))
-    throw new Error("Nextest inventory is missing rust-suites");
-  const selected = new Set();
-  for (const suite of Object.values(suites)) {
-    if (!suite || typeof suite !== "object" || Array.isArray(suite)) continue;
-    const binary = suite["binary-id"];
-    const testcases = suite.testcases;
-    if (typeof binary !== "string" || !testcases || typeof testcases !== "object") continue;
-    for (const [test, testcase] of Object.entries(testcases)) {
-      if (testcase?.["filter-match"]?.status === "matches") selected.add(`${binary}=${test}`);
-    }
-  }
+  const { selected, ignored } = selectedInventory(inventory.stdout);
   for (const { binary, test } of requiredNextestTests) {
-    if (!selected.has(`${binary}=${test}`))
-      throw new Error(`required Nextest test is absent from selected inventory: ${binary}=${test}`);
+    const id = `${binary}=${test}`;
+    if (selected.has(id)) continue;
+    if (ignored.has(id))
+      throw new Error(`required Nextest test is ignored in selected inventory: ${id}`);
+    throw new Error(`required Nextest test is absent from selected inventory: ${id}`);
   }
 }
 const command = "cargo";
