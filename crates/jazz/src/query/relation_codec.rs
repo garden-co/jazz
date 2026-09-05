@@ -1003,19 +1003,24 @@ mod relation_codec_tests {
 
     #[test]
     fn jrq_v1_shared_cross_language_corpus_is_rust_produced() {
-        let mut corpus: Corpus =
-            serde_json::from_str(include_str!("../../fixtures/relation_query_jrq_v1.json"))
-                .unwrap();
+        let source = std::fs::read_to_string(CORPUS_PATH).unwrap();
+        let mut corpus: Corpus = serde_json::from_str(&source).unwrap();
         for case in &mut corpus.cases {
             let query: RelationQuery = serde_json::from_value(case.relation.clone()).unwrap();
             case.jrq_hex = hex::encode(encode_relation_query_v1(&query).unwrap());
         }
         if std::env::var_os("JAZZ_UPDATE_JRQ_CORPUS").is_some() {
-            std::fs::write(
-                CORPUS_PATH,
-                serde_json::to_string_pretty(&corpus).unwrap() + "\n",
-            )
-            .unwrap();
+            let committed: Corpus = serde_json::from_str(&source).unwrap();
+            assert_eq!(corpus.cases.len(), committed.cases.len());
+            let mut updated = source;
+            for (actual, expected) in corpus.cases.iter().zip(committed.cases) {
+                assert_eq!(actual.name, expected.name);
+                let before = format!(r#""jrq_hex": "{}""#, expected.jrq_hex);
+                let after = format!(r#""jrq_hex": "{}""#, actual.jrq_hex);
+                assert!(updated.contains(&before), "{}", actual.name);
+                updated = updated.replacen(&before, &after, 1);
+            }
+            std::fs::write(CORPUS_PATH, updated).unwrap();
             return;
         }
         let committed: Corpus =

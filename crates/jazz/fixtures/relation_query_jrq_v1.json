@@ -110,9 +110,7 @@
                     "Param": "p"
                   },
                   {
-                    "SessionRef": [
-                      "actor"
-                    ]
+                    "SessionRef": ["actor"]
                   },
                   {
                     "OuterColumn": {
