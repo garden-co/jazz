@@ -3309,7 +3309,10 @@ export class NativeRuntimeAdapter implements Runtime {
     start: () => NativePermissionAdviceResult,
   ): Promise<PermissionAdvice> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
-    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+    if (
+      this.closed ||
+      ((!this.serverTransport || !this.serverCarrier) && !this.nativeUpstreamConfigured())
+    ) {
       return Promise.resolve("unknown");
     }
     const started = start();

@@ -68,7 +68,13 @@ export type NativeForegroundRuntime = {
  * `ReadOpts` to the regular local-first defaults; callers must not silently
  * reinterpret remote tiers, views, or relation terminal operations.
  */
+export type NativeForegroundPermissionAdviceAction =
+  | { type: 'insert'; table: string; cells: Uint8Array }
+  | { type: 'read' | 'delete'; table: string; rowId: Uint8Array }
+  | { type: 'update'; table: string; rowId: Uint8Array; patch: Uint8Array };
+
 export type NativeForegroundCommand =
+  | { type: 'permissionAdvice'; action: NativeForegroundPermissionAdviceAction }
   | 'probe'
   | 'tick'
   | { type: 'prepareQuery'; query: Uint8Array }
@@ -153,7 +159,8 @@ export type NativeForegroundResponse =
   | { type: 'streamingMutationOpened'; upload: number }
   | { type: 'streamingMutationPushed' }
   | { type: 'streamingMutationAborted'; aborted: boolean }
-  | { type: 'mutationCommitted'; txId: Uint8Array; rowId: Uint8Array };
+  | { type: 'mutationCommitted'; txId: Uint8Array; rowId: Uint8Array }
+  | { type: 'permissionAdvice'; advice: 'allowed' | 'denied' | 'unknown' };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -284,6 +291,14 @@ export function encodeNativeForegroundCommand(
   if (command.type === 'reconnectNativeUpstream') return Uint8Array.of(24);
   if (command.type === 'nativeConnectionStatus') return Uint8Array.of(25);
   if (command.type === 'nativeSessionMetadata') return Uint8Array.of(26);
+  if (command.type === 'permissionAdvice') {
+    const action = command.action;
+    const tag = { insert: 0, read: 1, update: 2, delete: 3 }[action.type];
+    const target = action.type === 'insert'
+      ? encodeForegroundBytes(action.cells)
+      : concatForegroundBytes(encodeForegroundId(action.rowId, 'row id'), ...(action.type === 'update' ? [encodeForegroundBytes(action.patch)] : []));
+    return concatForegroundBytes(Uint8Array.of(38, tag), encodeForegroundString(action.table), target);
+  }
   if (command.type === 'prepareQuery') {
     return concatForegroundBytes(
       Uint8Array.of(2),
@@ -515,6 +530,7 @@ export function decodeNativeForegroundResponse(
   if (tag === 21) return { type: 'streamingMutationOpened', upload: decodeForegroundU64(bytes.subarray(1), 'upload') };
   if (tag === 22 && bytes.length === 1) return { type: 'streamingMutationPushed' };
   if (tag === 24 && bytes.length === 33) return { type: 'mutationCommitted', txId: bytes.slice(1, 17), rowId: bytes.slice(17) };
+  if (tag === 25 && bytes.length === 2 && bytes[1]! <= 2) return { type: 'permissionAdvice', advice: (['allowed', 'denied', 'unknown'] as const)[bytes[1]!]! };
   if (tag === 23 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) return { type: 'streamingMutationAborted', aborted: bytes[1] === 1 };
   if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
     return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };

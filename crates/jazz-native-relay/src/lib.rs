@@ -537,6 +537,40 @@ pub enum ForegroundDbCommandRequest {
         query_json: String,
         options_json: String,
     },
+    PermissionAdvice {
+        action: ForegroundPermissionAdviceAction,
+    },
+}
+
+/// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
+/// Identity comes exclusively from the admitted foreground, never this payload.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundPermissionAdviceAction {
+    Insert {
+        table: String,
+        cells: Vec<u8>,
+    },
+    Read {
+        table: String,
+        row: [u8; 16],
+    },
+    Update {
+        table: String,
+        row: [u8; 16],
+        patch: Vec<u8>,
+    },
+    Delete {
+        table: String,
+        row: [u8; 16],
+    },
+}
+
+/// Append-only V1 advice result: Allowed=0, Denied=1, Unknown=2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundPermissionAdvice {
+    Allowed,
+    Denied,
+    Unknown,
 }
 
 /// Frozen postcard mutation ordinals within the V1 StageMutation envelope.
@@ -638,6 +672,9 @@ pub enum ForegroundDbCommandResponse {
     MutationCommitted {
         tx_id: [u8; 16],
         row_id: [u8; 16],
+    },
+    PermissionAdvice {
+        advice: ForegroundPermissionAdvice,
     },
 }
 
@@ -2577,6 +2614,18 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         ForegroundDbCommandRequest::Probe => ForegroundDbCommandResponse::Probe {
             abi_version: NATIVE_RELAY_ABI_V1,
         },
+        ForegroundDbCommandRequest::PermissionAdvice { action } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.request_foreground_permission_advice(action) {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => ForegroundDbCommandResponse::OperationError {
+                    reason: error.to_string(),
+                },
+            }
+        }
         ForegroundDbCommandRequest::Tick => match host.tick_foreground(foreground) {
             Ok(()) => ForegroundDbCommandResponse::Ticked,
             Err(status) => return status,
@@ -3235,6 +3284,15 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.prepare_foreground_query(id, query))
+    }
+
+    fn request_foreground_permission_advice(
+        &self,
+        action: ForegroundPermissionAdviceAction,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.request_foreground_permission_advice(id, action))
     }
 
     fn start_foreground_read(&self, query: u64) -> Result<ForegroundOperationPoll, RelayError> {
@@ -4422,6 +4480,7 @@ struct ForegroundPendingOperation {
 }
 
 enum ForegroundOperationResult {
+    PermissionAdvice(ForegroundPermissionAdvice),
     Rows(Vec<u8>),
     SubscriptionEvents(Vec<ForegroundSubscriptionEvent>),
     TransactionSettled(TransactionId),
@@ -4438,6 +4497,9 @@ enum ForegroundOperationPoll {
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
     match poll {
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::PermissionAdvice(advice)) => {
+            ForegroundDbCommandResponse::PermissionAdvice { advice }
+        }
         ForegroundOperationPoll::Pending { operation } => {
             ForegroundDbCommandResponse::Pending { operation }
         }
@@ -5096,6 +5158,56 @@ impl RelayWorker {
             Ok(ForegroundOperationResult::SubscriptionEvents(events))
         });
         self.start_foreground_operation(client, Some(subscription), future)
+    }
+
+    fn request_foreground_permission_advice(
+        &mut self,
+        client: u64,
+        action: ForegroundPermissionAdviceAction,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        use jazz::protocol::{PermissionAdvice, PermissionAdviceAction};
+        let action = match action {
+            ForegroundPermissionAdviceAction::Insert { table, cells } => {
+                PermissionAdviceAction::Insert {
+                    table,
+                    cells: decode_foreground_cells(&cells)?,
+                }
+            }
+            ForegroundPermissionAdviceAction::Read { table, row } => PermissionAdviceAction::Read {
+                table,
+                row: RowUuid::from_bytes(row),
+            },
+            ForegroundPermissionAdviceAction::Update { table, row, patch } => {
+                PermissionAdviceAction::Update {
+                    table,
+                    row: RowUuid::from_bytes(row),
+                    patch: decode_foreground_cells(&patch)?,
+                }
+            }
+            ForegroundPermissionAdviceAction::Delete { table, row } => {
+                PermissionAdviceAction::Delete {
+                    table,
+                    row: RowUuid::from_bytes(row),
+                }
+            }
+        };
+        let advice = self
+            .foreground_client(client)?
+            .db
+            .request_permission_advice(action);
+        self.start_foreground_operation(
+            client,
+            None,
+            Box::pin(async move {
+                Ok(ForegroundOperationResult::PermissionAdvice(
+                    match advice.await {
+                        PermissionAdvice::Allowed => ForegroundPermissionAdvice::Allowed,
+                        PermissionAdvice::Denied => ForegroundPermissionAdvice::Denied,
+                        PermissionAdvice::Unknown => ForegroundPermissionAdvice::Unknown,
+                    },
+                ))
+            }),
+        )
     }
 
     fn start_foreground_operation(

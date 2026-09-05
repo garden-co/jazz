@@ -12,6 +12,32 @@ const txId = Uint8Array.from({ length: 16 }, () => 7);
 const optionsJson = '{"readTier":"local","view":{"head":"main"}}';
 const cases: [string, unknown, unknown][] = [
   [
+    "insert advice",
+    {
+      type: "permissionAdvice",
+      action: { type: "insert", table: "t", cells: Uint8Array.of(1, 2) },
+    },
+    { PermissionAdvice: { action: { Insert: { table: "t", cells: [1, 2] } } } },
+  ],
+  [
+    "read advice",
+    { type: "permissionAdvice", action: { type: "read", table: "t", rowId: txId } },
+    { PermissionAdvice: { action: { Read: { table: "t", row: [...txId] } } } },
+  ],
+  [
+    "update advice",
+    {
+      type: "permissionAdvice",
+      action: { type: "update", table: "t", rowId: txId, patch: Uint8Array.of(1, 2) },
+    },
+    { PermissionAdvice: { action: { Update: { table: "t", row: [...txId], patch: [1, 2] } } } },
+  ],
+  [
+    "delete advice",
+    { type: "permissionAdvice", action: { type: "delete", table: "t", rowId: txId } },
+    { PermissionAdvice: { action: { Delete: { table: "t", row: [...txId] } } } },
+  ],
+  [
     "relation subscription",
     { type: "subscribeRelationQuery", queryJson: "{}", optionsJson },
     { SubscribeRelationQuery: { query_json: "{}", options_json: optionsJson } },
@@ -105,6 +131,9 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
   test("Rust-produced responses decode through the production reader", () => {
     const responses = rustResponseCorpus();
     expect(responses.map(decodeNativeForegroundResponse)).toEqual([
+      { type: "permissionAdvice", advice: "allowed" },
+      { type: "permissionAdvice", advice: "denied" },
+      { type: "permissionAdvice", advice: "unknown" },
       { type: "pending", operation: 256 },
       { type: "operationError", reason: "codec boundary: λ" },
       { type: "transactionSettled", txId },
@@ -125,8 +154,26 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
   });
 
   test("noncanonical Rust request encodings fail closed", () => {
+    expect(() => decodeCommandInRust(Uint8Array.of(38, 4))).toThrow();
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(25, 3))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(128, 0))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(255))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(18, 1, 0, 2))).toThrow();
+  });
+  test("permission advice command and result ordinals are frozen", () => {
+    for (const [index, [, command]] of cases.slice(0, 4).entries()) {
+      expect([
+        ...encodeNativeForegroundCommand(command as NativeForegroundCommand).subarray(0, 2),
+      ]).toEqual([38, index]);
+    }
+    expect(
+      rustResponseCorpus()
+        .slice(0, 3)
+        .map((bytes) => [...bytes]),
+    ).toEqual([
+      [25, 0],
+      [25, 1],
+      [25, 2],
+    ]);
   });
 });

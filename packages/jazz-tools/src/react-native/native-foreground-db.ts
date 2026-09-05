@@ -10,7 +10,13 @@ type ForegroundMutationOptions = {
   author?: Uint8Array;
 };
 
+type ForegroundPermissionAdviceAction =
+  | { type: "insert"; table: string; cells: Uint8Array }
+  | { type: "read" | "delete"; table: string; rowId: Uint8Array }
+  | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
+
 type ForegroundCommand =
+  | { type: "permissionAdvice"; action: ForegroundPermissionAdviceAction }
   | "tick"
   | "close"
   | { type: "disconnectNativeUpstream" }
@@ -118,6 +124,7 @@ type NativeConnectionStatus = {
 };
 
 type ForegroundResponse =
+  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
   | { type: "nativeSessionMetadata"; issuer: string; userId: string }
   | NativeConnectionStatus
   | { type: "ticked" }
@@ -429,6 +436,52 @@ export class NativeForegroundDb {
     // to do it for us.
     if (response.closed) this.tick();
     return response.closed;
+  }
+
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "insert", table, cells });
+  }
+
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "read", table, rowId });
+  }
+
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "update", table, rowId, patch });
+  }
+
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array) {
+    return this.requestPermissionAdvice({ type: "delete", table, rowId });
+  }
+
+  private requestPermissionAdvice(action: ForegroundPermissionAdviceAction) {
+    let response = this.execute({ type: "permissionAdvice", action });
+    if (response.type === "permissionAdvice") return response.advice;
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "pending") return unexpected("permissionAdvice", response.type);
+    const operation = response.operation;
+    let completed = false;
+    return {
+      poll: (): string | null => {
+        if (completed || this.closed) return "unknown";
+        this.tick();
+        response = this.execute({ type: "poll", operation });
+        if (response.type === "pending") return null;
+        completed = true;
+        if (response.type === "operationError") throw new Error(response.reason);
+        if (response.type !== "permissionAdvice")
+          return unexpected("permissionAdvice", response.type);
+        return response.advice;
+      },
+      cancel: (): boolean => {
+        if (completed || this.closed) return false;
+        completed = true;
+        const cancelled = this.execute({ type: "cancel", operation });
+        if (cancelled.type !== "cancelled")
+          return unexpected("permissionAdvice cancellation", cancelled.type);
+        return cancelled.cancelled;
+      },
+    };
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {

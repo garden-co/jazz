@@ -353,6 +353,15 @@ pub fn decode_foreground_command(command: Uint8Array) -> Result<String> {
 #[napi(js_name = "__testRnForegroundResponseCorpus", skip_typescript)]
 pub fn foreground_response_corpus() -> Result<String> {
     let responses = [
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Allowed,
+        },
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Denied,
+        },
+        ForegroundDbCommandResponse::PermissionAdvice {
+            advice: ForegroundPermissionAdvice::Unknown,
+        },
         ForegroundDbCommandResponse::Pending { operation: 256 },
         ForegroundDbCommandResponse::OperationError {
             reason: "codec boundary: λ".into(),
