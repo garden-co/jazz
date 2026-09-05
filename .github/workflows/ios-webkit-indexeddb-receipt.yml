@@ -144,6 +144,10 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-cache: "true"
+          rust-targets: wasm32-unknown-unknown
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
       - name: Exclude CI-local receipt outputs before source sealing
         run: |
           # The selected-ref producer fingerprints the checkout. These files
