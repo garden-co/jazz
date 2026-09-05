@@ -222,9 +222,15 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
     /// Flat membership owns public occurrence rows. Groove root operations
     /// only order the root groups those occurrences belong to.
     Flat {
-        authoritative_membership_changed: bool,
         added: Vec<(OutputOccurrenceId, CurrentRow)>,
         removed: Vec<OutputOccurrenceId>,
+    },
+    /// Aggregate terminals retain every group, while the public facade shows
+    /// an ordered window of those groups. Re-materialize that complete facade
+    /// after each transition so displaced page members are retracted too.
+    AggregateWindow {
+        snapshot: RelationSnapshot,
+        occurrence_ids: Vec<OutputOccurrenceId>,
     },
     /// Structured output is published directly from Groove's terminal tree.
     Structured {
@@ -1227,7 +1233,6 @@ where
         // owner. Every public root collector (flat or nested) publishes via
         // its own terminal state and positional operations.
         let structured_output = local.terminal_schemas.has_root_collector();
-        let authoritative_membership_changed = transitions.authoritative_membership_changed;
         let authoritative_member_adds = transitions.authoritative_member_adds;
         let terminal_operations = transitions.terminal_operations.clone();
         let aggregate_replacements = transitions
@@ -1343,17 +1348,22 @@ where
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
             }
+        } else if materialize_update && local.result_query.aggregate.is_some() {
+            let materialized = self
+                .materialize_local_maintained_relation_snapshot_with_occurrences(local)
+                .await?;
+            local.root_occurrence_ids = materialized.root_occurrence_ids.clone();
+            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+                snapshot: materialized.snapshot,
+                occurrence_ids: materialized.root_occurrence_ids,
+            }
         } else {
             if !terminal_operations.is_empty() {
                 return Err(Error::InvalidStoredValue(
                     "non-terminal app-row path emitted collector terminal operations",
                 ));
             }
-            LocalMaintainedViewSubscriptionUpdate::Flat {
-                authoritative_membership_changed,
-                added,
-                removed,
-            }
+            LocalMaintainedViewSubscriptionUpdate::Flat { added, removed }
         })
     }
 }

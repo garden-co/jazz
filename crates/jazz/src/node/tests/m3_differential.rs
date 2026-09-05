@@ -383,6 +383,81 @@ fn m3_differential_plain_body_cells_match_one_shot() {
     oracle.tick_and_assert(&mut core, 0, "after-visible-doc");
 }
 
+/// Alice's grouped aggregate subscription applies its result window after each
+/// locally maintained aggregate update, keeping the selected group aligned
+/// with an equivalent one-shot read.
+///
+/// alice ──covered source update──► receiver aggregate ──window──► selected group
+#[test]
+fn maintained_grouped_aggregate_window_tracks_live_membership() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x76), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let mut parents = m3_differential_parent_map(&mut core);
+    accept_with_parent(
+        &mut core,
+        &mut parents,
+        "docs",
+        row(0x15),
+        100,
+        differential_doc_cells("third-group", "match", user(0xa1), 7, 3, 0.0, None, 0, 0),
+    );
+    let shape = Query::from("docs")
+        .count()
+        .group_by("bucket")
+        .order_by("count", OrderDirection::Desc)
+        .order_by("bucket", OrderDirection::Asc)
+        .offset(1)
+        .limit(1)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let identity = user(0xa1);
+    let mut peer = PeerState::client_link(identity);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let mut receiver = maintained_receiver(&schema, 0xd8);
+    register_maintained_receiver(&mut receiver, &shape, &binding, identity);
+    receiver.apply_sync_message_settled(initial).unwrap();
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        BTreeMap::from([(2, Value::U64(2))]),
+        "the tied second group is selected by its explicit bucket tie-breaker"
+    );
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        one_shot_aggregate_values(&mut core, &shape, &binding, identity, "count"),
+        "initial maintained aggregate window agrees with one-shot"
+    );
+
+    accept_with_parent(
+        &mut core,
+        &mut parents,
+        "docs",
+        row(0x11),
+        101,
+        differential_doc_cells("moved-group", "match", identity, 7, 2, 1.5, Some(1.5), -11, 11),
+    );
+    let update = peer
+        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
+        .unwrap();
+    receiver.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        BTreeMap::from([(1, Value::U64(1))]),
+        "a count update retracts the former window member and admits its replacement"
+    );
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        one_shot_aggregate_values(&mut core, &shape, &binding, identity, "count"),
+        "updated maintained aggregate window agrees with one-shot"
+    );
+}
+
 /// The authority publishes only Alice's exact recursive seed closure: the
 /// allowed group seed reaches visible docs, while Bob's otherwise valid group
 /// seed must neither appear as a covered source nor arrive in the receiver.

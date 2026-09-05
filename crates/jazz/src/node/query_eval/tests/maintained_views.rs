@@ -785,17 +785,32 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
         &mut occurrences,
     )
     .unwrap();
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        [1, 3, 2, 4].map(row),
+        "aggregate ordering must retain its complete deterministic order before windowing",
+    );
+    assert_eq!(
+        occurrences,
+        [1, 3, 2, 4].map(occurrence),
+        "aggregate ordering must keep occurrence identities paired before windowing",
+    );
+    let mut windowed_rows = rows.clone();
+    let mut windowed_occurrences = occurrences.clone();
     NodeState::<RocksDbStorage>::apply_aggregate_window_with_occurrences(
         &query,
-        &mut rows,
-        &mut occurrences,
+        &mut windowed_rows,
+        &mut windowed_occurrences,
     )
     .unwrap();
     assert_eq!(
-        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        windowed_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
         [3].map(row)
     );
-    assert_eq!(occurrences, [3].map(occurrence));
+    assert_eq!(windowed_occurrences, [3].map(occurrence));
 
     let mut malformed = make_row(5, Value::U64(9), ValueType::U64);
     malformed.record =

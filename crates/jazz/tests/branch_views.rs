@@ -767,6 +767,115 @@ fn review_branch_aggregate_empty_grouped_window_and_roles() {
 }
 
 #[test]
+fn aggregate_window_subscription_reconciles_live_page_membership() {
+    let (db, _schema) = open_db();
+    let base = selector(0xe1);
+    let head = selector(0xe2);
+    let opts =
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    for (index, title) in ["alpha", "bravo", "bravo", "bravo", "charlie", "charlie"]
+        .iter()
+        .enumerate()
+    {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String((*title).to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0xe3 + index as u8; 16])),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = db
+        .prepare_query(
+            &Query::from("todos")
+                .count()
+                .group_by("title")
+                .order_by("count", OrderDirection::Desc)
+                .order_by("title", OrderDirection::Asc)
+                .offset(1)
+                .limit(1),
+        )
+        .unwrap();
+    let mut subscription = block_on(db.subscribe(&query, opts.clone())).unwrap();
+    let opening = block_on(subscription.next_event()).unwrap();
+    let visible = match opening {
+        SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            removed,
+            ..
+        } => {
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].cell_at(0),
+                Some(Value::String("charlie".to_owned()))
+            );
+            added[0].row_uuid()
+        }
+        other => panic!("expected charlie aggregate-window opening reset: {other:?}"),
+    };
+
+    db.update(
+        "todos",
+        RowUuid::from_bytes([0xe3; 16]),
+        BTreeMap::from([("title".to_owned(), Value::String("bravo".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let expected = block_on(db.all(&query, opts.clone())).unwrap();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(
+        expected[0].cell_at(0),
+        Some(Value::String("charlie".to_owned()))
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "an aggregate change outside the retained page must not leak an add"
+    );
+
+    db.update(
+        "todos",
+        RowUuid::from_bytes([0xe7; 16]),
+        BTreeMap::from([("title".to_owned(), Value::String("alpha".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head,
+                base: Some(BranchViewBase::Current(base)),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let expected = block_on(db.all(&query, opts)).unwrap();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(
+        expected[0].cell_at(0),
+        Some(Value::String("alpha".to_owned()))
+    );
+    assert!(matches!(
+        block_on(subscription.next_event()).unwrap(),
+        SubscriptionEvent::Delta { reset: false, ref added, ref updated, ref removed, .. }
+            if added.len() == 1
+                && added[0].cell_at(0) == Some(Value::String("alpha".to_owned()))
+                && updated.is_empty()
+                && removed.len() == 1
+                && removed[0].row_uuid == visible
+    ));
+}
+
+#[test]
 fn branch_view_reachability_consumes_effective_sources() {
     let schema = compile_schema(
         &SchemaBuilder::new()
