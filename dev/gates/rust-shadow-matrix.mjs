@@ -46,7 +46,7 @@ const sourceFingerprint = (source) =>
   crypto
     .createHash("sha256")
     .update(
-      ["headTree", "indexTree", "unstaged", "untracked"]
+      ["headTree", "indexTree", "staged", "unstaged", "untracked"]
         .map((field) => `${field}\0${source[field]}\0`)
         .join(""),
     )
@@ -56,6 +56,7 @@ const validSourceIdentity = (source) =>
   /^[0-9a-f]{40}$/.test(source.commit) &&
   /^[0-9a-f]{40}$/.test(source.headTree) &&
   /^[0-9a-f]{40}$/.test(source.indexTree) &&
+  /^[0-9a-f]{64}$/.test(source.staged) &&
   /^[0-9a-f]{64}$/.test(source.unstaged) &&
   /^[0-9a-f]{64}$/.test(source.untracked) &&
   /^[0-9a-f]{64}$/.test(source.fingerprint) &&

@@ -802,6 +802,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     commit: "a".repeat(40),
     headTree: "b".repeat(40),
     indexTree: "b".repeat(40),
+    staged: "e".repeat(64),
     unstaged: "c".repeat(64),
     untracked: "d".repeat(64),
     dirty: false,
@@ -810,7 +811,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     crypto
       .createHash("sha256")
       .update(
-        ["headTree", "indexTree", "unstaged", "untracked"]
+        ["headTree", "indexTree", "staged", "unstaged", "untracked"]
           .map((field) => `${field}\0${value[field]}\0`)
           .join(""),
       )
@@ -973,6 +974,30 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       message,
       `planted ${name} mismatch must identify the violated binding`,
     );
+  }
+});
+
+test("a clean checkout seals a Rust shadow source baseline", () => {
+  const receipt = path.join(os.tmpdir(), `jazz-rust-shadow-source-${process.pid}-${Date.now()}.json`);
+  try {
+    const commit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+    assert.equal(commit.status, 0, commit.stderr);
+    const result = spawnSync(
+      "node",
+      [
+        path.join(root, "dev/gates/rust-shadow-matrix.mjs"),
+        "clean-source-baseline",
+        receipt,
+        commit.stdout.trim(),
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
+    assert.equal(source.dirty, false);
+    assert.match(source.staged, /^[0-9a-f]{64}$/);
+  } finally {
+    fs.rmSync(receipt, { force: true });
   }
 });
 
