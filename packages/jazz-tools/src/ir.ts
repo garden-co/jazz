@@ -134,6 +134,10 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     if (!Number.isSafeInteger(value) || value < 0 || value > maxItems) fail("collection limit");
     length(value);
   };
+  const dimension = (value: number) => {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) fail("dimension");
+    length(value);
+  };
   const string = (value: string) => {
     if (typeof value !== "string") fail("string");
     const encoded = text.encode(value);
@@ -217,12 +221,20 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     }
     if (typeof value === "number") {
       if (!Number.isFinite(value)) fail("number");
-      // serde_json parses ordinary JSON integers as i64 where possible, so JS
-      // safe integers use the signed tag too. -0 remains a distinct f64 value.
-      if (Number.isSafeInteger(value) && !Object.is(value, -0)) {
-        bytes.push(3);
-        signed(BigInt(value));
-        return;
+      // JSON text emitted from this Number is integral too, even beyond JS's
+      // safe range. Match serde_json's i64/u64 classification of that text.
+      if (Number.isInteger(value) && !Object.is(value, -0)) {
+        const integer = BigInt(value);
+        if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {
+          bytes.push(3);
+          signed(integer);
+          return;
+        }
+        if (integer >= 0n && integer <= 0xffff_ffff_ffff_ffffn) {
+          bytes.push(4);
+          unsigned(integer);
+          return;
+        }
       }
       bytes.push(5);
       const raw = new DataView(new ArrayBuffer(8));
@@ -306,7 +318,9 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     if ("Cmp" in input) {
       bytes.push(0);
       column(input.Cmp.left);
-      bytes.push(["Eq", "Ne", "Lt", "Le", "Gt", "Ge"].indexOf(input.Cmp.op));
+      const op = ["Eq", "Ne", "Lt", "Le", "Gt", "Ge"].indexOf(input.Cmp.op);
+      if (op < 0) fail("comparison");
+      bytes.push(op);
       value(input.Cmp.right, depth + 1);
     } else if ("IsNull" in input) {
       bytes.push(1);
@@ -414,7 +428,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
       if (input.Gather.bound === "Fixpoint") bytes.push(0);
       else {
         bytes.push(1);
-        length(input.Gather.bound.MaxDepth);
+        dimension(input.Gather.bound.MaxDepth);
       }
       count(input.Gather.dedupe_key.length);
       input.Gather.dedupe_key.forEach(key);
@@ -436,11 +450,11 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     } else if ("Offset" in input) {
       bytes.push(8);
       expr(input.Offset.input, depth + 1);
-      length(input.Offset.offset);
+      dimension(input.Offset.offset);
     } else {
       bytes.push(9);
       expr(input.Limit.input, depth + 1);
-      length(input.Limit.limit);
+      dimension(input.Limit.limit);
     }
   };
   expr(relation, 0);
