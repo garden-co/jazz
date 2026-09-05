@@ -61,7 +61,7 @@
         Add one disposable task, reload this same tab, then use “Restart storage” and confirm the
         task remains.
       </p>
-      <p id="receipt-status" role="status">Starting persistent IndexedDB runtime…</p>
+      <p id="receipt-status" role="status">Attaching worker and reading local data…</p>
       <button id="restart-storage" type="button" disabled>Restart storage</button>
       <p id="startup-error" role="alert" hidden></p>
     </section>
@@ -77,12 +77,12 @@
 
       async function open() {
         restart.disabled = true;
-        status.textContent = "Starting persistent IndexedDB runtime…";
+        status.textContent = "Attaching worker and reading local data…";
         error.hidden = true;
         try {
           running = await startApp(app, config);
           status.textContent =
-            "Persistent runtime ready. Add a disposable task, then reload this same tab.";
+            "Persistent runtime ready after local read. Add a disposable task, then reload this same tab.";
           restart.disabled = false;
         } catch (cause) {
           const detail = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
