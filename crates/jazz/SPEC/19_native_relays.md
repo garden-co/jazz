@@ -502,6 +502,25 @@ domain, then `u64`; non-integral values use raw IEEE-754 `f64` bytes. Semantic
 dimensions (`Offset`, `Limit`, and `Gather.MaxDepth`) are capped at `u32::MAX`
 so native and WASM32 accept the same grammar. Encoders use checked byte sinks:
 they fail before an append would exceed the carrier limit.
+
+Each tag is followed by its fields in declaration order. `TableScan` is table
+string then alias-presence byte and optional alias string. Unary expressions
+carry their input first; `Filter` then carries its predicate, `Project` its
+counted alias/expression pairs, `Distinct` its counted keys, `OrderBy` its
+counted column/direction pairs, and `Offset`/`Limit` their dimension. `Union`
+carries counted label/input pairs. `Join` carries left, right, kind, then
+counted left/right column pairs. `Gather` carries seed, step, frontier key,
+bound tag plus optional dimension, then counted dedupe keys.
+
+A column is scope-presence byte, optional scope string, then column string.
+Keys and project expressions are tagged `Column=0` or `RowId=1`; row ids are
+`Current=0`, `Outer=1`, and `Frontier=2`. Predicates and value references use
+the fixed field order named by their public AST declarations. Every collection
+has exactly one preceding count and no implicit/default fields. Literal objects
+carry counted UTF-8-key/value pairs sorted by UTF-8 byte sequence; duplicate or
+out-of-order keys are invalid. A decoder accepts only bytes whose canonical
+re-encoding is byte-for-byte identical, including minimal varints and scalar
+tags.
 It shares the same coverage, row hydration, pending-operation, and cleanup path
 as ordinary option-bearing reads. As on the other native bindings, raw
 relation-IR one-shot reads require the default read view; transaction-local

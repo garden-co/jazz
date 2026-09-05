@@ -147,6 +147,17 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const string = (value: string) => {
     if (typeof value !== "string") fail("string");
+    for (let index = 0; index < value.length; index++) {
+      const unit = value.charCodeAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        if (
+          ++index >= value.length ||
+          value.charCodeAt(index) < 0xdc00 ||
+          value.charCodeAt(index) > 0xdfff
+        )
+          fail("unpaired surrogate");
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) fail("unpaired surrogate");
+    }
     const encoded = text.encode(value);
     if (encoded.length > maxString || (stringBytes += encoded.length) > maxBytes)
       fail("string limit");
@@ -228,8 +239,22 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     }
     if (typeof value === "number") {
       if (!Number.isFinite(value)) fail("number");
-      // JSON text emitted from this Number is integral too, even beyond JS's
-      // safe range. Match serde_json's i64/u64 classification of that text.
+      // Preserve the public JSON decimal normalization for unsafe integers.
+      // `BigInt(value)` uses the binary approximation, which can differ from
+      // JSON.stringify (for example, 2**63), so parse that decimal instead.
+      if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+        const normalized = BigInt(JSON.stringify(value));
+        if (normalized <= 0xffff_ffff_ffff_ffffn) {
+          if (normalized <= 0x7fff_ffff_ffff_ffffn) {
+            bytes.push(3);
+            signed(normalized);
+          } else {
+            bytes.push(4);
+            unsigned(normalized);
+          }
+          return;
+        }
+      }
       if (Number.isInteger(value) && !Object.is(value, -0)) {
         const integer = BigInt(value);
         if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {

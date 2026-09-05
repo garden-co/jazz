@@ -1,0 +1,221 @@
+{
+  "cases": [
+    {
+      "name": "table_scan",
+      "relation": {
+        "rel": {
+          "TableScan": {
+            "table": "t"
+          }
+        }
+      },
+      "jrq_hex": "4a52510100017400"
+    },
+    {
+      "name": "filter",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": "True"
+          }
+        }
+      },
+      "jrq_hex": "4a525101010001740009"
+    },
+    {
+      "name": "union",
+      "relation": {
+        "rel": {
+          "Union": {
+            "inputs": [
+              {
+                "input": {
+                  "TableScan": {
+                    "table": "a"
+                  }
+                },
+                "label": "a"
+              },
+              {
+                "input": {
+                  "TableScan": {
+                    "table": "b"
+                  }
+                },
+                "label": "b"
+              }
+            ]
+          }
+        }
+      },
+      "jrq_hex": "4a5251010202016100016100016200016200"
+    },
+    {
+      "name": "join",
+      "relation": {
+        "rel": {
+          "Join": {
+            "join_kind": "Inner",
+            "left": {
+              "TableScan": {
+                "table": "a"
+              }
+            },
+            "on": [
+              {
+                "left": {
+                  "column": "id"
+                },
+                "right": {
+                  "column": "id"
+                }
+              }
+            ],
+            "right": {
+              "TableScan": {
+                "table": "b"
+              }
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a52510103000161000001620000010002696400026964"
+    },
+    {
+      "name": "project",
+      "relation": {
+        "rel": {
+          "Project": {
+            "columns": [
+              {
+                "alias": "id",
+                "expr": {
+                  "Column": {
+                    "column": "id"
+                  }
+                }
+              }
+            ],
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a5251010400017400010269640000026964"
+    },
+    {
+      "name": "gather",
+      "relation": {
+        "rel": {
+          "Gather": {
+            "bound": {
+              "MaxDepth": 1
+            },
+            "dedupe_key": [
+              {
+                "RowId": "Current"
+              }
+            ],
+            "frontier_key": {
+              "RowId": "Current"
+            },
+            "seed": {
+              "TableScan": {
+                "table": "seed"
+              }
+            },
+            "step": {
+              "TableScan": {
+                "table": "step"
+              }
+            }
+          }
+        }
+      },
+      "jrq_hex": "4a52510105000473656564000004737465700001000101010100"
+    },
+    {
+      "name": "distinct",
+      "relation": {
+        "rel": {
+          "Distinct": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "key": [
+              {
+                "RowId": "Current"
+              }
+            ]
+          }
+        }
+      },
+      "jrq_hex": "4a5251010600017400010100"
+    },
+    {
+      "name": "order_by",
+      "relation": {
+        "rel": {
+          "OrderBy": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "terms": [
+              {
+                "column": {
+                  "column": "id"
+                },
+                "direction": "Asc"
+              }
+            ]
+          }
+        }
+      },
+      "jrq_hex": "4a5251010700017400010002696400"
+    },
+    {
+      "name": "offset",
+      "relation": {
+        "rel": {
+          "Offset": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "offset": 2
+          }
+        }
+      },
+      "jrq_hex": "4a525101080001740002"
+    },
+    {
+      "name": "limit",
+      "relation": {
+        "rel": {
+          "Limit": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "limit": 3
+          }
+        }
+      },
+      "jrq_hex": "4a525101090001740003"
+    }
+  ]
+}

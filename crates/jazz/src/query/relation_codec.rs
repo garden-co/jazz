@@ -962,6 +962,22 @@ pub fn decode_relation_query_v1_exact(bytes: &[u8]) -> CodecResult<RelationQuery
 #[cfg(test)]
 mod relation_codec_tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
+
+    const CORPUS_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/relation_query_jrq_v1.json"
+    );
+    #[derive(Debug, Deserialize, Serialize)]
+    struct Corpus {
+        cases: Vec<CorpusCase>,
+    }
+    #[derive(Debug, Deserialize, Serialize)]
+    struct CorpusCase {
+        name: String,
+        relation: serde_json::Value,
+        jrq_hex: String,
+    }
 
     fn col(name: &str) -> RelationColumnRef {
         RelationColumnRef {
@@ -983,6 +999,33 @@ mod relation_codec_tests {
             encode_relation_query_v1(&decode_relation_query_v1_exact(&bytes).unwrap()).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn jrq_v1_shared_cross_language_corpus_is_rust_produced() {
+        let mut corpus: Corpus =
+            serde_json::from_str(include_str!("../../fixtures/relation_query_jrq_v1.json"))
+                .unwrap();
+        for case in &mut corpus.cases {
+            let query: RelationQuery = serde_json::from_value(case.relation.clone()).unwrap();
+            case.jrq_hex = hex::encode(encode_relation_query_v1(&query).unwrap());
+        }
+        if std::env::var_os("JAZZ_UPDATE_JRQ_CORPUS").is_some() {
+            std::fs::write(
+                CORPUS_PATH,
+                serde_json::to_string_pretty(&corpus).unwrap() + "\n",
+            )
+            .unwrap();
+            return;
+        }
+        let committed: Corpus =
+            serde_json::from_str(include_str!("../../fixtures/relation_query_jrq_v1.json"))
+                .unwrap();
+        assert_eq!(corpus.cases.len(), committed.cases.len());
+        for (actual, expected) in corpus.cases.iter().zip(committed.cases) {
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.jrq_hex, expected.jrq_hex, "{}", actual.name);
+        }
     }
 
     #[test]
