@@ -1224,6 +1224,33 @@ where
         Ok(())
     }
 
+    /// Aggregate terminals produce every group so their receiver can maintain
+    /// it incrementally. Presentation ordering and pagination therefore happen
+    /// while materializing the local result, after the aggregate rows have
+    /// been paired with their opaque occurrence identities.
+    pub(crate) fn apply_aggregate_window_with_occurrences(
+        query: &crate::query::Query,
+        rows: &mut Vec<CurrentRow>,
+        occurrence_ids: &mut Vec<OutputOccurrenceId>,
+    ) -> Result<(), Error> {
+        if rows.len() != occurrence_ids.len() {
+            return Err(Error::InvalidStoredValue(
+                "maintained aggregate occurrence sidecar length does not match rows",
+            ));
+        }
+        let offset = query.offset.min(rows.len());
+        let end = offset
+            .saturating_add(query.limit.unwrap_or(rows.len().saturating_sub(offset)))
+            .min(rows.len());
+        if offset > 0 || end < rows.len() {
+            rows.drain(end..);
+            occurrence_ids.drain(end..);
+            rows.drain(..offset);
+            occurrence_ids.drain(..offset);
+        }
+        Ok(())
+    }
+
     pub(super) fn apply_query_order_in_schema(
         &self,
         query: &crate::query::Query,
@@ -1376,10 +1403,11 @@ where
             &mut root_occurrence_ids,
         )?;
         if local.result_query.aggregate.is_some() {
-            root_occurrence_ids = rows
-                .iter()
-                .map(|row| OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0)))
-                .collect();
+            Self::apply_aggregate_window_with_occurrences(
+                &local.result_query,
+                &mut rows,
+                &mut root_occurrence_ids,
+            )?;
         }
         self.apply_projection(&local.result_query, &mut rows)?;
         let root_count = rows.len();
