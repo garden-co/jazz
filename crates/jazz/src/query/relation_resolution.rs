@@ -1158,6 +1158,9 @@ fn runtime_i64_value(value: Option<&serde_json::Value>) -> Result<i64, QueryErro
         Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
             relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
         }),
+        Some(serde_json::Value::String(value)) => value.parse::<i64>().map_err(|_| {
+            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
+        }),
         _ => Err(relation_unification_error(
             "BigInt relation literal requires an integer value",
         )),
