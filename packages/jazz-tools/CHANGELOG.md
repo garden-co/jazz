@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- bc70549: Release the new incremental query and subscription core. Migrate `Db.subscribeAll` to `Db.subscribe` for complete current results, and React/React Native `useAll` array results to `{ data, isLoading, error }`; `useAllSuspense` continues to return rows. Replace removed `localUpdates`/`propagation` options with read-tier selection.
+
+  This alpha includes the private-session React Native relay with sealed Android/iOS artifacts, safer concurrent query admission and transaction recovery, and fixes to persistence, permissions, branch views, authentication and browser worker lifecycles. It also updates Better Auth compatibility to 1.7.1, pins generated starter source snapshots to the installed release, and verifies the packaged native runtime loaders.
+
+- Updated dependencies [bc70549]
+  - jazz-wasm@2.0.0-alpha.54
+  - jazz-rn@2.0.0-alpha.54
+
 ## 2.0.0-alpha.53
 
 ### Major Changes
@@ -180,7 +192,7 @@
 - 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
 - e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
 - 576531d: `ManagedDevRuntime` no longer throws when a prior in-process run leaves `*_JAZZ_SERVER_URL` set in `process.env`. The env var on its own is now treated as our own persisted value and ignored in favour of spinning up a fresh local server. The plugin still takes the "connect to an external server" path when the caller explicitly supplies an `adminSecret` option or sets `JAZZ_ADMIN_SECRET`. This makes Vite HMR restarts and repeated test runs work without stale-state errors.
-- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
 - 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
   `withJazz` writes the live schema hash into a generated module that the
   React provider depends on, so Turbopack and Webpack reload the page

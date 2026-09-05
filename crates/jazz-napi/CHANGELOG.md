@@ -1,5 +1,13 @@
 # jazz-napi
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- bc70549: Release the new incremental query and subscription core. Migrate `Db.subscribeAll` to `Db.subscribe` for complete current results, and React/React Native `useAll` array results to `{ data, isLoading, error }`; `useAllSuspense` continues to return rows. Replace removed `localUpdates`/`propagation` options with read-tier selection.
+
+  This alpha includes the private-session React Native relay with sealed Android/iOS artifacts, safer concurrent query admission and transaction recovery, and fixes to persistence, permissions, branch views, authentication and browser worker lifecycles. It also updates Better Auth compatibility to 1.7.1, pins generated starter source snapshots to the installed release, and verifies the packaged native runtime loaders.
+
 ## 2.0.0-alpha.53
 
 ## 2.0.0-alpha.52
@@ -49,7 +57,7 @@
   `jazz-tools server` can now run as an edge when configured with an upstream core URL and peer secret, and the DevServer/testing APIs expose matching upstream and peer-secret options for integration coverage.
 
 - e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
-- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
 - 92fbdf9: Persist sealed batch manifests and batch fates instead of replayable local batch records. Batch waits and mutation-error replay now read `BatchFate` directly, and sync no longer rebuilds local batch membership one row at a time.
 
 ## 2.0.0-alpha.46
