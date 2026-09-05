@@ -46,6 +46,65 @@ pub struct Query {
     /// Number of rows to skip after filtering.
     #[serde(default)]
     pub offset: usize,
+    /// Retained output-changing relation facade. This is normalized directly
+    /// into the row-set algebra; `table` remains the real-row materialization
+    /// table for the result.
+    #[serde(default, with = "relation_query_wire")]
+    pub relation: Option<RelationQuery>,
+}
+
+/// Human-readable query JSON retains the relation tree. The postcard runtime
+/// envelope instead carries one explicit UTF-8 JSON string, avoiding a second
+/// hand-maintained binary codec for the recursive relation grammar.
+mod relation_query_wire {
+    use super::RelationQuery;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<RelationQuery>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+        value
+            .as_ref()
+            .map(canonical_json)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<RelationQuery>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<RelationQuery>::deserialize(deserializer);
+        }
+        Option::<String>::deserialize(deserializer)?
+            .map(|encoded| serde_json::from_str(&encoded).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+
+    fn canonical_json(value: &RelationQuery) -> Result<String, serde_json::Error> {
+        fn sort(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Array(values) => {
+                    serde_json::Value::Array(values.into_iter().map(sort).collect())
+                }
+                serde_json::Value::Object(values) => {
+                    let mut entries = values.into_iter().collect::<Vec<_>>();
+                    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+                    serde_json::Value::Object(
+                        entries.into_iter().map(|(key, value)| (key, sort(value))).collect(),
+                    )
+                }
+                value => value,
+            }
+        }
+        serde_json::to_string(&sort(serde_json::to_value(value)?))
+    }
 }
 
 /// Output-changing relational join syntax.
@@ -104,7 +163,7 @@ pub enum RelationExpr {
         predicate: RelationPredicate,
     },
     Union {
-        inputs: Vec<RelationExpr>,
+        inputs: Vec<RelationUnionArm>,
     },
     Join {
         left: Box<RelationExpr>,
@@ -140,6 +199,13 @@ pub enum RelationExpr {
         input: Box<RelationExpr>,
         limit: usize,
     },
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RelationUnionArm {
+    pub label: String,
+    pub input: RelationExpr,
 }
 
 #[allow(missing_docs)]

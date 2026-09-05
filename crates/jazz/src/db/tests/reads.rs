@@ -106,10 +106,7 @@ fn maintained_multi_index_query_tracks_either_index_transition() {
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
-        removed
-            .into_iter()
-            .map(|row| row.row_uuid)
-            .collect::<Vec<_>>(),
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
         vec![inactive]
     );
 }
@@ -803,6 +800,131 @@ fn relation_query_one_shot_hop_uses_unified_query_path() {
 
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
+}
+
+/// Internal relation-IR construction is necessary here because the Rust DB
+/// integration surface is the public relation-query API exercised by WASM and
+/// NAPI; the assertion is the user-visible one-shot membership result.
+#[test]
+fn relation_union_all_preserves_labeled_same_row_derivations() {
+    let schema = relation_schema();
+    let db = open_db(0xca, AuthorSubject::for_test_bytes([0xca; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("alice".to_owned())),
+            },
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![alice, alice]);
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added: opened, .. } =
+        subscription.try_next_event().expect("opened event")
+    else {
+        panic!("subscription opening must be a delta")
+    };
+    assert_eq!(
+        opened
+            .iter()
+            .map(|output| output.row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(opened[0].occurrence_id, opened[1].occurrence_id);
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, _, removed) = delta_rows(subscription.try_next_event().expect("removal event"));
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(removed[0].occurrence_id, removed[1].occurrence_id);
+
+    // Global order/window stays outside the UNION ALL arms. Rows from the
+    // same physical source tie on the user order and UUID, so the semantic
+    // arm carrier is the final deterministic page key.
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let windowed_query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                offset: 1,
+            }),
+            limit: 1,
+        },
+    };
+    let mut windowed =
+        block_on(db.subscribe_relation_query(&windowed_query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta {
+        added: windowed_opened,
+        ..
+    } = windowed.try_next_event().expect("windowed opening event")
+    else {
+        panic!("windowed subscription opening must be a delta");
+    };
+    assert_eq!(windowed_opened.len(), 1);
+    assert_eq!(
+        windowed_opened[0].occurrence_id.union_arms(),
+        &[(0, "second".to_owned())],
+        "the offset crosses the first physical-row occurrence into the second union arm",
+    );
 }
 
 #[test]

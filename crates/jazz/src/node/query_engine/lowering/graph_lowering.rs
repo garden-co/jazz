@@ -719,26 +719,33 @@ fn union_branch_plans_with_labels<'a>(
         .map(|branch| {
             let label = prefix.map_or_else(
                 || branch.label.clone(),
-                |prefix| format!("{prefix}\u{0}{}", branch.label),
+                |prefix| compose_union_arm_path(prefix, &branch.label),
             );
             (&branch.plan, label)
         })
         .collect::<Vec<_>>();
     while let Some((plan, label)) = pending.pop() {
         match plan {
-            RelationInputPlan::Union(nested) => pending.extend(
-                nested
-                    .branches
-                    .iter()
-                    .rev()
-                    .map(|branch| (&branch.plan, format!("{label}\u{0}{}", branch.label))),
-            ),
+            RelationInputPlan::Union(nested) => {
+                pending.extend(
+                    nested.branches.iter().rev().map(|branch| {
+                        (&branch.plan, compose_union_arm_path(&label, &branch.label))
+                    }),
+                )
+            }
             RelationInputPlan::Linear(_) | RelationInputPlan::Recursive(_) => {
                 leaves.push((plan, label))
             }
         }
     }
     leaves
+}
+
+/// Encode a nested semantic-arm path without relying on a separator that a
+/// user label could contain. The opaque carrier remains stable when siblings
+/// are inserted or reordered and is never derived from traversal position.
+fn compose_union_arm_path(prefix: &str, label: &str) -> String {
+    format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
 }
 
 fn lower_union_plan(
@@ -749,8 +756,8 @@ fn lower_union_plan(
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
-    for branch in &union.branches {
-        let input = match &branch.plan {
+    for (branch_plan, label) in union_branch_plans_with_labels(union, None) {
+        let mut input = match branch_plan {
             RelationInputPlan::Linear(linear) => {
                 let source_id = linear.root.source().ok_or_else(|| {
                     UnsupportedReason::Operator("union branch must have a source".to_owned())
@@ -777,12 +784,110 @@ fn lower_union_plan(
                 lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
             }
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
-                lower_relation_input(&branch.plan, resolved_sources, request)?
+                lower_relation_input(branch_plan, resolved_sources, request)?
             }
         };
+        // A public root UNION ALL has no join-side occurrence slot. Retain an
+        // explicit typed `(arm, source-row)` carrier beside the real root so
+        // the terminal can address two derivations of one physical row.
+        let source_id = branch_plan.root_source().ok_or_else(|| {
+            UnsupportedReason::Operator("UNION ALL root arm lacks a stable source row".to_owned())
+        })?;
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            UnsupportedReason::Runtime(format!("union source {source_id:?} was not resolved"))
+        })?;
+        let row_field = &source.row_shape.row_uuid_field;
+        if !input.fields.contains(row_field) {
+            return Err(UnsupportedReason::Operator(
+                "UNION ALL root arm projection discarded its stable source row identity".to_owned(),
+            ));
+        }
+        input.graph =
+            input
+                .graph
+                .project_fields(input.fields.iter().map(ProjectField::named).chain([
+                    ProjectField::renamed(row_field, "__root_union_row".to_owned()),
+                    ProjectField::literal("__root_union_arm", Value::String(label)),
+                ]));
+        input.fields.insert("__root_union_row".to_owned());
+        input.fields.insert("__root_union_arm".to_owned());
+        input.union_occurrence_carrier =
+            Some(("__root_union_arm".to_owned(), "__root_union_row".to_owned()));
         lowered.push(input);
     }
-    lower_union_inputs(lowered, request)
+    let lowered = lower_union_inputs(lowered, request)?;
+    lower_union_terminal_steps(lowered, &union.terminal_steps, root_source, request)
+}
+
+fn lower_union_terminal_steps(
+    mut input: LoweredRelationInput,
+    steps: &[LinearStep],
+    root_source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    if steps.is_empty() {
+        return Ok(input);
+    }
+    let root = input.root_source.as_ref().unwrap_or(root_source);
+    let plan = LinearCurrentRoot {
+        root: LinearRoot::Source {
+            source: root.row_shape.source.clone(),
+            visibility: RowVisibility::Visible,
+        },
+        steps: Vec::new(),
+    };
+    let mut pending_order = None;
+    for step in steps {
+        match step {
+            LinearStep::OrderBy(keys) => pending_order = Some(keys.clone()),
+            LinearStep::Slice {
+                partition_by,
+                limit,
+                offset,
+                tie_breaker,
+                ..
+            } => {
+                let order = pending_order.take().unwrap_or_default();
+                input.graph = lower_window(
+                    input.graph,
+                    &order,
+                    partition_by,
+                    &root.routing_fields,
+                    *limit,
+                    *offset,
+                    tie_breaker,
+                    &plan,
+                    root,
+                    request,
+                )?;
+            }
+            LinearStep::Filter(_)
+            | LinearStep::Join { .. }
+            | LinearStep::Project(_)
+            | LinearStep::Aggregate { .. } => {
+                return Err(UnsupportedReason::Operator(
+                    "only global order/window operators may wrap a public UNION ALL".to_owned(),
+                ));
+            }
+        }
+    }
+    if let Some(order) = pending_order {
+        input.graph = lower_window(
+            input.graph,
+            &order,
+            &[],
+            &root.routing_fields,
+            None,
+            0,
+            &[NormalizedValueRef::RowId(RowIdRef::Source(
+                root.row_shape.source.clone(),
+            ))],
+            &plan,
+            root,
+            request,
+        )?;
+    }
+    Ok(input)
 }
 
 fn lower_union_inputs(
@@ -3678,6 +3783,12 @@ fn lower_value_ref(
     request: &QueryProgramRequest,
 ) -> Result<LoweredValueRef, UnsupportedReason> {
     match value {
+        NormalizedValueRef::SourceField {
+            source: value_source,
+            field,
+        } if value_source == source_id && field == "__root_union_arm" => {
+            Ok(LoweredValueRef::Field(field.clone()))
+        }
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
