@@ -226,6 +226,17 @@ type NativeDb = {
   queryAttachmentIsCovered?(attachment: unknown): boolean;
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
+  prepareQueryAsync?(
+    query: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): PendingNativeOperation<PreparedQuery>;
+  subscribeAsync?(
+    query: PreparedQuery,
+    opts: unknown,
+    author?: Uint8Array,
+  ): PendingNativeOperation<ReadableStream<unknown> | Subscription>;
+
   subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
   subscribeForIdentity?(
     query: PreparedQuery,
@@ -485,6 +496,7 @@ type PendingTx = {
   kind: TransactionKind;
   txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
+  requestSession?: RuntimeSession;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   writes: PendingTxWrite[];
@@ -551,7 +563,16 @@ type RuntimeSession = {
   backendAuthority: boolean;
 };
 
+type PendingNativeOperation<T> = {
+  poll(): T | null | undefined;
+  cancel(): void;
+  setWake(callback: () => void): void;
+};
+
 type SubscriptionState = {
+  openingAbort?: AbortController;
+  terminalError?: Error;
+  terminalErrorDelivered?: boolean;
   sources: SubscriptionSourceState[];
   queryJson: string;
   query: PreparedQuery | null;
@@ -682,6 +703,7 @@ function openMemoryDb(
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1229,6 +1251,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
       await Promise.all(this.pendingStreamingMutations);
@@ -1256,7 +1279,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private closeRuntimeState(alreadyMarkedClosed = false): boolean {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
+    for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const subscription of this.subscriptions.values()) {
+      subscription.openingAbort?.abort();
       for (const source of subscription.sources) {
         closeSubscriptionSource(source.source);
       }
@@ -1872,6 +1897,7 @@ export class NativeRuntimeAdapter implements Runtime {
       id,
       kind,
       identity: admission,
+      requestSession: admission ? (session ?? undefined) : undefined,
       attribution,
       writes: [],
       txByView: new Map(),
@@ -1970,10 +1996,10 @@ export class NativeRuntimeAdapter implements Runtime {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+    const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
     // Relation-IR lowering still has a JSON-only binding API.  Array includes
     // below use the transaction-aware snapshot ABI instead, so they preserve
     // staged writes and do not fall back to the owner's ordinary view.
@@ -1988,12 +2014,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
+      this.applySessionClaims(session);
       await this.waitForStrictRemoteQueryTransport(tier);
       if (this.closed) return [];
       const payload = await this.readRelationQueryForContext(coreQueryJson, opts, readContext);
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
-    const query = this.prepareQuery(coreQueryJson);
+    const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
     if (this.closed) return [];
     if (!pendingTx) {
@@ -2047,33 +2074,37 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }
     const session = readSession(sessionJson);
-    this.applySessionClaims(session);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    let nativeSubscription: ReadableStream<unknown> | Subscription;
-    let preparedQuery: PreparedQuery | null = null;
-    try {
-      if (usesNativeRelationApi) {
-        nativeSubscription = this.subscribeRelationForContext(queryJson, opts, readContext);
-      } else {
-        const query = this.prepareQuery(queryJson);
-        preparedQuery = query;
-        nativeSubscription = this.subscribeForContext(query, opts, readContext);
+    let immediateSource: ReadableStream<unknown> | Subscription | undefined;
+    let immediateQuery: PreparedQuery | null = null;
+    if (usesNativeRelationApi || !this.db.prepareQueryAsync) {
+      this.applySessionClaims(session);
+      try {
+        if (usesNativeRelationApi) {
+          immediateSource = this.subscribeRelationForContext(queryJson, opts, readContext);
+        } else {
+          immediateQuery = this.prepareQuery(queryJson);
+          immediateSource = this.subscribeForContext(immediateQuery, opts, readContext);
+        }
+      } catch (error) {
+        const nativeStack = error instanceof Error ? error.stack : undefined;
+        throw new Error(
+          `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
+        );
       }
-    } catch (error) {
-      const nativeStack = error instanceof Error ? error.stack : undefined;
-      throw new Error(
-        `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
-      );
     }
     this.subscriptions.set(handle, {
-      sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
+      sources: immediateSource
+        ? [{ source: subscriptionSource(immediateSource), reading: false }]
+        : [],
+      openingAbort: new AbortController(),
       queryJson,
-      query: preparedQuery,
+      query: immediateQuery,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -2093,6 +2124,41 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredPlaceholderBytes: 0,
       cancelled: false,
     });
+    if (immediateSource) return handle;
+    const subscription = this.subscriptions.get(handle)!;
+    const install = (native: ReadableStream<unknown> | Subscription) => {
+      subscription.sources = [{ source: subscriptionSource(native), reading: false }];
+      if (subscription.cancelled || this.closed) {
+        closeSubscriptionSourceState(subscription);
+        return;
+      }
+      if (subscription.callback) this.startSubscriptionReader(handle, subscription);
+    };
+    const fail = (error: unknown) => {
+      if (!subscription.cancelled && !this.closed)
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+    };
+    const open = (query: PreparedQuery) => {
+      if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
+      subscription.query = query;
+      return this.db.subscribeAsync
+        ? this.awaitNativeOperation(
+            this.db.subscribeAsync(query, opts, this.nativeReadAuthor(readContext)),
+            subscription.openingAbort!.signal,
+          )
+        : this.subscribeForContext(query, opts, readContext);
+    };
+    try {
+      const query = this.prepareQueryForRead(queryJson, session, subscription.openingAbort!.signal);
+      const opening = query instanceof Promise ? query.then(open) : open(query);
+      if (opening instanceof Promise) void opening.then(install).catch(fail);
+      else install(opening);
+    } catch (error) {
+      fail(error);
+    }
     return handle;
   }
 
@@ -2105,6 +2171,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    if (subscription.terminalError) {
+      this.deliverSubscriptionFailure(subscription);
+      return;
+    }
     if (subscription.visibleOpened) {
       subscription.callback(
         runtimeResetDeltaFromRows(
@@ -2121,6 +2191,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.cancelled = true;
+    subscription.openingAbort?.abort();
     clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
     this.subscriptions.delete(handle);
@@ -2778,6 +2849,94 @@ export class NativeRuntimeAdapter implements Runtime {
     await this.readRowsForContextAsync(query, opts, this.nativeReadContext(session));
   }
 
+  private awaitNativeOperation<T>(
+    pending: PendingNativeOperation<T>,
+    signal?: AbortSignal,
+  ): T | Promise<T> {
+    let wakeVersion = 0;
+    let resume: (() => void) | undefined;
+    let cancelled = false;
+    let progressError: unknown;
+    const wake = () => {
+      wakeVersion += 1;
+      resume?.();
+    };
+    const cancel = () => {
+      cancelled = true;
+      pending.cancel();
+      wake();
+    };
+    this.pendingNativeAdmissionCancels.add(cancel);
+    signal?.addEventListener("abort", cancel, { once: true });
+    const cleanup = () => {
+      this.pendingNativeAdmissionCancels.delete(cancel);
+      signal?.removeEventListener("abort", cancel);
+      pending.cancel();
+    };
+    const advance = (): T | Promise<T> => {
+      for (;;) {
+        if (this.closed || cancelled || signal?.aborted)
+          throw new Error("native operation was cancelled");
+        if (progressError) throw progressError;
+        const observed = wakeVersion;
+        const result = pending.poll();
+        if (result !== null && result !== undefined) return result;
+        // A pending operation can own the core. Transport must run alongside
+        // its woken continuation, never become a prerequisite for polling it.
+        void this.pumpServerTransport().catch((error) => {
+          progressError = error;
+          wake();
+        });
+        if (wakeVersion !== observed) continue;
+        return new Promise<void>((resolve) => {
+          resume = resolve;
+          if (wakeVersion !== observed) resolve();
+        }).then(() => {
+          resume = undefined;
+          return advance();
+        });
+      }
+    };
+    try {
+      pending.setWake(wake);
+      const result = advance();
+      if (result instanceof Promise) return result.finally(cleanup);
+      cleanup();
+      return result;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  }
+
+  private prepareQueryForRead(
+    queryJson: string,
+    session: RuntimeSession | null,
+    signal?: AbortSignal,
+  ): PreparedQuery | Promise<PreparedQuery> {
+    if (!this.db.prepareQueryAsync) {
+      this.applySessionClaims(session);
+      return this.prepareQuery(queryJson);
+    }
+    const contextual =
+      session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
+    const queryBytes = encodeQueryJson(queryJson, this.schema);
+    const key = bytesKey(queryBytes);
+    const cached = contextual ? undefined : this.preparedQueries.get(key);
+    if (cached) return cached;
+    const pending = this.db.prepareQueryAsync(
+      queryBytes,
+      contextual ? session.identity : undefined,
+      contextual ? session.claims : undefined,
+    );
+    const remember = (query: PreparedQuery) => {
+      if (!contextual) this.preparedQueries.set(key, query);
+      return query;
+    };
+    const query = this.awaitNativeOperation(pending, signal);
+    return query instanceof Promise ? query.then(remember) : remember(query);
+  }
+
   private prepareQuery(queryJson: string): PreparedQuery {
     const queryBytes = encodeQueryJson(queryJson, this.schema);
     const key = bytesKey(queryBytes);
@@ -2814,63 +2973,71 @@ export class NativeRuntimeAdapter implements Runtime {
       this.closed ? undefined : this.attachQueryForContext(query, opts, readContext, pendingTx),
     );
     if (attachment === undefined) return;
-    this.emitQueryCoverageTrace("attach");
-    // Durable Local reads returned above. A memory-only foreground must first
-    // receive its persistent owner's local answer, including an empty answer.
-    // The core attachment distinguishes that delivery from authority coverage:
-    // Local still completes while the owner is disconnected from edge/core.
-    if (!this.db.queryAttachmentIsCovered) return attachment;
-    const coverageKey = this.coverageKey(readContext, session);
-    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
-    const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
-    const requiresFreshPeerConfirmation =
-      this.nonDurableClient &&
-      readPropagationIsFull(optionsJson) &&
-      confirmedPeerActivityEpoch != null;
-    // A prior confirmation can recover a reattachment only if no newer worker
-    // frame has arrived. Otherwise the old coverage state could be exposed to
-    // a query whose authorization (for example, an authorship-scoped policy)
-    // is about to change.
-    if (
-      mayReusePeerConfirmation &&
-      confirmedPeerActivityEpoch != null &&
-      (await this.runWhenCoreIdle(
-        () =>
-          !this.closed &&
-          this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
-          this.db.queryAttachmentIsCovered!(attachment),
-      ))
-    ) {
-      return attachment;
-    }
-    const minimumPeerActivityEpoch = this.nonDurableClient
-      ? this.peerTransportActivityEpoch
-      : undefined;
-    const pendingPeerActivityEpoch =
-      this.nonDurableClient &&
-      !requiresFreshPeerConfirmation &&
-      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+    try {
+      if (typeof (attachment as Partial<PendingNativeOperation<boolean>>).setWake === "function") {
+        await this.awaitNativeOperation(attachment as PendingNativeOperation<boolean>);
+      }
+      this.emitQueryCoverageTrace("attach");
+      // Durable Local reads returned above. A memory-only foreground must first
+      // receive its persistent owner's local answer, including an empty answer.
+      // The core attachment distinguishes that delivery from authority coverage:
+      // Local still completes while the owner is disconnected from edge/core.
+      if (!this.db.queryAttachmentIsCovered) return attachment;
+      const coverageKey = this.coverageKey(readContext, session);
+      const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
+      const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
+      const requiresFreshPeerConfirmation =
+        this.nonDurableClient &&
+        readPropagationIsFull(optionsJson) &&
+        confirmedPeerActivityEpoch != null;
+      // A prior confirmation can recover a reattachment only if no newer worker
+      // frame has arrived. Otherwise the old coverage state could be exposed to
+      // a query whose authorization (for example, an authorship-scoped policy)
+      // is about to change.
+      if (
+        mayReusePeerConfirmation &&
+        confirmedPeerActivityEpoch != null &&
+        (await this.runWhenCoreIdle(
+          () =>
+            !this.closed &&
+            this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
+            this.db.queryAttachmentIsCovered!(attachment),
+        ))
+      ) {
+        return attachment;
+      }
+      const minimumPeerActivityEpoch = this.nonDurableClient
         ? this.peerTransportActivityEpoch
         : undefined;
-    await this.waitForQueryCoverage(
-      attachment,
-      query,
-      readOptions(tier, false, optionsJson),
-      readContext,
-      minimumPeerActivityEpoch,
-      pendingPeerActivityEpoch,
-      mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
-    );
-    if (this.nonDurableClient) {
-      await this.runWhenCoreIdle(() => {
-        if (this.closed || !this.db.queryAttachmentIsCovered!(attachment)) return;
-        const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-        confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
-        this.peerCoveredQueries.set(query, confirmations);
-      });
+      const pendingPeerActivityEpoch =
+        this.nonDurableClient &&
+        !requiresFreshPeerConfirmation &&
+        this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+          ? this.peerTransportActivityEpoch
+          : undefined;
+      await this.waitForQueryCoverage(
+        attachment,
+        query,
+        readOptions(tier, false, optionsJson),
+        readContext,
+        minimumPeerActivityEpoch,
+        pendingPeerActivityEpoch,
+        mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
+      );
+      if (this.nonDurableClient) {
+        await this.runWhenCoreIdle(() => {
+          if (this.closed || !this.db.queryAttachmentIsCovered!(attachment)) return;
+          const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+          confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
+          this.peerCoveredQueries.set(query, confirmations);
+        });
+      }
+      this.emitQueryCoverageTrace("covered");
+      return attachment;
+    } catch (error) {
+      this.db.detachQuery?.(attachment);
+      throw error;
     }
-    this.emitQueryCoverageTrace("covered");
-    return attachment;
   }
 
   /**
@@ -3829,10 +3996,23 @@ export class NativeRuntimeAdapter implements Runtime {
   private failSubscription(subscription: SubscriptionState, error: Error): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    subscription.openingAbort?.abort();
+    subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
+    this.deliverSubscriptionFailure(subscription);
+  }
+
+  private deliverSubscriptionFailure(subscription: SubscriptionState): void {
+    if (
+      !subscription.callback ||
+      !subscription.terminalError ||
+      subscription.terminalErrorDelivered
+    )
+      return;
+    subscription.terminalErrorDelivered = true;
     try {
-      subscription.callback?.(error);
+      subscription.callback(subscription.terminalError);
     } catch (callbackError) {
       setTimeout(() => {
         throw callbackError;
