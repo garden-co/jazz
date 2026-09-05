@@ -3969,6 +3969,30 @@ impl NativeRelayWire {
             .transpose()?;
         Ok((owner, connection))
     }
+
+    /// A retired connection is a transient transport condition: its owner may
+    /// still be detaching the old peer or installing its replacement. Keep the
+    /// owner and connection liveness domains separate so core retains outbound
+    /// work until the replacement has been installed.
+    fn enter_queue_transport(&self) -> Result<WireLivenessGuards<'_>, TransportError> {
+        let owner = self
+            .liveness
+            .as_ref()
+            .map(|l| l.enter())
+            .transpose()
+            .map_err(transport_queue_error)?;
+        let connection = match self
+            .connection_liveness
+            .as_ref()
+            .map(|l| l.enter())
+            .transpose()
+        {
+            Ok(connection) => connection,
+            Err(RelayError::Closed) => return Err(TransportError::Backpressure),
+            Err(error) => return Err(transport_queue_error(error)),
+        };
+        Ok((owner, connection))
+    }
     fn retire_connection(&self) {
         if let Some(liveness) = &self.connection_liveness {
             let _guard = liveness
@@ -4492,7 +4516,7 @@ impl Transport for QueueTransport {
         self.session_context
     }
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let _terminal = self.wire.enter().map_err(transport_queue_error)?;
+        let _terminal = self.wire.enter_queue_transport()?;
         self.wire
             .outbound
             .lock()
@@ -9005,6 +9029,33 @@ mod tests {
             ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
         ));
         client.close().unwrap();
+    }
+
+    #[test]
+    fn retired_connection_backpressures_but_owner_close_stays_terminal() {
+        let owner = Arc::new(RelayLiveness::new());
+        let wire = NativeRelayWire::for_owner(Arc::clone(&owner));
+        let mut transport = QueueTransport {
+            wire: wire.clone(),
+            session_context: None,
+        };
+        let message = SyncMessage::SessionClaims {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+        };
+
+        wire.retire_connection();
+        assert!(matches!(
+            transport.send(message.clone()),
+            Err(TransportError::Backpressure)
+        ));
+        assert!(matches!(wire.take_outbound(), Err(RelayError::Closed)));
+
+        owner.mark_terminal();
+        assert!(matches!(
+            transport.send(message),
+            Err(TransportError::Failed(error)) if error.contains("native relay is closed")
+        ));
     }
 
     #[test]
