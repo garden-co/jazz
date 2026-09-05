@@ -7616,7 +7616,7 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
-  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const keys of [
     delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
     delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
@@ -7640,7 +7640,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
     const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 2;
+    key[0] = 1;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(8, 21, 37);
@@ -7879,7 +7879,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
-  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
+  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec((index) => index.u64(0), 1);
@@ -7912,8 +7912,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writeTeamGatherBatches(writer, updated, descriptor);
   writer.vec(() => undefined, 0);
   for (const keys of [
-    delta.addedOccurrenceKeys ?? added.map((row) => Uint8Array.from([1, ...row.rowId])),
-    delta.updatedOccurrenceKeys ?? updated.map((row) => Uint8Array.from([1, ...row.rowId])),
+    delta.addedOccurrenceKeys ??
+      added.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+    delta.updatedOccurrenceKeys ??
+      updated.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
     [],
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
@@ -7968,7 +7970,7 @@ function writeTeamGatherBatches(
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
   const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-  key[0] = 2;
+  key[0] = 1;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);
   key.fill(2, 21, 37);
