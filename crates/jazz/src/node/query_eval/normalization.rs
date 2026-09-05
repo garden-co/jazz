@@ -3342,15 +3342,9 @@ where
                     partition_by: Vec::new(),
                     limit: query.limit.map(|limit| limit.min(u32::MAX as usize) as u32),
                     offset: query.offset.min(u32::MAX as usize) as u32,
-                    tie_breaker: vec![
-                        NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
-                        // A physical row can occur through more than one UNION ALL arm.
-                        // Its semantic arm carrier completes the global page order.
-                        NormalizedValueRef::SourceField {
-                            source: root_source.clone(),
-                            field: "__root_union_arm".to_owned(),
-                        },
-                    ],
+                    tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                        root_source.clone(),
+                    ))],
                     rank_output: None,
                 },
             );
