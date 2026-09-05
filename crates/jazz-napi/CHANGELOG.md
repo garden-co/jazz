@@ -1,5 +1,22 @@
 # jazz-napi
 
+## 2.0.0-alpha.54
+
+### Minor Changes
+
+- fd7a2d6: Replace the public `Db.subscribeAll` delta callback with `Db.subscribe`, which receives the complete current query result.
+
+### Patch Changes
+
+- 62ddffe: Support Better Auth 1.7 in the Jazz database adapter with atomic `consumeOne` and
+  `incrementOne` operations. Exclusive transactions now preserve trusted-serving identities and
+  support identity-aware transaction reads across the native and WASM runtimes.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+- 16c3eec: Wait for asynchronous core ownership when preparing ordinary queries and opening subscriptions. Preserve admitted session claims across waits and cancel pending admission during unsubscribe or shutdown.
+- 68a91a3: Route ordinary and mergeable-transaction upserts through their complete head-over-base branch view. Head-local rows are merged, inherited rows (including verified indirect large values) are copied into the head, and absent rows are inserted there consistently across native and WASM runtimes. Committed tombstones remain rejected; a later upsert in the same mergeable transaction supersedes its pending delete so replacement content is visible. Session transactions can upsert branch rows staged earlier in that transaction.
+
+  Low-level JavaScript callers must use `{ head, base? }` for a branch view. The removed `{ branch }` upsert option is rejected by property presence, including `null` or `undefined`, rather than silently selecting the root target. Rust callers must construct `UpsertOptions::target` with `WriteTarget`.
+
 ## 2.0.0-alpha.53
 
 ## 2.0.0-alpha.52
@@ -49,7 +66,7 @@
   `jazz-tools server` can now run as an edge when configured with an upstream core URL and peer secret, and the DevServer/testing APIs expose matching upstream and peer-secret options for integration coverage.
 
 - e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
-- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
 - 92fbdf9: Persist sealed batch manifests and batch fates instead of replayable local batch records. Batch waits and mutation-error replay now read `BatchFate` directly, and sync no longer rebuilds local batch membership one row at a time.
 
 ## 2.0.0-alpha.46

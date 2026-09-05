@@ -1,5 +1,23 @@
 # jazz-wasm
 
+## 2.0.0-alpha.54
+
+### Minor Changes
+
+- fd7a2d6: Replace the public `Db.subscribeAll` delta callback with `Db.subscribe`, which receives the complete current query result.
+
+### Patch Changes
+
+- 62ddffe: Support Better Auth 1.7 in the Jazz database adapter with atomic `consumeOne` and
+  `incrementOne` operations. Exclusive transactions now preserve trusted-serving identities and
+  support identity-aware transaction reads across the native and WASM runtimes.
+- aa9a5a1: Make `StreamingMutation.abort()` reliably settle a push that is already in flight, evicting staged upload state instead of returning early while the storage operation continues.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+- 16c3eec: Wait for asynchronous core ownership when preparing ordinary queries and opening subscriptions. Preserve admitted session claims across waits and cancel pending admission during unsubscribe or shutdown.
+- 68a91a3: Route ordinary and mergeable-transaction upserts through their complete head-over-base branch view. Head-local rows are merged, inherited rows (including verified indirect large values) are copied into the head, and absent rows are inserted there consistently across native and WASM runtimes. Committed tombstones remain rejected; a later upsert in the same mergeable transaction supersedes its pending delete so replacement content is visible. Session transactions can upsert branch rows staged earlier in that transaction.
+
+  Low-level JavaScript callers must use `{ head, base? }` for a branch view. The removed `{ branch }` upsert option is rejected by property presence, including `null` or `undefined`, rather than silently selecting the root target. Rust callers must construct `UpsertOptions::target` with `WriteTarget`.
+
 ## 2.0.0-alpha.53
 
 ## 2.0.0-alpha.52

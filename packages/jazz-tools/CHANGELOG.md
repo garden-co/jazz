@@ -1,5 +1,122 @@
 # jazz-tools
 
+## 2.0.0-alpha.54
+
+### Major Changes
+
+- f63d5c0: BREAKING CHANGE: remove `LocalUpdatesMode`, `QueryPropagation`, and their `localUpdates` and `propagation` query options from the public API. Read tiers now determine how subscriptions treat the caller's own local writes: `local-first` and `remote-if-possible` publish them immediately, while `remote` defers them until the remote view observes them. Local-only reads are not supported by the public query API.
+
+### Minor Changes
+
+- fd7a2d6: Replace the public `Db.subscribeAll` delta callback with `Db.subscribe`, which receives the complete current query result.
+
+### Patch Changes
+
+- dcd08a9: Anchor qualified permission joins to their source relation scope
+
+  Sibling qualified filters on directly related tables now join each related table from the protected row, while explicitly chained relation joins continue from the preceding joined table.
+
+- fbad905: Enforce anonymous sessions as read-only by rejecting anonymous writes before table-policy evaluation.
+- 4e30516: Make permission publications sharing one in-process catalogue store compare and swap the current parent while preserving bundle-first, head-second storage.
+- 3e639ef: Honor `defaultDurabilityTier` independently from the backend node's durability tier.
+- 8233c8f: Pin Better Auth compatibility to the tested 1.6.24 release across the starters and workspace package metadata.
+- 62ddffe: Support Better Auth 1.7 in the Jazz database adapter with atomic `consumeOne` and
+  `incrementOne` operations. Exclusive transactions now preserve trusted-serving identities and
+  support identity-aware transaction reads across the native and WASM runtimes.
+- 1e6950e: Reduce peak memory use when decoding uncompressed inbound wire payloads by borrowing the assembled message bytes.
+- 03fdd88: Validate configured JWT issuers and audiences in backend request authentication.
+- 66bc601: Counter merge strategies now support non-nullable bigint columns and reject nullable or non-integer columns during schema construction.
+- a80a6a4: Preserve runtime factory and source identity when React providers choose a client, while keeping unchanged React Native provider rerenders on the current client.
+- f9b1722: Restore inherited frozen-branch rows when a head deletion is restored.
+- 77d701b: Recover persistent browser databases when pages connect during SharedWorker realm shutdown.
+- 1135440: Add typed `notIn` query filters, including native handling of Better Auth's `not_in` operator. Membership filters now use one canonical predicate representation for root and included relations, so `notIn` reaches the core as `Not(In(...))` rather than client-side inequality expansion.
+- 924ff72: Make concurrent and repeated embedded server stop calls share the same successful or failed terminal shutdown result.
+- 4a7ac60: Stop advertising a Windows `jazz-tools` CLI binary that the release workflow does not produce. Windows users now get a clear unsupported-platform error instead of a misleading missing-artifact error; Windows NAPI builds remain supported.
+- 4ea0821: Coalesce concurrent JWKS downloads per URL and start the forced-refresh cooldown only after a successful download. Freshly fetched keys no longer trigger an immediate duplicate download for an invalid JWT, while stale keys can still refresh after provider rotation. Failed downloads are not cached and remain immediately retryable.
+- a5f6b67: Compile timestamp/`Date`, floating-point, byte-array, and array permission policy literals that the TypeScript authoring API already accepts. Invalid and pre-epoch dates, tagged timestamps outside the non-negative safe-integer millisecond range, and non-finite floating-point literals now fail at the TypeScript authoring boundary; core compilation independently enforces finite floating-point values.
+- 4bfa2d7: Scope browser client storage by identity for cookie sessions.
+- 34d01d9: Permission consumers no longer interpret unbranded `PolicyExpr` objects as raw
+  policy IR. Plain objects with policy-shaped keys such as `type` remain row predicates when the table
+  schema declares those columns. On a table without a `type` column, an unbranded value carrying a
+  policy-expression discriminator is rejected rather than misclassified. Wrap manually-authored or
+  stored policy IR with `raw(...)`, and change reusable helpers that can return any DSL condition to
+  the new opaque `PermissionExpressionInput` type. `PermissionExpression` remains available for
+  helpers that specifically return branded raw policy IR. DSL atoms, compounds, existence checks,
+  session predicates, and resolved row-condition objects all compose through
+  `PermissionExpressionInput`, while plain row-predicate objects remain structurally typed.
+  `isCreator`, `allowedTo.*`, `allOf`, and `anyOf` continue to work with schemas whose columns use
+  policy-shaped names.
+- 0410f75: Fail server startup when the durable catalogue cannot be read safely instead of silently replacing it with an empty catalogue.
+- 1031920: Own the edge server's upstream connector across bootstrap, retry, established disconnect, and shutdown. Reconnect transient failures with bounded exponential backoff, expose fatal lifecycle health, detach the exact upstream peer before retry, and cancel and join connector work before storage closes.
+- 477acf7: Require accepted authority receipts and timestamps for global write waits, retain exact edge upload units until the current admitted authority settles them, and require fresh exact-subscription coverage for repeated settled reads.
+- dc5ee01: Encode Expo SecureStore scope values into valid, collision-resistant key segments.
+- 0b6d070: Improve write and sync performance by replacing full row-history scans with batch-indexed or exact row lookups across batch tracking, transaction validation, permission rejection, and common parent resolution.
+
+  Disable automatic full-storage reconciliation when connecting to a server, avoiding a replay of all stored rows' history on every connection. This means rows that couldn't be synced to the server will not be sent on reconnection, instead needing to wait until a query loads them again. Also, the full client storage won't be automatically reconciled when connecting to a new server.
+
+- 16512ce: Deliver native mutation errors as the single callback argument declared by the JavaScript API.
+- f35a32c: Limit backend JWKS documents to five minutes of trust. Authentication now fails closed if the provider cannot refresh an expired document, trading provider outage availability for prompt signing-key revocation.
+- 1480b80: Fix reactive array truncation and expose `reconcileArray` as a public subpath.
+- 4afac6e: Prevent staged large values from being evicted or reclaimed while accepted or reactivated references are still resident but not yet durable. Eviction now defers while any resident large-value publication owns lifecycle serialization, avoiding cross-receipt deadlocks, and reclamation reuses the durable metadata read when there is no staged override.
+- e7da674: Bind external JWTs to the configured issuer, audience, and validity window, and keep privileged server credentials out of client admission.
+- 693c232: Let the in-app inspector move into a separate window that matches the dock dimensions and returns to the dock when the window closes. The detached window opens with Alt+Shift+D, and its toolbar button can be hidden in settings.
+- 5e1064b: Fix deletes of rows created under earlier schema versions when permission checks need the row's historical content. Rejected migrated deletes now also leave the row usable for a subsequent update.
+- 18dd8b5: Expose an established native transport's terminal future so socket close and failure are observable even while the semantic transport is idle. This adds a required `terminal` field to `ConnectedNativeTransport`; external custom connector implementations that construct this struct with a literal must add a future resolving to `NativeTransportTerminal::Closed` or `NativeTransportTerminal::Failed`.
+- dfd256d: Keep generated app IDs on a separate dotenv line without replacing the `.env`
+  file or losing concurrent edits.
+- 1983c09: Fix persisted row encoding for arrays whose elements are payload-bearing enums, preserving nested case payload data across storage round trips.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+- c75f818: Complete browser and React Native client teardown even when an earlier shutdown step fails, while preserving the first failure.
+- 41f5012: Persist batch settlement and recovery metadata before publishing rows, so failed commits cannot expose partially durable writes.
+- efb5c80: Transfer published transactions to node-owned ordered persistence before refreshing subscriptions, so refresh errors or cancellation cannot abandon their storage slots.
+- 6876b2e: Preserve distinct tied records in non-table argument extrema queries without allowing projected payload layout to override the declared extrema ordering.
+- 2890736: Keep a failed client shutdown as the persistent-store closing barrier so later client creation cannot overlap a runtime that did not shut down.
+- 8a29aae: Fix: preserve sorting after updates on sorted values for queries that use projections and magic columns.
+- acf4dec: Preserve stored row provenance when evaluating update and delete policies.
+- a032517: Expose terminal errors through public `Db.subscribe` callback objects and propagate them through framework query entries. Subscription generations now fence buffered/admission/seed work after terminalization, legacy function callbacks report unhandled errors, and browser-worker relays preserve error names, messages, stacks, and serializable causes.
+- 6d43ab5: Make dropped Rust transaction handles abandon promptly without blocking, preserve cleanup queued behind node work, and close transaction admission before terminalizing all open work during database shutdown.
+- 61d3178: Stop indexing Bytea columns to reduce write and index storage overhead.
+- 6122619: Validate `s.int()` values against Jazz's signed 32-bit range before native writes and report actionable errors for invalid values.
+- 16c3eec: Wait for asynchronous core ownership when preparing ordinary queries and opening subscriptions. Preserve admitted session claims across waits and cancel pending admission during unsubscribe or shutdown.
+- 3a753a9: Keep managed development backend credentials in the server process instead of returned Next.js configuration. Applications using `jazz-tools/dev/next` should read `BACKEND_SECRET` from the server environment.
+- 399173d: Ensure Rust client shutdown cancels retained subscription forwarding before closing persistent local storage, allowing the same client directory to reopen immediately.
+- dc8f624: Defer React `JazzProvider` client acquisition until the browser commit lifecycle so server rendering stays side-effect free and hydration starts from the configured fallback.
+- bbfa46f: BREAKING CHANGE: Align React and React Native `useAll` with the other framework bindings by returning `{ data, isLoading, error }` instead of a bare `T[] | undefined`. `useAllSuspense` still returns `T[]`.
+- 280c3f7: Rebuild release artifacts when the publishing workflow differs from the release preview commit instead of reusing potentially stale packages.
+- b8fd2f9: Reconcile canonical query membership before cloning it to a new subscriber. Canonical transitions are published exactly once to every established sibling, with their existing authorization progress and receipt pairing, before the new clone's fallible reset is assembled. Established siblings therefore converge even when that reset fails, without changing the public Rust rehydration return type. Replaced maintained receivers are also unregistered eagerly.
+- 585243e: Reject schemas whose generated relation names are ambiguous or shadow another stored/public output column instead of silently selecting or overwriting a value.
+- 57340a3: Reject multiple asymmetric update permission rules instead of merging their old-row and new-row conditions into unintended combinations.
+- 8cd15cf: Retire upstream transports whose asynchronous admission completes after the native runtime disconnects or closes.
+- 2b0b36a: Apply schema column transforms to included and hopped relation rows.
+- 28f749a: Save inspector mutations atomically, settle queued edits filtered out by schema changes without opening an empty transaction, keep ambiguous committed saves visibly pending and non-discardable across navigation, and confirm retained results without resubmitting them or later edits.
+- eee104e: Flush pending RocksDB WAL writes synchronously when closing storage.
+- 68a91a3: Route ordinary and mergeable-transaction upserts through their complete head-over-base branch view. Head-local rows are merged, inherited rows (including verified indirect large values) are copied into the head, and absent rows are inserted there consistently across native and WASM runtimes. Committed tombstones remain rejected; a later upsert in the same mergeable transaction supersedes its pending delete so replacement content is visible. Session transactions can upsert branch rows staged earlier in that transaction.
+
+  Low-level JavaScript callers must use `{ head, base? }` for a branch view. The removed `{ branch }` upsert option is rejected by property presence, including `null` or `undefined`, rather than silently selecting the root target. Rust callers must construct `UpsertOptions::target` with `WriteTarget`.
+
+- 2070622: Keep staged native binaries intact when their source already resolves to the bundle destination.
+- 2412c35: Preserve payload enum case ordinals above 255 when Jazz reconciles and projects schema lineages.
+- 763e735: Generate deny-all client permissions for Better Auth tables while retaining backend adapter access.
+- 64bc594: Serialize authentication secret and hybrid database transitions so stale asynchronous work cannot restore superseded credentials or database instances.
+- 8081e75: Make concurrent server shutdown callers wait for and share the completed result.
+- aaff21e: Deliver structured collector updates to every subscription and sink sharing the same terminal node.
+- b28b3c6: Drive subscription finalisation directly from explicit close so cleanup does not require a later database tick.
+- 74717db: Prevent replay from resubmitting terminally rejected batches or echoing accepted rows back to the authoritative server that delivered them.
+- 9255074: Preserve specialised TypeScript types when chaining column merge and transform modifiers.
+- fdcdea3: Reject migration files whose embedded schema metadata, filename hashes, snapshots, or table-scoped transforms do not agree before publication.
+- 7478b04: Make `jazzPlugin` and `jazzSvelteKit` load Vite environment files from Vite's configured `envDir` for the active serve mode, including `.env.local`, `.env.<mode>` and `.env.<mode>.local`. `envFile: false` disables this loading. Builds continue to skip the hooks; production serve mode is covered.
+- ba8f46f: Project team identifiers directly through bounded, cycle-safe reachable permission recursion frontiers without requiring membership rows for reached parents. `MaxDepth(0)` is seed-only and never admits a one-hop authorization grant.
+- 82b704c: Clean up failed broker-worker initialisation so later connections can retry safely.
+- Updated dependencies [62ddffe]
+- Updated dependencies [aa9a5a1]
+- Updated dependencies [7d39a1f]
+- Updated dependencies [16c3eec]
+- Updated dependencies [68a91a3]
+- Updated dependencies [f72ea1d]
+- Updated dependencies [fd7a2d6]
+  - jazz-wasm@2.0.0-alpha.54
+  - jazz-rn@2.0.0-alpha.54
+
 ## 2.0.0-alpha.53
 
 ### Major Changes
@@ -180,7 +297,7 @@
 - 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
 - e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
 - 576531d: `ManagedDevRuntime` no longer throws when a prior in-process run leaves `*_JAZZ_SERVER_URL` set in `process.env`. The env var on its own is now treated as our own persisted value and ignored in favour of spinning up a fresh local server. The plugin still takes the "connect to an external server" path when the caller explicitly supplies an `adminSecret` option or sets `JAZZ_ADMIN_SECRET`. This makes Vite HMR restarts and repeated test runs work without stale-state errors.
-- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
 - 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
   `withJazz` writes the live schema hash into a generated module that the
   React provider depends on, so Turbopack and Webpack reload the page

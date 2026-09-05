@@ -1,5 +1,17 @@
 # create-jazz
 
+## 2.0.0-alpha.54
+
+### Minor Changes
+
+- fd7a2d6: Replace the public `Db.subscribeAll` delta callback with `Db.subscribe`, which receives the complete current query result.
+
+### Patch Changes
+
+- b43fb82: Redact hosted credentials while preserving retry placeholders.
+- 670ba3d: Scaffold starters and workspace dependencies from the immutable source snapshot matching the installed release.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+
 ## 2.0.0-alpha.53
 
 ## 2.0.0-alpha.52
