@@ -717,8 +717,8 @@ function translateBuiltRelationToRelExpr(
   schema: WasmSchema,
 ): { expr: RelExpr; outputTable: string } {
   if (relation.union) {
-    const inputs = relation.union.inputs.map((input) =>
-      translateBuiltRelationToRelExpr(input, relations, schema),
+    const inputs = relation.union.inputs.map((arm) =>
+      translateBuiltRelationToRelExpr(arm.input, relations, schema),
     );
     const first = inputs[0];
     if (!first) {
@@ -805,6 +805,7 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
         conditions: builder.conditions,
         hops: builder.hops,
         gather: builder.gather,
+        union: builder.union,
       },
       relations,
       schema,
@@ -879,6 +880,7 @@ function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQue
   // its nested predicate. Route it through the relation IR even without a hop
   // so the public enum-match node reaches the Rust query compiler.
   return (
+    builder.union !== undefined ||
     builder.hops.length > 0 ||
     builder.gather !== undefined ||
     builder.conditions.some((condition) => condition.op === "match")
@@ -925,11 +927,7 @@ function toFlatConditions(
  * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const raw = JSON.parse(builderJson);
-  if (raw?.union !== undefined) {
-    throw new Error("Public union queries are not supported by canonical query lowering yet.");
-  }
-  const builder = normalizeBuiltQuery(raw);
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const selectColumns =
     builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
