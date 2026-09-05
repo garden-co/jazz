@@ -1,3 +1,25 @@
+// Keep a proof's temporary serving identity scoped to the retained future,
+// including cancellation while cold storage is pending.
+struct AuthorizationSupportPeerScope<'a, S: OrderedKvStorage> {
+    peer: &'a mut PeerState,
+    node: &'a mut NodeState<S>,
+    subscription: SubscriptionKey,
+    completed: bool,
+    previous_role: PeerRole,
+    previous_permission_identity: Option<AuthorSubject>,
+}
+
+impl<S: OrderedKvStorage> Drop for AuthorizationSupportPeerScope<'_, S> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.peer
+                .forget_subscription_with_node(self.node, self.subscription);
+        }
+        self.peer.role = self.previous_role;
+        self.peer.permission_identity = self.previous_permission_identity;
+    }
+}
+
 fn ordinary_flat_row_duplicate_view(
     shape: &ValidatedQuery,
     current_members: &BTreeSet<ResultMemberEntry>,
@@ -2210,27 +2232,50 @@ impl PeerState {
         self.set_subscription_policy_binding(subscription, (identity, claims));
         let previous_role = self.role;
         let previous_permission_identity = self.permission_identity;
-        self.role = PeerRole::ClientLink { identity };
-        self.permission_identity = Some(identity);
-        let update = self
-            .rehydrate_query_for_subscription_with_purpose(
-                node,
-                subscription,
-                shape,
-                binding,
-                opts,
-                RehydratePurpose::AuthorizationSupport,
-                None,
-            )
-            .await
-            .and_then(|update| {
-                update.ok_or(Error::InvalidStoredValue(
-                    "authorization hydration suspended outside an owner-loop subscription",
-                ))
-            });
-        self.role = previous_role;
-        self.permission_identity = previous_permission_identity;
-        update
+        let mut scope = AuthorizationSupportPeerScope {
+            peer: self,
+            node,
+            subscription,
+            completed: false,
+            previous_role,
+            previous_permission_identity,
+        };
+        scope.peer.role = PeerRole::ClientLink { identity };
+        scope.peer.permission_identity = Some(identity);
+        // These retained evaluator futures are large; keep them off callers'
+        // nested terminal-proof/peer-tick stack frames.
+        let opening = Box::pin(scope.peer.rehydrate_query_for_subscription_with_purpose(
+            scope.node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            RehydratePurpose::AuthorizationSupport,
+            None,
+        ))
+        .await?;
+        if let Some(update) = opening {
+            scope.completed = true;
+            return Ok(update);
+        }
+        // The proof owns this retained receiver. Await its ordinary storage
+        // progress instead of treating a cold opening as unavailable or
+        // restarting hydration with a new usage-site registration.
+        scope.node.drive_query_runtime().await?;
+        let result = Box::pin(scope.peer.query_update_maintained_subscription_view(
+            scope.node,
+            shape,
+            binding,
+            subscription,
+            None,
+            None,
+        ))
+        .await?
+        .ok_or(Error::InvalidStoredValue(
+            "authorization hydration missing initial snapshot after storage progress",
+        ));
+        scope.completed = result.is_ok();
+        result
     }
 
     /// Build a usage-site update from an already-maintained canonical subscription.

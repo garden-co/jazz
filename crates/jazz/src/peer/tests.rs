@@ -42,6 +42,88 @@ fn row_from_u64(value: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
+// The proof helper temporarily serves as its captured authorization subject.
+// Dropping an actual cold-storage future must restore the enclosing peer role.
+#[test]
+fn cancelled_cold_authorization_support_restores_peer_identity() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let mut state =
+        crate::db::block_on(NodeState::new(node(0xe3), schema.clone(), storage)).unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::relay();
+    let original_role = peer.role;
+    let original_identity = peer.permission_identity;
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut hydration = Box::pin(peer.rehydrate_authorization_support_query_for_identity(
+        &mut state,
+        AuthorSubject::for_test_bytes([0xe4; 16]),
+        BTreeMap::new(),
+        subscription,
+        &shape,
+        &binding,
+        Default::default(),
+    ));
+    let first_poll = std::future::Future::poll(
+        hydration.as_mut(),
+        &mut std::task::Context::from_waker(std::task::Waker::noop()),
+    );
+    assert!(
+        first_poll.is_pending(),
+        "expected cold hydration: {first_poll:?}"
+    );
+    drop(hydration);
+    assert_eq!(peer.role, original_role);
+    assert_eq!(peer.permission_identity, original_identity);
+    assert!(
+        !peer.publication_states.contains_key(&subscription),
+        "cancel releases maintained receiver and usage owner"
+    );
+    let retry_identity = AuthorSubject::for_test_bytes([0xe5; 16]);
+    let mut retry = Box::pin(peer.rehydrate_authorization_support_query_for_identity(
+        &mut state,
+        retry_identity,
+        BTreeMap::new(),
+        subscription,
+        &shape,
+        &binding,
+        Default::default(),
+    ));
+    assert!(
+        std::future::Future::poll(
+            retry.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending()
+    );
+    control.resume();
+    let update = crate::db::block_on(retry).unwrap();
+    assert!(matches!(update, SyncMessage::ViewUpdate(_)));
+    assert_eq!(
+        peer.served_subscription_policy_binding(subscription)
+            .unwrap()
+            .0,
+        retry_identity
+    );
+    assert_eq!(peer.role, original_role);
+    assert_eq!(peer.permission_identity, original_identity);
+    peer.forget_subscription_with_node(&mut state, subscription);
+}
+
 #[test]
 fn late_initial_drain_resets_the_complete_retained_source_closure() {
     let (_dir, mut core) = open_node_with_uuid(node(0x74));

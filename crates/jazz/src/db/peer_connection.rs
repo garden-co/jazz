@@ -3678,7 +3678,6 @@ where
                                 ingest_context.trust,
                                 authority_scope_hydrations,
                                 authority_scope_hydration_count,
-                                progress_waker.as_ref(),
                             )
                             .await?;
                             if !self.pending_control_responses.is_empty() {
@@ -5932,7 +5931,6 @@ async fn serve_authorization_scope_intent<S>(
         ServedAuthorizationScopeHydration,
     >,
     hydration_count: &mut u64,
-    progress_waker: Option<&std::task::Waker>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -6071,22 +6069,16 @@ where
         let update = {
             let mut node = node.lock().await;
             let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
-            peer.rehydrate_query_for_subscription_with_opts_and_waker(
+            peer.rehydrate_authorization_support_query_for_identity(
                 &mut node,
+                identity,
+                session_claims.clone(),
                 subscription,
                 shape,
                 binding,
                 scope.options.clone(),
-                progress_waker,
             )
             .await?
-        };
-        let Some(update) = update else {
-            queue_direct_control(
-                pending_control_responses,
-                SyncMessage::AuthorizationScopeUnavailable { request_id },
-            );
-            return Ok(());
         };
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             settled_through: cut,
