@@ -54,6 +54,8 @@ fn validate_role_fields(
     let mut group_ordinal = 0usize;
     let mut value_ordinal = 0usize;
     let mut values_started = false;
+    let mut occurrence_ordinal = 1usize;
+    let mut last_union_position = None;
     let fields = descriptor.fields();
     let fields = if role == ResultDescriptorRole::Current {
         let first = fields.first().ok_or_else(invalid)?;
@@ -74,9 +76,32 @@ fn validate_role_fields(
         let _logical_name = parts.next().ok_or_else(invalid)?;
         let expected = match role {
             ResultDescriptorRole::Current
-                if matches!(tag, "source" | "result" | "provenance" | "metadata") =>
+                if matches!(tag, "source" | "result" | "provenance" | "metadata")
+                    && !values_started =>
             {
                 current_ordinal
+            }
+            ResultDescriptorRole::Current
+                if tag == "occurrence" && last_union_position.is_none() =>
+            {
+                if field.value_type != records::ValueType::Uuid {
+                    return Err(invalid());
+                }
+                values_started = true;
+                let index = occurrence_ordinal;
+                occurrence_ordinal += 1;
+                index
+            }
+            ResultDescriptorRole::Current if tag == "occurrence_union" => {
+                let position = ordinal.parse::<usize>().map_err(|_| invalid())?;
+                if field.value_type != records::ValueType::String
+                    || position >= occurrence_ordinal - 1
+                    || last_union_position.is_some_and(|last| position <= last)
+                {
+                    return Err(invalid());
+                }
+                last_union_position = Some(position);
+                position
             }
             ResultDescriptorRole::Aggregate if tag == "group" && !values_started => {
                 let index = group_ordinal;
@@ -239,6 +264,21 @@ fn current_role_schema(
     use super::{
         CurrentRowPublicationField as Publication, CurrentRowResultVisibility as Visibility,
     };
+    let unique_sources = schema
+        .occurrence_id_fields
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if schema.occurrence_id_fields.first() != Some(&schema.row_field)
+        || unique_sources.len() != schema.occurrence_id_fields.len()
+        || schema
+            .occurrence_union_arm_fields
+            .keys()
+            .any(|position| *position + 1 >= schema.occurrence_id_fields.len())
+    {
+        return Err(Error::InvalidStoredValue(
+            "result occurrence source declarations are invalid",
+        ));
+    }
     let mut fields = vec![DescriptorField::new(
         "metadata/row_uuid",
         records::ValueType::Uuid,
@@ -277,6 +317,18 @@ fn current_role_schema(
             field.ty.clone(),
         ));
     }
+    for (ordinal, name) in schema.occurrence_id_fields.iter().enumerate().skip(1) {
+        fields.push(DescriptorField::new(
+            format!("occurrence/{ordinal}/{name}"),
+            records::ValueType::Uuid,
+        ));
+    }
+    for (position, name) in &schema.occurrence_union_arm_fields {
+        fields.push(DescriptorField::new(
+            format!("occurrence_union/{position}/{name}"),
+            records::ValueType::String,
+        ));
+    }
     let descriptor = RecordDescriptor::new_with_fields(fields);
     Ok(records::decode_persisted_record_descriptor(
         &records::encode_persisted_record_descriptor(&descriptor)?,
@@ -288,13 +340,27 @@ pub(super) fn encode_current_payload_record(
     schema: &super::query_engine::ResultMembershipSchema,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let descriptor = record.descriptor();
-    let selected = std::iter::once(schema.row_field.as_str()).chain(
-        schema
-            .payload_fields
-            .iter()
-            .filter(|field| field.name != schema.row_field)
-            .map(|field| field.name.as_str()),
-    );
+    let selected = std::iter::once(schema.row_field.as_str())
+        .chain(
+            schema
+                .payload_fields
+                .iter()
+                .filter(|field| field.name != schema.row_field)
+                .map(|field| field.name.as_str()),
+        )
+        .chain(
+            schema
+                .occurrence_id_fields
+                .iter()
+                .skip(1)
+                .map(String::as_str),
+        )
+        .chain(
+            schema
+                .occurrence_union_arm_fields
+                .values()
+                .map(String::as_str),
+        );
     let mut values = Vec::new();
     let mut runtime_fields = Vec::new();
     for name in selected {
@@ -305,6 +371,14 @@ pub(super) fn encode_current_payload_record(
             .ok_or(Error::InvalidStoredValue(
                 "result payload is missing its declared carrier",
             ))?;
+        if descriptor.fields()[index + 1..]
+            .iter()
+            .any(|field| field.name.as_deref() == Some(name))
+        {
+            return Err(Error::InvalidStoredValue(
+                "result payload carrier binding is ambiguous",
+            ));
+        }
         values.push(record.get_idx(index)?);
         runtime_fields.push(descriptor.fields()[index].clone());
     }
@@ -383,12 +457,76 @@ pub(super) fn decode_current_payload_record(
                 ))?,
         );
     }
+    let member_occurrence = payload.member.output_occurrence_id();
+    if member_occurrence
+        .as_ref()
+        .map_or(0, |id| id.joined_sources().len())
+        + 1
+        != schema.occurrence_id_fields.len()
+        || member_occurrence.as_ref().is_some_and(|id| {
+            values[0] != records::Value::Uuid(*id.root_source().uuid())
+                || id.union_arms().len() != schema.occurrence_union_arm_fields.len()
+        })
+    {
+        return Err(Error::InvalidStoredValue(
+            "result occurrence differs from compiled sources",
+        ));
+    }
+    if schema.occurrence_id_fields.len() > 1 {
+        let occurrence = payload
+            .member
+            .output_occurrence_id()
+            .ok_or(Error::InvalidStoredValue(
+                "joined result payload has no occurrence identity",
+            ))?;
+        if occurrence.joined_sources().len() + 1 != schema.occurrence_id_fields.len()
+            || occurrence.union_arms().len() != schema.occurrence_union_arm_fields.len()
+        {
+            return Err(Error::InvalidStoredValue(
+                "result occurrence differs from compiled sources",
+            ));
+        }
+        for (name, source) in schema
+            .occurrence_id_fields
+            .iter()
+            .skip(1)
+            .zip(occurrence.joined_sources())
+        {
+            if values[fields.len()] != records::Value::Uuid(*source.uuid()) {
+                return Err(Error::InvalidStoredValue(
+                    "result payload differs from its joined source identity",
+                ));
+            }
+            fields.push(DescriptorField::new(name, records::ValueType::Uuid));
+            publications.push(CurrentRowPublicationField::ResultField {
+                name: name.clone(),
+                visibility: CurrentRowResultVisibility::HiddenMetadata,
+            });
+        }
+        for ((position, name), (member_position, arm)) in schema
+            .occurrence_union_arm_fields
+            .iter()
+            .zip(occurrence.union_arms())
+        {
+            if position != member_position
+                || values[fields.len()] != records::Value::String(arm.clone())
+            {
+                return Err(Error::InvalidStoredValue(
+                    "result payload differs from its union discriminator",
+                ));
+            }
+            fields.push(DescriptorField::new(name, records::ValueType::String));
+            publications.push(CurrentRowPublicationField::ResultField {
+                name: name.clone(),
+                visibility: CurrentRowResultVisibility::HiddenMetadata,
+            });
+        }
+    }
+    let descriptor = RecordDescriptor::new_with_fields(fields);
+    let raw = descriptor.create(&values)?;
     Ok(super::CurrentRow::new_with_publication_fields(
         table,
-        OwnedRecord::new(
-            payload.record.clone(),
-            RecordDescriptor::new_with_fields(fields),
-        ),
+        OwnedRecord::new(raw, descriptor),
         publications,
     ))
 }
@@ -463,6 +601,117 @@ mod tests {
             settle_position_field: None,
             routing_param_fields: BTreeSet::new(),
         }
+    }
+
+    // Malformed member/schema pairings cannot be authored through the public
+    // query API. Exercise the role decoder directly to prove it rejects them.
+    #[test]
+    fn current_roles_bind_ordered_join_sources_and_union_discriminators() {
+        use crate::protocol::RealRowMemberEntry;
+        use crate::tools::{ObjectId, OutputOccurrenceId};
+        let mut schema = current_schema(1, "_app_1");
+        schema.occurrence_id_fields.extend([
+            "__flat_join_row_1".to_owned(),
+            "__flat_join_row_2".to_owned(),
+        ]);
+        schema
+            .occurrence_union_arm_fields
+            .insert(0, "__root_join_arm_0".to_owned());
+        let root = uuid::Uuid::from_bytes([1; 16]);
+        let first = uuid::Uuid::from_bytes([2; 16]);
+        let second = uuid::Uuid::from_bytes([3; 16]);
+        let runtime = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("_app_1", ValueType::String),
+            ("__flat_join_row_1", ValueType::Uuid),
+            ("__flat_join_row_2", ValueType::Uuid),
+            ("__root_join_arm_0", ValueType::String),
+        ]);
+        let raw = runtime
+            .create(&[
+                Value::Uuid(root),
+                Value::String("published".to_owned()),
+                Value::Uuid(first),
+                Value::Uuid(second),
+                Value::String("left".to_owned()),
+            ])
+            .unwrap();
+        let (descriptor, record) =
+            encode_current_payload_record(runtime.bind(&raw), &schema).unwrap();
+        let member = |joined: Vec<uuid::Uuid>, arm: &str| {
+            RealRowMemberEntry::current_content((
+                "items".to_owned().into(),
+                crate::ids::RowUuid(root),
+                crate::tx::TxId::new(crate::time::TxTime::from(1), crate::ids::NodeUuid(root)),
+            ))
+            .with_occurrence_id(
+                OutputOccurrenceId::with_union_arms(
+                    ObjectId::from_uuid(root),
+                    joined.into_iter().map(ObjectId::from_uuid),
+                    [(0, arm.to_owned())],
+                )
+                .unwrap(),
+            )
+            .into()
+        };
+        let payload = ResultMemberPayloadEntry {
+            member: member(vec![first, second], "left"),
+            descriptor,
+            record,
+        };
+        let decoded = decode_current_payload_record("items", &payload, &schema).unwrap();
+        assert_eq!(
+            decoded.raw_field("__flat_join_row_1"),
+            Some(Value::Uuid(first))
+        );
+        assert_eq!(
+            decoded.raw_field("__flat_join_row_2"),
+            Some(Value::Uuid(second))
+        );
+        assert_eq!(
+            decoded.raw_field("__root_join_arm_0"),
+            Some(Value::String("left".to_owned()))
+        );
+        for wrong in [
+            member(vec![second, first], "left"),
+            member(vec![first], "left"),
+            member(vec![first, second], "right"),
+        ] {
+            let mut bad = payload.clone();
+            bad.member = wrong;
+            assert!(decode_current_payload_record("items", &bad, &schema).is_err());
+        }
+        let single_schema = current_schema(1, "_app_1");
+        let (single_descriptor, single_record) =
+            encode_current_payload_record(runtime.bind(&raw), &single_schema).unwrap();
+        let extra_sources = ResultMemberPayloadEntry {
+            member: member(vec![first, second], "left"),
+            descriptor: single_descriptor,
+            record: single_record,
+        };
+        assert!(decode_current_payload_record("items", &extra_sources, &single_schema).is_err());
+        let mut wrong_root = payload.clone();
+        let mut row = payload.member.as_real_row().unwrap().clone();
+        row.occurrence_id = Some(
+            OutputOccurrenceId::with_union_arms(
+                ObjectId::from_uuid(second),
+                [ObjectId::from_uuid(first), ObjectId::from_uuid(second)],
+                [(0, "left".to_owned())],
+            )
+            .unwrap(),
+        );
+        wrong_root.member = ResultMemberEntry::Row(row);
+        assert!(decode_current_payload_record("items", &wrong_root, &schema).is_err());
+        let mut reordered = schema.clone();
+        reordered.occurrence_id_fields.swap(1, 2);
+        assert!(decode_current_payload_record("items", &payload, &reordered).is_err());
+        let mut changed_arm_role = schema.clone();
+        let arm = changed_arm_role
+            .occurrence_union_arm_fields
+            .remove(&0)
+            .unwrap();
+        changed_arm_role.occurrence_union_arm_fields.insert(1, arm);
+        assert!(decode_current_payload_record("items", &payload, &changed_arm_role).is_err());
     }
 
     #[test]

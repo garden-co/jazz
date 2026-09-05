@@ -2365,3 +2365,138 @@ fn missing_claim_lowers_to_deny_predicate() {
     assert!(graph.contains("Filter"), "{graph}");
     assert!(graph.contains("Or([])"), "{graph}");
 }
+
+// Internal compiler fixture: public query syntax cannot request distinct nullable
+// depths for two aliases of the same physical source carrier.
+#[test]
+fn review_same_source_projection_preserves_each_output_nullable_depth() {
+    for (source_field, base_type, include_raw, expected_rows) in [
+        ("title", ColumnType::String, true, 1),
+        ("todo", ColumnType::Uuid, false, 1),
+        ("todo", ColumnType::Uuid, true, 0),
+    ] {
+        for reverse in [false, true] {
+            for depth in [1, 2] {
+                let mut nullable_type = base_type.clone();
+                for _ in 0..depth {
+                    nullable_type = ColumnType::Nullable(Box::new(nullable_type));
+                }
+                let mut input = row_set_input(0xec);
+                let root = source("todos", SourceRole::Root);
+                let project = RowSetNodeId("review-duplicate-source-project".to_owned());
+                let mut columns = vec![RowProjection {
+                    output: TypedOutputField {
+                        name: "row_uuid".to_owned(),
+                        ty: ColumnType::Uuid,
+                    },
+                    value: NormalizedValueRef::RowId(RowIdRef::Source(root.clone())),
+                }];
+                for (name, ty) in [
+                    ("raw_title", base_type.clone()),
+                    ("nullable_title", nullable_type.clone()),
+                ] {
+                    if name == "raw_title" && !include_raw {
+                        continue;
+                    }
+                    columns.push(RowProjection {
+                        output: TypedOutputField {
+                            name: name.to_owned(),
+                            ty,
+                        },
+                        value: NormalizedValueRef::SourceField {
+                            source: root.clone(),
+                            field: source_field.to_owned(),
+                        },
+                    });
+                }
+                if reverse {
+                    columns.reverse();
+                }
+                input.shape.nodes.insert(
+                    project.clone(),
+                    RowSetExpr::Project {
+                        input: input.shape.root.clone(),
+                        columns,
+                    },
+                );
+                input.shape.root = project;
+                let request = QueryProgramRequest {
+                    authorization_mode: QueryAuthorizationMode::TrustedServing,
+                    reads: QueryReadSet::primary(current_read_view()),
+                    policy: system_policy_context(),
+                    input,
+                    output: row_set_output(BTreeSet::new()),
+                };
+                if source_field == "title" && include_raw {
+                    let mut resolver = InlineCollectorResolver::new(None);
+                    let mut sources = BTreeMap::new();
+                    for source_request in query_program_source_requests(&request).unwrap() {
+                        let source = resolver
+                            .prepare_source_graph(&source_request)
+                            .resolve()
+                            .unwrap();
+                        sources.insert(source_request.source, source);
+                    }
+                    let (graph, depths) = retained_projection_graph_for_test(&request, &sources);
+                    let mut database =
+                        Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+                            .unwrap();
+                    let retained = database.query_graph(graph).unwrap();
+                    let index = retained
+                        .descriptor
+                        .fields()
+                        .iter()
+                        .position(|field| field.name.as_deref() == Some("_app_title"))
+                        .expect("retained source carrier");
+                    assert_eq!(depths.get("_app_title"), Some(&1));
+                    assert_eq!(
+                        retained.descriptor.fields()[index].value_type,
+                        ValueType::Nullable(Box::new(ValueType::String)),
+                        "retained source carrier must preserve the nullable depth advertised to contributor equality"
+                    );
+                }
+                let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+                    .expect("duplicate source projection lowers");
+                let selected = std::cell::RefCell::new(None);
+                for terminal in &program.lowered.terminals {
+                    graph_any(&terminal.graph, &|graph| {
+                        if let GraphBuilder::Project { fields, .. } = graph {
+                            if fields
+                                .iter()
+                                .any(|field| field.output_name == "nullable_title")
+                            {
+                                *selected.borrow_mut() = Some(graph.clone());
+                                return true;
+                            }
+                        }
+                        false
+                    });
+                }
+                let graph = selected.into_inner().expect("requested projection exists");
+                let mut database =
+                    Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+                        .unwrap();
+                let rows = database.query_graph(graph).expect("execute projection");
+                let index = rows.descriptor.field_index("nullable_title").unwrap();
+                assert_eq!(
+                    rows.descriptor.fields()[index].value_type,
+                    nullable_type.clone(),
+                    "one alias requiring a raw value must not unwrap the nullable alias"
+                );
+                let values = rows.to_values().unwrap();
+                assert_eq!(values.len(), expected_rows);
+                if expected_rows == 1 {
+                    let mut expected = if source_field == "title" {
+                        Value::Nullable(Some(Box::new(Value::String("parent".to_owned()))))
+                    } else {
+                        Value::Nullable(None)
+                    };
+                    for _ in 1..depth {
+                        expected = Value::Nullable(Some(Box::new(expected)));
+                    }
+                    assert_eq!(values[0].0[index], expected);
+                }
+            }
+        }
+    }
+}

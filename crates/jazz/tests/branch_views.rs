@@ -689,6 +689,83 @@ fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
     );
 }
 
+/// Alice's branch view counts its reduced rows; Bob's grouped window observes
+/// explicit aggregate roles, deterministic group identity, and empty counts.
+#[test]
+fn review_branch_aggregate_empty_grouped_window_and_roles() {
+    let (db, schema) = open_db();
+    let base = selector(0xd1);
+    let head = selector(0xd2);
+    let opts =
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    let count = db.prepare_query(&Query::from("todos").count()).unwrap();
+    let empty = block_on(db.all(&count, opts.clone())).unwrap();
+    assert_eq!(empty.len(), 1);
+    assert_eq!(empty[0].cell_at(0), Some(Value::U64(0)));
+    let grouped = db
+        .prepare_query(&Query::from("todos").count().group_by("title"))
+        .unwrap();
+    assert!(block_on(db.all(&grouped, opts.clone())).unwrap().is_empty());
+
+    for (index, title) in ["alpha", "bravo", "bravo", "charlie", "charlie", "charlie"]
+        .iter()
+        .enumerate()
+    {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String((*title).to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0xd3 + index as u8; 16])),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    // Effective branch reduction moves one row between groups before counting.
+    db.update(
+        "todos",
+        RowUuid::from_bytes([0xd6; 16]),
+        BTreeMap::from([("title".to_owned(), Value::String("bravo".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head,
+                base: Some(BranchViewBase::Current(base)),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let window = db
+        .prepare_query(
+            &Query::from("todos")
+                .count()
+                .group_by("title")
+                .order_by("count", OrderDirection::Desc)
+                .order_by("title", OrderDirection::Asc)
+                .offset(1)
+                .limit(1),
+        )
+        .unwrap();
+    let rows = block_on(db.all(&window, opts.clone())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell_at(0),
+        Some(Value::String("charlie".to_owned()))
+    );
+    assert_eq!(rows[0].cell_at(1), Some(Value::U64(2)));
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("charlie".to_owned()))
+    );
+    assert_eq!(
+        rows[0].binding_field_names(),
+        vec![None, None, Some("count")]
+    );
+    let again = block_on(db.all(&window, opts.clone())).unwrap();
+    assert_eq!(again[0].row_uuid(), rows[0].row_uuid());
+}
+
 #[test]
 fn branch_view_reachability_consumes_effective_sources() {
     let schema = compile_schema(

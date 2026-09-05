@@ -42,6 +42,7 @@ import {
   PostcardReader,
   PostcardWriter,
   openConfig,
+  nativeRowDescriptorPublicName,
   queryWithPredicates,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
@@ -6138,8 +6139,7 @@ function nativeRowFieldPlans(
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
     const field = batch.descriptor[index];
-    if (!field || field.kind === "hidden-metadata") continue;
-    const fieldName = field.kind === "stored-column" ? field.outputName : field.name;
+    const fieldName = field && nativeRowDescriptorPublicName(field);
     if (!fieldName) {
       continue;
     }

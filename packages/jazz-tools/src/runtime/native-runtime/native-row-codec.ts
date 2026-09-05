@@ -49,6 +49,15 @@ export type NativeRowDescriptorField =
   | NativeStoredColumnDescriptorField
   | NativeResultFieldDescriptorField
   | NativeHiddenMetadataDescriptorField;
+
+/**
+ * The producer owns a publication field's public identity. Hidden metadata is
+ * carried in the same record only for decoding and never has a public binding.
+ */
+export function nativeRowDescriptorPublicName(field: NativeRowDescriptorField): string | undefined {
+  if (field.kind === "hidden-metadata") return undefined;
+  return field.kind === "stored-column" ? field.outputName : field.name;
+}
 export type NativeRowBatch = {
   table: string;
   descriptor: NativeRowDescriptorField[];

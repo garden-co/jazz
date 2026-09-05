@@ -1879,15 +1879,22 @@ impl CurrentRow {
     }
 
     pub(crate) fn project(&self, table: &TableSchema, columns: &[String]) -> Result<Self, Error> {
+        self.project_with_column_binding(table, columns, |name| {
+            self.application_column_index_by_name(name)
+        })
+    }
+
+    fn project_with_column_binding(
+        &self,
+        table: &TableSchema,
+        columns: &[String],
+        column_binding: impl Fn(&str) -> Option<usize>,
+    ) -> Result<Self, Error> {
         let projected_public_name = |column_name: &str| -> String {
-            if self.application_column_index_by_name(column_name).is_some() {
-                column_name.to_owned()
-            } else {
-                self::query_engine::aggregate_output_logical_name(column_name)
-                    .filter(|logical| self.application_column_index_by_name(logical).is_some())
-                    .unwrap_or(column_name)
-                    .to_owned()
-            }
+            column_binding(column_name)
+                .and_then(|index| self.publication_fields[index].application_name())
+                .unwrap_or(column_name)
+                .to_owned()
         };
         let selected = columns.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let projected_columns = table
@@ -1931,8 +1938,7 @@ impl CurrentRow {
         let mut binding_field_names = vec![None];
         for column in projected_columns {
             let public_name = projected_public_name(&column.name);
-            let cell = self
-                .application_column_index_by_name(&public_name)
+            let cell = column_binding(&column.name)
                 .and_then(|idx| self.record.borrowed().get_idx(idx).ok())
                 .and_then(|value| match value {
                     Value::Nullable(None) => None,
@@ -1951,8 +1957,7 @@ impl CurrentRow {
                 Value::Nullable(cell.map(Box::new))
             };
             values.push(projected);
-            let binding = self
-                .application_column_index_by_name(&public_name)
+            let binding = column_binding(&column.name)
                 .and_then(|index| {
                     self.publication_fields
                         .get(index)

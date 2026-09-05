@@ -238,20 +238,18 @@ test.describe("data explorer page", () => {
   });
 
   test("filters rows to done=true and shows only checked boolean cells", async ({ page }) => {
-    const visibleCheckboxesBeforeFilter = page.getByRole("checkbox", { name: /Toggle done for/ });
-    await expect
-      .poll(async () => await visibleCheckboxesBeforeFilter.count(), { timeout: 15_000 })
-      .toBeGreaterThan(0);
-    const visibleCheckboxCountBeforeFilter = await visibleCheckboxesBeforeFilter.count();
-    expect(visibleCheckboxCountBeforeFilter).toBeGreaterThan(0);
-
-    let uncheckedBeforeFilter = 0;
-    for (let index = 0; index < visibleCheckboxCountBeforeFilter; index += 1) {
-      if (!(await visibleCheckboxesBeforeFilter.nth(index).isChecked())) {
-        uncheckedBeforeFilter += 1;
-      }
-    }
-    expect(uncheckedBeforeFilter).toBeGreaterThan(0);
+    const checkboxes = page.getByRole("checkbox", { name: /Toggle done for/ });
+    // Sorting and filtering replace the grid while the new query loads. Read
+    // one DOM snapshot per attempt so counts and states describe the same rows.
+    const readCheckedStates = () =>
+      checkboxes.evaluateAll((elements) =>
+        elements.map((element) => (element as HTMLInputElement).checked),
+      );
+    await expect(async () => {
+      const checkedStates = await readCheckedStates();
+      expect(checkedStates.length).toBeGreaterThan(0);
+      expect(checkedStates).toContain(false);
+    }).toPass({ timeout: 15_000 });
 
     const filters = page.getByRole("region", { name: "Filter rows" });
     await filters.getByLabel("Column", { exact: true }).selectOption("done");
@@ -259,13 +257,10 @@ test.describe("data explorer page", () => {
     await filters.getByRole("button", { name: "Add where clause" }).click();
     await expect(filters.getByText("done eq true", { exact: true })).toBeVisible();
 
-    const checkboxes = page.getByRole("checkbox", { name: /Toggle done for/ });
-    await expect.poll(async () => await checkboxes.count(), { timeout: 15_000 }).toBeGreaterThan(0);
-    const checkboxCount = await checkboxes.count();
-    expect(checkboxCount).toBeGreaterThan(0);
-
-    for (let index = 0; index < checkboxCount; index += 1) {
-      await expect(checkboxes.nth(index)).toBeChecked();
-    }
+    await expect(async () => {
+      const checkedStates = await readCheckedStates();
+      expect(checkedStates.length).toBeGreaterThan(0);
+      expect(checkedStates).not.toContain(false);
+    }).toPass({ timeout: 15_000 });
   });
 });

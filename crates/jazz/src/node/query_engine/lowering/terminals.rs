@@ -2467,11 +2467,12 @@ fn result_payload_fields(
         .iter()
         .filter_map(|field| {
             let name = field.name.as_ref()?;
-            (!hidden.contains(name) && !source.routing_fields.contains(name)).then(|| {
-                TypedOutputField {
-                    name: name.clone(),
-                    ty: field.value_type.clone(),
-                }
+            (name != &source.row_shape.row_uuid_field
+                && !hidden.contains(name)
+                && !source.routing_fields.contains(name))
+            .then(|| TypedOutputField {
+                name: name.clone(),
+                ty: field.value_type.clone(),
             })
         })
         .collect()
@@ -3148,6 +3149,9 @@ fn result_membership_fields(
     fields.extend(
         payload_fields
             .iter()
+            // The row identity is already the terminal's authoritative root
+            // carrier. Branch payloads also list it among their source cells.
+            .filter(|field| field.name != source.row_shape.row_uuid_field)
             .map(|field| ProjectField::named(field.name.clone())),
     );
     Ok(fields)
@@ -3200,7 +3204,9 @@ fn aggregate_app_row_descriptor(
                     aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
                 )
-                .with_identity(FieldIdentity::Name(output.output.name.clone())))
+                .with_identity(FieldIdentity::Name(aggregate_output_field(
+                    &output.output.name,
+                ))))
             })
             .collect::<CapabilityResult<Vec<_>>>()?,
     );

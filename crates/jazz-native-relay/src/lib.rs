@@ -8370,6 +8370,23 @@ mod tests {
         cells.push(0);
         assert!(decode_foreground_cells(&cells).is_err());
 
+        let canonical =
+            jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+                7_u64.to_le_bytes().to_vec(),
+                RecordDescriptor::new([("count", ValueType::U64)]),
+            ))
+            .unwrap();
+        assert_eq!(
+            canonical,
+            vec![
+                1, 1, 5, b'c', b'o', b'u', b'n', b't', 3, 8, 7, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert_eq!(
+            decode_foreground_cells(&canonical).unwrap().get("count"),
+            Some(&Value::U64(7))
+        );
+
         let mut command = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
         command.push(0);
         assert!(decode_foreground_command(&command).is_err());

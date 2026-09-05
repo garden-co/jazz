@@ -1176,21 +1176,11 @@ where
                 },
             );
         } else if query.aggregate.is_some() {
-            paired.sort_by(
+            sort_aggregate_rows(
+                query,
+                &mut paired,
+                |(row, _)| row,
                 |(left_row, left_occurrence), (right_row, right_occurrence)| {
-                    for order in &query.order_by {
-                        let ordering = compare_optional_values(
-                            aggregate_row_cell(left_row, &order.column),
-                            aggregate_row_cell(right_row, &order.column),
-                        );
-                        let ordering = match order.direction {
-                            OrderDirection::Asc => ordering,
-                            OrderDirection::Desc => ordering.reverse(),
-                        };
-                        if ordering != Ordering::Equal {
-                            return ordering;
-                        }
-                    }
                     left_row
                         .row_uuid()
                         .to_bytes()
@@ -1198,7 +1188,7 @@ where
                         .then_with(|| left_row.record.raw().cmp(right_row.record.raw()))
                         .then_with(|| left_occurrence.cmp(right_occurrence))
                 },
-            );
+            )?;
         } else {
             let table = table.ok_or(Error::InvalidStoredValue(
                 "ordered maintained rows are missing their table schema",
@@ -1246,22 +1236,12 @@ where
         }
         sort_current_rows(rows);
         if query.aggregate.is_some() {
-            rows.sort_by(|left, right| {
-                for order in &query.order_by {
-                    let ordering = compare_optional_values(
-                        aggregate_row_cell(left, &order.column),
-                        aggregate_row_cell(right, &order.column),
-                    );
-                    let ordering = match order.direction {
-                        OrderDirection::Asc => ordering,
-                        OrderDirection::Desc => ordering.reverse(),
-                    };
-                    if ordering != Ordering::Equal {
-                        return ordering;
-                    }
-                }
-                left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes())
-            });
+            sort_aggregate_rows(
+                query,
+                rows,
+                |row| row,
+                |left, right| left.row_uuid().to_bytes().cmp(&right.row_uuid().to_bytes()),
+            )?;
             return Ok(());
         }
         let table = self.table_in_schema(&query.table, schema_version)?;

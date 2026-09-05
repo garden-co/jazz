@@ -143,12 +143,20 @@ The concrete v1 byte contracts are:
   its declared member/descriptor/record framing. Current descriptors start with
   `metadata/row_uuid: UUID`, then ordered `source/<i>/<name>`,
   `result/<i>/<name>`, `provenance/<i>/<name>`, or `metadata/<i>/<name>` fields;
-  `<i>` starts at zero after the root. Aggregate descriptors contain all
+  `<i>` starts at zero after the root. Current descriptors then append ordered
+  `occurrence/<i>/<carrier>: UUID` fields for joined sources (`<i>` starts at one),
+  followed by `occurrence_union/<position>/<carrier>: String` fields ordered by
+  zero-based joined-source position. These carriers identify normalized query
+  declarations, not global table identities or compiler slots. Exact descriptor
+  equality precedes row decoding; each ordered UUID and union label must also
+  match the member occurrence identity. Reordered declarations, changed source
+  lists, and discriminator substitutions are rejected. Aggregate descriptors contain all
   `group/<i>/<name>` fields followed by all `value/<i>/<name>` fields, each role
   numbering independently from zero. Decimal ordinals have no padding. The
   remainder after the second slash is the exact logical name, including any
   slash in that name. Current row bytes contain only the root and these declared
-  payload cells; aggregate bytes contain only the declared groups and values.
+  payload cells plus declared occurrence UUIDs and union labels; aggregate bytes
+  contain only the declared groups and values.
   Member identity and query binding own omitted version/routing bookkeeping.
 - Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
   the persisted role descriptor, root byte-layout position as little-endian

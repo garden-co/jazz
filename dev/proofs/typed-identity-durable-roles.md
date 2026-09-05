@@ -187,8 +187,10 @@ suffix are byte-identical to the old corpus: inline/wrong-String raw rows are
 and indirect raw rows are 292 bytes (SHA-256
 `29bd9bed0e0b4269adc0d2ab73ec6e8a5e99116f6e602bf15234ff3964442d8b`).
 The test retains inline/indirect semantic-kind and raw-byte assertions, exact
-round trips, the wrong-descriptor rejection receipt, and an explicit `JVRR` tag
-assertion. Other standalone integration targets contain no additional embedded
+round trips, wrong-descriptor inequality, and an explicit `JVRR` tag assertion.
+Actual admission rejection and absence of stored history are proved separately
+by `node::tests::catalogue_lenses::replication::legacy_inline_json_wire_descriptor_is_rejected_before_storage`.
+Other standalone integration targets contain no additional embedded
 row-byte corpus beyond the already-covered `wire_fixtures` target; the persistent
 codec registry checks exact proof anchors rather than encoding records itself.
 
@@ -229,3 +231,56 @@ the policy-branch semantic label and authorization-support digests still hash
 Postcard tuples. Their indirect use in durable identities requires a separate
 freeze audit before claiming that all durable hash inputs are independent of
 serializer layouts.
+Independent review added a grouped branch-view ordering/window canary: after
+moving one source row, the groups are alpha=1, bravo=3, charlie=2, so count
+descending/title ascending with offset 1 and limit 1 must return charlie=2.
+The old aggregate comparator treated raw String/U64 values as absent because
+it only accepted Nullable wrappers, then sorted by synthetic row identity.
+The shared one-shot/maintained comparator now reads explicit publication
+bindings, preserves raw scalars, unwraps nullable values, and decodes all keys
+before sorting so malformed records produce errors rather than null keys.
+The maintained comparator canary mixes raw, nullable and null keys and verifies
+that occurrence sidecars remain aligned. Restoring the old raw-to-missing
+conversion makes both new canaries fail; restoring the fix makes them pass.
+These receipts do not claim that aggregate subscription pagination is fixed;
+that expanded reproduction is tracked separately from the ordering repair.
+
+## Full-workspace publication regressions
+
+The exact main baseline passes all eleven `jazz-testkit` tests that failed or
+stalled on typed checkpoint `1c687468f7`. The repaired compiler preserves distinct
+source and result identities when a grouped column and aggregate alias both spell
+`sum_score`. Final projection selects their explicit publication roles.
+
+Joined projections derive nullability from the transformed graph, including keys
+unwrapped for equality. They remove only excess presence wrappers and restore
+only the declared output wrappers. A normal single wrapper uses the existing
+projection operator. The private flat-join contributor equality separately unwraps
+the declared public key type; it does not change the public value or admit null
+keys. This preserves both FK-reference and explicit-join source occurrences.
+
+The retained `JRPD` Current role now carries query-declared joined UUID fields and
+UNION discriminator fields, in explicit source order. Decoding validates the exact
+role descriptor before reading bytes, then checks arity, ordered UUIDs and UNION
+positions/labels against the member identity before exposing hidden runtime
+carriers. The direct codec negative test covers inputs that public queries cannot
+author: reordered declarations, swapped contributors, missing contributors and
+changed UNION labels/positions. This is runtime correctness; retained result
+persistence remains unfrozen and scheduled for removal in #2578. Active source
+storage gains no new format or persistence path.
+
+The final projection planner first computes shared source unwrap depths, then
+plans each output wrapper against that transformed source. An executable compiler
+canary covers reversed alias order, one/two nullable layers, null-only projections
+and a raw alias that must filter a null source. Branch payload schemas exclude
+the separately declared root identity so both direct and prepared terminals emit
+one carrier. The native foreground input decoder delegates to the same explicit
+named-cell codec as NAPI/WASM; native fixture consumers read publication roles,
+and a literal U64 envelope pins the shared input ABI.
+
+Independent execution review also found that a retained contributor carrier could
+become raw while its advertised nullable depth remained one. No public failure
+was demonstrated. Contributor projection now restores the exact wrappers removed
+from each retained source carrier, using the pre-projection declared depth; public
+aliases retain their separately computed result types. The retained-graph canary
+checks the actual Groove descriptor against its advertised contributor metadata.

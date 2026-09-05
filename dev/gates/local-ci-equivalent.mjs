@@ -121,9 +121,6 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   "rust-differential": Object.freeze([m3DifferentialCommand]),
-  "storage-compat": Object.freeze([
-    command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
-  ]),
   typescript: Object.freeze([
     command("all Rust workspace target classes", "cargo", [
       "check",
@@ -132,7 +129,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    command("native correctness-artifact producer", "pnpm", ["build:correctness-artifacts"]),
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
     command("preinstalled Chromium", "pnpm", [
       "exec",
       "playwright",
@@ -145,6 +144,26 @@ export const ciPartitions = Object.freeze({
       // own harness tests. A CI-equivalent invocation must not inherit one.
       env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
     }),
+  ]),
+  "storage-compat": Object.freeze([
+    command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("preinstalled Chromium", "pnpm", [
+      "exec",
+      "playwright",
+      "install",
+      "--dry-run",
+      "chromium",
+    ]),
+    command("browser storage compatibility corpus", "pnpm", [
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
+      "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]),
   ]),
 });
 
