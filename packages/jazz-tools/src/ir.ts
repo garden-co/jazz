@@ -243,16 +243,19 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
       // `BigInt(value)` uses the binary approximation, which can differ from
       // JSON.stringify (for example, 2**63), so parse that decimal instead.
       if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-        const normalized = BigInt(JSON.stringify(value));
-        if (normalized <= 0xffff_ffff_ffff_ffffn) {
-          if (normalized <= 0x7fff_ffff_ffff_ffffn) {
+        const decimal = JSON.stringify(value);
+        if (/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
+          const normalized = BigInt(decimal);
+          if (normalized >= -0x8000_0000_0000_0000n && normalized <= 0x7fff_ffff_ffff_ffffn) {
             bytes.push(3);
             signed(normalized);
-          } else {
+            return;
+          }
+          if (normalized >= 0n && normalized <= 0xffff_ffff_ffff_ffffn) {
             bytes.push(4);
             unsigned(normalized);
+            return;
           }
-          return;
         }
       }
       if (Number.isInteger(value) && !Object.is(value, -0)) {

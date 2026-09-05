@@ -50,6 +50,7 @@ describe("encodeRelationQueryV1", () => {
   test("preserves JSON decimal normalization for unsafe integers and rejects nonportable dimensions", () => {
     expect([...encodeRelationQueryV1(filter(2 ** 63))][15]).toBe(4);
     expect([...encodeRelationQueryV1(filter(2 ** 64))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(filter(1e21))][15]).toBe(5);
     expect(() =>
       encodeRelationQueryV1({
         Offset: { input: { TableScan: { table: "t" } }, offset: 0x1_0000_0000 },
