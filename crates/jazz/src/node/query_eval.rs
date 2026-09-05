@@ -79,7 +79,7 @@ use prepared_bindings::*;
 use query_read_sets::*;
 use query_result_rows::{
     aggregate_output_schema, aggregate_query_row_uuid, aggregate_record_field_index,
-    aggregate_result_table, aggregate_row_cell, compare_optional_values,
+    aggregate_result_table, compare_optional_values, sort_aggregate_rows,
 };
 
 #[cfg(test)]

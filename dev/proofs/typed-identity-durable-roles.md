@@ -187,7 +187,23 @@ suffix are byte-identical to the old corpus: inline/wrong-String raw rows are
 and indirect raw rows are 292 bytes (SHA-256
 `29bd9bed0e0b4269adc0d2ab73ec6e8a5e99116f6e602bf15234ff3964442d8b`).
 The test retains inline/indirect semantic-kind and raw-byte assertions, exact
-round trips, the wrong-descriptor rejection receipt, and an explicit `JVRR` tag
-assertion. Other standalone integration targets contain no additional embedded
+round trips, wrong-descriptor inequality, and an explicit `JVRR` tag assertion.
+Actual admission rejection and absence of stored history are proved separately
+by `node::tests::catalogue_lenses::replication::legacy_inline_json_wire_descriptor_is_rejected_before_storage`.
+Other standalone integration targets contain no additional embedded
 row-byte corpus beyond the already-covered `wire_fixtures` target; the persistent
 codec registry checks exact proof anchors rather than encoding records itself.
+
+Independent review added a grouped branch-view ordering/window canary: after
+moving one source row, the groups are alpha=1, bravo=3, charlie=2, so count
+descending/title ascending with offset 1 and limit 1 must return charlie=2.
+The old aggregate comparator treated raw String/U64 values as absent because
+it only accepted Nullable wrappers, then sorted by synthetic row identity.
+The shared one-shot/maintained comparator now reads explicit publication
+bindings, preserves raw scalars, unwraps nullable values, and decodes all keys
+before sorting so malformed records produce errors rather than null keys.
+The maintained comparator canary mixes raw, nullable and null keys and verifies
+that occurrence sidecars remain aligned. Restoring the old raw-to-missing
+conversion makes both new canaries fail; restoring the fix makes them pass.
+These receipts do not claim that aggregate subscription pagination is fixed;
+that expanded reproduction is tracked separately from the ordering repair.

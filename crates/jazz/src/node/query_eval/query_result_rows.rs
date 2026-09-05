@@ -9,7 +9,7 @@ use groove::schema::ColumnType;
 use super::{
     Aggregate, AggregateFunction, ColumnSchema, CurrentRow, Error, ResultMemberEntry, RowUuid,
     SyntheticReplacementToken, TableSchema, Value, aggregate_output_column,
-    aggregate_result_member_row_uuid, nullable_value,
+    aggregate_result_member_row_uuid,
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
@@ -21,9 +21,66 @@ pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>)
     }
 }
 
-pub(super) fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
-    let idx = row.record.descriptor().field_index(column)?;
-    nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
+fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Result<Option<Value>, Error> {
+    let idx = row
+        .application_column_index_by_name(column)
+        .ok_or(Error::InvalidStoredValue(
+            "aggregate ordering field has no publication binding",
+        ))?;
+    Ok(match row.record.borrowed().get_idx(idx)? {
+        Value::Nullable(value) => value.map(|value| *value),
+        value => Some(value),
+    })
+}
+
+/// Decode ordering keys before sorting so malformed rows fail instead of
+/// becoming null keys. Aggregate terminals can emit raw scalars while projected
+/// current rows wrap the same values in Nullable; both have identical order.
+pub(super) fn sort_aggregate_rows<T>(
+    query: &crate::query::Query,
+    rows: &mut [T],
+    row: impl Fn(&T) -> &CurrentRow,
+    tie_break: impl Fn(&T, &T) -> Ordering,
+) -> Result<(), Error> {
+    let mut keys = rows
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let values = query
+                .order_by
+                .iter()
+                .map(|order| aggregate_row_cell(row(item), &order.column))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((index, values))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    keys.sort_by(|(left_index, left), (right_index, right)| {
+        for ((left, right), order) in left.iter().zip(right).zip(&query.order_by) {
+            let ordering = compare_optional_values(left.clone(), right.clone());
+            let ordering = match order.direction {
+                crate::query::OrderDirection::Asc => ordering,
+                crate::query::OrderDirection::Desc => ordering.reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        tie_break(&rows[*left_index], &rows[*right_index])
+    });
+    // Apply the sorted permutation without cloning rows or separating a
+    // maintained row from its occurrence sidecar.
+    let mut destinations = vec![0; rows.len()];
+    for (destination, (source, _)) in keys.into_iter().enumerate() {
+        destinations[source] = destination;
+    }
+    for source in 0..rows.len() {
+        while destinations[source] != source {
+            let destination = destinations[source];
+            rows.swap(source, destination);
+            destinations.swap(source, destination);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn aggregate_result_table(

@@ -728,6 +728,82 @@ fn maintained_root_order_keeps_occurrence_sidecar_aligned() {
     );
 }
 
+/// Alice's maintained aggregate rows keep Bob's occurrence sidecars aligned
+/// across raw, nullable and null keys. This internal boundary receipt also
+/// supplies malformed packed bytes, which public writes cannot construct.
+#[test]
+fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_rows() {
+    let make_row = |id: usize, value: Value, value_type: ValueType| {
+        let descriptor = RecordDescriptor::new_with_fields([
+            DescriptorField::new("row_uuid", ValueType::Uuid),
+            DescriptorField::new("private_count_carrier", value_type)
+                .with_identity(records::FieldIdentity::Name("count".to_owned())),
+        ]);
+        CurrentRow::new_with_publication_fields(
+            "todos",
+            OwnedRecord::new(
+                descriptor.create(&[Value::Uuid(row(id).0), value]).unwrap(),
+                descriptor,
+            ),
+            vec![
+                CurrentRowPublicationField::ResultField {
+                    name: "row_uuid".to_owned(),
+                    visibility: CurrentRowResultVisibility::HiddenMetadata,
+                },
+                CurrentRowPublicationField::ResultField {
+                    name: "count".to_owned(),
+                    visibility: CurrentRowResultVisibility::ApplicationCell,
+                },
+            ],
+        )
+    };
+    let occurrence = |id| OutputOccurrenceId::single_source(ObjectId::from_uuid(row(id).0));
+    let mut rows = vec![
+        make_row(1, Value::U64(3), ValueType::U64),
+        make_row(
+            2,
+            Value::Nullable(Some(Box::new(Value::U64(1)))),
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+        make_row(3, Value::U64(2), ValueType::U64),
+        make_row(
+            4,
+            Value::Nullable(None),
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+    ];
+    let mut occurrences = (1..=4).map(occurrence).collect::<Vec<_>>();
+    let query = Query::from("todos")
+        .count()
+        .order_by("count", OrderDirection::Desc);
+    NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+        &query,
+        None,
+        &mut rows,
+        &mut occurrences,
+    )
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+        [1, 3, 2, 4].map(row)
+    );
+    assert_eq!(occurrences, [1, 3, 2, 4].map(occurrence));
+
+    let mut malformed = make_row(5, Value::U64(9), ValueType::U64);
+    malformed.record =
+        std::sync::Arc::new(OwnedRecord::new(vec![], *malformed.record.descriptor()));
+    assert!(
+        NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+            &query,
+            None,
+            &mut vec![malformed],
+            &mut vec![occurrence(5)],
+        )
+        .is_err(),
+        "corrupt aggregate keys must not become null sort keys"
+    );
+}
+
 #[test]
 fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let (_dir, mut core) = open_recursive_node();
