@@ -10,11 +10,15 @@ import android.util.Base64
 import android.os.Build
 import android.system.Os
 import android.util.Log
+import android.security.NetworkSecurityPolicy
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -34,6 +38,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "relay-probe-failed",
     "relay-cleanup-failed",
     "foreground-byte-abi-failed",
+    "foreground-abi-version-failed",
+    "foreground-revocation-failed",
     "foreground-install-failed",
     "foreground-open-failed",
     "foreground-probe-failed",
@@ -46,6 +52,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "public-client-write-failed",
     "public-client-read-failed",
     "public-client-publish-failed",
+    "public-client-core-observation-failed",
+    "core-observation-cleartext-denied",
     "public-client-shutdown-failed",
     "public-client-relay-readback-failed",
     "scope-isolation-failed",
@@ -137,6 +145,84 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
       admitPrivateSession("b").also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  /** The host acknowledges only after its independent Core reader sees the
+   * run's write. No bearer or endpoint is exposed to JavaScript. */
+  // Runs on the JS calling thread, so a later synchronous native stall cannot
+  // strand this fixed marker in the asynchronous native-module queue.
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  fun recordSeedBoundary(code: String): Boolean {
+    if (code !in setOf("js-before-core-await", "js-core-await-returned", "js-before-unsubscribe",
+        "js-after-unsubscribe", "js-before-shutdown", "js-after-shutdown")) return false
+    Log.e("JazzCoreObservation", code)
+    return true
+  }
+
+  @ReactMethod fun waitForCoreObservation(promise: Promise) {
+    try {
+      val activity = reactApplicationContext.currentActivity
+        ?: error("acceptance activity is unavailable")
+      val endpoint = activity.intent.getStringExtra("jazzDeviceCoreObservationEndpoint")
+        ?: error("missing Core observation endpoint")
+      val url = URL(endpoint)
+      if (url.protocol == "http" && !NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(url.host)) {
+        Log.e("JazzDeviceAcceptance", "core-observation-cleartext-denied")
+        promise.reject("E_JAZZ_DEVICE_CORE", "Core observation fixture host denied by network policy")
+        return
+      }
+      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+        ?: error("missing acceptance run nonce")
+      val identity = JSONObject().apply {
+        put("platform", "android")
+        put("deviceIdentifier", Build.FINGERPRINT)
+        put("buildFingerprint", sha256File(reactApplicationContext.applicationInfo.sourceDir))
+        put("runNonce", nonce)
+      }.toString().toByteArray(Charsets.UTF_8)
+      Thread({
+        var connection: HttpURLConnection? = null
+        var phase = "setup"
+        try {
+          val request = url.openConnection() as HttpURLConnection
+          connection = request
+          request.requestMethod = "POST"
+          request.connectTimeout = 5_000
+          request.readTimeout = 65_000
+          request.instanceFollowRedirects = false
+          request.doOutput = true
+          request.setRequestProperty("Content-Type", "application/json")
+          request.setFixedLengthStreamingMode(identity.size)
+          phase = "request"
+          Log.e("JazzCoreObservation", "request-started")
+          request.outputStream.use { it.write(identity) }
+          Log.e("JazzCoreObservation", "request-sent")
+          phase = "response"
+          val status = request.responseCode
+          // Log only a bounded status/category. Never log the exception, URL,
+          // request identity or body; JS's generic stage retry uses another tag.
+          Log.e("JazzCoreObservation", if (status in 100..599) "http-status-$status" else "http-status-invalid")
+          check(status == 204) { "Core observation was not acknowledged" }
+          phase = "promise"
+          promise.resolve(null)
+          Log.e("JazzCoreObservation", "promise-resolved")
+        } catch (error: Throwable) {
+          val category = when (error) {
+            is java.net.SocketTimeoutException -> "timeout"
+            is java.net.ConnectException -> "connection"
+            is java.net.UnknownHostException -> "dns"
+            is javax.net.ssl.SSLException -> "tls"
+            is java.net.ProtocolException -> "protocol"
+            is java.io.IOException -> "io"
+            is IllegalStateException -> "state"
+            else -> "other"
+          }
+          Log.e("JazzCoreObservation", "failure-$phase-$category")
+          promise.reject("E_JAZZ_DEVICE_CORE", "Core observation was not acknowledged")
+        } finally { connection?.disconnect() }
+      }, "JazzCoreObservation").start()
+    } catch (_: Throwable) {
+      promise.reject("E_JAZZ_DEVICE_CORE", "Missing Core observation launch metadata")
+    }
   }
 
   @ReactMethod fun receiptContext(promise: Promise) {

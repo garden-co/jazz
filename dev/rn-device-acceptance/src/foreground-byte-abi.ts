@@ -1,3 +1,4 @@
+import { scopeQuery, scopeCells } from "./scope-fixture.ts";
 import type {
   NativeForegroundCommand,
   NativeForegroundResponse,
@@ -28,12 +29,14 @@ export function proveForegroundByteAbi(
   codec: ForegroundByteCodec,
   markFailure?: (
     stage:
+      | "foreground-abi-version-failed"
       | "foreground-open-failed"
       | "foreground-probe-failed"
       | "foreground-tick-failed"
       | "foreground-close-failed",
   ) => void,
 ): NativeForegroundRuntime {
+  markFailure?.("foreground-abi-version-failed");
   if (factory.abiVersion !== NATIVE_RELAY_ABI_V1)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
   markFailure?.("foreground-open-failed");
@@ -388,9 +391,9 @@ export async function proveForegroundScopeIsolation(
       const staged = execute({
         type: "upsert",
         transaction: transaction.transaction,
-        table: "todos",
+        table: "scope_rows",
         rowId,
-        cells: fixtureCells(receipt.write === "a" ? "scope A private row" : "scope B private row"),
+        cells: Uint8Array.from(scopeCells[receipt.write]),
       });
       if (staged.type !== "mutationStaged")
         throw new Error("scope fixture foreground upsert was not staged");
@@ -405,7 +408,7 @@ export async function proveForegroundScopeIsolation(
       // view. This separates write/admission failures from propagation to the
       // independently attached reader below without exposing runtime details.
       markFailure("scope-isolation-writer-read-failed");
-      await readTodos(
+      await readScopeRows(
         openedWriter.runtime,
         codec,
         (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
@@ -419,7 +422,7 @@ export async function proveForegroundScopeIsolation(
     const foreground = openScopeForeground(factory, capability);
     try {
       markFailure("scope-isolation-read-failed");
-      const rows = await readTodos(
+      const rows = await readScopeRows(
         foreground.runtime,
         codec,
         (candidate) =>
@@ -509,7 +512,7 @@ const TODOS_QUERY = Uint8Array.of(
   0,
 );
 
-async function readTodos(
+async function readScopeRows(
   foreground: NativeForegroundRuntime,
   codec: ForegroundByteCodec,
   ready: (rows: Uint8Array) => boolean = () => true,
@@ -519,38 +522,78 @@ async function readTodos(
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
+  const prepared = execute({ type: "prepareQuery", query: scopeQuery });
   if (prepared.type !== "preparedQuery")
-    throw new Error("scope isolation fixture could not prepare the todos query");
+    throw new Error("scope isolation fixture could not prepare the owner-protected scope query");
+  const subscribed = execute({ type: "subscribe", query: prepared.query });
+  if (subscribed.type !== "subscribed")
+    throw new Error(
+      "scope isolation fixture could not subscribe to the owner-protected scope query",
+    );
   let pendingOperation: number | undefined;
+  let published = false;
+  let failed = true;
+  const finishRead = () => {
+    let cleanupError: unknown;
+    try {
+      if (pendingOperation !== undefined) execute({ type: "cancel", operation: pendingOperation });
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      const closed = execute({ type: "unsubscribe", subscription: subscribed.subscription });
+      if (closed.type !== "unsubscribed" || !closed.closed)
+        throw new Error("scope isolation fixture subscription did not close");
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (!failed && cleanupError) throw cleanupError;
+  };
   const deadline = timing.now() + timing.timeoutMs;
-  do {
-    progressWriter();
-    foreground.tick();
-    // Async storage completion wakes the installed foreground through React
-    // Native's CallInvoker. A synchronous tick loop starves that callback, so
-    // each bounded attempt must hand control back to the app event loop.
-    await timing.yieldTurn();
-    if (timing.now() >= deadline) break;
-    if (pendingOperation !== undefined && !consumeWake()) continue;
-    if (timing.now() >= deadline) break;
-    const response =
-      pendingOperation === undefined
-        ? execute({ type: "all", query: prepared.query })
-        : execute({ type: "poll", operation: pendingOperation });
-    if (timing.now() >= deadline) break;
-    if (response.type === "rows") {
-      pendingOperation = undefined;
-      if (ready(response.rows)) return response.rows;
-      continue;
-    }
-    if (response.type === "pending") {
-      pendingOperation = response.operation;
-      continue;
-    }
-    throw new Error("scope isolation fixture read returned an unexpected response");
-  } while (timing.now() < deadline);
-  throw new Error("scope isolation fixture read did not settle before its bounded deadline");
+  try {
+    do {
+      progressWriter();
+      foreground.tick();
+      // The subscription retains relay coverage for this fresh foreground.
+      // LocalFirst all() alone may legitimately remain empty. Wait for actual
+      // publication and keep the coverage alive until the local read finishes.
+      await timing.yieldTurn();
+      if (timing.now() >= deadline) break;
+      if (pendingOperation !== undefined && !consumeWake()) continue;
+      if (timing.now() >= deadline) break;
+      let response =
+        pendingOperation !== undefined
+          ? execute({ type: "poll", operation: pendingOperation })
+          : published
+            ? execute({ type: "all", query: prepared.query })
+            : execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      // Retain a newly admitted operation even if execution crossed the deadline,
+      // so timeout cleanup can cancel it rather than abandoning its future.
+      pendingOperation = response.type === "pending" ? response.operation : undefined;
+      if (timing.now() >= deadline) break;
+      if (response.type === "subscriptionEvents") {
+        if (response.events.some((event) => event.type === "rejected" || event.type === "closed"))
+          throw new Error("scope isolation fixture subscription ended before its read");
+        if (!response.events.some((event) => event.type === "delta")) continue;
+        published = true;
+        response = execute({ type: "all", query: prepared.query });
+        pendingOperation = response.type === "pending" ? response.operation : undefined;
+        if (timing.now() >= deadline) break;
+      }
+      if (response.type === "rows") {
+        if (ready(response.rows)) {
+          failed = false;
+          return response.rows;
+        }
+        continue;
+      }
+      if (response.type === "pending") continue;
+      throw new Error("scope isolation fixture read returned an unexpected response");
+    } while (timing.now() < deadline);
+    throw new Error("scope isolation fixture read did not settle before its bounded deadline");
+  } finally {
+    finishRead();
+  }
 }
 
 async function drainSubscription(
@@ -598,14 +641,7 @@ function utf8(value: string): Uint8Array {
 }
 
 function fixtureCells(
-  title:
-    | "mergeable"
-    | "updated"
-    | "upserted"
-    | "rolled back"
-    | "scope A private row"
-    | "scope B private row"
-    | "subscription from foreground A",
+  title: "mergeable" | "updated" | "upserted" | "rolled back" | "subscription from foreground A",
 ): Uint8Array {
   const bytes = {
     mergeable: [
@@ -615,14 +651,6 @@ function fixtureCells(
     upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 2, 117, 112, 115, 101, 114, 116, 101, 100],
     "rolled back": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 2, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
-    ],
-    "scope A private row": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105,
-      118, 97, 116, 101, 45, 114, 111, 119,
-    ],
-    "scope B private row": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 98, 45, 112, 114, 105,
-      118, 97, 116, 101, 45, 114, 111, 119,
     ],
     "subscription from foreground A": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
