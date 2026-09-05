@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
+import { schema as s } from "../index.js";
 import { type TxId, type Row } from "./client.js";
 import type { Session } from "./context.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
@@ -122,6 +123,20 @@ const TEST_SCHEMA: WasmSchema = {
     ],
   },
 };
+
+const publicUnionApp = s.defineApp({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
+
+const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
+  policy.todos.allowRead.where({ done: false });
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -450,6 +465,115 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(runtimeData);
     }
   });
+
+  it("runs named and array unions through public Db reads and live order windows", async () => {
+    const dataRoot = await createTempDir("jazz-napi-public-union-");
+    const dataPath = join(dataRoot, "runtime.db");
+    let context: { db(): Db; shutdown(): Promise<void> } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: publicUnionApp,
+        permissions: {},
+        driver: { type: "persistent", dataPath },
+      });
+      const db = context.db();
+      const alpha = await db
+        .insert(publicUnionApp.todos, { title: "alpha", done: false })
+        .wait({ tier: "local" });
+      await db.insert(publicUnionApp.todos, { title: "beta", done: false }).wait({ tier: "local" });
+      await db.insert(publicUnionApp.todos, { title: "gamma", done: true }).wait({ tier: "local" });
+
+      const arms = [
+        publicUnionApp.todos.where({ done: false }),
+        publicUnionApp.todos.where({ title: "alpha" }),
+      ] as const;
+      const arrayUnion = publicUnionApp.union(arms).orderBy("title").limit(2);
+      const namedUnion = publicUnionApp
+        .union({ byDone: arms[0], byTitle: arms[1] })
+        .orderBy("title")
+        .limit(2);
+
+      await expect(db.all(arrayUnion, { tier: "local" })).resolves.toMatchObject([
+        { id: alpha.id, title: "alpha" },
+        { id: alpha.id, title: "alpha" },
+      ]);
+      await expect(db.all(namedUnion, { tier: "local" })).resolves.toMatchObject([
+        { id: alpha.id, title: "alpha" },
+        { id: alpha.id, title: "alpha" },
+      ]);
+
+      const updates: string[][] = [];
+      const unsubscribe = db.subscribe(
+        arrayUnion,
+        (rows) => updates.push(rows.map((row) => row.title)),
+        { tier: "local" },
+      );
+      try {
+        await vi.waitFor(() => expect(updates.at(-1)).toEqual(["alpha", "alpha"]));
+
+        await db.update(publicUnionApp.todos, alpha.id, { done: true }).wait({ tier: "local" });
+        await vi.waitFor(() => expect(updates.at(-1)).toEqual(["alpha", "beta"]));
+
+        await db
+          .insert(publicUnionApp.todos, { title: "aardvark", done: false })
+          .wait({ tier: "local" });
+        await vi.waitFor(() => expect(updates.at(-1)).toEqual(["aardvark", "alpha"]));
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      if (context) await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("applies ordinary table read policy to every public union arm", async () => {
+    const dataRoot = await createTempDir("jazz-napi-public-union-policy-");
+    const dataPath = join(dataRoot, "runtime.db");
+    let context: {
+      db(): Db;
+      forSession(session: Session): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: publicUnionApp,
+        permissions: publicUnionPermissions,
+        driver: { type: "persistent", dataPath },
+      });
+      const writer = context.db();
+      await writer
+        .insert(publicUnionApp.todos, { title: "visible", done: false })
+        .wait({ tier: "local" });
+      await writer
+        .insert(publicUnionApp.todos, { title: "hidden", done: true })
+        .wait({ tier: "local" });
+
+      const reader = context.forSession({
+        issuer: "https://union-policy.test",
+        user_id: "reader",
+        claims: {},
+        authMode: "external",
+      });
+      const query = publicUnionApp.union([
+        publicUnionApp.todos.where({}),
+        publicUnionApp.todos.where({ done: { in: [false, true] } }),
+      ]);
+      await expect(reader.all(query, { tier: "local" })).resolves.toMatchObject([
+        { title: "visible", done: false },
+        { title: "visible", done: false },
+      ]);
+    } finally {
+      if (context) await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const dataDir = await createTempDir("jazz-napi-large-index-");

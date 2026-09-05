@@ -3411,9 +3411,10 @@ where
         binding: &Binding,
         schema: &RuntimeSchema,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let Some(inputs) = crate::query::relation_union_arms(&relation.rel) else {
+        let Some(parts) = crate::query::relation_union_parts(&relation.rel) else {
             return Err(Error::QueryCapability(
-                "retained relation body must be a UNION ALL".to_owned(),
+                "retained relation body must be a UNION ALL with global terminal operators in builder order"
+                    .to_owned(),
             ));
         };
         let mut nodes = BTreeMap::new();
@@ -3423,7 +3424,7 @@ where
         let mut join_contributions = Vec::new();
         let mut inherited_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
-        for arm in inputs {
+        for arm in parts.inputs {
             let arm_query = relation_query_to_query(&RelationQuery {
                 rel: arm.input.clone(),
             })?;
@@ -3458,12 +3459,57 @@ where
                 inputs: union_inputs,
             },
         );
+        let root_source = root_source_id(&shape.query().table);
+        let mut terminal = root;
+        if let Some(terms) = parts.order_by {
+            let order = RowSetNodeId("relation_union:order".to_owned());
+            nodes.insert(
+                order.clone(),
+                RowSetExpr::OrderBy {
+                    input: terminal,
+                    keys: terms
+                        .into_iter()
+                        .map(|term| {
+                            Ok(NormalizedOrderKey {
+                                value: normalize_operand_for_schema(
+                                    schema,
+                                    &root_source,
+                                    &Operand::Column(term.column.column),
+                                )?,
+                                direction: match term.direction {
+                                    OrderDirection::Asc => NormalizedSortDirection::Asc,
+                                    OrderDirection::Desc => NormalizedSortDirection::Desc,
+                                },
+                            })
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?,
+                },
+            );
+            terminal = order;
+        }
+        if parts.limit.is_some() || parts.offset.is_some() {
+            let slice = RowSetNodeId("relation_union:slice".to_owned());
+            nodes.insert(
+                slice.clone(),
+                RowSetExpr::Slice {
+                    input: terminal,
+                    partition_by: Vec::new(),
+                    limit: parts.limit.map(|limit| limit.min(u32::MAX as usize) as u32),
+                    offset: parts.offset.unwrap_or_default().min(u32::MAX as usize) as u32,
+                    tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
+                        root_source.clone(),
+                    ))],
+                    rank_output: None,
+                },
+            );
+            terminal = slice;
+        }
         Ok(NormalizedRowSetShape {
             identity: NormalizedShapeIdentity {
                 shape_id: shape.shape_id(),
                 canonical: shape.canonical_bytes().to_vec(),
             },
-            root,
+            root: terminal,
             result: ResultId::RealRow {
                 table: shape.query().table.clone(),
                 row: ResultRowRef::Source(root_source_id(&shape.query().table)),
