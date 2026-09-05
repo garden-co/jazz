@@ -167,7 +167,24 @@ async fn run() {
         edge.server_state().edge_upstream_health(),
         EdgeUpstreamHealth::Connected
     );
-    let (_, _, transaction) = observer
+    let writer_storage = tempfile::tempdir().expect("Core writer scratch directory");
+    let core_writer = connect(AppContext {
+        app_id: core.app_id(),
+        client_id: None,
+        schema: schema.clone(),
+        server_url: core.base_url(),
+        data_dir: writer_storage.path().to_owned(),
+        storage: ClientStorage::Memory,
+        storage_factory: None,
+        jwt_token: Some(TestJwtIssuer::jwt_for_user(
+            "rn-device-core-recovery-writer",
+        )),
+        backend_secret: None,
+        admin_secret: Some(core.admin_secret().to_owned()),
+    })
+    .await
+    .expect("connect Core recovery writer");
+    let (_, _, transaction) = core_writer
         .insert(
             "todos",
             HashMap::from([(
@@ -175,8 +192,8 @@ async fn run() {
                 Value::Text(format!("{title}:recovered-by-core")),
             )]),
         )
-        .expect("Core observer writes post-recovery marker");
-    observer
+        .expect("Core writer writes post-recovery marker");
+    core_writer
         .wait_for_transaction(
             transaction.expect("Core write owns a transaction"),
             DurabilityTier::GlobalServer,

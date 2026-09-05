@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { finishSeedClient } from "./seed-teardown.ts";
-import { readFileSync } from "node:fs";
 
 test("a primary write failure survives unsubscribe failure while shutdown runs once", async () => {
   const primary = new Error("planted write failure");
@@ -86,18 +85,4 @@ test("seed boundaries distinguish unsubscribe from a pending shutdown", async ()
   release();
   await teardown;
   assert.equal(events.at(-1), "js-after-shutdown");
-});
-
-test("reconnect receipt rejects a suppressed Core-authored recovery marker", () => {
-  const source = readFileSync(new URL("./high-level-foreground.ts", import.meta.url), "utf8");
-  const required =
-    /await waitForPublication\(\(\) => recoveredObserved\)[\s\S]*?original installed subscription did not receive Core's post-recovery marker/;
-  assert.match(source, required);
-  assert.doesNotMatch(
-    source.replace(
-      "waitForPublication(() => recoveredObserved)",
-      "waitForPublication(() => localEcho)",
-    ),
-    required,
-  );
 });

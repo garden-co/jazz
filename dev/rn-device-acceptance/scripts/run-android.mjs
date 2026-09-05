@@ -50,7 +50,7 @@ const localSession = await startLocalEdgeSessionHarness({
   runNonce,
   host: "10.0.2.2",
 });
-process.once("exit", () => localSession.child.kill("SIGTERM"));
+process.once("exit", () => { void localSession.terminate(); });
 let control;
 try {
   androidAdb(["install", "-r", apk]);
@@ -150,6 +150,6 @@ try {
   );
   await launchAndAssert("verify");
 } finally {
-  localSession.child.kill("SIGTERM");
+  await localSession.terminate();
   await control?.close();
 }

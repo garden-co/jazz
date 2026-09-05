@@ -3,6 +3,7 @@ import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
+import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -77,15 +78,11 @@ export async function seedHighLevelForegroundRuntime(
     await waitForCoreObservation();
     boundary?.("js-core-await-returned");
     markFailure("public-client-reconnect-failed");
-    if (!(await waitForPublication(() => recoveredObserved))) {
-      throw new Error(
-        "original installed subscription did not receive Core's post-recovery marker",
-      );
-    }
-    const recoveredRows = await client.db.all(app.todos);
-    if (!recoveredRows.some((row) => row.title === `${title}:recovered-by-core`)) {
-      throw new Error("original installed foreground did not read Core's post-recovery marker");
-    }
+    await requireCoreRecoveryMarker(
+      () => recoveredObserved,
+      async () => (await client.db.all(app.todos)).map((row) => row.title),
+      title,
+    );
     // A second native acknowledgement is issued only after the same original
     // subscription has observed the Core-authored marker.
     await waitForCoreObservation();

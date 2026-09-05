@@ -65,6 +65,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
   const child = spawn("cargo", ["run", "--quiet", ...harnessCargoArgs], {
     cwd: harnessRoot,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     env: { ...process.env, JAZZ_DEVICE_RUN_NONCE: runNonce },
   });
   let observation;
@@ -90,7 +91,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (!child.killed) child.kill("SIGTERM");
+      void terminateHarness(child).catch(() => {});
       rejectSession(
         new Error(`${reason}; ${harnessDiagnostic({ child, stdout, stderr, device })}`),
       );
@@ -148,7 +149,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
     typeof session.bearer_a !== "string" ||
     typeof session.bearer_b !== "string"
   ) {
-    child.kill("SIGTERM");
+    await terminateHarness(child);
     throw new Error("local Edge/Core harness emitted malformed session material");
   }
   return {
@@ -166,6 +167,7 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       return assertCoreObservation(observation, runNonce);
     },
     stopForOfflineRestart: () => stopForOfflineRestart(child, session.edge_port),
+    terminate: () => terminateHarness(child),
     async interruptAndRecover() {
       child.stdin.write("interrupt-edge\n");
       await waitForLine("JAZZ_RN_EDGE_INTERRUPTED ");
@@ -177,6 +179,34 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
     bearerA: session.bearer_a,
     bearerB: session.bearer_b,
   };
+}
+
+/** Cargo can be a parent of the actual fixture. Close its control reader and
+ * terminate the whole Unix process group, escalating if it does not exit. */
+export async function terminateHarness(child, timeoutMs = 5_000, processInfo = process) {
+  if (child.exitCode !== null || child.signalCode) return;
+  child.stdin?.end();
+  const signal = (name) => {
+    try {
+      if (processInfo.platform !== "win32" && child.pid) processInfo.kill(-child.pid, name);
+      else child.kill(name);
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  };
+  const waitForExit = (ms) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+  });
+  signal("SIGTERM");
+  await waitForExit(timeoutMs);
+  if (child.exitCode === null && !child.signalCode) {
+    signal("SIGKILL");
+    await waitForExit(timeoutMs);
+    if (child.exitCode === null && !child.signalCode) {
+      throw new Error("local Edge/Core harness process group survived SIGKILL");
+    }
+  }
 }
 
 function assertEndpointRefused(port) {
@@ -192,14 +222,7 @@ function assertEndpointRefused(port) {
  * serves Edge. Preserve the original endpoint for the native SQLite scope. */
 export async function stopForOfflineRestart(child, port) {
   if (child.exitCode === null && !child.signalCode) {
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("upstream did not stop")), 5_000);
-      child.once("exit", () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-      child.kill("SIGTERM");
-    });
+    await terminateHarness(child);
   }
   await new Promise((resolve, reject) => {
     const socket = createConnection({ host: "127.0.0.1", port });
