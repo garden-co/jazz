@@ -79,6 +79,8 @@ describe("encodeRelationQueryV1", () => {
     expect([...encodeRelationQueryV1(parse("18446744073709551616"))][15]).toBe(5);
     expect([...encodeRelationQueryV1(parse("-9223372036854775809"))][15]).toBe(5);
     expect([...encodeRelationQueryV1(parse("1e21"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("-0"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("-0"))].slice(-8)).toEqual([0, 0, 0, 0, 0, 0, 0, 0x80]);
     expect(() =>
       encodeRelationQueryV1(
         (
@@ -100,12 +102,35 @@ describe("encodeRelationQueryV1", () => {
     expect(() =>
       encodeRelationQueryV1(
         (
+          parseRelationQueryJsonLossless(
+            '{"relation_ir":{"Offset":{"input":{"TableScan":{"table":"t"}},"offset":-0}}}',
+          ) as { relation_ir: RelExpr }
+        ).relation_ir,
+      ),
+    ).toThrow("dimension");
+    expect(() =>
+      encodeRelationQueryV1(
+        (
           parseRelationQueryJsonLossless('{"relation_ir":{"TableScan":{"table":"\\ud800"}}}') as {
             relation_ir: RelExpr;
           }
         ).relation_ir,
       ),
     ).toThrow("unpaired surrogate");
+    expect(() =>
+      parseRelationQueryJsonLossless(
+        '{"relation_ir":{"TableScan":{"table":"t"}},"ignored":"\\ud800"}',
+      ),
+    ).toThrow("unpaired surrogate");
+    expect(() =>
+      parseRelationQueryJsonLossless('{"relation_ir":{"TableScan":{"table":"t",1:"invalid"}}}'),
+    ).toThrow();
+    const escapedMarker = parseRelationQueryJsonLossless(
+      '{"relation_ir":{"Filter":{"input":{"TableScan":{"table":"t"}},"predicate":{"Cmp":{"left":{"column":"c"},"op":"Eq","right":{"Literal":[1,"\\u005f_jrq_raw_number_0__"]}}}}}}',
+    ) as { relation_ir: RelExpr };
+    expect(encodeRelationQueryV1(escapedMarker.relation_ir)).toEqual(
+      encodeRelationQueryV1(filter([1, "__jrq_raw_number_0__"])),
+    );
   });
 
   test("checked writer rejects mixed values at the byte boundary", () => {

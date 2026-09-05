@@ -87,10 +87,40 @@ export class RawJsonNumber {
   constructor(readonly text: string) {}
 }
 
+function assertNoUnpairedSurrogates(value: string): void {
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      if (
+        ++index >= value.length ||
+        value.charCodeAt(index) < 0xdc00 ||
+        value.charCodeAt(index) > 0xdfff
+      )
+        throw new Error("invalid JRQ: unpaired surrogate");
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw new Error("invalid JRQ: unpaired surrogate");
+    }
+  }
+}
+
 /** Parse raw query JSON without losing numeric token spelling. */
 export function parseRelationQueryJsonLossless(queryJson: string): unknown {
+  const validated = JSON.parse(queryJson) as unknown;
+  const containsMarker = (value: unknown, marker: string): boolean => {
+    if (typeof value === "string") {
+      assertNoUnpairedSurrogates(value);
+      return value.includes(marker);
+    }
+    if (Array.isArray(value)) return value.some((child) => containsMarker(child, marker));
+    if (value && typeof value === "object")
+      return Object.entries(value).some(([key, child]) => {
+        assertNoUnpairedSurrogates(key);
+        return key.includes(marker) || containsMarker(child, marker);
+      });
+    return false;
+  };
   let marker = "__jrq_raw_number_";
-  while (queryJson.includes(marker)) marker = `_${marker}`;
+  while (queryJson.includes(marker) || containsMarker(validated, marker)) marker = `_${marker}`;
   const numbers: string[] = [];
   let rewritten = "";
   let string = false;
@@ -194,7 +224,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const dimension = (value: unknown) => {
     if (value instanceof RawJsonNumber) {
-      if (!/^-?(?:0|[1-9]\d*)$/.test(value.text)) fail("dimension");
+      if (!/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value.text)) fail("dimension");
       value = Number(value.text);
     }
     const dimensionValue = typeof value === "number" ? value : fail("dimension");
@@ -204,17 +234,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const string = (value: string) => {
     if (typeof value !== "string") fail("string");
-    for (let index = 0; index < value.length; index++) {
-      const unit = value.charCodeAt(index);
-      if (unit >= 0xd800 && unit <= 0xdbff) {
-        if (
-          ++index >= value.length ||
-          value.charCodeAt(index) < 0xdc00 ||
-          value.charCodeAt(index) > 0xdfff
-        )
-          fail("unpaired surrogate");
-      } else if (unit >= 0xdc00 && unit <= 0xdfff) fail("unpaired surrogate");
-    }
+    assertNoUnpairedSurrogates(value);
     const encoded = text.encode(value);
     if (encoded.length > maxString || (stringBytes += encoded.length) > maxBytes)
       fail("string limit");
@@ -283,7 +303,7 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   const json = (value: unknown, depth: number): void => {
     node(depth);
     if (value instanceof RawJsonNumber) {
-      if (/^-?(?:0|[1-9]\d*)$/.test(value.text)) {
+      if (/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value.text)) {
         const integer = BigInt(value.text);
         if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {
           bytes.push(3);
