@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { encodeRelationQueryV1, type RelExpr } from "./ir.js";
+import { encodeRelationQueryV1, parseRelationQueryJsonLossless, type RelExpr } from "./ir.js";
 import corpus from "../../../crates/jazz/fixtures/relation_query_jrq_v1.json";
 
 const filter = (literal: unknown): RelExpr => ({
@@ -62,6 +62,50 @@ describe("encodeRelationQueryV1", () => {
     expect(() => encodeRelationQueryV1({ TableScan: { table: "\ud800" } })).toThrow(
       "unpaired surrogate",
     );
+  });
+
+  test("preserves raw subscription literal numeric spellings", () => {
+    const parse = (token: string) =>
+      (
+        parseRelationQueryJsonLossless(
+          `{"relation_ir":{"Filter":{"input":{"TableScan":{"table":"t"}},"predicate":{"Cmp":{"left":{"column":"c"},"op":"Eq","right":{"Literal":${token}}}}}}}`,
+        ) as { relation_ir: RelExpr }
+      ).relation_ir;
+    expect([...encodeRelationQueryV1(parse("1"))][15]).toBe(3);
+    expect([...encodeRelationQueryV1(parse("1.0"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("1e0"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("9223372036854775808"))][15]).toBe(4);
+    expect([...encodeRelationQueryV1(parse("9223372036854776000"))][15]).toBe(4);
+    expect([...encodeRelationQueryV1(parse("18446744073709551616"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("-9223372036854775809"))][15]).toBe(5);
+    expect([...encodeRelationQueryV1(parse("1e21"))][15]).toBe(5);
+    expect(() =>
+      encodeRelationQueryV1(
+        (
+          parseRelationQueryJsonLossless(
+            '{"relation_ir":{"Offset":{"input":{"TableScan":{"table":"t"}},"offset":1}}}',
+          ) as { relation_ir: RelExpr }
+        ).relation_ir,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      encodeRelationQueryV1(
+        (
+          parseRelationQueryJsonLossless(
+            '{"relation_ir":{"Offset":{"input":{"TableScan":{"table":"t"}},"offset":1.0}}}',
+          ) as { relation_ir: RelExpr }
+        ).relation_ir,
+      ),
+    ).toThrow("dimension");
+    expect(() =>
+      encodeRelationQueryV1(
+        (
+          parseRelationQueryJsonLossless('{"relation_ir":{"TableScan":{"table":"\\ud800"}}}') as {
+            relation_ir: RelExpr;
+          }
+        ).relation_ir,
+      ),
+    ).toThrow("unpaired surrogate");
   });
 
   test("checked writer rejects mixed values at the byte boundary", () => {

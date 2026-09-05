@@ -503,6 +503,16 @@ dimensions (`Offset`, `Limit`, and `Gather.MaxDepth`) are capped at `u32::MAX`
 so native and WASM32 accept the same grammar. Encoders use checked byte sinks:
 they fail before an append would exceed the carrier limit.
 
+The raw `queryJson` adapter used by NAPI, WASM, and RN retains a literal
+numeric token until it selects that scalar tag. Thus raw `1`, `1.0`, and `1e0`
+remain respectively an integer, an `f64`, and an `f64`, matching Rust's
+`serde_json` relation-query input; a decimal integer outside the `i64` range
+uses `u64` when it fits, otherwise `f64`. The typed TypeScript relation encoder
+accepts JavaScript values and applies the public `JSON.stringify` numeric
+normalization before this classification. Both paths reject an unpaired UTF-16
+surrogate before UTF-8 encoding, rather than allowing `TextEncoder` to replace
+it.
+
 Each tag is followed by its fields in declaration order. `TableScan` is table
 string then alias-presence byte and optional alias string. Unary expressions
 carry their input first; `Filter` then carries its predicate, `Project` its

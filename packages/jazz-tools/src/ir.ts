@@ -82,6 +82,57 @@ export type RelExpr =
   | { Offset: { input: RelExpr; offset: number } }
   | { Limit: { input: RelExpr; limit: number } };
 
+/** A numeric lexeme retained only while adapting raw native query JSON to JRQ. */
+export class RawJsonNumber {
+  constructor(readonly text: string) {}
+}
+
+/** Parse raw query JSON without losing numeric token spelling. */
+export function parseRelationQueryJsonLossless(queryJson: string): unknown {
+  let marker = "__jrq_raw_number_";
+  while (queryJson.includes(marker)) marker = `_${marker}`;
+  const numbers: string[] = [];
+  let rewritten = "";
+  let string = false;
+  let escaped = false;
+  for (let index = 0; index < queryJson.length; index++) {
+    const char = queryJson[index]!;
+    if (string) {
+      rewritten += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') string = false;
+      continue;
+    }
+    if (char === '"') {
+      string = true;
+      rewritten += char;
+      continue;
+    }
+    if (char === "-" || (char >= "0" && char <= "9")) {
+      const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(queryJson.slice(index));
+      if (match) {
+        numbers.push(match[0]);
+        rewritten += JSON.stringify(`${marker}${numbers.length - 1}__`);
+        index += match[0].length - 1;
+        continue;
+      }
+    }
+    rewritten += char;
+  }
+  const revive = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      const match = new RegExp(`^${marker}(\\d+)__$`).exec(value);
+      return match ? new RawJsonNumber(numbers[Number(match[1])]!) : value;
+    }
+    if (Array.isArray(value)) return value.map(revive);
+    if (value && typeof value === "object")
+      return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, revive(child)]));
+    return value;
+  };
+  return revive(JSON.parse(rewritten));
+}
+
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
 
 /** A relational policy expression used by the query IR, distinct from the schema DSL AST. */
@@ -141,9 +192,15 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
     if (!Number.isSafeInteger(value) || value < 0 || value > maxItems) fail("collection limit");
     length(value);
   };
-  const dimension = (value: number) => {
-    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) fail("dimension");
-    length(value);
+  const dimension = (value: unknown) => {
+    if (value instanceof RawJsonNumber) {
+      if (!/^-?(?:0|[1-9]\d*)$/.test(value.text)) fail("dimension");
+      value = Number(value.text);
+    }
+    const dimensionValue = typeof value === "number" ? value : fail("dimension");
+    if (!Number.isSafeInteger(dimensionValue) || dimensionValue < 0 || dimensionValue > 0xffff_ffff)
+      fail("dimension");
+    length(dimensionValue);
   };
   const string = (value: string) => {
     if (typeof value !== "string") fail("string");
@@ -225,6 +282,28 @@ export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
   };
   const json = (value: unknown, depth: number): void => {
     node(depth);
+    if (value instanceof RawJsonNumber) {
+      if (/^-?(?:0|[1-9]\d*)$/.test(value.text)) {
+        const integer = BigInt(value.text);
+        if (integer >= -0x8000_0000_0000_0000n && integer <= 0x7fff_ffff_ffff_ffffn) {
+          bytes.push(3);
+          signed(integer);
+          return;
+        }
+        if (integer >= 0n && integer <= 0xffff_ffff_ffff_ffffn) {
+          bytes.push(4);
+          unsigned(integer);
+          return;
+        }
+      }
+      const number = Number(value.text);
+      if (!Number.isFinite(number)) fail("number");
+      bytes.push(5);
+      const raw = new DataView(new ArrayBuffer(8));
+      raw.setFloat64(0, number, true);
+      for (let index = 0; index < 8; index++) bytes.push(raw.getUint8(index));
+      return;
+    }
     if (value === null) {
       bytes.push(0);
       return;

@@ -11,7 +11,7 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import { encodeRelationQueryV1, type RelExpr } from "../../ir.js";
+import { encodeRelationQueryV1, parseRelationQueryJsonLossless, type RelExpr } from "../../ir.js";
 import type {
   TxId,
   InsertResult,
@@ -4598,7 +4598,8 @@ function queryUsesNativeRelationApi(queryJson: string): boolean {
 function relationQueryBytes(queryJson: string): Uint8Array {
   let relation_ir: unknown;
   try {
-    relation_ir = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
+    relation_ir = (parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown })
+      .relation_ir;
   } catch {
     throw new Error("Relation query is not valid runtime query JSON");
   }
