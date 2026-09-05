@@ -305,10 +305,23 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        // Match upsert's transaction-local visibility rule: staged inserts or
+        // restores remain writable, but committed tombstones must reject a
+        // patch rather than accepting content hidden by the deletion register.
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.lock_for_transaction_operation(tx_id)
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        if node
+            .tx_visible_current_cells_in_branch(tx_id, table, row, &BranchSelector::default())
             .await?
-            .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
+            .is_none()
+            && node
+                .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
+                .await?
+                .is_some()
+        {
+            return Err(row_already_deleted(row));
+        }
+        node.tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .await
             .map_err(Into::into)
     }

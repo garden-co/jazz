@@ -1868,6 +1868,34 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
 }
 
 #[test]
+fn mergeable_tx_rejects_update_of_committed_deleted_row() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(1);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("archived", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row, Default::default()).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    let error = tx
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(prepared_read(&db, &db.table("todos")).is_empty());
+}
+
+#[test]
 fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
