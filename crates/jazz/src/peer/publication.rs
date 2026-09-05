@@ -722,6 +722,7 @@ impl PeerState {
                     purpose: RehydratePurpose::Query,
                 },
                 None,
+                None,
             )
             .await?
             {
@@ -1041,6 +1042,7 @@ impl PeerState {
                 purpose: RehydratePurpose::Query,
             },
             progress_waker,
+            None,
         )
         .await
         .map(|update| {
@@ -1177,6 +1179,7 @@ impl PeerState {
                         purpose: RehydratePurpose::Query,
                     },
                     progress_waker,
+                    None,
                 )
                 .await
                 .map(|update| {
@@ -1577,6 +1580,7 @@ impl PeerState {
         node: &mut NodeState<S>,
         request: MaintainedRehydrateRequest<'_>,
         progress_waker: Option<&std::task::Waker>,
+        observer: Option<&crate::node::QueryRuntimeDiagnosticObserver>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -1666,7 +1670,7 @@ impl PeerState {
                     })
             }
             RehydratePurpose::Query => {
-                scoped.open_seeded_maintained_subscription_view_with_waker(
+                scoped.open_seeded_maintained_subscription_view_with_waker_and_diagnostic(
                     shape,
                     binding,
                     policy_identity,
@@ -1674,6 +1678,7 @@ impl PeerState {
                     read_view,
                     subscription.read_view,
                     progress_waker,
+                    observer,
                 )
                 .await
                 .map(|(receiver, maintained, schemas, transitions, tables, received)| {
@@ -1895,6 +1900,9 @@ impl PeerState {
             node.reset_storage_read_metrics();
         }
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        if let Some(observer) = observer {
+            observer(crate::db::DbTickDiagnosticPhase::SubscriberInitialMaterializationStart);
+        }
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             scoped.view_update_for_maintained_result_members(
@@ -1917,6 +1925,9 @@ impl PeerState {
             },
             ).await
         };
+        if let Some(observer) = observer {
+            observer(crate::db::DbTickDiagnosticPhase::SubscriberInitialMaterializationComplete);
+        }
         let mut update = match update {
             Ok(update) => update,
             Err(err) => {
@@ -2089,6 +2100,31 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.rehydrate_query_for_subscription_with_opts_and_waker_and_diagnostic(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            progress_waker,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn rehydrate_query_for_subscription_with_opts_and_waker_and_diagnostic<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        progress_waker: Option<&std::task::Waker>,
+        observer: Option<&crate::node::QueryRuntimeDiagnosticObserver>,
+    ) -> Result<Option<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.rehydrate_query_for_subscription_with_purpose(
             node,
             subscription,
@@ -2097,6 +2133,7 @@ impl PeerState {
             opts,
             RehydratePurpose::Query,
             progress_waker,
+            observer,
         )
         .await
     }
@@ -2110,6 +2147,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
         purpose: RehydratePurpose,
         progress_waker: Option<&std::task::Waker>,
+        observer: Option<&crate::node::QueryRuntimeDiagnosticObserver>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -2203,6 +2241,7 @@ impl PeerState {
                 purpose,
             },
             progress_waker,
+            observer,
         )
         .await
     }
@@ -2251,6 +2290,7 @@ impl PeerState {
             binding,
             opts,
             RehydratePurpose::AuthorizationSupport,
+            None,
             None,
         ))
         .await?;

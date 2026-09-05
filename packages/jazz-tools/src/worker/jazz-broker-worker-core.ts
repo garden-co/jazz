@@ -1954,6 +1954,14 @@ const DIAGNOSTIC_TICK_PHASES = new Set([
   "subscriber-initial-rehydrate-node-lock-complete",
   "subscriber-initial-rehydrate-start",
   "subscriber-initial-rehydrate-complete",
+  "subscriber-initial-compile-policy-dependencies-start",
+  "subscriber-initial-compile-policy-dependencies-complete",
+  "subscriber-initial-compile-lowering-start",
+  "subscriber-initial-compile-lowering-complete",
+  "subscriber-initial-subscribe-start",
+  "subscriber-initial-subscribe-complete",
+  "subscriber-initial-materialization-start",
+  "subscriber-initial-materialization-complete",
   "node-tick-complete",
 ]);
 

@@ -5317,13 +5317,14 @@ where
                                     observer,
                                     DbTickDiagnosticPhase::SubscriberInitialRehydrateStart,
                                 );
-                                let result = peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                let result = peer.rehydrate_query_for_subscription_with_opts_and_waker_and_diagnostic(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
+                                    observer,
                                 )
                                 .await;
                                 report_peer_tick_diagnostic(

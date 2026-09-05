@@ -466,10 +466,28 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources_and_access_paths(
+        self.compile_query_program_request_with_access_paths_and_diagnostic(
+            request,
+            access_paths,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn compile_query_program_request_with_access_paths_and_diagnostic(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        observer: Option<&QueryRuntimeDiagnosticObserver>,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
             BTreeMap::new(),
             access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+            observer,
         )
         .await
     }
@@ -503,6 +521,26 @@ where
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs_and_diagnostic(
+            request,
+            inline_sources,
+            access_paths,
+            covered_input_sources,
+            covered_input_descriptors,
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs_and_diagnostic(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
+        observer: Option<&QueryRuntimeDiagnosticObserver>,
+    ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
             request,
             inline_sources,
@@ -510,6 +548,7 @@ where
             covered_input_sources,
             covered_input_descriptors,
             true,
+            observer,
         )
         .await
     }
@@ -526,6 +565,7 @@ where
             BTreeMap::new(),
             BTreeMap::new(),
             false,
+            None,
         )
         .await
     }
@@ -538,6 +578,7 @@ where
         covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
+        observer: Option<&QueryRuntimeDiagnosticObserver>,
     ) -> Result<QueryProgram, Error> {
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && !covered_input_sources.is_empty()
@@ -548,9 +589,17 @@ where
                 covered_input_sources.keys().collect::<Vec<_>>(),
             );
         }
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialCompilePolicyDependenciesStart,
+        );
         let replaced_policy_graphs =
             Box::pin(self.prepare_query_program_policy_dependencies(&request, &access_paths))
                 .await?;
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialCompilePolicyDependenciesComplete,
+        );
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = JazzSourceGraphPreparer {
@@ -565,7 +614,15 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialCompileLoweringStart,
+        );
         let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialCompileLoweringComplete,
+        );
         resolver
             .node
             .restore_policy_authorization_graphs(replaced_policy_graphs);

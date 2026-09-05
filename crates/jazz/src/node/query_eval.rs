@@ -9,6 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::rc::Rc;
 use std::time::Instant;
 
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
@@ -51,6 +52,7 @@ use super::query_engine::{
     left_field, prepare_and_lower_query_program, query_program_source_requests, right_field,
     route_param_field, user_column_field,
 };
+use crate::db::DbTickDiagnosticPhase;
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
 use crate::protocol::{
@@ -73,6 +75,17 @@ mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
+
+pub(crate) type QueryRuntimeDiagnosticObserver = Rc<dyn Fn(DbTickDiagnosticPhase)>;
+
+pub(super) fn report_query_runtime_diagnostic(
+    observer: Option<&QueryRuntimeDiagnosticObserver>,
+    phase: DbTickDiagnosticPhase,
+) {
+    if let Some(observer) = observer {
+        observer(phase);
+    }
+}
 
 pub(crate) use prepared_bindings::coerce_prepared_binding_value;
 use prepared_bindings::*;
@@ -3289,6 +3302,41 @@ where
         ),
         Error,
     > {
+        self.open_seeded_maintained_subscription_view_with_waker_and_diagnostic(
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            read_view_key,
+            progress_waker,
+            None,
+        )
+        .await
+    }
+
+    /// Test-only owner-loop variant which reports fixed, redacted opening phases.
+    pub(crate) async fn open_seeded_maintained_subscription_view_with_waker_and_diagnostic(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        read_view_key: ReadViewKey,
+        progress_waker: Option<&std::task::Waker>,
+        observer: Option<&QueryRuntimeDiagnosticObserver>,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
         // A scope-isolated client relay serves already admitted local data.
         // It is not an authority and may not re-evaluate policies using its
         // deliberately incomplete support-row cache. Strict remote children
@@ -3307,6 +3355,7 @@ where
             PreparedClaimBindingMode::Strict,
             false,
             progress_waker,
+            observer,
         )
         .await
         .map(
@@ -3416,6 +3465,7 @@ where
                 PreparedClaimBindingMode::Strict,
                 false,
                 progress_waker,
+                None,
             )
             .await?;
         // Seeded relay children are ordinary receiver-local maintained views.
@@ -3560,6 +3610,7 @@ where
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
             false,
             progress_waker,
+            None,
         )
         .await
         .map(
@@ -3590,6 +3641,7 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         pending_overlay: bool,
         progress_waker: Option<&std::task::Waker>,
+        observer: Option<&QueryRuntimeDiagnosticObserver>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3677,7 +3729,11 @@ where
             };
         let program = if runtime_sources.is_empty() {
             match self
-                .compile_query_program_request_with_access_paths(request, access_paths)
+                .compile_query_program_request_with_access_paths_and_diagnostic(
+                    request,
+                    access_paths,
+                    observer,
+                )
                 .await
             {
                 Ok(program) => program,
@@ -3689,12 +3745,13 @@ where
             }
         } else {
             match self
-                .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs_and_diagnostic(
                     request,
                     BTreeMap::new(),
                     access_paths,
                     runtime_sources,
                     runtime_source_descriptors,
+                    observer,
                 )
                 .await
             {
@@ -3754,6 +3811,10 @@ where
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialSubscribeStart,
+        );
         let subscription = match self
             .subscribe_lowered_program(
                 program,
@@ -3771,6 +3832,10 @@ where
                 return Err(error);
             }
         };
+        report_query_runtime_diagnostic(
+            observer,
+            DbTickDiagnosticPhase::SubscriberInitialSubscribeComplete,
+        );
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }

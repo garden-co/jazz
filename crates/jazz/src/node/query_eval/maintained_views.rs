@@ -338,6 +338,7 @@ where
                 PreparedClaimBindingMode::Strict,
                 pending_overlay,
                 progress_waker,
+                None,
             )
             .await?;
         let mut local = LocalMaintainedViewSubscription {

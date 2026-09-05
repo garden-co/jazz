@@ -2615,6 +2615,14 @@ pub enum DbTickDiagnosticPhase {
     SubscriberInitialRehydrateNodeLockComplete,
     SubscriberInitialRehydrateStart,
     SubscriberInitialRehydrateComplete,
+    SubscriberInitialCompilePolicyDependenciesStart,
+    SubscriberInitialCompilePolicyDependenciesComplete,
+    SubscriberInitialCompileLoweringStart,
+    SubscriberInitialCompileLoweringComplete,
+    SubscriberInitialSubscribeStart,
+    SubscriberInitialSubscribeComplete,
+    SubscriberInitialMaterializationStart,
+    SubscriberInitialMaterializationComplete,
     NodeTickComplete,
 }
 
@@ -2656,6 +2664,26 @@ impl DbTickDiagnosticPhase {
             }
             Self::SubscriberInitialRehydrateStart => "subscriber-initial-rehydrate-start",
             Self::SubscriberInitialRehydrateComplete => "subscriber-initial-rehydrate-complete",
+            Self::SubscriberInitialCompilePolicyDependenciesStart => {
+                "subscriber-initial-compile-policy-dependencies-start"
+            }
+            Self::SubscriberInitialCompilePolicyDependenciesComplete => {
+                "subscriber-initial-compile-policy-dependencies-complete"
+            }
+            Self::SubscriberInitialCompileLoweringStart => {
+                "subscriber-initial-compile-lowering-start"
+            }
+            Self::SubscriberInitialCompileLoweringComplete => {
+                "subscriber-initial-compile-lowering-complete"
+            }
+            Self::SubscriberInitialSubscribeStart => "subscriber-initial-subscribe-start",
+            Self::SubscriberInitialSubscribeComplete => "subscriber-initial-subscribe-complete",
+            Self::SubscriberInitialMaterializationStart => {
+                "subscriber-initial-materialization-start"
+            }
+            Self::SubscriberInitialMaterializationComplete => {
+                "subscriber-initial-materialization-complete"
+            }
             Self::NodeTickComplete => "node-tick-complete",
         }
     }

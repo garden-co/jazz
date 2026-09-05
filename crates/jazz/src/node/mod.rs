@@ -329,6 +329,7 @@ mod views;
 pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
+pub(crate) use query_eval::QueryRuntimeDiagnosticObserver;
 #[cfg(test)]
 pub(crate) use query_eval::take_client_physical_row_query_calls_for_test;
 pub(crate) use query_eval::{
