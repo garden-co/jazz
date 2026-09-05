@@ -122,6 +122,7 @@ impl Query {
             aggregate: None,
             limit: None,
             offset: 0,
+            relation: None,
         }
     }
 

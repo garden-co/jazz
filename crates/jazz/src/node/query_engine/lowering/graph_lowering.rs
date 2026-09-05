@@ -750,7 +750,7 @@ fn lower_union_plan(
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
     for branch in &union.branches {
-        let input = match &branch.plan {
+        let mut input = match &branch.plan {
             RelationInputPlan::Linear(linear) => {
                 let source_id = linear.root.source().ok_or_else(|| {
                     UnsupportedReason::Operator("union branch must have a source".to_owned())
@@ -780,6 +780,32 @@ fn lower_union_plan(
                 lower_relation_input(&branch.plan, resolved_sources, request)?
             }
         };
+        // A public root UNION ALL has no join-side occurrence slot. Retain an
+        // explicit typed `(arm, source-row)` carrier beside the real root so
+        // the terminal can address two derivations of one physical row.
+        let source_id = branch.plan.root_source().ok_or_else(|| {
+            UnsupportedReason::Operator("UNION ALL root arm lacks a stable source row".to_owned())
+        })?;
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            UnsupportedReason::Runtime(format!("union source {source_id:?} was not resolved"))
+        })?;
+        let row_field = &source.row_shape.row_uuid_field;
+        if !input.fields.contains(row_field) {
+            return Err(UnsupportedReason::Operator(
+                "UNION ALL root arm projection discarded its stable source row identity".to_owned(),
+            ));
+        }
+        input.graph =
+            input
+                .graph
+                .project_fields(input.fields.iter().map(ProjectField::named).chain([
+                    ProjectField::renamed(row_field, "__root_union_row".to_owned()),
+                    ProjectField::literal("__root_union_arm", Value::String(branch.label.clone())),
+                ]));
+        input.fields.insert("__root_union_row".to_owned());
+        input.fields.insert("__root_union_arm".to_owned());
+        input.union_occurrence_carrier =
+            Some(("__root_union_arm".to_owned(), "__root_union_row".to_owned()));
         lowered.push(input);
     }
     lower_union_inputs(lowered, request)

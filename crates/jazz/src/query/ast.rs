@@ -46,6 +46,11 @@ pub struct Query {
     /// Number of rows to skip after filtering.
     #[serde(default)]
     pub offset: usize,
+    /// Retained output-changing relation facade. This is normalized directly
+    /// into the row-set algebra; `table` remains the real-row materialization
+    /// table for the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<RelationQuery>,
 }
 
 /// Output-changing relational join syntax.
