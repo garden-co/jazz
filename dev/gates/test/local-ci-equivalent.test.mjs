@@ -343,6 +343,20 @@ test("React Native is a distinct bridge-enabled CI partition with an admitted bu
   const missingTests = reactNative.filter(({ label }) => label !== "React Native bridge tests");
   assert.throws(() => assertReactNativeBridgeBoundary(missingTests), /omits its bridge producer, build, or tests/);
 
+  const noConfig = reactNative.map((item) =>
+    item.label === "React Native bridge tests"
+      ? { ...item, args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts") }
+      : item,
+  );
+  assert.throws(() => assertReactNativeBridgeBoundary(noConfig), /omits the React Native Vitest configuration/);
+
+  const emptySuccess = reactNative.map((item) =>
+    item.label === "React Native bridge tests"
+      ? { ...item, args: [...item.args, "--passWithNoTests"] }
+      : item,
+  );
+  assert.throws(() => assertReactNativeBridgeBoundary(emptySuccess), /permits an empty React Native test run/);
+
   const seen = [];
   await assert.rejects(
     () =>
