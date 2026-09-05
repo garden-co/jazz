@@ -130,7 +130,7 @@ test("native acknowledgement checks every identity field and stays pending until
     assert.equal(calls, 0, "foreign native identity must not enter the Core observation gate");
     assert.equal(
       control.diagnostic(),
-      "requests=4,identityRejected=4,coreWaitStarted=0,coreWaitSucceeded=0,coreWaitFailed=0",
+      "requests=4,identityRejected=4,coreWaitStarted=0,coreWaitSucceeded=0,coreWaitFailed=0,acknowledgementsFinished=0,responsesClosedEarly=0",
       "controller diagnostics expose only bounded request/outcome counts",
     );
     let completed = false;
@@ -145,7 +145,7 @@ test("native acknowledgement checks every identity field and stays pending until
     assert.equal(calls, 1);
     assert.equal(
       control.diagnostic(),
-      "requests=5,identityRejected=4,coreWaitStarted=1,coreWaitSucceeded=1,coreWaitFailed=0",
+      "requests=5,identityRejected=4,coreWaitStarted=1,coreWaitSucceeded=1,coreWaitFailed=0,acknowledgementsFinished=1,responsesClosedEarly=0",
     );
   } finally {
     release();
@@ -177,7 +177,7 @@ test("missing Core observation cannot release the native foreground", async () =
     );
     assert.equal(
       control.diagnostic(),
-      "requests=1,identityRejected=0,coreWaitStarted=1,coreWaitSucceeded=0,coreWaitFailed=1",
+      "requests=1,identityRejected=0,coreWaitStarted=1,coreWaitSucceeded=0,coreWaitFailed=1,acknowledgementsFinished=0,responsesClosedEarly=0",
       "failed Core observation is observable without exposing request contents",
     );
   } finally {
@@ -260,6 +260,65 @@ test("both drivers establish offline provenance before reopening the unchanged s
     assert.match(source, /finishSeedClient/);
   };
   assertRestart(foreground);
-  assert.throws(() => assertRestart(foreground.replace("client.db.subscribe", "missingSubscription")));
+  assert.throws(() =>
+    assertRestart(foreground.replace("client.db.subscribe", "missingSubscription")),
+  );
   assert.throws(() => assertRestart(foreground.replace("await waitForPublication", "missingWait")));
+});
+
+test("Core observation counters distinguish server observation from a closed HTTP response", async () => {
+  const { startCoreObservationControl } = await import("./core-observation-control.mjs");
+  let release, started;
+  const observing = new Promise((resolve) => {
+    started = resolve;
+  });
+  const observation = new Promise((resolve) => {
+    release = resolve;
+  });
+  const expected = {
+    platform: "android",
+    deviceIdentifier: "emulator",
+    buildFingerprint: "d".repeat(64),
+    runNonce: nonce,
+  };
+  const control = await startCoreObservationControl({
+    session: {
+      async waitForCoreObservation() {
+        started();
+        await observation;
+        return valid;
+      },
+    },
+    expected,
+    host: "127.0.0.1",
+  });
+  const abort = new AbortController();
+  try {
+    const pending = fetch(control.endpoint, {
+      method: "POST",
+      body: JSON.stringify(expected),
+      signal: abort.signal,
+    }).then(
+      () => assert.fail("aborted acknowledgement unexpectedly completed"),
+      () => {},
+    );
+    await observing;
+    abort.abort();
+    await pending;
+    for (
+      let attempt = 0;
+      !control.diagnostic().includes("responsesClosedEarly=1") && attempt < 50;
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      control.diagnostic(),
+      "requests=1,identityRejected=0,coreWaitStarted=1,coreWaitSucceeded=1,coreWaitFailed=0,acknowledgementsFinished=0,responsesClosedEarly=1",
+    );
+  } finally {
+    release();
+    await control.close();
+  }
 });

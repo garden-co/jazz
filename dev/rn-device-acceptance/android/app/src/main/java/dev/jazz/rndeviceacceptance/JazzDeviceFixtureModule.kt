@@ -169,6 +169,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
       }.toString().toByteArray(Charsets.UTF_8)
       Thread({
         var connection: HttpURLConnection? = null
+        var phase = "setup"
         try {
           val request = url.openConnection() as HttpURLConnection
           connection = request
@@ -179,10 +180,31 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
           request.doOutput = true
           request.setRequestProperty("Content-Type", "application/json")
           request.setFixedLengthStreamingMode(identity.size)
+          phase = "request"
+          Log.e("JazzCoreObservation", "request-started")
           request.outputStream.use { it.write(identity) }
-          check(request.responseCode == 204) { "Core observation was not acknowledged" }
+          Log.e("JazzCoreObservation", "request-sent")
+          phase = "response"
+          val status = request.responseCode
+          // Log only a bounded status/category. Never log the exception, URL,
+          // request identity or body; JS's generic stage retry uses another tag.
+          Log.e("JazzCoreObservation", if (status in 100..599) "http-status-$status" else "http-status-invalid")
+          check(status == 204) { "Core observation was not acknowledged" }
+          phase = "promise"
           promise.resolve(null)
-        } catch (_: Throwable) {
+          Log.e("JazzCoreObservation", "promise-resolved")
+        } catch (error: Throwable) {
+          val category = when (error) {
+            is java.net.SocketTimeoutException -> "timeout"
+            is java.net.ConnectException -> "connection"
+            is java.net.UnknownHostException -> "dns"
+            is javax.net.ssl.SSLException -> "tls"
+            is java.net.ProtocolException -> "protocol"
+            is java.io.IOException -> "io"
+            is IllegalStateException -> "state"
+            else -> "other"
+          }
+          Log.e("JazzCoreObservation", "failure-$phase-$category")
           promise.reject("E_JAZZ_DEVICE_CORE", "Core observation was not acknowledged")
         } finally { connection?.disconnect() }
       }, "JazzCoreObservation").start()

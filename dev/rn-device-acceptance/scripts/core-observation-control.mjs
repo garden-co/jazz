@@ -10,8 +10,16 @@ export async function startCoreObservationControl({ session, expected, host }) {
     coreWaitStarted: 0,
     coreWaitSucceeded: 0,
     coreWaitFailed: 0,
+    acknowledgementsFinished: 0,
+    responsesClosedEarly: 0,
   };
   const server = createServer(async (request, response) => {
+    response.once("finish", () => {
+      if (response.statusCode === 204) status.acknowledgementsFinished++;
+    });
+    response.once("close", () => {
+      if (!response.writableFinished) status.responsesClosedEarly++;
+    });
     try {
       if (request.method !== "POST" || request.url !== "/core-observation") {
         response.writeHead(404).end();
@@ -72,6 +80,8 @@ export async function startCoreObservationControl({ session, expected, host }) {
         `coreWaitStarted=${status.coreWaitStarted}`,
         `coreWaitSucceeded=${status.coreWaitSucceeded}`,
         `coreWaitFailed=${status.coreWaitFailed}`,
+        `acknowledgementsFinished=${status.acknowledgementsFinished}`,
+        `responsesClosedEarly=${status.responsesClosedEarly}`,
       ].join(",");
     },
   };

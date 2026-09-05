@@ -33,6 +33,7 @@ const acceptanceLogcat = () =>
     "threadtime",
     "ReactNativeJS:I",
     "JazzDeviceAcceptance:E",
+    "JazzCoreObservation:E",
     "*:S",
   ]);
 const startedAt = Date.now();
