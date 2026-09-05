@@ -170,6 +170,13 @@ function toRuntimeValue(value: unknown, columnType: ColumnType): object {
     return { type: "BigInt", value };
   }
   if (typeof value === "string") {
+    if (columnType?.type === "BigInt") {
+      try {
+        return { type: "BigInt", value: BigInt(value) };
+      } catch {
+        throw new Error("BIGINT query values must be signed integer strings");
+      }
+    }
     if (columnType?.type === "Timestamp") {
       return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
@@ -717,8 +724,8 @@ function translateBuiltRelationToRelExpr(
   schema: WasmSchema,
 ): { expr: RelExpr; outputTable: string } {
   if (relation.union) {
-    const inputs = relation.union.inputs.map((input) =>
-      translateBuiltRelationToRelExpr(input, relations, schema),
+    const inputs = relation.union.inputs.map((arm) =>
+      translateBuiltRelationToRelExpr(arm.input, relations, schema),
     );
     const first = inputs[0];
     if (!first) {
@@ -730,7 +737,10 @@ function translateBuiltRelationToRelExpr(
     return {
       expr: {
         Union: {
-          inputs: inputs.map((input) => input.expr),
+          inputs: relation.union.inputs.map((arm, index) => ({
+            label: arm.label,
+            input: inputs[index]!.expr,
+          })),
         },
       },
       outputTable: first.outputTable,
@@ -802,6 +812,7 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
         conditions: builder.conditions,
         hops: builder.hops,
         gather: builder.gather,
+        union: builder.union,
       },
       relations,
       schema,
@@ -876,6 +887,7 @@ function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQue
   // its nested predicate. Route it through the relation IR even without a hop
   // so the public enum-match node reaches the Rust query compiler.
   return (
+    builder.union !== undefined ||
     builder.hops.length > 0 ||
     builder.gather !== undefined ||
     builder.conditions.some((condition) => condition.op === "match")
@@ -903,6 +915,14 @@ function toRuntimeOrderBy(
   });
 }
 
+function stringifyRuntimeQuery(value: unknown): string {
+  // JSON has no bigint token. Preserve the exact decimal spelling for the
+  // typed relation literal; Rust accepts that string only for a BigInt value.
+  return JSON.stringify(value, (_key, candidate) =>
+    typeof candidate === "bigint" ? candidate.toString() : candidate,
+  );
+}
+
 function toFlatConditions(
   conditions: BuiltCondition[],
   schema: WasmSchema,
@@ -922,11 +942,7 @@ function toFlatConditions(
  * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const raw = JSON.parse(builderJson);
-  if (raw?.union !== undefined) {
-    throw new Error("Public union queries are not supported by canonical query lowering yet.");
-  }
-  const builder = normalizeBuiltQuery(raw);
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const selectColumns =
     builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
@@ -942,7 +958,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
 
   if (usesNativeRelationFeatures(builder)) {
     const relation = translateBuilderToRelationIr(builderJson, schema);
-    return JSON.stringify({
+    return stringifyRuntimeQuery({
       table: builder.table,
       array_subqueries: arraySubqueries,
       relation_ir: relation,
@@ -965,5 +981,5 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
   };
 
-  return JSON.stringify(query);
+  return stringifyRuntimeQuery(query);
 }

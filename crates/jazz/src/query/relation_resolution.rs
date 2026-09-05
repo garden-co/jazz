@@ -20,6 +20,42 @@ struct RelationFacadeJoin {
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
+    if let Some(parts) = relation_union_parts(&query.rel) {
+        let inputs = parts.inputs;
+        if inputs.is_empty() {
+            return Err(relation_unification_error(
+                "union requires at least one labeled input",
+            ));
+        }
+        let mut labels = BTreeSet::new();
+        let mut output = None;
+        for arm in &inputs {
+            if arm.label.is_empty()
+                || arm.label.len() > 4096
+                || arm.label.contains('\0')
+                || !labels.insert(&arm.label)
+            {
+                return Err(relation_unification_error(
+                    "union arm labels must be 1..=4096 bytes, NUL-free, and unique",
+                ));
+            }
+            let arm_query = relation_query_to_query(&RelationQuery {
+                rel: arm.input.clone(),
+            })?;
+            match &output {
+                Some(table) if table != &arm_query.table => {
+                    return Err(relation_unification_error(
+                        "union inputs must output the same table",
+                    ));
+                }
+                None => output = Some(arm_query.table),
+                _ => {}
+            }
+        }
+        let mut output_query = Query::from(output.expect("non-empty union has an output table"));
+        output_query.relation = Some(query.clone());
+        return Ok(output_query);
+    }
     if let Some(query) = relation_gather_to_query(&query.rel)? {
         return Ok(query);
     }
@@ -65,6 +101,121 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         query = query.offset(plan.offset);
     }
     Ok(query)
+}
+
+/// The order used when materializing a retained public UNION ALL result set.
+/// The row-set compiler owns terminal pagination; callers use this only to
+/// restore the ordered Vec after identity-keyed result storage.
+pub(crate) fn relation_union_presentation_order(relation: &RelationQuery) -> Option<Vec<OrderBy>> {
+    relation_union_parts(&relation.rel).and_then(|parts| {
+        parts.order_by.map(|terms| {
+            terms
+                .into_iter()
+                .map(|term| OrderBy {
+                    column: term.column.column,
+                    direction: term.direction,
+                })
+                .collect()
+        })
+    })
+}
+
+/// A retained `UNION ALL` and the terminal operators which must execute over
+/// the complete union. Filter and project remain arm-local because they are
+/// output-preserving, while order and window operators deliberately remain
+/// above the union to retain UNION ALL multiplicity and global page semantics.
+#[derive(Clone, Debug)]
+pub(crate) struct RelationUnionParts {
+    pub(crate) inputs: Vec<RelationUnionArm>,
+    pub(crate) order_by: Option<Vec<RelationOrderBy>>,
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+}
+
+impl RelationUnionParts {
+    fn has_terminal_steps(&self) -> bool {
+        self.order_by.is_some() || self.offset.is_some() || self.limit.is_some()
+    }
+}
+
+/// Split a public union into independently normalizable arms and its global
+/// terminal order/window operators. The accepted order is the public builder's
+/// `OrderBy` then optional `Offset` then optional `Limit`; other wrapper
+/// arrangements are rejected instead of changing their meaning by pushing
+/// them into every arm.
+pub(crate) fn relation_union_parts(expr: &RelationExpr) -> Option<RelationUnionParts> {
+    match expr {
+        RelationExpr::Union { inputs } => Some(RelationUnionParts {
+            inputs: inputs.clone(),
+            order_by: None,
+            offset: None,
+            limit: None,
+        }),
+        RelationExpr::Filter { input, predicate } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.inputs = parts
+                .inputs
+                .into_iter()
+                .map(|arm| RelationUnionArm {
+                    label: arm.label,
+                    input: RelationExpr::Filter {
+                        input: Box::new(arm.input),
+                        predicate: predicate.clone(),
+                    },
+                })
+                .collect();
+            Some(parts)
+        }
+        RelationExpr::Project { input, columns } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.inputs = parts
+                .inputs
+                .into_iter()
+                .map(|arm| RelationUnionArm {
+                    label: arm.label,
+                    input: RelationExpr::Project {
+                        input: Box::new(arm.input),
+                        columns: columns.clone(),
+                    },
+                })
+                .collect();
+            Some(parts)
+        }
+        RelationExpr::OrderBy { input, terms } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.has_terminal_steps() {
+                return None;
+            }
+            parts.order_by = Some(terms.clone());
+            Some(parts)
+        }
+        RelationExpr::Offset { input, offset } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.offset.is_some() || parts.limit.is_some() {
+                return None;
+            }
+            parts.offset = Some(*offset);
+            Some(parts)
+        }
+        RelationExpr::Limit { input, limit } => {
+            let mut parts = relation_union_parts(input)?;
+            if parts.limit.is_some() {
+                return None;
+            }
+            parts.limit = Some(*limit);
+            Some(parts)
+        }
+        RelationExpr::TableScan { .. }
+        | RelationExpr::Join { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. } => None,
+    }
 }
 
 /// Normalize the canonical public `gather` shape into the ordinary recursive
@@ -1016,6 +1167,9 @@ fn runtime_i32_value(value: Option<&serde_json::Value>) -> Result<i32, QueryErro
 fn runtime_i64_value(value: Option<&serde_json::Value>) -> Result<i64, QueryError> {
     match value {
         Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
+            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
+        }),
+        Some(serde_json::Value::String(value)) => value.parse::<i64>().map_err(|_| {
             relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
         }),
         _ => Err(relation_unification_error(
