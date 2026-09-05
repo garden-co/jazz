@@ -69,7 +69,7 @@ fn budget_enter<E: de::Error>() -> Result<(), E> {
             .ok_or_else(|| E::custom("relation-query budget missing"))?;
         state.depth += 1;
         state.nodes += 1;
-        if state.depth > MAX_RELATION_DEPTH || state.nodes > MAX_RELATION_ITEMS {
+        if state.depth > MAX_RELATION_DEPTH + 1 || state.nodes > MAX_RELATION_ITEMS {
             Err(E::custom("relation-query tree limit"))
         } else {
             Ok(())
@@ -1513,13 +1513,27 @@ mod relation_postcard_tests {
 
     #[test]
     fn typed_postcard_rejects_deep_filter_before_ast_construction() {
+        let table_scan = [0, 1, b't', 0];
+        let mut boundary = vec![1; MAX_RELATION_DEPTH];
+        boundary.extend([0, 1, b't', 0]);
+        boundary.extend(std::iter::repeat_n(9, MAX_RELATION_DEPTH));
+        assert!(decode_relation_query_postcard(&boundary).is_ok());
+
         let mut relation = vec![1; MAX_RELATION_DEPTH + 1];
         relation.extend([0, 1, b't', 0]);
         relation.extend(std::iter::repeat_n(9, MAX_RELATION_DEPTH + 1));
         assert!(std::panic::catch_unwind(|| decode_relation_query_postcard(&relation)).is_ok());
         assert!(decode_relation_query_postcard(&relation).is_err());
+        assert_eq!(
+            decode_relation_query_postcard(&table_scan).unwrap(),
+            RelationQuery {
+                rel: RelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                },
+            }
+        );
 
-        let table_scan = [0, 1, b't', 0];
         let mut query = Query::from("t");
         query.relation = Some(RelationQuery {
             rel: RelationExpr::TableScan {
@@ -1533,6 +1547,11 @@ mod relation_postcard_tests {
         query_bytes.extend(&relation);
         assert!(std::panic::catch_unwind(|| postcard::from_bytes::<Query>(&query_bytes)).is_ok());
         assert!(postcard::from_bytes::<Query>(&query_bytes).is_err());
+        let valid_query_bytes = postcard::to_allocvec(&query).unwrap();
+        assert_eq!(
+            crate::wire::decode_postcard_exact::<Query>(&valid_query_bytes).unwrap(),
+            query
+        );
 
         let shape = crate::protocol::ShapeAst::new_relation(
             RelationQuery {
@@ -1554,6 +1573,12 @@ mod relation_postcard_tests {
             .is_ok()
         );
         assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
+        let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            crate::wire::decode_postcard_exact::<crate::protocol::ShapeAst>(&valid_shape_bytes)
+                .unwrap(),
+            shape
+        );
 
         let mut union = Vec::new();
         for _ in 0..=MAX_RELATION_DEPTH {
@@ -1562,6 +1587,45 @@ mod relation_postcard_tests {
         union.extend([0, 1, b't', 0]);
         assert!(std::panic::catch_unwind(|| decode_relation_query_postcard(&union)).is_ok());
         assert!(decode_relation_query_postcard(&union).is_err());
+    }
+
+    #[test]
+    fn typed_postcard_node_limit_matches_union_and_value_boundaries() {
+        let union = RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: (0..(MAX_RELATION_ITEMS - 1))
+                    .map(|index| RelationUnionArm {
+                        label: format!("u{index}"),
+                        input: RelationExpr::TableScan {
+                            table: "t".into(),
+                            alias: None,
+                        },
+                    })
+                    .collect(),
+            },
+        };
+        assert!(encode_relation_query_postcard(&union).is_ok());
+
+        let values = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::In {
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "c".into(),
+                    },
+                    values: std::iter::repeat_n(
+                        RelationValueRef::RowId(RelationRowIdRef::Current),
+                        MAX_RELATION_ITEMS - 3,
+                    )
+                    .collect(),
+                },
+            },
+        };
+        assert!(encode_relation_query_postcard(&values).is_ok());
     }
 
     #[test]
