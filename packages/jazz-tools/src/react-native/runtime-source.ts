@@ -66,6 +66,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
+  private lifecycleForeground: NativeForegroundDb | null = null;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (config.sqliteStorage !== undefined) {
@@ -82,20 +83,17 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
         const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
-          const db = new NativeForegroundDb(
+          if (this.lifecycleForeground) return run(this.lifecycleForeground);
+          // Connectivity is available before the lazy schema client exists.
+          const temporary = new NativeForegroundDb(
             this.foregroundFactory!.openAttached(capability),
             foreground,
           );
           try {
-            return run(db);
+            return run(temporary);
           } finally {
-            db.close();
+            temporary.close();
           }
-        };
-        this.nativeConnection = {
-          configured: () => withForeground((db) => db.nativeConnectionStatus().configured),
-          disconnect: () => withForeground((db) => db.disconnectNativeUpstream()),
-          reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
         };
         const opened = new NativeForegroundDb(
           this.foregroundFactory.openAttached(capability),
@@ -103,6 +101,15 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         );
         try {
           const metadata = opened.nativeSessionMetadata();
+          const configured = opened.nativeConnectionStatus().configured;
+          // The admitted scope's transport configuration is immutable. Lifecycle
+          // actions use the application owner, rather than opening a recovery
+          // foreground merely to inspect or change connectivity.
+          this.nativeConnection = {
+            configured: () => configured,
+            disconnect: () => withForeground((db) => db.disconnectNativeUpstream()),
+            reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
+          };
           this.admittedSession = markTrustedReservedSession({
             issuer: metadata.issuer,
             user_id: metadata.userId,
@@ -159,8 +166,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       if (!factory || !module)
         throw new Error("React Native native foreground runtime is not loaded");
       const session = resolveNativeSession(context.config);
+      const foreground = new NativeForegroundDb(factory.openAttached(capability), module);
+      this.lifecycleForeground = foreground;
       const runtime = NativeRuntimeAdapter.fromDb(
-        new NativeForegroundDb(factory.openAttached(capability), module),
+        foreground,
         context.schema,
         randomNativeNodeBytes(),
         authorBytesForSession(session),

@@ -835,7 +835,17 @@ where
             // can be ingested before its Local ack or later authority fate.
             downstream_fates.borrow_mut().push(unit.clone());
             if pending_set.contains(&tx_id) {
-                self.queue_pending_upload(tx_id, Some(unit));
+                // Durable recovery omits exclusive snapshot/read evidence. A
+                // live sibling may already retain the exact authored unit;
+                // never replace that unit with its redacted history replay.
+                let retained_unit = self
+                    .outbox
+                    .borrow()
+                    .iter()
+                    .any(|pending| pending.tx_id == tx_id && pending.unit.is_some());
+                if !retained_unit {
+                    self.queue_pending_upload(tx_id, Some(unit));
+                }
             }
         }
         for tx_id in pending {

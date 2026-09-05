@@ -217,6 +217,11 @@ integration run passes all 2982 tests, with eight skipped, using the canonical
 4 MiB stack and the RN bridge feature. This is still a Rust receipt; default
 and RN bridge artifact consumers remain separate required gates.
 
+The subsequent reviewed RN merge at `458bc466ab` adds the live-upload evidence
+retention and foreground connection-lifecycle fixes. Its new native exclusive
+transaction canary uses the shared cell fixture encoder. The combined Rust
+gate then passes all 2983 tests, with eight skipped, including that new canary.
+
 This inventory is scoped to descriptor ownership, not a repository-wide claim
 that Postcard is runtime-only. Outer peer transport still uses its frozen
 Postcard grammar. Query and binding IDs use explicit canonical request bytes;

@@ -7262,6 +7262,252 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn recovered_sibling_cannot_replace_live_exclusive_upload() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("todos")
+                        .column("title", ColumnType::Text)
+                        .column("done", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+        .unwrap();
+        let server = JazzServer::builder()
+            .with_schema(schema.public_schema().clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
+        let admitted = fixture.begin_private_session(
+            &server.base_url(),
+            &server.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let foreground = fixture.open_foreground(&admitted);
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        jazz_testkit::wait_for(Duration::from_secs(5), "real upstream installed", || {
+            let installed = client
+                .relay
+                .run(|worker| {
+                    Ok(worker.upstream_attached
+                        && worker.socket_wire.is_some()
+                        && worker.upstream_transition.is_none())
+                })
+                .unwrap();
+            async move { installed.then_some(()) }
+        })
+        .await;
+        let row_id = [0x61; 16];
+        let descriptor =
+            RecordDescriptor::new([("title", ValueType::String), ("done", ValueType::Bool)]);
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        };
+        let raw = descriptor
+            .create(&[Value::String("before".into()), Value::Bool(false)])
+            .unwrap();
+        let ForegroundDbCommandResponse::MutationCommitted {
+            tx_id: inserted, ..
+        } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DirectMutation {
+                mutation: ForegroundMutationKind::Insert,
+                table: "todos".into(),
+                row_id: Some(row_id),
+                cells: encoded_cells(descriptor, raw),
+                options_json: format!(r#"{{"updatedAtMs":{}}}"#, now_ms()),
+            },
+        )
+        else {
+            panic!("direct insertion queues");
+        };
+        let mut initial_wait = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::WaitForTransaction {
+                tx_id: inserted,
+                tier: "global".into(),
+            },
+        );
+        for _ in 0..10000 {
+            let ForegroundDbCommandResponse::Pending { operation } = initial_wait else {
+                break;
+            };
+            fixture.tick(foreground);
+            tokio::task::yield_now().await;
+            initial_wait =
+                fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+        }
+        assert!(
+            matches!(
+                initial_wait,
+                ForegroundDbCommandResponse::TransactionSettled { .. }
+            ),
+            "{initial_wait:?}"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
+            vec![
+                5, 116, 111, 100, 111, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0
+            ]
+        );
+        let ForegroundDbCommandResponse::PreparedQuery {
+            query: remote_query,
+        } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::PrepareQuery {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+            },
+        )
+        else {
+            panic!("remote query prepares");
+        };
+        let mut remote = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::AllWithOptions {
+                query: remote_query,
+                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                transaction: None,
+            },
+        );
+        for _ in 0..1000 {
+            let ForegroundDbCommandResponse::Pending { operation } = remote else {
+                break;
+            };
+            fixture.tick(foreground);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            remote = fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+        }
+        assert!(
+            matches!(remote, ForegroundDbCommandResponse::Rows { .. }),
+            "{remote:?}"
+        );
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DisconnectNativeUpstream,
+        );
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Exclusive,
+            },
+        ) else {
+            panic!("exclusive transaction opens");
+        };
+        assert_eq!(
+            fixture.execute(
+                foreground,
+                ForegroundDbCommandRequest::StageMutation {
+                    transaction,
+                    mutation: ForegroundMutationKind::Update,
+                    table: "todos".into(),
+                    row_id: Some(row_id),
+                    cells: encoded_title_cells("accepted"),
+                    options_json: format!(r#"{{"updatedAtMs":{}}}"#, now_ms()),
+                }
+            ),
+            ForegroundDbCommandResponse::MutationStaged
+        );
+        let ForegroundDbCommandResponse::PreparedQuery { query } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::PrepareQuery {
+                query: postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
+            },
+        ) else {
+            panic!("query prepares");
+        };
+        let mut read = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::AllWithOptions {
+                query,
+                options_json: r#"{"tier":"local","local_updates":"deferred"}"#.into(),
+                transaction: Some(transaction),
+            },
+        );
+        for _ in 0..200 {
+            let ForegroundDbCommandResponse::Pending { operation } = read else {
+                break;
+            };
+            fixture.tick(foreground);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            read = fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+        }
+        assert!(
+            matches!(read, ForegroundDbCommandResponse::Rows { .. }),
+            "{read:?}"
+        );
+        let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::CommitTransaction { transaction },
+        ) else {
+            panic!("exclusive commit queues");
+        };
+        let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::WaitForTransaction {
+                tx_id,
+                tier: "global".into(),
+            },
+        ) else {
+            panic!("offline acceptance waits");
+        };
+        for _ in 0..100 {
+            fixture.tick(foreground);
+            assert!(matches!(
+                fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation }),
+                ForegroundDbCommandResponse::Pending { .. }
+            ));
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // Reopening a sibling recovers pending local history before reconnect.
+        // That recovery must not replace the live exclusive commit's evidence.
+        let _sibling = fixture.open_foreground(&admitted);
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::ReconnectNativeUpstream,
+        );
+        let mut settled = ForegroundDbCommandResponse::Pending { operation };
+        for _ in 0..1000 {
+            fixture.tick(foreground);
+            settled = fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+            if !matches!(settled, ForegroundDbCommandResponse::Pending { .. }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            settled,
+            ForegroundDbCommandResponse::TransactionSettled { tx_id }
+        );
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            server.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_invalid_bearer_still_fails_closed() {
         let issuer = TestJwtIssuer::start().await;
         let schema = schema();
