@@ -283,7 +283,7 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
       ne?: MaybeNullableWhere<T, TOptional>;
     } & TExtra);
 type Membership<T> = { in?: T[]; notIn?: T[] };
-type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
+type NumberWhere<T extends number | bigint, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
   { gt?: T; gte?: T; lt?: T; lte?: T } & Membership<T>
@@ -314,44 +314,46 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
       ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, Membership<boolean>>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
-        : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
-          ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
-          : ColumnBuilderSqlType<TBuilder> extends "UUID"
-            ? UuidWhere<ColumnBuilderOptional<TBuilder>>
-            : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? WhereEqNe<
-                  Uint8Array,
-                  ColumnBuilderOptional<TBuilder>,
-                  Membership<Uint8Array | number[]>
-                >
-              : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        : ColumnBuilderSqlType<TBuilder> extends "BIGINT"
+          ? NumberWhere<bigint, ColumnBuilderOptional<TBuilder>>
+          : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
+            ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
+            : ColumnBuilderSqlType<TBuilder> extends "UUID"
+              ? UuidWhere<ColumnBuilderOptional<TBuilder>>
+              : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
                 ? WhereEqNe<
-                    StoredColumnValue<TBuilder>,
+                    Uint8Array,
                     ColumnBuilderOptional<TBuilder>,
-                    Membership<StoredColumnValue<TBuilder>>
+                    Membership<Uint8Array | number[]>
                   >
-                : ColumnBuilderSqlType<TBuilder> extends {
-                      kind: "ENUM";
-                      variants: readonly (infer TVariant extends string)[];
-                    }
-                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
+                : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+                  ? WhereEqNe<
+                      StoredColumnValue<TBuilder>,
+                      ColumnBuilderOptional<TBuilder>,
+                      Membership<StoredColumnValue<TBuilder>>
+                    >
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ENUM";
-                        cases: readonly unknown[];
+                        variants: readonly (infer TVariant extends string)[];
                       }
-                    ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                    ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
                     : ColumnBuilderSqlType<TBuilder> extends {
-                          kind: "ARRAY";
-                          element: infer TElementSql extends SqlType;
+                          kind: "ENUM";
+                          cases: readonly unknown[];
                         }
-                      ? WhereEqNe<
-                          StoredColumnValue<TBuilder>,
-                          ColumnBuilderOptional<TBuilder>,
-                          { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
-                            StoredColumnValue<TBuilder>
+                      ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                      : ColumnBuilderSqlType<TBuilder> extends {
+                            kind: "ARRAY";
+                            element: infer TElementSql extends SqlType;
+                          }
+                        ? WhereEqNe<
+                            StoredColumnValue<TBuilder>,
+                            ColumnBuilderOptional<TBuilder>,
+                            { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
+                              StoredColumnValue<TBuilder>
+                            >
                           >
-                        >
-                      : never;
+                        : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -968,7 +970,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 }
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
-  return value instanceof Uint8Array ? [...value] : value;
+  if (value instanceof Uint8Array) return [...value];
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {

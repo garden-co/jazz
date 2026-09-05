@@ -12,6 +12,7 @@ const app = s.defineApp({
   todos: s.table({
     title: s.string(),
     body: s.string(),
+    rank: s.bigint(),
     attachment: s.bytes(),
     metadata: s.json(),
     done: s.boolean(),
@@ -36,6 +37,17 @@ describe("translateQuery", () => {
     const translated = JSON.parse(translateQuery(union._build(), app.wasmSchema));
     expect(translated).toHaveProperty("relation_ir");
     expect(JSON.stringify(translated.relation_ir)).toContain('"Union"');
+  });
+
+  it("preserves signed bigint union literals through relation JSON", () => {
+    const query = app.union([
+      app.todos.where({ rank: 9_007_199_254_740_993n }),
+      app.todos.where({ rank: -9_007_199_254_740_993n }),
+    ]);
+    const translated = JSON.parse(translateQuery(query._build(), app.wasmSchema));
+    const relationJson = JSON.stringify(translated.relation_ir);
+    expect(relationJson).toContain('"9007199254740993"');
+    expect(relationJson).toContain('"-9007199254740993"');
   });
 
   it("derives bounded, typed-distinct union labels", () => {
