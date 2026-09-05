@@ -7991,6 +7991,9 @@ mod tests {
                 _normal_permit: None,
             })
             .expect("the final owner slot carries a deterministic drain receipt");
+        sender
+            .try_send(RelayCommand::FlushForegroundWakes)
+            .expect("the coalesced internal wake occupies its dedicated slot");
         assert!(matches!(
             sender.try_send(RelayCommand::Run {
                 job: Box::new(|_| {}),
