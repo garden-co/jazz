@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ReadTier } from "../../src/runtime/client.js";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
@@ -108,12 +108,15 @@ it("waits for native upstream authority before accepting an exclusive commit", a
     await withNativeRelayFixture(
       { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
       async (fixture) => {
+        const openForeground = vi.spyOn(fixture.nativeHost, "openAttached");
         const db = await fixture.createDb();
+        const applicationOpens = openForeground.mock.calls.length;
         const base = await db
           .insert(app.todos, { title: "before", done: false })
           .wait({ tier: "global" });
         await db.all(app.todos, { tier: ReadTier.Remote });
         await db.disconnect();
+        expect(openForeground).toHaveBeenCalledTimes(applicationOpens);
         const tx = db.beginExclusiveTransaction();
         tx.update(app.todos, base.id, { title: "accepted" });
         expect(await tx.one(app.todos)).toEqual({ ...base, title: "accepted" });
@@ -132,6 +135,7 @@ it("waits for native upstream authority before accepting an exclusive commit", a
         await new Promise((resolve) => setTimeout(resolve, 100));
         expect(settled).toBe(false);
         await db.reconnect();
+        expect(openForeground).toHaveBeenCalledTimes(applicationOpens);
         await accepted;
         expect(await db.one(app.todos, { tier: ReadTier.Remote })).toEqual({
           ...base,
