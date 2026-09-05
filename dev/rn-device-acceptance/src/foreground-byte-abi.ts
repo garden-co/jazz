@@ -194,7 +194,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
       throw new Error("foreground B could not prepare the todos subscription");
     const subscribed = execute(b, { type: "subscribe", query: prepared.query });
     if (subscribed.type !== "subscribed")
-      throw new Error("foreground B could not subscribe to the owner-protected scope query");
+      throw new Error("foreground B could not subscribe to the todos query");
 
     // Settle and acknowledge B's initial reset before A writes. Subscribe may
     // make the reset immediately ready without scheduling a wake, so Drain must
