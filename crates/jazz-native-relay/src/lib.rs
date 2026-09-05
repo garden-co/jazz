@@ -4620,7 +4620,9 @@ impl RelayWorker {
                 Ok(true) => {}
                 Ok(false) => self.closing.push_back(closing),
                 Err(error) => {
-                    self.closing.push_back(closing);
+                    // A core/storage close error is terminal for this owner.
+                    // Release it now; other local drains still need their turns.
+                    debug_assert!(closing.close.is_none());
                     return Err(error);
                 }
             }
@@ -4632,6 +4634,21 @@ impl RelayWorker {
         let ids: Vec<_> = self.clients.keys().copied().collect();
         for id in ids {
             let _ = self.retire_foreground(id);
+        }
+    }
+
+    fn finish_foreground_retirement(&mut self) {
+        self.retire_all_foregrounds();
+        while !self.closing.is_empty() {
+            // pump polls local closes before any persistent peer work. An
+            // unrelated I/O failure must not discard still-pending local work;
+            // a terminal core close error removes only that failed owner.
+            let _ = self.pump();
+            if !self.closing.is_empty() {
+                // No JavaScript callback remains to schedule these turns. Keep
+                // pending local storage moving without spinning on a peer error.
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 
@@ -5890,12 +5907,7 @@ impl NativeRelay {
                             continue;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            worker.retire_all_foregrounds();
-                            while !worker.closing.is_empty() {
-                                if worker.pump().is_err() {
-                                    break;
-                                }
-                            }
+                            worker.finish_foreground_retirement();
                             return;
                         }
                     };
@@ -5910,12 +5922,7 @@ impl NativeRelay {
                             }
                         }
                         RelayCommand::Shutdown(done) => {
-                            worker.retire_all_foregrounds();
-                            while !worker.closing.is_empty() {
-                                if worker.pump().is_err() {
-                                    break;
-                                }
-                            }
+                            worker.finish_foreground_retirement();
                             drop(worker);
                             let _ = done.send(());
                             return;
@@ -8762,6 +8769,138 @@ mod tests {
             "local commit completion receipt"
         );
         assert!(released, "peer I/O failure cannot pin the closing owner");
+    }
+
+    // Internal receipt: public hosts cannot deterministically stall the local
+    // transaction FIFO or poison the independent persistent peer queue.
+    #[test]
+    fn shutdown_keeps_local_commit_despite_persistent_io_failure() {
+        shutdown_failure_receipt(true, false);
+    }
+
+    #[test]
+    fn disconnected_owner_keeps_local_commit_despite_persistent_io_failure() {
+        shutdown_failure_receipt(true, true);
+    }
+
+    #[test]
+    fn shutdown_core_close_error_releases_failed_owner_and_finishes_sibling() {
+        shutdown_failure_receipt(false, false);
+    }
+
+    fn shutdown_failure_receipt(persistent_io_failure: bool, disconnected: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("shutdown-local.sqlite"),
+            Some("shutdown-local"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4e; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let observed = Arc::new(AtomicBool::new(false));
+        let receipt = Arc::clone(&observed);
+        relay
+            .run(move |worker| {
+                let tx = worker
+                    .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
+                let (db, state) = worker.foreground_transaction(id, tx)?;
+                let liveness = Arc::clone(&worker.liveness);
+                let _read = db.enqueue_transaction_read(state.open_tx_id, async move {
+                    // Deterministically keep accepted work pending through the
+                    // first shutdown turn, without timing or a JS-owned future.
+                    let mut pending_turns = 2;
+                    futures::future::poll_fn(move |context| {
+                        if liveness.is_alive() {
+                            return Poll::Pending;
+                        }
+                        if pending_turns > 0 {
+                            pending_turns -= 1;
+                            context.waker().wake_by_ref();
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(())
+                        }
+                    })
+                    .await;
+                    Ok(())
+                });
+                db.drive_queued_mutation_once();
+                let row = worker.insert_foreground_transaction(
+                    id,
+                    tx,
+                    "todos".into(),
+                    encoded_title_cells("accepted before shutdown"),
+                    None,
+                )?;
+                worker.commit_foreground_transaction(id, tx)?;
+                worker.retire_foreground(id)?;
+                let closing = worker.closing.back_mut().unwrap();
+                let close = closing.close.take().unwrap();
+                closing.close = Some(Box::pin(async move {
+                    close.await?;
+                    let current = db.local_current_row("todos", row).await?.expect(
+                        "accepted local commit must finish before shutdown releases its owner",
+                    );
+                    assert_eq!(current.row_uuid(), row);
+                    receipt.store(true, Ordering::Release);
+                    Ok(())
+                }));
+                if persistent_io_failure {
+                    let failed_inbound = Arc::new(Mutex::new(BoundedMessageQueue::default()));
+                    let poison = Arc::clone(&failed_inbound);
+                    assert!(
+                        std::panic::catch_unwind(move || {
+                            let _held = poison.lock().unwrap();
+                            panic!("controlled persistent queue failure");
+                        })
+                        .is_err()
+                    );
+                    worker.upstream_io.wire.inbound = failed_inbound;
+                } else {
+                    let failed_id = worker.attach_client(
+                        fresh_client_identity(AuthorSubject::for_test_bytes([0x4f; 16]))?,
+                        BTreeMap::new(),
+                        None,
+                    )?;
+                    worker.retire_foreground(failed_id)?;
+                    let liveness = Arc::clone(&worker.liveness);
+                    worker.closing.back_mut().unwrap().close =
+                        Some(Box::pin(futures::future::poll_fn(move |_| {
+                            if liveness.is_alive() {
+                                Poll::Pending
+                            } else {
+                                Poll::Ready(Err(jazz::db::Error {
+                                    code: jazz::db::ErrorCode::NotObserved,
+                                    message: "controlled terminal storage close failure".into(),
+                                }))
+                            }
+                        })));
+                    // Enter the same final drain on this owner turn, so an
+                    // earlier background turn cannot consume the injected error.
+                    worker.liveness.mark_terminal();
+                    worker.finish_foreground_retirement();
+                    assert!(
+                        worker.closing.is_empty(),
+                        "terminal core failure must not end the drain before its pending sibling"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        if disconnected {
+            // Drop the final command sender while retaining the join handle.
+            relay.inner.jobs.lock().unwrap().take();
+        }
+        relay.inner.shutdown().unwrap();
+        assert!(
+            observed.load(Ordering::Acquire),
+            "shutdown must finish the accepted local commit despite an independent peer or sibling close failure"
+        );
     }
 
     #[test]
