@@ -1477,9 +1477,45 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
 
 test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
   const workspace = job("test-rust-workspace");
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
+  const requiredSmokeTests = [
+    "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+    "jazz-sim::scenario_smoke=s1_saas_smoke",
+    "jazz-sim::scenario_smoke=micro_correctness_smoke",
+    "jazz-sim::scenario_smoke=s1_saas_db_surface_smoke",
+    "jazz-sim::scenario_smoke=s2_canvas_smoke",
+    "jazz-sim::scenario_smoke=s3_permissions_smoke",
+    "jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile",
+    "jazz-sim::scenario_smoke=s5_durable_stream_smoke",
+    "jazz-sim::scenario_smoke=s7_migrations_smoke",
+    "jazz-sim::scenario_smoke=s8_branch_views_smoke",
+    "jazz-sim::scenario_smoke=s9_durable_execution_smoke",
+  ];
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
+  assert.deepEqual(
+    [
+      ...localCi.matchAll(/"(?:jazz|jazz-sim)::(?:legacy_benchmark_smoke|scenario_smoke)=[^"]+"/g),
+    ].map((match) => match[0].slice(1, -1)),
+    requiredSmokeTests,
+  );
+  assert.doesNotMatch(
+    localCi,
+    /command\("benchmark deterministic scenario smoke", "bash", \[[\s\S]*benchmark-smoke\.sh[\s\S]*"--ci"/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        localCi.replace('"jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile",', ""),
+        /jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile/,
+      ),
+    /s4_order_processing_smoke_debug_profile/,
+  );
   assert.match(
     realisticWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
