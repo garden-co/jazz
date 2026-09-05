@@ -5038,6 +5038,9 @@ impl RelayWorker {
             .clients
             .remove(&id)
             .ok_or(RelayError::UnknownClient(id))?;
+        if let Some(generation) = self.foreground_wake_generations.remove(&id) {
+            generation.fetch_add(1, Ordering::AcqRel);
+        }
         let abandoned = client.abandon_foreground_transactions();
         let db = Rc::clone(&client.db);
         self.closing.push_back(ClosingForeground {
@@ -10462,6 +10465,14 @@ mod tests {
         assert_eq!(
             fixture.execute(a, ForegroundDbCommandRequest::Close),
             ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(
+            client
+                .relay
+                .run(|worker| Ok(worker.foreground_wake_generations.len()))
+                .unwrap(),
+            1,
+            "retiring one foreground releases its generation while its sibling remains live"
         );
         b_wake.queued.lock().unwrap().clear();
         waker.wake_by_ref();
