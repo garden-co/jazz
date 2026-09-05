@@ -12,6 +12,7 @@ import {
   encodeNativeRowValues,
   assertTerminalRootDescriptorCompatible,
   fieldIndex,
+  nativeRowDescriptorPublicName,
   readDescriptor,
   readNativeRowDescriptor,
   writeNativeRowDescriptor,
@@ -31,6 +32,27 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("resolves publication names from typed roles without exposing hidden metadata", () => {
+    const text = { tag: 8 } as const;
+
+    expect(
+      nativeRowDescriptorPublicName({
+        kind: "stored-column",
+        id: 7,
+        outputName: "title",
+        valueType: text,
+      }),
+    ).toBe("title");
+    expect(
+      nativeRowDescriptorPublicName({ kind: "result-field", name: "title", valueType: text }),
+    ).toBe("title");
+    // A private carrier may share a public name. Its role, rather than its raw
+    // spelling, prevents an observation from treating it as a publication.
+    expect(
+      nativeRowDescriptorPublicName({ kind: "hidden-metadata", name: "title", valueType: text }),
+    ).toBeUndefined();
+  });
+
   it("pins explicit hidden metadata tag 2 and rejects unknown publication tags", () => {
     const descriptor = [
       { kind: "hidden-metadata" as const, name: "schema_version", valueType: { tag: 3 } },

@@ -22,6 +22,7 @@ export {
   decodeRecordBytes,
   decodeRecordString,
   fieldIndex,
+  nativeRowDescriptorPublicName,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
