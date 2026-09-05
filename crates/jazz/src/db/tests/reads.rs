@@ -881,6 +881,50 @@ fn relation_union_all_preserves_labeled_same_row_derivations() {
         vec![alice, alice]
     );
     assert_ne!(removed[0].occurrence_id, removed[1].occurrence_id);
+
+    // Global order/window stays outside the UNION ALL arms. Rows from the
+    // same physical source tie on the user order and UUID, so the semantic
+    // arm carrier is the final deterministic page key.
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let windowed_query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                offset: 1,
+            }),
+            limit: 1,
+        },
+    };
+    let mut windowed =
+        block_on(db.subscribe_relation_query(&windowed_query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta {
+        added: windowed_opened,
+        ..
+    } = windowed.try_next_event().expect("windowed opening event")
+    else {
+        panic!("windowed subscription opening must be a delta");
+    };
+    assert_eq!(windowed_opened.len(), 1);
+    assert_eq!(
+        windowed_opened[0].occurrence_id.union_arms(),
+        &[(0, "second".to_owned())],
+        "the offset crosses the first physical-row occurrence into the second union arm",
+    );
 }
 
 #[test]

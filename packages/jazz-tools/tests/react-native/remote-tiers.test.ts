@@ -161,7 +161,7 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
   }
 }, 30_000);
 
-it("keeps local and RemoteIfPossible reads usable across an established native socket outage", async () => {
+it("keeps local work usable while remote read tiers recover from an established native socket outage", async () => {
   const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
@@ -200,10 +200,18 @@ it("keeps local and RemoteIfPossible reads usable across an established native s
         const write = db.insert(app.todos, { title: "durable through outage", done: false });
         const local = await write.wait({ tier: "local" });
         await expect.poll(async () => db.all(app.todos, { tier: ReadTier.Local })).toEqual([local]);
-        await expect
-          .poll(async () => db.all(app.todos, { tier: ReadTier.RemoteIfPossible }))
-          .toEqual([local]);
 
+        let remoteIfPossibleSettled = false;
+        const remoteIfPossible = db.all(app.todos, { tier: ReadTier.RemoteIfPossible }).then(
+          (rows) => {
+            remoteIfPossibleSettled = true;
+            return rows;
+          },
+          (error) => {
+            remoteIfPossibleSettled = true;
+            throw error;
+          },
+        );
         let strictSettled = false;
         const strict = db.all(app.todos, { tier: ReadTier.Remote }).then(
           (rows) => {
@@ -216,7 +224,7 @@ it("keeps local and RemoteIfPossible reads usable across an established native s
           },
         );
         await new Promise((resolve) => setTimeout(resolve, 100));
-        expect(strictSettled).toBe(false);
+        expect([remoteIfPossibleSettled, strictSettled]).toEqual([false, false]);
 
         server = await startLocalJazzServer({
           ...initial,
@@ -225,8 +233,14 @@ it("keeps local and RemoteIfPossible reads usable across an established native s
           jwtIssuer: issuer.issuer,
           jwtAudience: issuer.audience,
         });
-        await expect(strict).resolves.toEqual(expect.arrayContaining([local]));
+        const [resumedIfPossible, resumedStrict] = await Promise.all([remoteIfPossible, strict]);
+        for (const rows of [resumedIfPossible, resumedStrict]) {
+          // Recovery establishes a fresh authority snapshot, which may precede
+          // this queued write's later Global admission.
+          expect(rows.every((row) => row.id === local.id)).toBe(true);
+        }
         await write.wait({ tier: "global" });
+        await expect(db.all(app.todos, { tier: ReadTier.Remote })).resolves.toEqual([local]);
       },
       {
         appId: initial.appId,
