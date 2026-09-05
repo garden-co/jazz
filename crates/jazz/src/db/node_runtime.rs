@@ -3818,11 +3818,10 @@ where
                             // publication below handles an unchanged but
                             // newly complete closure.
                         }
-                        LocalMaintainedViewSubscriptionUpdate::Flat {
-                            authoritative_membership_changed,
-                            added,
-                            removed,
-                        } => {
+                        update @ (LocalMaintainedViewSubscriptionUpdate::Flat { .. }
+                        | LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+                            ..
+                        }) => {
                             let state_ref = &mut refresh;
                             let previous_snapshot = materialized_subscription_snapshot(
                                 &state_ref.snapshot,
@@ -3831,11 +3830,7 @@ where
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
-                                LocalMaintainedViewSubscriptionUpdate::Flat {
-                                    authoritative_membership_changed,
-                                    added,
-                                    removed,
-                                },
+                                update,
                                 shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,

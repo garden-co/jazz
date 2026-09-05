@@ -588,6 +588,36 @@ fn canonical_query_bytes_for_schema(
         }
         put_len(&mut bytes, query.offset);
     }
+    if let Some(relation) = &query.relation {
+        bytes.push(b'u');
+        put_bytes(&mut bytes, &canonical_relation_query_key(relation)?);
+    }
+    Ok(bytes)
+}
+
+/// Relation query identity is an explicitly canonical JSON tree: object keys
+/// sort lexicographically and scalar JSON values retain their exact content.
+/// This prevents array-derived labels from accidentally collapsing distinct
+/// literal values while keeping the public serde envelope out of shape ids.
+fn canonical_relation_query_key(query: &crate::query::RelationQuery) -> Result<Vec<u8>, QueryError> {
+    let value = serde_json::to_value(query)
+        .map_err(|error| QueryError::UnsupportedRelationQuery(format!("encode relation query: {error}")))?;
+    fn write(value: &serde_json::Value, out: &mut Vec<u8>) {
+        match value {
+            serde_json::Value::Null => out.push(b'n'),
+            serde_json::Value::Bool(value) => out.push(if *value { b't' } else { b'f' }),
+            serde_json::Value::Number(value) => { out.push(b'#'); put_str(out, &value.to_string()); }
+            serde_json::Value::String(value) => { out.push(b's'); put_str(out, value); }
+            serde_json::Value::Array(values) => { out.push(b'['); put_len(out, values.len()); for value in values { write(value, out); } }
+            serde_json::Value::Object(values) => {
+                out.push(b'{'); put_len(out, values.len());
+                for (key, value) in values { put_str(out, key); write(value, out); }
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"jazz-relation-v1");
+    write(&value, &mut bytes);
     Ok(bytes)
 }
 

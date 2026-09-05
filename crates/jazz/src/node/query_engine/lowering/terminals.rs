@@ -1690,6 +1690,12 @@ pub(super) fn root_join_occurrence_fields(
     {
         return Ok(Vec::new());
     }
+    if matches!(plan, AnalyzedQueryPlan::Union(_)) {
+        return Ok(vec![
+            ("__root_union_arm".to_owned(), ValueType::String),
+            ("__root_union_row".to_owned(), ValueType::Uuid),
+        ]);
+    }
     let Some(steps) = root_linear_steps(plan) else {
         return Ok(Vec::new());
     };
@@ -2411,7 +2417,10 @@ fn result_occurrence_union_arm_fields(
         return Ok(BTreeMap::new());
     }
     let fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
-    let mut joined_position = 0usize;
+    if matches!(plan, AnalyzedQueryPlan::Union(_)) {
+        return Ok(BTreeMap::from([(0, "__root_union_arm".to_owned())]));
+    }
+    let mut joined_position = 1usize;
     let mut pending_arm = None;
     let mut arms = BTreeMap::new();
     for (name, value_type) in fields {
