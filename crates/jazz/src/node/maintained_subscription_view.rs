@@ -349,7 +349,7 @@ enum MaintainedTerminalKind {
     /// Compiler-owned aggregate app rows. The same local terminal drives its
     /// reset state and subsequent replacements; derived aggregate results are
     /// never accepted from an authority snapshot.
-    AggregateAppRows(AggregateResultSchema),
+    AggregateAppRows(AppRowSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1671,6 +1671,18 @@ fn rebind_terminal_value(
 }
 
 impl MaintainedTerminalSchemas {
+    pub(in crate::node) fn aggregate_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::AggregateAppRows(output) => Some(output),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained aggregate has no compiler-owned app-row schema",
+            ))
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn footprint(&self) -> MaintainedTerminalSchemasFootprint {
         let terminal_schemas_bytes = btree_map_bytes(self.sinks.len())
@@ -1704,8 +1716,8 @@ impl MaintainedTerminalSchemas {
                     {
                         MaintainedTerminalKind::DirectAppRows(rows.clone())
                     }
-                    crate::node::query_engine::AppRowTerminal::Aggregate(schema) => {
-                        MaintainedTerminalKind::AggregateAppRows(schema.clone())
+                    crate::node::query_engine::AppRowTerminal::Aggregate(_) => {
+                        MaintainedTerminalKind::AggregateAppRows(rows.clone())
                     }
                     crate::node::query_engine::AppRowTerminal::Direct => {
                         panic!("direct app-row terminal has no row_uuid")
@@ -1942,7 +1954,13 @@ fn decode_typed_terminal_record(
     read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
-        MaintainedTerminalKind::AggregateAppRows(schema) => {
+        MaintainedTerminalKind::AggregateAppRows(output) => {
+            let crate::node::query_engine::AppRowTerminal::Aggregate(schema) = &output.terminal
+            else {
+                return Err(super::Error::InvalidStoredValue(
+                    "aggregate terminal lost its lowered schema",
+                ));
+            };
             decode_aggregate_app_row(record, schema)
         }
         MaintainedTerminalKind::ResultCurrent(schema) => {

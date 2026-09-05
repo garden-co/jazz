@@ -1,6 +1,14 @@
 use super::*;
 
 impl Database {
+    /// Infer the exact output contract without installing or executing a graph.
+    pub fn graph_output_descriptor(&self, graph: &GraphBuilder) -> Result<RecordDescriptor, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .infer_builder_output(graph)
+            .map_err(Into::into)
+    }
+
     /// Allocate an opaque mutable input source for graphs maintained by this
     /// database. The identity is runtime-local and cannot be reused after the
     /// database closes.

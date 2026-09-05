@@ -43,6 +43,29 @@ fn app_row_terminal_schema(output: &ProgramOutputSchemas) -> Result<&AppRowSchem
         ))
 }
 
+pub(super) fn materialization_app_row_schema(
+    plan: Option<&PreparedQueryPlan>,
+    program: Option<&QueryProgram>,
+) -> Result<AppRowSchema, Error> {
+    match plan {
+        Some(plan) => plan
+            .app_row_schema()
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "prepared plan has no app-row schema",
+            )),
+        None => app_row_terminal_schema(
+            &program
+                .ok_or(Error::InvalidStoredValue(
+                    "materialization has no lowered program",
+                ))?
+                .lowered
+                .output,
+        )
+        .cloned(),
+    }
+}
+
 pub(super) fn lowered_terminal_graph(
     program: &QueryProgram,
     sink: &str,
@@ -721,6 +744,7 @@ where
         _shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
+        let output = app_row_terminal_schema(&program.lowered.output)?.clone();
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_materialization_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
@@ -747,7 +771,7 @@ where
                 .zip(params.iter().map(|param| param.ty.clone())),
         );
         if params.is_empty() {
-            Ok(PreparedQueryPlan::Graph(graph))
+            Ok(PreparedQueryPlan::Graph { graph, output })
         } else {
             let binding_source_shape = program
                 .request
@@ -775,6 +799,7 @@ where
             Ok(PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
                 params,
+                output,
             })
         }
     }

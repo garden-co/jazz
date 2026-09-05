@@ -206,14 +206,15 @@ where
     pub(super) fn materialize_aggregate_query_rows(
         &mut self,
         query: &crate::query::Query,
-        _table: &TableSchema,
+        output: &AppRowSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             rows.push(aggregate_current_row_from_record(
                 query,
-                aggregate_query_row_uuid(query, &record)?,
+                output,
+                aggregate_query_row_uuid(output, &record)?,
                 &record,
             )?);
         }
@@ -320,6 +321,7 @@ where
                 .current_row_from_aggregate_result_payload(
                     local.result_schema_version,
                     &local.result_query,
+                    local.terminal_schemas.aggregate_app_row_schema()?,
                     member,
                     payload,
                 )
@@ -441,6 +443,7 @@ where
                 .current_row_from_aggregate_result_payload(
                     local.result_schema_version,
                     &local.result_query,
+                    local.terminal_schemas.aggregate_app_row_schema()?,
                     member,
                     payload,
                 )
@@ -666,6 +669,7 @@ where
         &mut self,
         read_schema: SchemaVersionId,
         query: &crate::query::Query,
+        output: &AppRowSchema,
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
@@ -683,6 +687,7 @@ where
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
         let mut row = aggregate_current_row_from_record(
             query,
+            output,
             aggregate_result_member_row_uuid(member)?,
             &payload_record,
         )?;

@@ -1,5 +1,6 @@
 //! Aggregate result shaping and ordering for query evaluation.
 
+use crate::node::query_engine::{AggregateResultSchema, AppRowTerminal};
 use std::cmp::Ordering;
 
 use groove::records::BorrowedRecord;
@@ -82,33 +83,49 @@ fn aggregate_result_column_type(
 /// Use the same stable identity for direct aggregate reads and maintained
 /// aggregate delivery. A global aggregate is keyed by `"global"`; grouped
 /// aggregates are keyed by their lowered group value.
+pub(super) fn aggregate_output_schema(
+    output: &super::AppRowSchema,
+) -> Result<&AggregateResultSchema, Error> {
+    match &output.terminal {
+        AppRowTerminal::Aggregate(schema) => Ok(schema),
+        _ => Err(Error::InvalidStoredValue(
+            "aggregate materialization has no lowered aggregate schema",
+        )),
+    }
+}
+
+pub(super) fn aggregate_record_field_index(
+    record: &BorrowedRecord<'_>,
+    field: &groove::records::DescriptorField,
+) -> Result<usize, Error> {
+    let identity = field.identity.as_ref().ok_or(Error::InvalidStoredValue(
+        "lowered aggregate field has no identity",
+    ))?;
+    let descriptor = record.descriptor();
+    let index = descriptor
+        .field_index_by_identity(identity)
+        .ok_or(Error::InvalidStoredValue(
+            "aggregate output is missing its lowered field identity",
+        ))?;
+    Ok(index)
+}
+
 pub(super) fn aggregate_query_row_uuid(
-    query: &crate::query::Query,
+    output: &super::AppRowSchema,
     record: &BorrowedRecord<'_>,
 ) -> Result<RowUuid, Error> {
-    let aggregate = query.aggregate.as_ref().ok_or(Error::InvalidStoredValue(
-        "aggregate query missing aggregate",
-    ))?;
-    let (row_value, row_type) = match &aggregate.group_by {
-        Some(group_by) => {
-            let index =
-                record
-                    .descriptor()
-                    .field_index(group_by)
-                    .ok_or(Error::InvalidStoredValue(
-                        "aggregate record is missing group identity",
-                    ))?;
+    let aggregate = aggregate_output_schema(output)?;
+    if aggregate.group_key_fields.len() > 1 {
+        return Err(Error::InvalidStoredValue(
+            "aggregate row identity requires one lowered group field",
+        ));
+    }
+    let (row_value, row_type) = match aggregate.group_key_fields.first() {
+        Some(group) => {
+            let index = aggregate_record_field_index(record, group)?;
             (
                 record.get_idx(index)?,
-                record
-                    .descriptor()
-                    .fields()
-                    .get(index)
-                    .ok_or(Error::InvalidStoredValue(
-                        "aggregate group identity field is missing from descriptor",
-                    ))?
-                    .value_type
-                    .clone(),
+                record.descriptor().fields()[index].value_type.clone(),
             )
         }
         None => (

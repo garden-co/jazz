@@ -1791,13 +1791,20 @@ fn lowered_aggregate_terminals(
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
+    let aggregate_descriptor = aggregate_app_row_descriptor(plan, source)?;
     let aggregate_graph = if root_route_fields.is_empty() {
         graph
     } else {
         graph.project_fields(
-            available_fields
+            aggregate_descriptor
+                .fields()
                 .iter()
-                .map(ProjectField::named)
+                .map(|field| {
+                    ProjectField::named_with_identity(
+                        field.name.as_ref().expect("aggregate carrier"),
+                        field.identity.clone().expect("aggregate identity"),
+                    )
+                })
                 .chain(root_route_fields.iter().map(ProjectField::named))
                 .collect::<Vec<_>>(),
         )
@@ -3246,11 +3253,13 @@ fn aggregate_result_membership_fields(
             output_identity: identity,
         });
     }
-    fields.extend(
-        outputs
-            .iter()
-            .map(|output| ProjectField::named(aggregate_output_field(&output.output.name))),
-    );
+    fields.extend(outputs.iter().map(|output| ProjectField {
+        expression: groove::ivm::ProjectExpr::Field(FieldRef::stored_name(aggregate_output_field(
+            &output.output.name,
+        ))),
+        output_name: aggregate_output_field(&output.output.name),
+        output_identity: FieldIdentity::Name(output.output.name.clone()),
+    }));
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
 }

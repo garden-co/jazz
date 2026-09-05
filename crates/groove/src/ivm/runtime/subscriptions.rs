@@ -3844,7 +3844,7 @@ impl IvmRuntime {
         }))
     }
 
-    fn infer_builder_output(
+    pub(crate) fn infer_builder_output(
         &self,
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {

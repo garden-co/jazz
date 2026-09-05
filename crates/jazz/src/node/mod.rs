@@ -2653,12 +2653,25 @@ pub enum CatalogueActivationFailpoint {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PreparedQueryPlan {
-    Graph(GraphBuilder),
+    Graph {
+        graph: GraphBuilder,
+        output: query_engine::AppRowSchema,
+    },
     Prepared {
         shape: PreparedShapeId,
         params: Vec<PreparedQueryParam>,
+        output: query_engine::AppRowSchema,
     },
     PeerMaintainedMarker,
+}
+
+impl PreparedQueryPlan {
+    fn app_row_schema(&self) -> Option<&query_engine::AppRowSchema> {
+        match self {
+            Self::Graph { output, .. } | Self::Prepared { output, .. } => Some(output),
+            Self::PeerMaintainedMarker => None,
+        }
+    }
 }
 
 pub(crate) type PreparedQueryPlanHandle = Arc<PreparedQueryPlan>;
