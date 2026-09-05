@@ -43,11 +43,11 @@ describe("React Native transaction reads through the native C ABI", () => {
       const db = await fixture.createDb();
       const row = db.insert(app.todos, { title: "deleted", done: false }).value;
       await db.all(app.todos);
-      await db.delete(app.todos, row.id).wait();
+      await db.delete(app.todos, row.id).wait({ tier: "local" });
       const tx = db.beginTransaction();
       await expect(async () => {
         tx.update(app.todos, row.id, { title: "must not revive" });
-        await tx.commit().wait();
+        await tx.commit().wait({ tier: "local" });
       }).rejects.toThrow();
       expect(await db.all(app.todos)).toEqual([]);
     });

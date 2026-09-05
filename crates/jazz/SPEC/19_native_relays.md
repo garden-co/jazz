@@ -555,6 +555,14 @@ The relay worker retains removed foreground owners until their ordinary local
 `Db::close` drain finishes, including accepted commits; bounded cleanup turns run
 without callbacks into the closed JavaScript runtime. It does not wait for all
 peer frames or strengthen foreground close into a relay/network flush primitive.
+Retirement drops retained query-preparation futures before attempting HLC
+handoff. The HLC read is a single bounded poll: a contended owner makes the
+handoff uncertain and permanently retires that node identity; a later foreground
+receives a different node rather than guessing a safe clock floor. Accepted local
+work remains with the closing owner. Peer-I/O errors do not skip local close
+progress, and an abandonment error is reported only after close ownership has
+been retained. Final relay shutdown still awaits the accepted local close drain;
+this does not promise bounded completion of a never-ready storage operation.
 
 The V1 subset otherwise deliberately supports only `ReadOpts::default()`
 local-first reads. It fails closed for remote tiers/read views, relation

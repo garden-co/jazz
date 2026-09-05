@@ -3198,7 +3198,13 @@ impl NativeRelayClient {
             // Clean handoff retires this foreground. Release any suspended
             // owner before reading its monotonic minted HLC.
             client.cancel_pending_work();
-            Ok(block_on(client.db.minted_tx_time_high_water()))
+            let mut read = Box::pin(client.db.minted_tx_time_high_water());
+            match read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(high_water) => Ok(high_water),
+                Poll::Pending => Err(RelayError::ForegroundCommand(
+                    "foreground HLC readout is busy; retire its node identity".into(),
+                )),
+            }
         })
     }
 
@@ -4272,6 +4278,7 @@ impl ConnectedClient {
         self.tick = None;
         self.pending_operations.clear();
         self.pending_subscriptions.clear();
+        self.prepared_queries.clear();
         self.mutation_cleanups.clear();
         self.read_cleanup = None;
         self.read_cleanups.borrow_mut().clear();
@@ -4514,16 +4521,18 @@ struct ClosingForeground {
 
 impl ClosingForeground {
     fn poll(&mut self, waker: &Waker) -> Result<bool, RelayError> {
-        self.client.upstream_io.poll(waker)?;
-        self.client.poll_served_io(waker)?;
+        // Retirement is local. Failed peer I/O cannot prevent the local drain
+        // from being polled or make a completed close wait for network recovery.
+        let _ = self.client.upstream_io.poll(waker);
+        let _ = self.client.poll_served_io(waker);
         if let Some(close) = &mut self.close
             && let Poll::Ready(result) = close.as_mut().poll(&mut Context::from_waker(waker))
         {
             self.close = None;
             result.map_err(RelayError::Db)?;
         }
-        self.client.upstream_io.poll(waker)?;
-        self.client.poll_served_io(waker)?;
+        let _ = self.client.upstream_io.poll(waker);
+        let _ = self.client.poll_served_io(waker);
         Ok(self.close.is_none())
     }
 }
@@ -4593,7 +4602,7 @@ impl RelayWorker {
             .clients
             .remove(&id)
             .ok_or(RelayError::UnknownClient(id))?;
-        client.abandon_foreground_transactions()?;
+        let abandoned = client.abandon_foreground_transactions();
         let db = Rc::clone(&client.db);
         self.closing.push_back(ClosingForeground {
             client,
@@ -4601,7 +4610,7 @@ impl RelayWorker {
         });
         // Cleanup is owned by this worker after public handle retirement. Its
         // timeout-driven owner turns continue even with no JS wake callbacks.
-        Ok(())
+        abandoned
     }
 
     fn poll_closing(&mut self, waker: &Waker) -> Result<(), RelayError> {
@@ -8656,6 +8665,105 @@ mod tests {
         }
     }
 
+    // Internal receipt observes the local commit after Db::close completes,
+    // but before its retained owner is released. Close does not promise relay flush.
+    #[test]
+    fn closing_owner_finishes_local_commit_despite_peer_io_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("close-local.sqlite"),
+            Some("close-local"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4e; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let observed = Arc::new(AtomicBool::new(false));
+        let receipt = Arc::clone(&observed);
+        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+        relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                RETIRED_DB.with(|weak| *weak.borrow_mut() = Rc::downgrade(&db));
+                let held = Rc::clone(&db);
+                worker.start_foreground_operation(
+                    id,
+                    None,
+                    Box::pin(async move {
+                        held.hold_node_owner_for_test().await;
+                        unreachable!()
+                    }),
+                )?;
+                let tx = worker
+                    .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
+                let row = worker.insert_foreground_transaction(
+                    id,
+                    tx,
+                    "todos".into(),
+                    encoded_title_cells("accepted locally"),
+                    None,
+                )?;
+                worker.commit_foreground_transaction(id, tx)?;
+                worker.retire_foreground(id)?;
+                let closing = worker.closing.back_mut().unwrap();
+                let failed_inbound = Arc::new(Mutex::new(BoundedMessageQueue::default()));
+                let poison = Arc::clone(&failed_inbound);
+                assert!(
+                    std::panic::catch_unwind(move || {
+                        let _held = poison.lock().unwrap();
+                        panic!("controlled auxiliary queue failure");
+                    })
+                    .is_err()
+                );
+                closing.client.upstream_io.wire.inbound = failed_inbound;
+                assert!(closing.client.upstream_io.poll(Waker::noop()).is_err());
+                let close = closing.close.take().unwrap();
+                closing.close = Some(Box::pin(async move {
+                    close.await?;
+                    let current = db
+                        .local_current_row("todos", row)
+                        .await?
+                        .expect("accepted local commit must complete before owner release");
+                    assert_eq!(current.row_uuid(), row);
+                    assert!(!current.is_deleted());
+                    assert_eq!(
+                        current.cell(
+                            schema()
+                                .tables()
+                                .iter()
+                                .find(|table| table.name == "todos")
+                                .unwrap(),
+                            "title"
+                        ),
+                        Some(Value::String("accepted locally".into()))
+                    );
+                    receipt.store(true, Ordering::Release);
+                    Ok(())
+                }));
+                Ok(())
+            })
+            .unwrap();
+        let mut released = false;
+        for _ in 0..100 {
+            released = relay
+                .run(|_| Ok(RETIRED_DB.with(|weak| weak.borrow().upgrade().is_none())))
+                .unwrap();
+            if released {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            observed.load(Ordering::Acquire),
+            "local commit completion receipt"
+        );
+        assert!(released, "peer I/O failure cannot pin the closing owner");
+    }
+
     #[test]
     fn rolled_back_staging_failures_retire_queued_error_bookkeeping() {
         let directory = tempfile::tempdir().unwrap();
@@ -10627,6 +10735,127 @@ mod tests {
         let second = host.open_foreground(capability, 2).unwrap();
         assert_ne!(host.foregrounds[&second].lease.node, first_lease.node);
         assert!(host.close_foreground(second).unwrap());
+    }
+
+    // Internal queue hold models a cold transaction owner during synchronous
+    // native handoff. The public lease must retire rather than reuse an uncertain HLC.
+    #[test]
+    fn contended_hlc_readout_retires_identity_and_keeps_local_close_live() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = NativeRelayHost::default();
+        let capability = host
+            .admit_scope(RelayScopeAdmissionRequest {
+                scope: RelayScopeRequest {
+                    app_namespace: "contended-handoff".into(),
+                    storage_namespace: "default".into(),
+                    auth_scope: Some("validated".into()),
+                },
+                sqlite_path: directory
+                    .path()
+                    .join("handoff.sqlite")
+                    .display()
+                    .to_string(),
+                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xc1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xc2; 16]),
+                },
+                claims: BTreeMap::new(),
+            })
+            .unwrap();
+        let first = host.open_foreground(capability, 1).unwrap();
+        let keeper = host.open_foreground(capability, 2).unwrap();
+        let old_node = host.foregrounds[&first].lease.node;
+        let client = host.foreground_client(first).unwrap().clone();
+        let id = client.id;
+        let relay = client.relay.clone();
+        let tx = client
+            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+            .unwrap();
+        let release = relay
+            .run(move |worker| {
+                let (db, transaction) = worker.foreground_transaction(id, tx)?;
+                let (release, released) = futures::channel::oneshot::channel::<()>();
+                let held = Rc::clone(&db);
+                let _read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
+                    let hold = Box::pin(held.hold_node_owner_for_test());
+                    let _ = futures::future::select(released, hold).await;
+                    Ok(())
+                });
+                db.drive_queued_mutation_once();
+                Ok(release)
+            })
+            .unwrap();
+        client
+            .insert_foreground_transaction(
+                tx,
+                "todos".into(),
+                encoded_title_cells("admitted before retirement"),
+                None,
+            )
+            .unwrap();
+        client.commit_foreground_transaction(tx).unwrap();
+        assert_eq!(
+            host.close_foreground(first),
+            Err(JazzNativeRelayStatus::LifecycleFailure)
+        );
+        assert!(!host.foregrounds.contains_key(&first));
+        let next = host.open_foreground(capability, 3).unwrap();
+        assert_ne!(host.foregrounds[&next].lease.node, old_node);
+        release.send(()).unwrap();
+        for _ in 0..100 {
+            if relay.run(|worker| Ok(worker.closing.is_empty())).unwrap() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(relay.run(|worker| Ok(worker.closing.is_empty())).unwrap());
+        assert!(host.close_foreground(next).unwrap());
+        assert!(host.close_foreground(keeper).unwrap());
+    }
+
+    // Prepared-query futures can own the same node across cooperative awaits.
+    #[test]
+    fn handoff_drops_retained_preparation_owner_before_reading_hlc() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("prepare-handoff.sqlite"),
+            Some("prepare-handoff"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4f; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        relay
+            .run(move |worker| {
+                let db = Rc::clone(&worker.foreground_client(id)?.db);
+                let prepared: ForegroundPreparedQuery = async move {
+                    db.hold_node_owner_for_test().await;
+                    unreachable!()
+                }
+                .boxed_local()
+                .shared();
+                assert!(
+                    prepared
+                        .clone()
+                        .poll_unpin(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                worker
+                    .foreground_client_mut(id)?
+                    .prepared_queries
+                    .insert(999, prepared);
+                Ok(())
+            })
+            .unwrap();
+        client
+            .minted_tx_time_high_water()
+            .expect("dropping retained preparation releases the HLC owner");
+        client.close().unwrap();
     }
 
     #[test]
