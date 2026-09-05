@@ -5045,7 +5045,7 @@ mod authority_storage_codec_tests {
     }
 
     #[test]
-    fn source_closure_storage_rejects_retired_tags_and_malformed_bytes() {
+    fn source_closure_storage_rejects_unknown_tags_and_malformed_bytes() {
         // Internal codec boundary: callers cannot inject raw store bytes publicly.
         let output = ProgramFactEntry::ResultPayload(crate::protocol::ResultMemberPayloadEntry {
             member: ResultMemberEntry::row((
@@ -5068,9 +5068,9 @@ mod authority_storage_codec_tests {
         });
         let encoded = program_fact_storage_bytes(&fact).unwrap();
         for tag in (0..=255).filter(|tag| ![0, 1].contains(tag)) {
-            let mut retired = encoded.clone();
-            retired[5] = tag;
-            assert!(program_fact_from_storage_bytes(&retired).is_err());
+            let mut unknown = encoded.clone();
+            unknown[5] = tag;
+            assert!(program_fact_from_storage_bytes(&unknown).is_err());
         }
         let mut wrong_version = encoded.clone();
         wrong_version[4] += 1;
