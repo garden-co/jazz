@@ -1,5 +1,5 @@
 import { fetchSchemaHashes } from "jazz-tools";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
   normalizeSchemaHashInfos,
   type SchemaHashInfo,
@@ -33,26 +33,41 @@ export function DbConfigForm({
   title,
   onCancel,
 }: DbConfigFormProps) {
-  const [name, setName] = useState(initialValues?.name ?? "");
-  const [serverUrl, setServerUrl] = useState(initialValues?.serverUrl ?? "");
-  const [appId, setAppId] = useState(initialValues?.appId ?? "");
-  const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
-  const [env, setEnv] = useState(initialValues?.env ?? "dev");
+  const initialName = initialValues?.name ?? "";
+  const initialServerUrl = initialValues?.serverUrl ?? "";
+  const initialAppId = initialValues?.appId ?? "";
+  const initialAdminSecret = initialValues?.adminSecret ?? "";
+  const initialEnv = initialValues?.env ?? "dev";
+  const submissionGeneration = useRef(0);
+  const [name, setName] = useState(initialName);
+  const [serverUrl, setServerUrl] = useState(initialServerUrl);
+  const [appId, setAppId] = useState(initialAppId);
+  const [adminSecret, setAdminSecret] = useState(initialAdminSecret);
+  const [env, setEnv] = useState(initialEnv);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  useLayoutEffect(() => {
+    submissionGeneration.current += 1;
+    return () => {
+      submissionGeneration.current += 1;
+    };
+  }, [initialName, initialServerUrl, initialAppId, initialAdminSecret, initialEnv, mode]);
+
   useEffect(() => {
-    setName(initialValues?.name ?? "");
-    setServerUrl(initialValues?.serverUrl ?? "");
-    setAppId(initialValues?.appId ?? "");
-    setAdminSecret(initialValues?.adminSecret ?? "");
-    setEnv(initialValues?.env ?? "dev");
+    setName(initialName);
+    setServerUrl(initialServerUrl);
+    setAppId(initialAppId);
+    setAdminSecret(initialAdminSecret);
+    setEnv(initialEnv);
     setIsSubmitting(false);
     setErrorMessage(null);
-  }, [initialValues]);
+  }, [initialName, initialServerUrl, initialAppId, initialAdminSecret, initialEnv, mode]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const submissionId = ++submissionGeneration.current;
+
     setErrorMessage(null);
     setIsSubmitting(true);
 
@@ -69,13 +84,22 @@ export function DbConfigForm({
         appId: values.appId,
         adminSecret: values.adminSecret,
       })) as SchemaHashesResult;
+      if (submissionGeneration.current !== submissionId) return;
       onSubmit(values, normalizeSchemaHashInfos(hashes, schemas));
     } catch (error) {
+      if (submissionGeneration.current !== submissionId) return;
       const message = error instanceof Error ? error.message : String(error);
       setErrorMessage(message);
     } finally {
-      setIsSubmitting(false);
+      if (submissionGeneration.current === submissionId) {
+        setIsSubmitting(false);
+      }
     }
+  };
+
+  const handleCancel = () => {
+    submissionGeneration.current += 1;
+    onCancel?.();
   };
 
   return (
@@ -144,7 +168,7 @@ export function DbConfigForm({
           {isSubmitting ? "Fetching schemas…" : mode === "edit" ? "Save changes" : "Connect"}
         </button>
         {onCancel ? (
-          <button type="button" onClick={onCancel} className={styles.resetButton}>
+          <button type="button" onClick={handleCancel} className={styles.resetButton}>
             Cancel
           </button>
         ) : null}
