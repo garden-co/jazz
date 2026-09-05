@@ -285,6 +285,7 @@ test("Core observation counters distinguish server observation from a closed HTT
         await observation;
         return valid;
       },
+      async interruptAndRecover() {},
     },
     expected,
     host: "127.0.0.1",
