@@ -29,6 +29,7 @@ on:
         type: string
 
 env:
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
