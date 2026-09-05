@@ -450,14 +450,19 @@ pub(super) fn lowered_terminals(
                     .fields()
                     .iter()
                     .filter_map(|field| {
-                        Some((
-                            field.name.clone()?,
-                            source_publication_field(
-                                source,
-                                crate::node::query_engine::descriptor_public_name(field)?
-                                    .to_owned(),
-                            ),
-                        ))
+                        let carrier = field.name.clone()?;
+                        let binding = match crate::node::query_engine::descriptor_public_name(field)
+                        {
+                            Some(name) => source_publication_field(source, name.to_owned()),
+                            None => CurrentRowPublicationField::ResultField {
+                                name: carrier.clone(),
+                                visibility:
+                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                        &carrier,
+                                    ),
+                            },
+                        };
+                        Some((carrier, binding))
                     })
                     .collect(),
                 AppRowTerminal::Direct,
