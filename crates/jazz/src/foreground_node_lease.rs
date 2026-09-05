@@ -160,4 +160,63 @@ mod tests {
             Err(ForegroundNodeLeaseError::InactiveLease)
         );
     }
+
+    #[test]
+    fn checked_out_reusable_node_cannot_be_issued_concurrently_or_cleaned_twice() {
+        let mut pool = ForegroundNodeLeasePool::default();
+        let initial = pool.acquire_fresh(node(3)).unwrap();
+        pool.clean_handoff(ForegroundNodeLease {
+            confirmed_tx_time: TxTime(33),
+            ..initial
+        })
+        .unwrap();
+
+        let checked_out = pool.acquire_reusable().unwrap();
+        assert_eq!(checked_out.node, node(3));
+        assert_eq!(checked_out.confirmed_tx_time, TxTime(33));
+        assert_eq!(pool.acquire_reusable(), None);
+        assert_eq!(
+            pool.acquire_fresh(node(3)),
+            Err(ForegroundNodeLeaseError::DuplicateNode),
+            "a live runtime remains exclusive even after a prior clean return"
+        );
+
+        pool.clean_handoff(ForegroundNodeLease {
+            confirmed_tx_time: TxTime(34),
+            ..checked_out
+        })
+        .unwrap();
+        assert_eq!(
+            pool.clean_handoff(checked_out),
+            Err(ForegroundNodeLeaseError::InactiveLease),
+            "a duplicate cleanup cannot overwrite the later runtime handoff"
+        );
+        assert_eq!(
+            pool.acquire_reusable(),
+            Some(ForegroundNodeLease {
+                node: node(3),
+                confirmed_tx_time: TxTime(34),
+            })
+        );
+    }
+
+    #[test]
+    fn retirement_wins_over_a_late_clean_handoff() {
+        let mut pool = ForegroundNodeLeasePool::default();
+        let lease = pool.acquire_fresh(node(4)).unwrap();
+        pool.retire(lease).unwrap();
+
+        assert_eq!(
+            pool.clean_handoff(ForegroundNodeLease {
+                confirmed_tx_time: TxTime(44),
+                ..lease
+            }),
+            Err(ForegroundNodeLeaseError::InactiveLease)
+        );
+        assert_eq!(pool.acquire_reusable(), None);
+        assert_eq!(
+            pool.acquire_fresh(node(4)),
+            Err(ForegroundNodeLeaseError::DuplicateNode)
+        );
+    }
 }

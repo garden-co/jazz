@@ -335,6 +335,8 @@ where
                 authorized_deletion_preimage: None,
             });
         }
+        let snapshot_source = snapshot.is_some();
+        let mut snapshot_content_version = None;
         let (graph, descriptor, metadata, routing_fields) = if let Some((head, base)) = branch_view
         {
             if request.visibility == RowVisibility::IncludeDeleted
@@ -1020,10 +1022,7 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(snapshot) = snapshot {
-            if request.visibility != RowVisibility::Visible
-                || !request.requirements.metadata.is_empty()
-                || !matches!(authorization, SourceAuthorizationRequest::System)
-            {
+            if request.visibility != RowVisibility::Visible {
                 return Err(source_resolution_error(
                     request,
                     SourceGap::HistoricalStorageCut,
@@ -1038,14 +1037,84 @@ where
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            let graph = inline_current_graph(&table, rows)
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            (
-                graph,
-                current_row_descriptor(&table),
-                BTreeMap::new(),
-                BTreeSet::new(),
+            let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &table,
+                rows,
+                schema_version_alias,
+                "snapshot",
+                &request.requirements,
             )
+            .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            snapshot_content_version = request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::VersionPayloads)
+                .then(|| ContentVersionSource {
+                    graph: base
+                        .clone()
+                        .project(maintained_view_history_storage_field_names(&table)),
+                    row_uuid_field: "row_uuid".to_owned(),
+                });
+            let graph = match &authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(
+                            request,
+                            SourceGap::HistoricalStorageCut,
+                        ));
+                    }
+                    let param_binding_mode = if plan.binding_source_shape.is_some() {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    };
+                    let policy_request = self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &table.name,
+                        *permission_subject,
+                        param_binding_mode,
+                        DurabilityTier::Global,
+                        plan.binding_source_shape.clone(),
+                        plan.binding_user_params.clone(),
+                        plan.binding_claim_params.clone(),
+                    );
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
+                    let output_fields = descriptor_field_names(&descriptor).map_err(|_| {
+                        source_resolution_error(request, SourceGap::HistoricalStorageCut)
+                    })?;
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
+                }
+            };
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if let Some(tx_id) = open_tx_overlay {
             let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             let rows = self
@@ -1460,22 +1529,32 @@ where
             )
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
         };
-        let deletion_register = self.deletion_register_source_for_request(
-            request,
-            &table,
-            graph_tier,
-            history_position,
-            open_tx_overlay,
-        )?;
-        let content_version = self
-            .content_version_source_for_request(
+        let deletion_register = if snapshot_source {
+            // The snapshot is immutable and already excludes rows whose
+            // deletion winner is visible at its cut. It cannot later need a
+            // replacement/deletion transition sidecar.
+            None
+        } else {
+            self.deletion_register_source_for_request(
+                request,
+                &table,
+                graph_tier,
+                history_position,
+                open_tx_overlay,
+            )?
+        };
+        let content_version = if snapshot_source {
+            snapshot_content_version
+        } else {
+            self.content_version_source_for_request(
                 request,
                 &table,
                 graph_tier,
                 history_position,
                 open_tx_overlay,
             )
-            .await?;
+            .await?
+        };
         // The descriptor attached to the receiver input is the compiler's
         // canonical current-storage descriptor. The physical current arm
         // reaches that same boundary through its variant projection; retain
@@ -1995,6 +2074,26 @@ where
                 binding_user_params,
                 binding_claim_params,
             ),
+            SourceExpr::SnapshotRef {
+                data: DataSource::Current,
+                ..
+            } => {
+                let param_binding_mode = if binding_source_shape.is_some() {
+                    ParamBindingMode::RetainAllParams
+                } else {
+                    ParamBindingMode::InlineAllReachableSeeds
+                };
+                self.node.table_read_policy_authorization_request(
+                    self.read_view.policy_schema,
+                    &request.source.table,
+                    *permission_subject,
+                    param_binding_mode,
+                    DurabilityTier::Global,
+                    binding_source_shape,
+                    binding_user_params,
+                    binding_claim_params,
+                )
+            }
             SourceExpr::VisibleCurrent { .. }
             | SourceExpr::BranchView { .. }
             | SourceExpr::SettledBindingView { .. }
@@ -3196,10 +3295,27 @@ fn policy_read_view_projected_through(
     enclosing_view: &ReadView<RequestedSourceStage>,
 ) -> ReadView<RequestedSourceStage> {
     let mut projected = policy_view.clone();
+    let enclosing_frozen_view = enclosing_view
+        .sources
+        .values()
+        .find_map(|source| match source {
+            SourceExpr::SnapshotRef { snapshot, .. } => Some((snapshot.clone(), None)),
+            SourceExpr::WithOverlays { input, overlays }
+                if matches!(input.as_ref(), SourceExpr::SnapshotRef { .. }) =>
+            {
+                let SourceExpr::SnapshotRef { snapshot, .. } = input.as_ref() else {
+                    unreachable!("guarded above")
+                };
+                Some((snapshot.clone(), Some(overlays.clone())))
+            }
+            _ => None,
+        });
     // The outer normalized query and the independently normalized policy proof
     // may use different aliases for one logical table. Preserve every policy
-    // source, including policy-only recursive/access tables, while giving each
-    // source that the outer query also reads its exact current/live/frozen view.
+    // source, including policy-only recursive/access tables. A snapshot is a
+    // program-wide cut, so policy-only sources must use it too; otherwise a
+    // protected row and the relation granting access could be read at
+    // different points in history.
     for (policy_source, projected_source) in &mut projected.sources {
         if let Some(source) = enclosing_view
             .sources
@@ -3209,6 +3325,25 @@ fn policy_read_view_projected_through(
             })
         {
             *projected_source = source;
+        } else if let Some((snapshot, overlays)) = &enclosing_frozen_view
+            && let SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                ..
+            } = projected_source
+        {
+            let snapshot_source = SourceExpr::SnapshotRef {
+                projection: projection.clone(),
+                data: DataSource::Current,
+                snapshot: snapshot.clone(),
+            };
+            *projected_source = match overlays {
+                Some(overlays) => SourceExpr::WithOverlays {
+                    input: Box::new(snapshot_source),
+                    overlays: overlays.clone(),
+                },
+                None => snapshot_source,
+            };
         }
     }
     projected

@@ -109,6 +109,23 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
   assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
+const rnNativeArtifactPushPaths = [
+  "Cargo.lock",
+  "Cargo.toml",
+  "crates/groove/**",
+  "crates/idb-tree/**",
+  "crates/jazz/**",
+  "crates/jazz-compression/**",
+  "crates/jazz-native-relay/**",
+  "crates/jazz-storage-sqlite/**",
+  "crates/jazz-rn/**",
+];
+const assertRnNativeArtifactPushPaths = (paths) =>
+  assert.deepEqual(
+    paths,
+    rnNativeArtifactPushPaths,
+    "RN artifact main pushes must cover exactly the relay production dependency closure",
+  );
 const integrationCheckStep = (typescriptJob) => {
   const start = typescriptJob.indexOf("name: Run CI-equivalent TypeScript and workspace partition");
   assert.notEqual(start, -1, "missing integration workspace check");
@@ -1312,7 +1329,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
@@ -1396,10 +1413,21 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   assert.deepEqual(document.on.pull_request, {
     types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"],
   });
-  assert.deepEqual(document.on.push, {
-    branches: ["main"],
-    paths: ["crates/jazz-native-relay/**", "crates/jazz-storage-sqlite/**", "crates/jazz-rn/**"],
-  });
+  assert.deepEqual(document.on.push.branches, ["main"]);
+  assertRnNativeArtifactPushPaths(document.on.push.paths);
+  assert.throws(
+    () =>
+      assertRnNativeArtifactPushPaths(
+        document.on.push.paths.filter((path) => path !== "Cargo.lock"),
+      ),
+    /dependency closure/,
+    "omitting Cargo.lock must not leave artifact builds stale after a lockfile update",
+  );
+  assert.throws(
+    () => assertRnNativeArtifactPushPaths([...document.on.push.paths, "crates/irrelevant/**"]),
+    /dependency closure/,
+    "unrelated paths must not silently broaden the expensive RN artifact trigger",
+  );
   assert.equal(document.on.workflow_dispatch, undefined);
   assert.equal(document.on.schedule, undefined);
   assert.deepEqual(document.permissions, { contents: "read" });
@@ -1412,7 +1440,7 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   });
 
   const expectedCondition =
-    "${{ github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository ) }}";
+    "${{ github.event_name != 'pull_request' || ( ( contains(github.event.pull_request.labels.*.name, 'react-native') || contains(github.event.pull_request.labels.*.name, 'rn-preview-release') ) && github.event.pull_request.head.repo.full_name == github.repository ) }}";
   const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
   for (const jobName of ["android", "ios"]) {
     const job = document.jobs[jobName];

@@ -18,7 +18,7 @@ export async function createTestKeySet(): Promise<TestKeySet> {
   };
 
   async function mintJwt(sub: string, role: "admin" | "member"): Promise<string> {
-    return new SignJWT({ claims: { role } })
+    return new SignJWT({ role })
       .setProtectedHeader({ alg: "ES256", kid: KID })
       .setSubject(sub)
       .setIssuer(ISSUER)

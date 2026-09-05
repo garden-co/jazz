@@ -27,6 +27,30 @@ const app = s.defineApp({
 });
 
 describe("translateQuery", () => {
+  it("rejects public unions instead of silently scanning the whole table", () => {
+    const union = app.union([
+      app.users.where({ name: "first" }),
+      app.users.where({ name: "second" }),
+    ]);
+    expect(() => translateQuery(union._build(), app.wasmSchema)).toThrow(
+      "Public union queries are not supported by canonical query lowering yet.",
+    );
+  });
+
+  // https://github.com/garden-co/jazz/issues/2571
+  // Known shared-API regression: union is currently omitted from native-feature
+  // routing, so browser and native adapters receive an unfiltered table scan.
+  // Keep this executable counterexample until canonical union lowering exists.
+  it.fails("preserves public union membership in the shared runtime query", () => {
+    const union = app.union([
+      app.users.where({ name: "first" }),
+      app.users.where({ name: "second" }),
+    ]);
+    const translated = JSON.parse(translateQuery(union._build(), app.wasmSchema));
+    expect(translated).toHaveProperty("relation_ir");
+    expect(JSON.stringify(translated.relation_ir)).toContain('"Union"');
+  });
+
   it("rejects colliding externally supplied relation schemas during query lowering", () => {
     const ambiguousRelationsSchema = {
       users: {
@@ -258,6 +282,21 @@ describe("translateQuery", () => {
       'Include builder for relation "project" does not support partial large-value selections.',
     );
   });
+  it("orders relation hops by the projected output scope", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.todos.where({ done: false }).hopTo("owner").orderBy("name")._build(),
+        app.wasmSchema,
+      ),
+    );
+    const { input, terms } = translated.relation_ir.OrderBy;
+    const projectedName = input.Project.columns.find(
+      (column: { alias: string }) => column.alias === "name",
+    );
+    expect(terms).toEqual([{ column: projectedName.expr.Column, direction: "Asc" }]);
+    expect(terms[0].column).toEqual({ scope: "__hop_0", column: "name" });
+  });
+
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),

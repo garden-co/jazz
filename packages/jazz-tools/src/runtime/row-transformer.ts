@@ -19,6 +19,7 @@ type IncludePlan = {
   relation: Relation;
   nested: IncludePlan[];
   projection?: readonly string[];
+  nestedRelationNames: readonly string[];
 };
 
 type NamedRowValues = Map<string, WasmValue> | Record<string, WasmValue>;
@@ -114,6 +115,7 @@ function buildIncludePlans(
     plans.push({
       relation,
       nested,
+      nestedRelationNames: nested.map((plan) => plan.relation.name),
       projection: spec.select.length > 0 ? spec.select : undefined,
     });
   }
@@ -121,7 +123,44 @@ function buildIncludePlans(
   return plans;
 }
 
-function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: WasmSchema): unknown {
+type ReadColumnTransformRegistry = Readonly<
+  Record<string, Readonly<Record<string, { from(value: unknown): unknown }>> | undefined>
+>;
+
+export function applyColumnTransforms(
+  row: Record<string, unknown>,
+  transforms?: Readonly<Record<string, { from(value: unknown): unknown }>>,
+  excludedColumns: readonly string[] = [],
+): Record<string, unknown> {
+  if (!transforms) return row;
+  for (const column in transforms) {
+    if (
+      !Object.hasOwn(transforms, column) ||
+      !(column in row) ||
+      excludedColumns.includes(column)
+    ) {
+      continue;
+    }
+    row[column] = transforms[column]!.from(row[column]);
+  }
+  return row;
+}
+
+function applyTableColumnTransforms(
+  row: Record<string, unknown>,
+  tableName: string,
+  transformsByTable: ReadColumnTransformRegistry | undefined,
+  excludedColumns: readonly string[],
+): Record<string, unknown> {
+  return applyColumnTransforms(row, transformsByTable?.[tableName], excludedColumns);
+}
+
+function transformIncludedValue(
+  value: WasmValue,
+  plan: IncludePlan,
+  schema: WasmSchema,
+  transformsByTable?: ReadColumnTransformRegistry,
+): unknown {
   if (value.type !== "Array") {
     return unwrapValue(value);
   }
@@ -142,6 +181,8 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
       rowId,
       plan.projection,
       valuesByColumn,
+      transformsByTable,
+      plan.nestedRelationNames,
     );
   });
 
@@ -156,6 +197,9 @@ function transformRowValues(
   rowId?: string,
   projection?: readonly string[],
   valuesByColumn?: NamedRowValues,
+  transformsByTable?: ReadColumnTransformRegistry,
+  includedRelationNames: readonly string[] = [],
+  applyRootTransforms = true,
 ): Record<string, unknown> {
   const table = schema[tableName];
   if (!table) {
@@ -197,10 +241,12 @@ function transformRowValues(
       obj[plan.relation.name] = plan.relation.isArray ? [] : null;
       continue;
     }
-    obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
+    obj[plan.relation.name] = transformIncludedValue(value, plan, schema, transformsByTable);
   }
 
-  return obj;
+  return applyRootTransforms
+    ? applyTableColumnTransforms(obj, tableName, transformsByTable, includedRelationNames)
+    : obj;
 }
 
 function timestampToDate(value: number, _columnName?: string): Date {
@@ -264,6 +310,8 @@ export function transformRows<T>(
   tableName: string,
   includes: IncludeSpec = {},
   projection?: readonly string[],
+  transformsByTable?: ReadColumnTransformRegistry,
+  applyRootTransforms = true,
 ): T[] {
   if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
@@ -273,6 +321,7 @@ export function transformRows<T>(
     Object.keys(includes).length === 0
       ? []
       : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
+  const includedRelationNames = includePlans.map((plan) => plan.relation.name);
 
   return rows.map((row: WasmRowWithNamedValues) => {
     return transformRowValues(
@@ -283,6 +332,9 @@ export function transformRows<T>(
       row.id,
       projection,
       row.valuesByColumn,
+      transformsByTable,
+      includedRelationNames,
+      applyRootTransforms,
     ) as T;
   });
 }
@@ -293,8 +345,18 @@ export function transformRow<T>(
   tableName: string,
   includes: IncludeSpec = {},
   projection?: readonly string[],
+  transformsByTable?: ReadColumnTransformRegistry,
+  applyRootTransforms = true,
 ): T {
-  const transformed = transformRows<T>([row], schema, tableName, includes, projection)[0];
+  const transformed = transformRows<T>(
+    [row],
+    schema,
+    tableName,
+    includes,
+    projection,
+    transformsByTable,
+    applyRootTransforms,
+  )[0];
   if (transformed === undefined) {
     throw new Error(`Failed to transform row for table "${tableName}"`);
   }

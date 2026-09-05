@@ -177,7 +177,6 @@ export function withJazz(
         ...(managed.telemetryCollectorUrl
           ? { [PUBLIC_TELEMETRY_COLLECTOR_URL_ENV]: managed.telemetryCollectorUrl }
           : {}),
-        ...(managed.backendSecret ? { BACKEND_SECRET: managed.backendSecret } : {}),
       },
       turbopack: {
         ...previousTurbopack,

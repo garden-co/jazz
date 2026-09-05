@@ -97,66 +97,37 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  /** Read through an open transaction using the identity bound at begin. */
-  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  prepareQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
   /**
-   * Read through an open transaction as its identity bound at begin.
-   *
-   * The core verifies that `author` matches the capability retained by the
-   * transaction; this ABI exists so trusted-serving hosts never fall back
-   * to their ambient/default read identity.
+   * Execute an ordinary prepared read. The optional transaction id selects
+   * that transaction's snapshot and staged overlay; an explicit author
+   * selects trusted-serving authorization. Backend authority is inferred
+   * only from an explicit backend open.
    */
-  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Read through an open transaction using the authority of an explicit
-   * backend open. This deliberately has no caller-controlled identity.
-   */
-  allInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Materialize a relation snapshot through an open transaction's snapshot
-   * and staged overlay rather than the owning database's ordinary view.
-   */
-  allRelationSnapshotInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  allRelationSnapshotInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Materialize a transaction relation snapshot using the authority of an
-   * explicit backend open, without accepting a public author argument.
-   */
-  allRelationSnapshotInTransactionForBackend(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /**
-   * Read through the authority identity owned by an explicit backend open.
-   *
-   * This deliberately accepts no caller-supplied author. Public NAPI
-   * identity ingress must continue rejecting `SYSTEM`; only
-   * `open*AsBackend` mints this capability.
+   * Materialize a prepared relation snapshot, optionally through an open
+   * transaction and/or explicit trusted-serving identity.
    */
-  allForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   /**
-   * Materialize a relation snapshot through the authority of an explicit
-   * backend open. The backend capability selects this context; callers do
-   * not provide a synthetic author.
+   * Execute relation IR directly. Relation-IR reads do not currently
+   * support transaction overlays.
    */
-  allRelationSnapshotForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
-  /** Execute relation IR through the authority of an explicit backend open. */
-  allRelationQueryForBackend(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
-  attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
   /**
-   * Attach remote coverage using the authority identity of an explicit
-   * backend open. This has no public author argument by design.
+   * Attach query coverage using one native entry point. An optional open
+   * transaction selects its frozen snapshot; an explicit author selects
+   * trusted-serving authorization. With no author, an explicit backend
+   * open uses backend authority and an ordinary open remains client-local.
    */
-  attachQueryForBackend(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
+  attachQuery(query: PreparedQuery, opts?: any | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
   detachQuery(attachment: QueryAttachment): void
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribeAsync(query: PreparedQuery, opts?: JsonValue | undefined | null, author?: Uint8Array | undefined | null): PendingNativeSubscription
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   /**
    * Subscribe through the authority of an explicit backend open. This
@@ -200,6 +171,13 @@ export declare class PendingNativePermissionAdvice {
   cancel(): void
 }
 
+/** Thread-affine query preparation waiting for the core owner. */
+export declare class PendingNativePreparation {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): PreparedQuery | null
+  cancel(): void
+}
+
 /**
  * A JavaScript-thread-owned binding read which suspended on asynchronous
  * large-value storage. NAPI promises execute on a Send worker pool, whereas
@@ -208,6 +186,13 @@ export declare class PendingNativePermissionAdvice {
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+}
+
+/** Thread-affine subscription opening waiting for the core owner. */
+export declare class PendingNativeSubscription {
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): Subscription | null
+  cancel(): void
 }
 
 /**
@@ -235,7 +220,9 @@ export declare class PreparedQuery {
 }
 
 export declare class QueryAttachment {
-
+  setWake(callback: ((err: Error | null, arg: string) => void)): void
+  poll(): boolean | null
+  cancel(): void
 }
 
 /**

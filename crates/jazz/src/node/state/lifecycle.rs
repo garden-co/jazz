@@ -31,6 +31,11 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        Ok(self.database.pending_large_value_uploads().await?.len())
+    }
+
     /// Open or create a node over the supplied storage.
     pub async fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
     where
@@ -673,6 +678,16 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts().await?;
+        if !node.history_complete {
+            let recovered_authority_cut = node
+                .query
+                .authority_results
+                .values()
+                .filter_map(|state| state.settled_through)
+                .max()
+                .unwrap_or_default();
+            node.record_authoritative_settled_through(recovered_authority_cut);
+        }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
@@ -827,6 +842,21 @@ where
         claims: BTreeMap<String, Value>,
     ) -> ActiveSessionClaimsScope<'_, S> {
         let previous = self.active_session_claims.replace((identity, claims));
+        ActiveSessionClaimsScope {
+            node: self,
+            previous,
+        }
+    }
+
+    pub(crate) fn scoped_optional_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = self.active_session_claims.clone();
+        if let Some(claims) = claims {
+            self.active_session_claims = Some((identity, claims));
+        }
         ActiveSessionClaimsScope {
             node: self,
             previous,

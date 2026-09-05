@@ -93,11 +93,24 @@ pub enum NativeTransportTerminal {
 
 /// Error at the target/socket boundary, before a core peer has been attached.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeTransportError(pub String);
+pub enum NativeTransportError {
+    /// The peer is unavailable; local work may continue while connection retries.
+    Retryable(String),
+    /// Admission, protocol, or an unclassified adapter failure must fail closed.
+    Terminal(String),
+}
+
+impl NativeTransportError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
 
 impl std::fmt::Display for NativeTransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Retryable(message) | Self::Terminal(message) => f.write_str(message),
+        }
     }
 }
 
@@ -167,7 +180,7 @@ mod tests {
             _request: NativeTransportRequest,
         ) -> NativeCatalogueBootstrapFuture {
             Box::pin(async {
-                Err(NativeTransportError(
+                Err(NativeTransportError::Terminal(
                     "not used in this contract test".to_owned(),
                 ))
             })

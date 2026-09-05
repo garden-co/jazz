@@ -305,10 +305,23 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        // Match upsert's transaction-local visibility rule: staged inserts or
+        // restores remain writable, but committed tombstones must reject a
+        // patch rather than accepting content hidden by the deletion register.
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.lock_for_transaction_operation(tx_id)
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        if node
+            .tx_visible_current_cells_in_branch(tx_id, table, row, &BranchSelector::default())
             .await?
-            .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
+            .is_none()
+            && node
+                .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
+                .await?
+                .is_some()
+        {
+            return Err(row_already_deleted(row));
+        }
+        node.tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .await
             .map_err(Into::into)
     }
@@ -742,10 +755,12 @@ where
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_cleanup(Box::pin(async move {
             let mut node = db.node.node.lock().await;
-            match node.abandon_tx(open_tx_id) {
+            let result = match node.abandon_tx(open_tx_id) {
                 Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
                 Err(error) => Err(error.into()),
-            }
+            };
+            db.node.retire_queued_transaction_error(open_tx_id);
+            result
         }));
     }
 
@@ -807,6 +822,21 @@ where
                 }
             }),
         )
+    }
+
+    /// Queue capture of an open transaction's immutable base snapshot behind
+    /// its already-admitted operations. Foreign-function bindings use this to
+    /// defer snapshot-scoped query coverage until transaction opening finishes.
+    #[doc(hidden)]
+    pub fn enqueue_open_transaction_snapshot(
+        &self,
+        id: OpenTransactionId,
+    ) -> futures::channel::oneshot::Receiver<Result<crate::tx::Snapshot, Error>> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_read(id, async move {
+            let node = db.lock_for_transaction_operation(id).await?;
+            node.open_transaction_snapshot(id).map_err(Into::into)
+        })
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -1021,6 +1051,26 @@ where
         .await
     }
 
+    /// Binding-facing transaction read selected by open id, with an optional
+    /// trusted-serving identity. The open transaction itself determines its
+    /// mergeable or exclusive semantics.
+    #[doc(hidden)]
+    pub async fn all_in_open_transaction(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        match author {
+            Some(author) => {
+                self.transaction_all_for_identity(tx_id, prepared, author, opts)
+                    .await
+            }
+            None => self.transaction_all(tx_id, prepared, opts).await,
+        }
+    }
+
     pub(super) async fn transaction_relation_snapshot(
         &self,
         tx_id: OpenTransactionId,
@@ -1054,6 +1104,27 @@ where
         .await
     }
 
+    /// Binding-facing relation snapshot selected by open transaction id.
+    #[doc(hidden)]
+    pub async fn relation_snapshot_in_open_transaction(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: Option<AuthorSubject>,
+    ) -> Result<RelationSnapshot, Error> {
+        match author {
+            Some(author) => {
+                self.transaction_relation_snapshot_for_identity(tx_id, prepared, author, opts)
+                    .await
+            }
+            None => {
+                self.transaction_relation_snapshot(tx_id, prepared, opts)
+                    .await
+            }
+        }
+    }
+
     async fn transaction_relation_snapshot_in_authorization_mode(
         &self,
         tx_id: OpenTransactionId,
@@ -1064,6 +1135,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut node = prepared.scoped_node(&mut node, author)?;
         let mut snapshot = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_relation_snapshot_with_options(
@@ -1099,6 +1171,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
+        let mut node = prepared.scoped_node(&mut node, author)?;
         let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(

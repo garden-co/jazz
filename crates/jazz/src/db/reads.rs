@@ -95,6 +95,68 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
+    /// Prepare a query after asynchronously acquiring the node owner.
+    /// Runtime callers must use this entry point when another operation may
+    /// be suspended on storage. The synchronous API requires an idle owner.
+    pub async fn prepare_query_async(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        let mut node = self.node.node.lock().await;
+        let (schema, schema_version) = if self.schema_view_is_fixed {
+            (self.schema.clone(), self.schema_version_id)
+        } else {
+            let current = node.current_write_schema()?;
+            let schema = if current.schema == self.schema_version_id {
+                self.schema.clone()
+            } else {
+                node.catalogue_schemas()
+                    .get(&current.schema)
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::Schema,
+                            "current write schema is missing from catalogue",
+                        )
+                    })?
+                    .schema
+                    .clone()
+            };
+            (schema, current.schema)
+        };
+        let shape = query.validate_with_schema_version(&schema, schema_version)?;
+        let binding = shape.bind(BTreeMap::new())?;
+        let (local_plan, global_plan) =
+            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
+                (
+                    Some(
+                        node.prepared_query_plan(
+                            &shape,
+                            &binding,
+                            DurabilityTier::Local,
+                            AuthorSubject::SYSTEM,
+                        )
+                        .await?,
+                    ),
+                    Some(
+                        node.prepared_query_plan(
+                            &shape,
+                            &binding,
+                            DurabilityTier::Global,
+                            AuthorSubject::SYSTEM,
+                        )
+                        .await?,
+                    ),
+                )
+            } else {
+                (None, None)
+            };
+        Ok(PreparedQuery {
+            request_identity_claims: None,
+            shape,
+            binding,
+            local_plan,
+            global_plan,
+            groove_runtime_token: node.groove_runtime_token(),
+        })
+    }
+
     /// Prepare a query with explicit parameter bindings.
     pub fn prepare_query_bound(
         &self,
@@ -154,6 +216,7 @@ where
         };
         let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
         Ok(PreparedQuery {
+            request_identity_claims: None,
             shape,
             binding,
             local_plan,
@@ -356,6 +419,7 @@ where
             tier
         };
         let mut node = self.node.node.lock().await;
+        let mut node = prepared.scoped_node(&mut node, author)?;
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
             if opts.include_deleted {
@@ -541,19 +605,17 @@ where
             ));
         }
         let tier = self.client_authority_read_tier(effective_read_tier(&opts));
-        self.node
-            .node
-            .lock()
-            .await
-            .query_relation_snapshot_for_client(
-                &prepared.shape,
-                &prepared.binding,
-                tier,
-                self.identity.author,
-                &opts.read_view,
-            )
-            .await
-            .map_err(Into::into)
+        let mut owner = self.node.node.lock().await;
+        let mut node = prepared.scoped_node(&mut owner, self.identity.author)?;
+        node.query_relation_snapshot_for_client(
+            &prepared.shape,
+            &prepared.binding,
+            tier,
+            self.identity.author,
+            &opts.read_view,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -571,19 +633,17 @@ where
             ));
         }
         let tier = effective_read_tier(&opts);
-        self.node
-            .node
-            .lock()
-            .await
-            .query_relation_snapshot_for_serving_in_read_view(
-                &prepared.shape,
-                &prepared.binding,
-                tier,
-                author,
-                &opts.read_view,
-            )
-            .await
-            .map_err(Into::into)
+        let mut owner = self.node.node.lock().await;
+        let mut node = prepared.scoped_node(&mut owner, author)?;
+        node.query_relation_snapshot_for_serving_in_read_view(
+            &prepared.shape,
+            &prepared.binding,
+            tier,
+            author,
+            &opts.read_view,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     /// Tier-gated canonical structured result read.
@@ -600,6 +660,17 @@ where
         materialize_result_tree(prepared.shape.query(), snapshot)
     }
 
+    /// Normalize a relation expression through the canonical resolver and
+    /// prepare it after asynchronously acquiring the node owner.
+    #[doc(hidden)]
+    pub async fn prepare_relation_query_async(
+        &self,
+        query: &RelationQuery,
+    ) -> Result<PreparedQuery, Error> {
+        let query = relation_query_to_query(query)?;
+        self.prepare_query_async(&query).await
+    }
+
     /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
     pub async fn all_relation_query(
         &self,
@@ -607,8 +678,7 @@ where
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
+        let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single
         // root row set. They have no array payload edges, so request ordinary
         // app rows instead of the relation-snapshot fact output (which is
@@ -629,8 +699,7 @@ where
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
+        let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single
         // root row set.  They have no array payload edges, so request ordinary
         // app rows instead of the relation-snapshot fact output (which is

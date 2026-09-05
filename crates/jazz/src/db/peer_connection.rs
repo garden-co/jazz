@@ -3678,7 +3678,8 @@ where
                                 ingest_context.trust,
                                 authority_scope_hydrations,
                                 authority_scope_hydration_count,
-                                progress_waker.as_ref(),
+                                #[cfg(test)]
+                                None,
                             )
                             .await?;
                             if !self.pending_control_responses.is_empty() {
@@ -5749,6 +5750,12 @@ where
         let mut node_ref = node.lock().await;
         match node_ref.apply_view_updates_in_batch(updates).await {
             Ok(()) => {
+                let authoritative_cut = confirmed_subscriptions
+                    .iter()
+                    .map(|(_, settled_through)| *settled_through)
+                    .max()
+                    .unwrap_or_default();
+                node_ref.record_authoritative_settled_through(authoritative_cut);
                 node_ref
                     .record_scope_relay_authoritative_bundles(&ledger_bundles)
                     .await?;
@@ -5905,13 +5912,36 @@ where
     }
 }
 
+// Temporary proof receivers never outlive the request future. Keep the node
+// owner through cleanup so cancellation cannot require a synchronous re-lock.
+struct AuthorizationScopeReceivers<'a, S: OrderedKvStorage> {
+    peer: &'a mut PeerState,
+    node: &'a mut NodeState<S>,
+    subscriptions: Vec<SubscriptionKey>,
+}
+
+impl<S: OrderedKvStorage> Drop for AuthorizationScopeReceivers<'_, S> {
+    fn drop(&mut self) {
+        for subscription in self.subscriptions.drain(..) {
+            self.peer
+                .forget_subscription_with_node(self.node, subscription);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct AuthorizationScopeTestHook {
+    pub(crate) fail: bool,
+    pub(crate) reached_second_clause: bool,
+}
+
 /// Compile and serve an authorization scope entirely at the serving authority.
 ///
 /// This intentionally does not reuse the subscriber's shape registry or any
 /// caller-provided subscription.  The authority allocates opaque usage-site
 /// keys, registers canonical shapes in the receiver, and only then sends the
 /// ordinary view updates in authority-scope envelopes.
-async fn serve_authorization_scope_intent<S>(
+pub(crate) async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,
@@ -5926,7 +5956,7 @@ async fn serve_authorization_scope_intent<S>(
         ServedAuthorizationScopeHydration,
     >,
     hydration_count: &mut u64,
-    progress_waker: Option<&std::task::Waker>,
+    #[cfg(test)] mut test_hook: Option<&mut AuthorizationScopeTestHook>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -6004,9 +6034,29 @@ where
             .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
             .collect(),
     );
-    let mut support_subscriptions = Vec::new();
+    let mut node_owner = node.lock().await;
+    let mut receivers = AuthorizationScopeReceivers {
+        peer,
+        node: &mut node_owner,
+        subscriptions: Vec::new(),
+    };
     let mut served_clauses = Vec::new();
     for (index, (shape, binding)) in support_clauses.iter().enumerate() {
+        // A per-call test hook can suspend/fail between clauses without
+        // global state or special authority identities.
+        #[cfg(test)]
+        if index == 1
+            && let Some(hook) = test_hook.as_deref_mut()
+        {
+            hook.reached_second_clause = true;
+            if hook.fail {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "later-clause storage failure",
+                ));
+            }
+            std::future::pending::<()>().await;
+        }
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             // This usage-site key belongs to the authority, and cannot be
@@ -6022,8 +6072,9 @@ where
             return Ok(());
         }
         let supported = {
-            let mut node = node.lock().await;
-            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
+            let mut node = receivers
+                .node
+                .scoped_active_session_claims(identity, session_claims.clone());
             node.ensure_peer_maintained_subscription_view_supported(
                 shape,
                 binding,
@@ -6054,33 +6105,33 @@ where
             known_state: None,
             delegated_session: None,
         });
-        peer.declare_known_state(subscription, None);
+        receivers.subscriptions.push(subscription);
+        receivers.peer.declare_known_state(subscription, None);
         // Authority scope support has no wire Subscribe admission: this
         // opaque usage site is allocated locally for the request currently
         // authenticated on this link. Bind that exact admission snapshot
         // before the owner-loop rehydrate opens a maintained view. In
         // particular, do not fall back to the authority transport identity
         // (normally SYSTEM for a trusted backend link).
-        peer.set_subscription_policy_binding(subscription, (identity, session_claims.clone()));
+        receivers
+            .peer
+            .set_subscription_policy_binding(subscription, (identity, session_claims.clone()));
         let update = {
-            let mut node = node.lock().await;
-            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
-            peer.rehydrate_query_for_subscription_with_opts_and_waker(
-                &mut node,
-                subscription,
-                shape,
-                binding,
-                scope.options.clone(),
-                progress_waker,
-            )
-            .await?
-        };
-        let Some(update) = update else {
-            queue_direct_control(
-                pending_control_responses,
-                SyncMessage::AuthorizationScopeUnavailable { request_id },
-            );
-            return Ok(());
+            let mut node = receivers
+                .node
+                .scoped_active_session_claims(identity, session_claims.clone());
+            receivers
+                .peer
+                .rehydrate_authorization_support_query_for_identity(
+                    &mut node,
+                    identity,
+                    session_claims.clone(),
+                    subscription,
+                    shape,
+                    binding,
+                    scope.options.clone(),
+                )
+                .await?
         };
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             settled_through: cut,
@@ -6092,7 +6143,9 @@ where
                 "scope hydration was not a view update",
             ));
         };
-        let progress = peer.authorization_progress_for_subscription(subscription);
+        let progress = receivers
+            .peer
+            .authorization_progress_for_subscription(subscription);
         if aggregate.apply(subscription, *cut, progress).is_none()
             && index + 1 == support_clauses.len()
         {
@@ -6102,7 +6155,6 @@ where
             );
             return Ok(());
         }
-        support_subscriptions.push(subscription);
         served_clauses.push(ServedAuthorizationScopeClause {
             subscription,
             register,
@@ -6119,7 +6171,7 @@ where
     };
     let receipt = AuthorizationScopeReceipt {
         key: scope.key.clone(),
-        authority: *node.borrow().node_uuid().as_bytes(),
+        authority: *receivers.node.node_uuid().as_bytes(),
         link: identity,
         authority_epoch: connection_epoch,
         claims_revision: current_claims_revision,
@@ -6137,9 +6189,7 @@ where
     // Scope views are proof material, not application subscriptions.  Their
     // lifetime ends after the receipt; FIFO keeps the receiver's local
     // evaluation ahead of this cleanup.
-    for subscription in support_subscriptions {
-        peer.forget_subscription_with_node(&mut node.borrow_mut(), subscription);
-    }
+    drop(receivers);
     queue_authorization_scope_sequence(pending_control_responses, request_id, scope.key, hydration);
     Ok(())
 }

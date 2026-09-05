@@ -1,82 +1,24 @@
 import { describe, expect, it } from "vitest";
-import {
-  createDb,
-  getDbSubscriptionSource,
-  type Db,
-  type QueryBuilder,
-  type TableProxy,
-} from "../../src/runtime/db.js";
+import { getDbSubscriptionSource, type Db } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
-
-interface Todo {
-  id: string;
-  title: string;
-  rank: number | null;
-  done: boolean;
-}
-
-const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "rank", column_type: { type: "Integer" }, nullable: true },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
-
-const todos: TableProxy<Todo, Omit<Todo, "id">> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _initType: {} as Omit<Todo, "id">,
-};
-
-function makeTodosQuery(body: {
-  orderBy?: Array<[string, "asc" | "desc"]>;
-  limit?: number;
-  offset?: number;
-}): QueryBuilder<Todo> {
-  return {
-    _table: "todos",
-    _schema: schema,
-    _rowType: {} as Todo,
-    _build() {
-      return JSON.stringify({
-        table: "todos",
-        conditions: [],
-        includes: {},
-        orderBy: body.orderBy ?? [],
-        limit: body.limit,
-        offset: body.offset,
-      });
-    },
-  };
-}
-
-const sortedByRankAscQuery = makeTodosQuery({ orderBy: [["rank", "asc"]] });
-
-// Browser subscription delivery is asynchronous. Keep this aligned with the
-// rest of this suite's convergence waits: a sub-second deadline flakes when
-// the full browser suite is sharing a worker, without testing a latency SLO.
-const SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS = 10_000;
+import {
+  todos,
+  makeTodosQuery,
+  sortedByRankAscQuery,
+  SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
+  waitForCondition,
+  latestIds,
+  latestRows,
+  assertSubscriptionNull,
+  assertSubscriptionTies,
+  assertSubscriptionNoop,
+  assertSubscriptionWindow,
+  type Todo,
+} from "../shared/local-subscription-scenarios.js";
 
 function uniqueDbName(label: string): string {
   return `db-subscribe-all-sort-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function waitForCondition(
-  check: () => boolean,
-  timeoutMs: number,
-  errorMessage: string,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error(errorMessage);
 }
 
 async function withDb<T>(label: string, run: (db: Db) => Promise<T>): Promise<T> {
@@ -89,14 +31,6 @@ async function withDb<T>(label: string, run: (db: Db) => Promise<T>): Promise<T>
   } finally {
     await db.shutdown();
   }
-}
-
-function latestIds(snapshots: Todo[][]): string[] {
-  return (snapshots[snapshots.length - 1] ?? []).map((row) => row.id);
-}
-
-function latestRows(snapshots: Todo[][]): Todo[] {
-  return snapshots[snapshots.length - 1] ?? [];
 }
 
 function hasUpdateForId(delta: SubscriptionDelta<Todo>, id: string): boolean {
@@ -402,37 +336,10 @@ describe("internal subscription delta sorting browser integration", () => {
   });
 
   it("uses id as deterministic tie-break for equal sort values", async () => {
-    await withDb("tie-break-id", async (db) => {
-      const snapshots: Todo[][] = [];
-      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
-        sortedByRankAscQuery,
-        (delta) => {
-          snapshots.push(delta.all);
-        },
+    await withDb("assertSubscriptionTies", async (db) => {
+      await assertSubscriptionTies(db, (query, onRows) =>
+        getDbSubscriptionSource(db).subscribeDelta(query, (delta) => onRows(delta.all)),
       );
-
-      try {
-        const {
-          value: { id: idA },
-        } = await db.insert(todos, { title: "A", rank: 1, done: false });
-        const {
-          value: { id: idB },
-        } = await db.insert(todos, { title: "B", rank: 1, done: false });
-        const {
-          value: { id: idC },
-        } = await db.insert(todos, { title: "C", rank: 1, done: false });
-
-        await waitForCondition(
-          () => latestRows(snapshots).length === 3,
-          10_000,
-          "expected rows with equal rank",
-        );
-
-        const expectedById = [idA, idB, idC].toSorted((a, b) => a.localeCompare(b));
-        expect(latestIds(snapshots)).toEqual(expectedById);
-      } finally {
-        unsubscribe();
-      }
     });
   });
 
@@ -485,95 +392,18 @@ describe("internal subscription delta sorting browser integration", () => {
   });
 
   it("does not reposition on no-op sort-field update", async () => {
-    await withDb("noop-sort-update", async (db) => {
-      const snapshots: Todo[][] = [];
-      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
-        sortedByRankAscQuery,
-        (delta) => {
-          snapshots.push(delta.all);
-        },
+    await withDb("assertSubscriptionNoop", async (db) => {
+      await assertSubscriptionNoop(db, (query, onRows) =>
+        getDbSubscriptionSource(db).subscribeDelta(query, (delta) => onRows(delta.all)),
       );
-
-      try {
-        const {
-          value: { id: idA },
-        } = await db.insert(todos, { title: "A", rank: 1, done: false });
-        const {
-          value: { id: idB },
-        } = await db.insert(todos, { title: "B", rank: 2, done: false });
-        const {
-          value: { id: idC },
-        } = await db.insert(todos, { title: "C", rank: 3, done: false });
-
-        await waitForCondition(
-          () => latestRows(snapshots).length === 3,
-          10_000,
-          "expected initial rows",
-        );
-        const before = latestIds(snapshots);
-        expect(before).toEqual([idA, idB, idC]);
-
-        await db.update(todos, idB, { rank: 2 });
-
-        await waitForCondition(
-          () => latestRows(snapshots).some((row) => row.id === idB && row.rank === 2),
-          10_000,
-          "expected updated row",
-        );
-
-        expect(latestIds(snapshots)).toEqual(before);
-      } finally {
-        unsubscribe();
-      }
     });
   });
 
   it("keeps window order correct around limit/offset boundaries", async () => {
-    await withDb("limit-offset-boundary", async (db) => {
-      const snapshots: Todo[][] = [];
-      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
-        makeTodosQuery({ orderBy: [["rank", "asc"]], offset: 1, limit: 2 }),
-        (delta) => {
-          snapshots.push(delta.all);
-        },
+    await withDb("assertSubscriptionWindow", async (db) => {
+      await assertSubscriptionWindow(db, (query, onRows) =>
+        getDbSubscriptionSource(db).subscribeDelta(query, (delta) => onRows(delta.all)),
       );
-
-      try {
-        const {
-          value: { id: idA },
-        } = await db.insert(todos, { title: "A", rank: 1, done: false });
-        const {
-          value: { id: idB },
-        } = await db.insert(todos, { title: "B", rank: 2, done: false });
-        const {
-          value: { id: idC },
-        } = await db.insert(todos, { title: "C", rank: 3, done: false });
-        const {
-          value: { id: idD },
-        } = await db.insert(todos, { title: "D", rank: 4, done: false });
-
-        await waitForCondition(
-          () => latestRows(snapshots).length === 2,
-          10_000,
-          "expected initial window",
-        );
-        expect(latestIds(snapshots)).toEqual([idB, idC]);
-
-        await db.update(todos, idD, { rank: 0 });
-
-        await waitForCondition(
-          () => {
-            const ids = latestIds(snapshots);
-            return ids.length === 2 && ids[0] === idA && ids[1] === idB;
-          },
-          10_000,
-          "expected offset window to shift after boundary move",
-        );
-
-        expect(latestIds(snapshots)).toEqual([idA, idB]);
-      } finally {
-        unsubscribe();
-      }
     });
   });
 
@@ -955,5 +785,13 @@ describe("internal subscription delta sorting browser integration", () => {
         unsubscribe();
       }
     });
+  });
+});
+
+// Public snapshot coverage shares the RN scenario; the delta/reset-specific
+// null-ordering test above continues to exercise the internal browser contract.
+it("keeps public null sort snapshots stable", async () => {
+  await withDb("public-null-sort", async (db) => {
+    await assertSubscriptionNull(db, (query, onRows) => db.subscribe(query, onRows));
   });
 });

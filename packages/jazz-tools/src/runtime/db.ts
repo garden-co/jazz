@@ -40,13 +40,9 @@ import {
   type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
-import {
-  DefaultRuntimeSource,
-  trustAttachedBrowserWorkerSession,
-} from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRow, transformRows } from "./row-transformer.js";
+import { applyColumnTransforms, transformRow, transformRows } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -175,6 +171,8 @@ export interface QueryBuilder<T> {
   readonly _schema: WasmSchema;
   /** Optional TypeScript-only per-column transforms carried by typed query handles. */
   readonly _columnTransforms?: ColumnTransformMap;
+  /** All app transforms, retained outside the serialised query representation. */
+  readonly _columnTransformsByTable?: ColumnTransformRegistry;
   /** Build and return the query as JSON */
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
@@ -452,7 +450,6 @@ function normalizeUpdateOptions(
     branch: normalizeBranchView(schema, tableName, branch, base),
   };
 }
-
 export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
   return {
     get _table() {
@@ -463,6 +460,9 @@ export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
     },
     get _columnTransforms() {
       return query._columnTransforms;
+    },
+    get _columnTransformsByTable() {
+      return query._columnTransformsByTable;
     },
     get _rowType() {
       return query._rowType;
@@ -927,7 +927,18 @@ export interface ColumnTransform {
 }
 
 export type ColumnTransformMap = Record<string, ColumnTransform>;
+export type ColumnTransformRegistry = Record<string, ColumnTransformMap | undefined>;
 
+function resolveOutputColumnTransforms<T>(
+  query: QueryBuilder<T>,
+  inputTable: string,
+  outputTable: string,
+): ColumnTransformMap | undefined {
+  return (
+    query._columnTransformsByTable?.[outputTable] ??
+    (inputTable === outputTable ? query._columnTransforms : undefined)
+  );
+}
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
   openTransactionId: OpenTransactionId;
@@ -1411,18 +1422,24 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       session,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const transformedRows = transformRows(
+    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
+    const outputRelationNames = Object.keys(outputIncludes);
+    const transformedRows = transformRows<Record<string, unknown>>(
       rows,
       outputSchema,
       outputTable,
       outputIncludes,
       builtQuery.select,
+      query._columnTransformsByTable,
+      false,
     );
-    return transformedRows.map((row) =>
-      transformOutputRow(
-        outputTable === builtQuery.table ? query : {},
-        applyPartialValueSelections(row, builtQuery.partialSelect),
-      ),
+    return transformedRows.map(
+      (row) =>
+        applyColumnTransforms(
+          applyPartialValueSelections(row, builtQuery.partialSelect),
+          outputTransforms,
+          outputRelationNames,
+        ) as T,
     );
   }
 
@@ -1475,6 +1492,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly shutdownAbort = new AbortController();
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
@@ -1683,6 +1701,7 @@ export class Db {
   }
 
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1718,6 +1737,7 @@ export class Db {
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
@@ -1781,6 +1801,7 @@ export class Db {
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
+    this.assertOpen();
     return this.connection.getClient(schema);
   }
 
@@ -1789,7 +1810,8 @@ export class Db {
   }
 
   protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    await this.connection.ensureReady(tier, signal);
+    await this.connection.ensureReady(tier, signal ?? this.shutdownAbort.signal);
+    this.assertOpen();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
@@ -2310,6 +2332,7 @@ export class Db {
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+    this.assertOpen();
     const context = this.getRuntimeOperationContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
@@ -2449,18 +2472,24 @@ export class Db {
           )
         : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const transformedRows = transformRows(
+    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
+    const outputRelationNames = Object.keys(outputIncludes);
+    const transformedRows = transformRows<Record<string, unknown>>(
       rows,
       outputSchema,
       outputTable,
       outputIncludes,
       builtQuery.select,
+      query._columnTransformsByTable,
+      false,
     );
-    return transformedRows.map((row) =>
-      transformOutputRow(
-        outputTable === builtQuery.table ? query : {},
-        applyPartialValueSelections(row, builtQuery.partialSelect),
-      ),
+    return transformedRows.map(
+      (row) =>
+        applyColumnTransforms(
+          applyPartialValueSelections(row, builtQuery.partialSelect),
+          outputTransforms,
+          outputRelationNames,
+        ) as T,
     );
   }
 
@@ -2560,16 +2589,27 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
+    const outputRelationNames = Object.keys(outputIncludes);
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
-      transformOutputRow(
-        outputTable === builtQuery.table ? query : {},
+      applyColumnTransforms(
         applyPartialValueSelections(
-          transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+          transformRow(
+            row,
+            outputSchema,
+            outputTable,
+            outputIncludes,
+            builtQuery.select,
+            query._columnTransformsByTable,
+            false,
+          ),
           builtQuery.partialSelect,
         ),
-      );
+        outputTransforms,
+        outputRelationNames,
+      ) as T;
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
@@ -2864,8 +2904,15 @@ export class Db {
     return this.shutdownPromise;
   }
 
+  private assertOpen(): void {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot operate on a Db that is shutting down or closed.");
+    }
+  }
+
   private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
+    this.shutdownAbort.abort();
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
       this.localFirstRefreshTimer = null;
@@ -3069,7 +3116,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
-  trustAttachedBrowserWorkerSession(resolvedConfig);
+  runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
   const db =
@@ -3084,12 +3131,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   return db;
 }
 
-export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
-}
-
 /** Keep server-only admission credentials out of every client runtime factory. */
-function assertNoClientBackendSecret(config: object): void {
+export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
       "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",

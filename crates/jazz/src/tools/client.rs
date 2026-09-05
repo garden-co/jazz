@@ -3,7 +3,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::ops::Deref;
 use std::pin::Pin;
@@ -54,7 +54,7 @@ use crate::tx::{
 };
 use base64::Engine;
 use futures::lock::Mutex as LocalMutex;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -102,26 +102,8 @@ type StorageBundle = CoreStorage;
 struct UnverifiedJwtClaims {
     iss: String,
     sub: String,
-    #[serde(default)]
-    claims: JwtClaimsPayload,
-}
-
-/// Keeps a missing application-claims field distinct from a supplied JSON
-/// value, including JSON `null`.
-#[derive(Debug, Default)]
-enum JwtClaimsPayload {
-    #[default]
-    Absent,
-    Present(serde_json::Value),
-}
-
-impl<'de> Deserialize<'de> for JwtClaimsPayload {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        serde_json::Value::deserialize(deserializer).map(Self::Present)
-    }
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Jazz client for building applications.
@@ -2406,10 +2388,13 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     Some(Session {
         issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
-        claims: match claims.claims {
-            JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
-            JwtClaimsPayload::Present(claims) => claims,
-        },
+        claims: serde_json::Value::Object(
+            claims
+                .extra
+                .into_iter()
+                .filter(|(name, _)| !is_registered_jwt_claim(name))
+                .collect(),
+        ),
         auth_mode,
     })
 }
@@ -2512,41 +2497,21 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     }
 }
 
-fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
-    match value {
-        serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
-        serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
-        serde_json::Value::String(value) => Ok(CoreValue::String(value)),
-        serde_json::Value::Number(value) => {
-            crate::tools::policy_claims::json_number_to_policy_claim(
-                value,
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
-            )
-            .map_err(JazzError::Connection)
-        }
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(json_claim_to_core_value)
-            .collect::<Result<Vec<_>>>()
-            .map(CoreValue::Array),
-        serde_json::Value::Object(_) => Err(JazzError::Connection(
-            "nested JWT claim objects are not supported by core policy claims yet".to_string(),
-        )),
-    }
-}
-
 fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, CoreValue>> {
-    let serde_json::Value::Object(claims) = session.claims.clone() else {
-        return Err(JazzError::Connection(
-            "JWT claims payload must be a JSON object".to_string(),
-        ));
+    let claims = match session.claims.clone() {
+        serde_json::Value::Object(claims) => claims,
+        _ => serde_json::Map::new(),
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        core_claims.insert(
-            crate::query::provider_claim_key(&name),
-            json_claim_to_core_value(value)?,
-        );
+        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+            value,
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .map_err(JazzError::Connection)?
+        {
+            core_claims.insert(crate::query::provider_claim_key(&name), value);
+        }
     }
     core_claims.insert(
         crate::query::provider_claim_key("sub"),
@@ -2565,6 +2530,10 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
+}
+
+fn is_registered_jwt_claim(name: &str) -> bool {
+    matches!(name, "iss" | "sub" | "aud" | "exp" | "nbf" | "iat" | "jti")
 }
 
 fn core_to_public_value(value: CoreValue) -> Result<Value> {
@@ -4028,7 +3997,9 @@ mod tests {
                             terminal,
                         })
                     }
-                    ControlledAdmissionResult::Refused(error) => Err(NativeTransportError(error)),
+                    ControlledAdmissionResult::Refused(error) => {
+                        Err(NativeTransportError::Terminal(error))
+                    }
                 }
             })
         }
@@ -4038,7 +4009,7 @@ mod tests {
             _request: NativeTransportRequest,
         ) -> NativeCatalogueBootstrapFuture {
             Box::pin(async {
-                Err(NativeTransportError(
+                Err(NativeTransportError::Terminal(
                     "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
                 ))
             })
@@ -4287,14 +4258,18 @@ mod tests {
     fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({
-                "iss": "https://issuer.example",
-                "sub": sub,
-                "claims": claims,
-            }))
-            .expect("serialize jwt payload"),
+        let mut payload = serde_json::Map::from_iter([
+            ("iss".to_owned(), json!("https://issuer.example")),
+            ("sub".to_owned(), json!(sub)),
+        ]);
+        payload.extend(
+            claims
+                .as_object()
+                .expect("test JWT claims are flat")
+                .clone(),
         );
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("serialize jwt payload"));
         format!("{header}.{payload}.sig")
     }
 
@@ -4328,20 +4303,39 @@ mod tests {
     }
 
     #[test]
-    fn client_session_claim_numbers_match_admission_classification() {
+    fn client_session_claim_projection_matches_admission_and_omits_recursive_values() {
         assert_eq!(
-            json_claim_to_core_value(json!(7)).unwrap(),
-            CoreValue::U64(7)
+            crate::tools::policy_claims::json_value_to_policy_claim(
+                json!(7),
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .unwrap(),
+            Some(CoreValue::U64(7))
         );
         assert_eq!(
-            json_claim_to_core_value(json!(-7)).unwrap(),
-            CoreValue::I64(-7)
+            crate::tools::policy_claims::json_value_to_policy_claim(
+                json!(-7),
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .unwrap(),
+            Some(CoreValue::I64(-7))
         );
         assert_eq!(
-            json_claim_to_core_value(json!(9_007_199_254_740_992_u64)).unwrap(),
-            CoreValue::U64(9_007_199_254_740_992)
+            crate::tools::policy_claims::json_value_to_policy_claim(
+                json!(9_007_199_254_740_992_u64),
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .unwrap(),
+            Some(CoreValue::U64(9_007_199_254_740_992))
         );
-        assert!(json_claim_to_core_value(json!({ "role": "admin" })).is_err());
+        assert_eq!(
+            crate::tools::policy_claims::json_value_to_policy_claim(
+                json!({ "role": "admin" }),
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -4631,23 +4625,33 @@ mod tests {
     // These internal tests are necessary because the distinction is made while
     // decoding the unverified JWT, before a client connection can expose it.
     #[test]
-    fn session_from_unverified_jwt_defaults_absent_claims_to_an_empty_object() {
+    fn session_from_unverified_jwt_projects_flat_claims_and_omits_recursive_policy_values() {
         let session = session_from_unverified_jwt(&make_test_jwt_without_claims("alice"))
             .expect("derive session from jwt without application claims");
 
         assert_eq!(session.claims, json!({}));
         assert!(session_claims_to_core_claims(&session).is_ok());
-    }
-
-    #[test]
-    fn session_from_unverified_jwt_preserves_explicit_non_object_claims() {
-        let session = session_from_unverified_jwt(&make_test_jwt("alice", json!(null)))
-            .expect("derive session from jwt with explicit null claims");
-
-        let error = session_claims_to_core_claims(&session)
-            .expect_err("explicit null application claims must be rejected");
-        assert!(
-            matches!(error, JazzError::Connection(message) if message == "JWT claims payload must be a JSON object")
+        let session = session_from_unverified_jwt(&make_test_jwt(
+            "alice",
+            json!({
+                "role": "editor",
+                "profile": { "handler_only": true },
+                "mixed": ["editor", { "nested": true }],
+                "__proto__": "safe",
+            }),
+        ))
+        .expect("flat JWT session");
+        assert_eq!(session.claims["profile"], json!({ "handler_only": true }));
+        let policy = session_claims_to_core_claims(&session).unwrap();
+        assert_eq!(
+            policy.get(&crate::query::provider_claim_key("role")),
+            Some(&CoreValue::String("editor".to_owned()))
+        );
+        assert!(!policy.contains_key(&crate::query::provider_claim_key("profile")));
+        assert!(!policy.contains_key(&crate::query::provider_claim_key("mixed")));
+        assert_eq!(
+            policy.get(&crate::query::provider_claim_key("__proto__")),
+            Some(&CoreValue::String("safe".to_owned()))
         );
     }
 
@@ -5177,7 +5181,9 @@ mod tests {
                     ),
                     (
                         "failed",
-                        NativeTransportTerminal::Failed(NativeTransportError("failed".to_owned())),
+                        NativeTransportTerminal::Failed(NativeTransportError::Terminal(
+                            "failed".to_owned(),
+                        )),
                     ),
                 ] {
                     let (mut first, first_admission) = successful_controlled_admission();
@@ -5489,9 +5495,9 @@ mod tests {
                 .expect("connect");
                 let observed = Arc::clone(&first.observed);
 
-                first.send(NativeTransportTerminal::Failed(NativeTransportError(
-                    "controlled terminal failure".to_owned(),
-                )));
+                first.send(NativeTransportTerminal::Failed(
+                    NativeTransportError::Terminal("controlled terminal failure".to_owned()),
+                ));
                 wait_for_terminal_observation(&observed).await;
                 wait_for_connect_count(&connector, 2).await;
                 tokio::task::yield_now().await;

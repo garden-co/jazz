@@ -27,6 +27,7 @@ const tempRoots = createTempRootTracker();
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
+const originalBackendSecret = process.env.BACKEND_SECRET;
 const originalStdoutIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 
 function makeRuntime(): ManagedDevRuntime {
@@ -64,6 +65,7 @@ beforeEach(() => {
   delete process.env.VITE_JAZZ_APP_ID;
   delete process.env.VITE_JAZZ_SERVER_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
+  delete process.env.BACKEND_SECRET;
 });
 
 afterEach(async () => {
@@ -92,6 +94,12 @@ afterEach(async () => {
     delete process.env.JAZZ_ADMIN_SECRET;
   } else {
     process.env.JAZZ_ADMIN_SECRET = originalAdminSecret;
+  }
+
+  if (originalBackendSecret === undefined) {
+    delete process.env.BACKEND_SECRET;
+  } else {
+    process.env.BACKEND_SECRET = originalBackendSecret;
   }
 });
 
@@ -129,6 +137,53 @@ describe("ManagedDevRuntime", () => {
     } finally {
       await runtime.dispose();
     }
+  });
+
+  it("restores the backend secret after stop failure and permits retry", async () => {
+    const firstSchemaDir = await tempRoots.create("jazz-managed-stop-failure-first-");
+    const secondSchemaDir = await tempRoots.create("jazz-managed-stop-failure-second-");
+    await writeFile(join(firstSchemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(secondSchemaDir, "schema.ts"), todoSchema());
+    const stopError = new Error("server stop failed");
+
+    vi.spyOn(devServer, "startLocalJazzServer")
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000128",
+        port: 19888,
+        url: "http://127.0.0.1:19888",
+        dataDir: undefined as unknown as string,
+        adminSecret: "stop-failure-admin-1",
+        backendSecret: "stop-failure-backend-1",
+        stop: vi.fn().mockRejectedValue(stopError),
+      })
+      .mockResolvedValueOnce({
+        appId: "00000000-0000-0000-0000-000000000129",
+        port: 19889,
+        url: "http://127.0.0.1:19889",
+        dataDir: undefined as unknown as string,
+        adminSecret: "stop-failure-admin-2",
+        backendSecret: "stop-failure-backend-2",
+        stop: vi.fn().mockResolvedValue(undefined),
+      });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const runtime = makeRuntime();
+    await runtime.initialize({
+      schemaDir: firstSchemaDir,
+      server: { port: 19888, adminSecret: "stop-failure-admin-1" },
+    });
+    expect(process.env.BACKEND_SECRET).toBe("stop-failure-backend-1");
+
+    await expect(runtime.dispose()).rejects.toBe(stopError);
+    expect(process.env.BACKEND_SECRET).toBeUndefined();
+
+    await runtime.initialize({
+      schemaDir: secondSchemaDir,
+      server: { port: 19889, adminSecret: "stop-failure-admin-2" },
+    });
+    expect(process.env.BACKEND_SECRET).toBe("stop-failure-backend-2");
+    await runtime.dispose();
   });
 
   it("separates a generated app ID from a final unterminated env line", async () => {

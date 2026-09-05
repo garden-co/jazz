@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../../index.js";
-import { createDb } from "../db.js";
+import { createDb } from "../default-create-db.js";
 import {
   acquireNodeForegroundNodeLease,
   nodeForegroundNodeLeaseDirectoryForTest,

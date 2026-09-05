@@ -56,7 +56,8 @@ struct JwtClaims {
     sub: String,
     iss: String,
     aud: String,
-    claims: JsonValue,
+    #[serde(flatten)]
+    claims: serde_json::Map<String, JsonValue>,
     exp: u64,
 }
 
@@ -343,7 +344,7 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
         // be rejected by the fail-closed server admission boundary.
         iss: TEST_JWT_ISSUER.to_owned(),
         aud: TEST_JWT_AUDIENCE.to_owned(),
-        claims,
+        claims: claims.as_object().cloned().unwrap_or_default(),
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")

@@ -14,7 +14,7 @@ const cookieSession: Session = {
 
 describe("DbConfig auth validation", () => {
   it("rejects setting both secret and jwtToken", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     // @ts-expect-error Exercise the runtime guard for untyped JavaScript callers.
     const config: DbConfig = {
       appId: "test-app",
@@ -25,7 +25,7 @@ describe("DbConfig auth validation", () => {
   });
 
   it("rejects setting both jwtToken and cookieSession", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     // @ts-expect-error Exercise the runtime guard for untyped JavaScript callers.
     const config: DbConfig = {
       appId: "test-app",
@@ -36,7 +36,7 @@ describe("DbConfig auth validation", () => {
   });
 
   it("rejects setting both secret and cookieSession from untyped callers", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const config = {
       appId: "test-app",
       secret: SECRET,
@@ -47,7 +47,7 @@ describe("DbConfig auth validation", () => {
   });
 
   it("accepts flat secret field", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       secret: SECRET,
@@ -62,7 +62,7 @@ describe("DbConfig auth validation", () => {
 
 describe("getLocalFirstIdentityProof", () => {
   it("returns a token for a local-first session", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       secret: SECRET,
@@ -75,7 +75,7 @@ describe("getLocalFirstIdentityProof", () => {
   });
 
   it("returns null for a non-local-first session", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     const db = await createDb({
       appId: "test-app",
       jwtToken: "dummy-jwt",
@@ -87,14 +87,14 @@ describe("getLocalFirstIdentityProof", () => {
   });
 
   it("rejects an unversioned secret before runtime or author minting", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     await expect(
       createDb({ appId: "test-app", secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
     ).rejects.toThrow(/jazz-auth-v1/);
   });
 
   it("rejects backend admission credentials on the public client factory", async () => {
-    const { createDb } = await import("./db.js");
+    const { createDb } = await import("./default-create-db.js");
     await expect(
       createDb({ appId: "test-app", backendSecret: "server-only" } as unknown as DbConfig),
     ).rejects.toThrow(/createJazzContext/);

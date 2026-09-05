@@ -71,7 +71,7 @@ use crate::query::{
 };
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
-use crate::time::GlobalTime;
+use crate::time::{GlobalTime, TxTime};
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
@@ -1073,6 +1073,25 @@ impl PeerIoPump {
                 ))
             }
         }
+    }
+
+    /// Hand one bounded auxiliary batch to an in-process transport. Preserve
+    /// its source obligation when the transport rejects the send, just as the
+    /// wire-frame reservation does for socket bindings.
+    pub fn send_outbound(
+        &self,
+        transport: &mut dyn Transport,
+        limit: usize,
+    ) -> Result<bool, TransportError> {
+        let Some(message) = self.take_outbound(limit) else {
+            return Ok(false);
+        };
+        if let Err(error) = transport.send(message.clone()) {
+            self.restore_outbound(message);
+            return Err(error);
+        }
+        self.acknowledge_outbound(&message);
+        Ok(true)
     }
 
     fn restore_outbound(&self, message: SyncMessage) {
@@ -2123,6 +2142,7 @@ struct PendingSubscriptionFinalization {
     /// The fallible opening guard can run before a public stream state exists.
     /// It is never subject to runtime replacement, so this narrowly scoped
     /// fallback may carry its just-created Groove handle directly.
+    opening_upstream: Vec<UpstreamCoverageHandle>,
     opening_local: Option<(u64, groove::ivm::SubscriptionId)>,
     acknowledgement: Option<oneshot::Sender<()>>,
 }
@@ -2557,6 +2577,27 @@ pub struct DbTickStats {
     pub remote_sync_applied: usize,
 }
 
+impl<S> Db<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Reserve local transaction-clock positions through `high_water` before a
+    /// trusted native foreground host reuses a node identity.
+    pub async fn reserve_minted_tx_time_after(&self, high_water: TxTime) -> Result<(), Error> {
+        self.node
+            .node()
+            .lock()
+            .await
+            .reserve_tx_time_after(high_water)?;
+        Ok(())
+    }
+
+    /// Return the HLC high-water mark for locally minted transactions.
+    pub async fn minted_tx_time_high_water(&self) -> TxTime {
+        self.node.node().lock().await.tx_time_high_water()
+    }
+}
+
 mod node_runtime;
 use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
@@ -2820,7 +2861,9 @@ fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
 fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     if matches!(
         opts.read_view.source,
-        ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+        ReadViewSourceSpec::Current
+            | ReadViewSourceSpec::BranchView { .. }
+            | ReadViewSourceSpec::Snapshot { .. }
     ) {
         return Ok(());
     }
@@ -4162,6 +4205,7 @@ struct SubscriptionState {
     /// closure, so finalization always retires the currently live state.
     upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
+    request_identity_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
@@ -4568,6 +4612,7 @@ impl Drop for SubscriptionStream {
 /// Validated and bound query plan used by all `Db` reads and subscriptions.
 #[derive(Clone, Debug)]
 pub struct PreparedQuery {
+    request_identity_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     shape: ValidatedQuery,
     binding: Binding,
     local_plan: Option<PreparedQueryPlanHandle>,
@@ -4578,6 +4623,40 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// Capture the admitted claims for this trusted-serving request.
+    /// Clones retain the same immutable scope across asynchronous owner waits.
+    pub fn with_identity_claims(
+        mut self,
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Self {
+        self.request_identity_claims = Some((author, claims));
+        self
+    }
+
+    fn scoped_node<'a, S: OrderedKvStorage>(
+        &self,
+        node: &'a mut NodeState<S>,
+        author: AuthorSubject,
+    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+        if self
+            .request_identity_claims
+            .as_ref()
+            .is_some_and(|(admitted, _)| *admitted != author)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "prepared request identity does not match read identity",
+            ));
+        }
+        Ok(node.scoped_optional_session_claims(
+            author,
+            self.request_identity_claims
+                .as_ref()
+                .map(|(_, claims)| claims.clone()),
+        ))
+    }
+
     /// Validated query shape.
     pub fn shape(&self) -> &ValidatedQuery {
         &self.shape

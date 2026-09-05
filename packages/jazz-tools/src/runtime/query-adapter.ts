@@ -21,7 +21,7 @@ import {
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
+import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -326,6 +326,9 @@ function toArraySubqueries(
       requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
+    const outputColumnName = schema[tableName]?.columns.some((column) => column.name === relName)
+      ? hiddenIncludeColumnName(relName)
+      : relName;
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -333,7 +336,7 @@ function toArraySubqueries(
       // We join from the FK column to the target table's id
       const requirement = includeRequirementForRelation(rel, requireCurrentLevelIncludes);
       subqueries.push({
-        column_name: relName,
+        column_name: outputColumnName,
         table: rel.toTable,
         inner_column: "id",
         outer_column: `${tableName}.${rel.fromColumn}`,
@@ -349,7 +352,7 @@ function toArraySubqueries(
       // Reverse relation: users -> todos via todos.owner_id
       // We join from the target table's FK column to our id
       subqueries.push({
-        column_name: relName,
+        column_name: outputColumnName,
         table: rel.toTable,
         inner_column: rel.toColumn,
         outer_column: `${tableName}.id`,
@@ -838,7 +841,10 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
       OrderBy: {
         input: relation,
         terms: builder.orderBy.map(([column, direction]) => ({
-          column: relColumn(column),
+          column: relColumn(
+            stripQualifier(column),
+            hops.length > 0 ? `__hop_${hops.length - 1}` : relationTable,
+          ),
           direction: direction === "desc" ? "Desc" : "Asc",
         })),
       },
@@ -916,7 +922,11 @@ function toFlatConditions(
  * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+  const raw = JSON.parse(builderJson);
+  if (raw?.union !== undefined) {
+    throw new Error("Public union queries are not supported by canonical query lowering yet.");
+  }
+  const builder = normalizeBuiltQuery(raw);
   const relations = analyzeRelations(schema);
   const selectColumns =
     builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];

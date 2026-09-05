@@ -684,7 +684,8 @@ struct Clock {
     global_time_register: GlobalTime,
     /// Authority timestamps allocated here and awaiting accepted application.
     locally_minted_global_times: BTreeSet<GlobalTime>,
-    /// Highest globally accepted timestamp durably committed by this core.
+    /// Highest authority-committed timestamp known to this node. On a
+    /// history-complete core this is also the locally complete history cut.
     committed_global_time: GlobalTime,
     /// Global transactions held by a partial node outside its core frontier.
     applied_global_times_after_frontier: BTreeSet<GlobalTime>,
@@ -696,6 +697,16 @@ impl Clock {
         self.global_time_register = global_time;
         self.locally_minted_global_times.insert(global_time);
         Ok(global_time)
+    }
+}
+
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
+        self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
+        Ok(())
     }
 }
 
@@ -729,13 +740,19 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+struct ParkedSubscription {
+    subscribe: Subscribe,
+    policy_binding: Option<PolicyBindingKey>,
+}
+
 /// Payloads parked until missing schema or catalogue context arrives.
 #[derive(Clone, Debug, Default)]
 struct Parking {
     /// Shape registrations waiting for an unknown schema version.
     parked_shape_registrations: BTreeMap<ShapeId, ShapeAst>,
     /// Subscription attaches waiting for their shape registration to become installable.
-    parked_binding_deltas: BTreeMap<ShapeId, Vec<Subscribe>>,
+    parked_binding_deltas: BTreeMap<ShapeId, Vec<ParkedSubscription>>,
     /// Commit units waiting for parent transactions or schema context.
     parked_commit_units: BTreeMap<TxId, ParkedCommitUnit>,
     /// Catalogue commit units waiting to be applied in dependency order.

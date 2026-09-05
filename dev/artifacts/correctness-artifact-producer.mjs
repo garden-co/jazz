@@ -13,6 +13,7 @@ import {
   correctnessArtifactStore,
   readCorrectnessArtifactSnapshotByFingerprint,
 } from "./test-artifact-store.mjs";
+import { artifactFeatures } from "./provenance.mjs";
 import { checkedOutCommit, sourceIdentity } from "../gates/source-identity.mjs";
 
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -186,6 +187,11 @@ export function verifyCorrectnessArtifactSnapshot(rootInput) {
     manifest.napiGeneration !== snapshot.napiGeneration
   )
     throw new Error("correctness artifacts: producer manifest does not match sealed snapshot");
+  const napiManifest = parseManifest(join(snapshot.napiGeneration, ".jazz-artifact-manifest.json"));
+  if (napiManifest.features !== artifactFeatures("napi"))
+    throw new Error(
+      "correctness artifacts: NAPI feature recipe differs from selected JAZZ_RN_TEST_BRIDGE mode",
+    );
   verifyGeneratedNativeExpectations(root, manifest);
   return { ...manifest, snapshot };
 }

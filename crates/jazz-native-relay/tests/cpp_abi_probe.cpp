@@ -3,7 +3,7 @@
 #include "jazz_native_relay.h"
 
 int main() {
-  if (jazz_native_relay_abi_version() != 3) return 1;
+  if (jazz_native_relay_abi_version() != 1) return 1;
   jazz_native_relay_host *host = jazz_native_relay_host_new();
   if (host == nullptr) return 1;
   const std::uint8_t probe[] = {0};

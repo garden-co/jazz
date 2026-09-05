@@ -2,13 +2,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createDb,
   generateAuthSecret,
-  publishStoredPermissions,
   schema,
   type CompiledPermissions,
   type Db,
   type RowOf,
 } from "../../src/index.js";
-import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, uniqueDbName, waitForCondition, withTimeout } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
@@ -120,6 +119,26 @@ describe("websocket include subscriptions", () => {
       "exclusive transaction did not reach the authority",
     );
 
+    let subscribedTodoIds: string[] = [];
+    ctx.trackSubscription(
+      observer.subscribe(
+        app.todos.where({ org_id: org.id }),
+        (rows) => {
+          subscribedTodoIds = rows.map((row) => row.id);
+        },
+        { tier: "edge" },
+      ),
+    );
+    let cancelledUpdates = 0;
+    const cancelBeforeOpening = observer.subscribe(
+      app.user_checks.where({ todo_id: todo.id }),
+      () => {
+        cancelledUpdates += 1;
+      },
+      { tier: "edge" },
+    );
+    cancelBeforeOpening();
+
     const [todos, checks, notes] = await withTimeout(
       Promise.all([
         observer.all(app.todos.where({ org_id: org.id }), { tier: "edge" }),
@@ -129,6 +148,12 @@ describe("websocket include subscriptions", () => {
       20_000,
       "concurrent strict-edge query coverage did not settle",
     );
+    await waitForCondition(
+      async () => subscribedTodoIds.includes(todo.id),
+      10_000,
+      "overlapping subscription admission did not settle",
+    );
+    expect(cancelledUpdates).toBe(0);
     expect(todos.map((row) => row.id)).toEqual([todo.id]);
     expect(checks.map((row) => ({ id: row.id, todoId: row.todo_id }))).toEqual([
       { id: check.id, todoId: todo.id },
@@ -384,21 +409,12 @@ async function publishSchemaAndPermissions(
   adminSecret: string,
   permissions: CompiledPermissions,
 ): Promise<void> {
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
     schema: app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 }
 

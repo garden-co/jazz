@@ -60,6 +60,7 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "JAZZ_RN_TEST_BRIDGE",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
@@ -188,6 +189,14 @@
         "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
         "JAZZ_CORRECTNESS_CONSUMER_TOKEN"
       ]
+    },
+    "rn-device-acceptance#test": {
+      "dependsOn": [],
+      "cache": false
+    },
+    "rn-device-acceptance#build": {
+      "dependsOn": [],
+      "cache": false
     }
   }
 }

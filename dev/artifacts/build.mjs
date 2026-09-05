@@ -14,7 +14,12 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { basename, join, relative, resolve } from "node:path";
-import { nativeArtifactFingerprint, verifyManifest, writeManifest } from "./provenance.mjs";
+import {
+  artifactFeatures,
+  nativeArtifactFingerprint,
+  verifyManifest,
+  writeManifest,
+} from "./provenance.mjs";
 import {
   acquireArtifactBuildLock,
   artifactLockPath,
@@ -392,13 +397,19 @@ export function validateNapiStage(
   assertRealNapiGeneration(stagePath, expectedBinding, { sealed: false });
   const generatedDeclarations = readFileSync(declarations, "utf8");
   const stableDeclarations = readFileSync(stableDeclarationsPath, "utf8");
-  if (generatedDeclarations !== stableDeclarations)
+  // napi-rs follows the host's native line endings. Declaration parity is a
+  // semantic ABI guard, so Windows CRLF must compare equal to the checked-in
+  // LF surface while every other generated difference remains fatal.
+  const normalizeLineEndings = (value) => value.replaceAll("\r\n", "\n");
+  const normalizedGeneratedDeclarations = normalizeLineEndings(generatedDeclarations);
+  const normalizedStableDeclarations = normalizeLineEndings(stableDeclarations);
+  if (normalizedGeneratedDeclarations !== normalizedStableDeclarations)
     throw new Error(
       declarationMismatchDiagnostic(
         stableDeclarationsPath,
         declarations,
-        stableDeclarations,
-        generatedDeclarations,
+        normalizedStableDeclarations,
+        normalizedGeneratedDeclarations,
       ),
     );
   if (target !== hostTarget) return;
@@ -482,6 +493,9 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const napiPath = expectedNapiBinding && join(napiStage, expectedNapiBinding);
   const args = [
     ...selectedArgs,
+    ...(artifactFeatures(kind) === "default,rn-test-bridge"
+      ? ["--features", "rn-test-bridge"]
+      : []),
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),

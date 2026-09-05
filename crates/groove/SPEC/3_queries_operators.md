@@ -29,6 +29,7 @@ Invariant digest:
 - `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form `column = $parameter` or `$parameter = column` as binding predicates.
 - `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including `SELECT DISTINCT`, grouped/ordered/limited selects, non-inner joins, and non-`UNION ALL` set operations.
 - `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with `AND` forming multi-column join keys.
+- `INV-QUERY-18A`: Each SQL inner-join `ON` operand MUST resolve against the complete visible join namespace: qualified references match exactly one qualifier and column, while unqualified references match exactly one column. Missing or ambiguous references MUST be rejected, and resolved operands MUST reference opposite join inputs.
 - `INV-QUERY-19`: `BindingSourceOp` MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
 - `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream
   graph inputs. Base-table inputs MUST have primary-key columns exactly
@@ -155,6 +156,14 @@ change in the same logical tick, the join must not double-count the left-delta Ã
 right-delta cross term (`INV-QUERY-10`). This is the subtlety that makes
 incremental joins correct, and chapter 4 covers how shared arrangements enforce
 it.
+
+The SQL planner resolves each operand of an `ON` equality against the complete
+visible namespace of both join inputs. A qualified reference MUST match exactly
+one field with that qualifier and column name; an unqualified reference MUST
+match exactly one field with that column name. Missing or ambiguous references
+are rejected. After resolution, the operands MUST belong to opposite join
+inputs; reversed equality operands are oriented into left and right keys without
+changing their meaning (`INV-QUERY-18A`).
 
 To see the double-count concretely, take key `k` with existing left row `L1`
 (weight +1) and existing right row `R1` (+1); the pre-tick join holds `L1Â·R1`.

@@ -18,11 +18,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 uuid = { version = "1", features = ["v5"] }
-jazz-storage-rocksdb.workspace = true
-jazz-benchmark-guard = { path = "../benchmark-guard" }
-tempfile = "3.27.0"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 jazz = { workspace = true, features = ["testing", "transport-compression-zstd"] }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio"] }
+jazz-storage-rocksdb.workspace = true
+jazz-benchmark-guard = { path = "../benchmark-guard" }
+tempfile = "3.27.0"
