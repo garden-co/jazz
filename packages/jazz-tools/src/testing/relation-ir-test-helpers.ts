@@ -175,7 +175,11 @@ export function toAssertionRelExprForTest(value: unknown): any {
       return {
         type: "Union",
         inputs: Array.isArray(payload.inputs)
-          ? payload.inputs.map((input) => toAssertionRelExprForTest(input))
+          ? payload.inputs.map((arm) =>
+              isRecord(arm) && typeof arm.label === "string" && "input" in arm
+                ? { label: arm.label, input: toAssertionRelExprForTest(arm.input) }
+                : toAssertionRelExprForTest(arm),
+            )
           : [],
       };
     case "Join":
