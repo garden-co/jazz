@@ -4169,16 +4169,27 @@ async fn run_native_relay_socket_worker(
             break;
         }
         let session_context = connected.session_context;
-        let (generation, wire) =
+        let (generation, wire) = loop {
+            if cancelled.load(Ordering::Acquire) {
+                break 'reconnect;
+            }
             match relay.run(move |worker| worker.begin_socket_upstream(session_context)) {
-                Ok(installed) => installed,
+                Ok(installed) => break installed,
+                Err(RelayError::OwnerQueueFull) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {},
+                        _ = wake.notified() => {},
+                    }
+                    continue;
+                }
                 Err(error) => {
                     (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
                         "native relay upstream install failed: {error}"
                     )));
-                    break;
+                    break 'reconnect;
                 }
-            };
+            }
+        };
         let lease = SocketUpstreamLease {
             relay: relay.clone(),
             generation,
@@ -4186,7 +4197,7 @@ async fn run_native_relay_socket_worker(
         };
         loop {
             if cancelled.load(Ordering::Acquire) {
-                return;
+                break 'reconnect;
             }
             match relay.run(move |worker| {
                 worker.poll_upstream_transition()?;
@@ -7191,8 +7202,87 @@ mod tests {
         private_session_restart_receipt(true).await;
     }
 
-    /// The C ABI must surface an actual Edge authentication denial, even though
-    /// a disconnected peer no longer disables local SQLite work.
+    /// Advice uses the real negotiated socket authority through the C ABI.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_permission_advice_uses_real_socket_authority() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = permissive_schema();
+        let server = JazzServer::builder()
+            .with_schema(schema.public_schema().clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await;
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
+        let admitted = fixture.begin_private_session(
+            &server.base_url(),
+            &server.app_id().to_string(),
+            &bearer,
+            storage.path(),
+            &schema,
+        );
+        let foreground = fixture.open_foreground(&admitted);
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        jazz_testkit::wait_for(Duration::from_secs(5), "real upstream installed", || {
+            let installed = client
+                .relay
+                .run(|worker| {
+                    Ok(worker.upstream_attached
+                        && worker.socket_wire.is_some()
+                        && worker.upstream_transition.is_none())
+                })
+                .unwrap();
+            async move { installed.then_some(()) }
+        })
+        .await;
+        let response = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::PermissionAdvice {
+                action: ForegroundPermissionAdviceAction::Insert {
+                    table: "todos".into(),
+                    cells: encoded_title_cells("dry run"),
+                },
+            },
+        );
+        let ForegroundDbCommandResponse::Pending { operation } = response else {
+            panic!("advice pending: {response:?}");
+        };
+        let advice = jazz_testkit::wait_for(Duration::from_secs(5), "authoritative advice", || {
+            fixture.tick(foreground);
+            let response =
+                fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+            async move {
+                match response {
+                    ForegroundDbCommandResponse::Pending { .. } => None,
+                    response => Some(response),
+                }
+            }
+        })
+        .await;
+        assert!(
+            matches!(
+                advice,
+                ForegroundDbCommandResponse::PermissionAdvice {
+                    advice: ForegroundPermissionAdvice::Allowed
+                }
+            ),
+            "{advice:?}"
+        );
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            server.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_invalid_bearer_still_fails_closed() {
         let issuer = TestJwtIssuer::start().await;
@@ -10625,6 +10715,121 @@ mod tests {
             outbound: Vec::new(),
         });
         assert_eq!(edge.try_recv(), Some(outbound));
+    }
+
+    // Internal queue seam: a host cannot deliberately block the relay owner.
+    #[test]
+    fn review_socket_install_recovers_after_owner_queue_saturation() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("socket-capacity.sqlite"),
+            Some("socket-capacity"),
+        ))
+        .unwrap();
+        let saturated = saturate_owner(&relay);
+        let (events_tx, events_rx) = mpsc::channel();
+        let connector = Arc::new(ReconnectingTestConnector {
+            calls: AtomicUsize::new(0),
+            bearer_seen: Arc::new(Mutex::new(Vec::new())),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay,
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".into(),
+                app_id: AppId::from_name("socket-capacity"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".into()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::from_millis(1),
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector.clone(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while connector.calls.load(Ordering::Acquire) < 1 {
+            if std::time::Instant::now() >= deadline {
+                saturated.release_and_wait();
+                panic!("connector did not reach installation");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let premature_event = events_rx.recv_timeout(Duration::from_millis(20));
+        saturated.release_and_wait();
+        assert!(matches!(
+            premature_event,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let mut connected = false;
+        for _ in 0..8 {
+            match events_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+            {
+                NativeRelaySocketEvent::Connected => {
+                    connected = true;
+                    break;
+                }
+                NativeRelaySocketEvent::Stopped => break,
+                _ => {}
+            }
+        }
+        worker.cancel();
+        assert!(
+            connected,
+            "transient owner backpressure must not permanently stop socket installation"
+        );
+    }
+
+    #[test]
+    fn socket_install_queue_retry_cancels_before_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("socket-capacity.sqlite"),
+            Some("socket-capacity"),
+        ))
+        .unwrap();
+        let saturated = saturate_owner(&relay);
+        let (events_tx, events_rx) = mpsc::channel();
+        let connector = Arc::new(ReconnectingTestConnector {
+            calls: AtomicUsize::new(0),
+            bearer_seen: Arc::new(Mutex::new(Vec::new())),
+        });
+        let worker = NativeRelaySocketWorker::start_with_connector(
+            relay.clone(),
+            NativeRelaySocketConfig {
+                server_url: "https://edge.example".into(),
+                app_id: AppId::from_name("socket-capacity"),
+                peer_identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                auth: AuthConfig {
+                    jwt_token: Some("edge-validated-bearer".into()),
+                    ..AuthConfig::default()
+                },
+                reconnect_delay: std::time::Duration::from_millis(1),
+                on_event: Arc::new(move |event| {
+                    let _ = events_tx.send(event);
+                }),
+            },
+            connector.clone(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while connector.calls.load(Ordering::Acquire) < 1 {
+            if std::time::Instant::now() >= deadline {
+                saturated.release_and_wait();
+                panic!("connector did not reach installation");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker.cancel();
+        let stopped = events_rx.recv_timeout(Duration::from_secs(1));
+        saturated.release_and_wait();
+        assert_eq!(stopped.unwrap(), NativeRelaySocketEvent::Stopped);
+        assert_eq!(relay.run(|worker| Ok(worker.socket_generation)).unwrap(), 0);
     }
 
     #[test]
