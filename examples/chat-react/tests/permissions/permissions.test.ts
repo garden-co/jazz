@@ -48,6 +48,107 @@ describe("chat permissions", () => {
     ]);
   });
 
+  it("allows self-membership with the current private chat join code", async () => {
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Invite-only room",
+        isPublic: false,
+        joinCode: "invite-current",
+      }),
+    );
+
+    const bobDb = testApp.as(externalSession("bob"));
+
+    bobDb.expectAllowed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: bob,
+        joinCode: "invite-current",
+      }),
+    );
+  });
+
+  it("denies self-membership with a forged private chat join code", async () => {
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Invite-only room",
+        isPublic: false,
+        joinCode: "invite-current",
+      }),
+    );
+
+    const bobDb = testApp.as(externalSession("bob"));
+
+    await bobDb.expectDenied((db) =>
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: bob,
+        joinCode: "invite-forged",
+      }),
+    );
+  });
+
+  it("denies self-membership with a stale private chat join code", async () => {
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Invite-only room",
+        isPublic: false,
+        joinCode: "invite-old",
+      }),
+    );
+    await testApp.seed((db) =>
+      db.update(app.chats, privateChat.id, {
+        joinCode: "invite-new",
+      }),
+    );
+
+    const bobDb = testApp.as(externalSession("bob"));
+
+    await bobDb.expectDenied((db) =>
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: bob,
+        joinCode: "invite-old",
+      }),
+    );
+  });
+
+  it("denies self-membership without a join code for a private chat", async () => {
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Invite-only room",
+        isPublic: false,
+      }),
+    );
+
+    const bobDb = testApp.as(externalSession("bob"));
+
+    await bobDb.expectDenied((db) =>
+      db.insert(app.chatMembers, {
+        chatId: privateChat.id,
+        userId: bob,
+      }),
+    );
+  });
+
+  it("allows self-membership without a join code for a public chat", async () => {
+    const publicChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Public room",
+        isPublic: true,
+      }),
+    );
+
+    const bobDb = testApp.as(externalSession("bob"));
+
+    bobDb.expectAllowed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: publicChat.id,
+        userId: bob,
+      }),
+    );
+  });
+
   it("allows chat name updates", async () => {
     await testApp.seed((db) =>
       db.insert(app.profiles, {
