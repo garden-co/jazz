@@ -7,6 +7,52 @@ use crate::db::peer_connection::{
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
+// Internal contention is deliberately planted: the public boundary is async
+// detach completion and continued local writes, but callers cannot hold these
+// owner guards deterministically through the public API.
+#[test]
+fn async_peer_detach_waits_for_connection_and_node_without_losing_local_work() {
+    let author = AuthorSubject::for_test_bytes([0xd4; 16]);
+    let client = open_db(0xd4, author, &schema());
+    let (transport, _authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let connection = block_on(client.connect_upstream(transport));
+    let mut detach = Box::pin(client.detach_connection_async(&connection));
+    let held_connection = block_on(connection.lock());
+    assert!(
+        std::future::Future::poll(
+            detach.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending()
+    );
+    drop(held_connection);
+    let held_node = block_on(client.node.node.lock());
+    assert!(
+        std::future::Future::poll(
+            detach.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop())
+        )
+        .is_pending()
+    );
+    drop(held_node);
+    assert!(block_on(detach));
+    assert!(!block_on(client.detach_connection_async(&connection)));
+    let write = client
+        .insert(
+            "todos",
+            doctest_support::todo_cells("after detach", false),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(block_on(write.wait(DurabilityTier::Local)).is_ok());
+}
+
 #[test]
 fn restarted_edge_forwards_complete_publication_without_original_clients() {
     // Internal topology test: inspect exact merge authorship and the durable

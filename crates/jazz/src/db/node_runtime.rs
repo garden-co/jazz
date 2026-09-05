@@ -2417,12 +2417,48 @@ where
         {
             return false;
         }
-        let mut connection_ref = connection.borrow_mut();
+        let connection_ref = connection.borrow_mut();
+        let node = self.node.borrow_mut();
+        self.detach_connection_with_guards(connection, connection_ref, node)
+    }
+
+    /// Wait for both owners before applying the shared detach transition.
+    pub async fn detach_connection_async(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+    ) -> bool {
+        if !self
+            .connections
+            .borrow()
+            .iter()
+            .any(|candidate| Rc::ptr_eq(candidate, connection))
+        {
+            return false;
+        }
+        let connection_ref = connection.lock().await;
+        let node = self.node.lock().await;
+        self.detach_connection_with_guards(connection, connection_ref, node)
+    }
+
+    fn detach_connection_with_guards(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+        mut connection_ref: futures::lock::MutexGuard<'_, PeerConnection<S>>,
+        mut node: futures::lock::MutexGuard<'_, NodeState<S>>,
+    ) -> bool {
+        if !self
+            .connections
+            .borrow()
+            .iter()
+            .any(|candidate| Rc::ptr_eq(candidate, connection))
+        {
+            return false;
+        }
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
         let mut terminal_permission_advice = Vec::new();
-        let current_session_claims = self.node.borrow().session_claims_with_revisions();
+        let current_session_claims = node.session_claims_with_revisions();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
@@ -2532,7 +2568,6 @@ where
                     // one maintained receiver per coverage group now; groups on
                     // every other downstream connection remain untouched.
                     let groups = std::mem::take(coverage_groups);
-                    let mut node = self.node.borrow_mut();
                     for (coverage, group) in groups {
                         for subscription in group.subscribers {
                             node.apply_unsubscribe(subscription);
@@ -2551,6 +2586,7 @@ where
                     (None, None, None, retired)
                 }
             };
+        drop(node);
         // The auxiliary lane is independent of semantic ticks. Retire it for
         // both upstream and subscriber links before releasing this connection
         // so an in-flight local lookup cannot recreate relay state afterward.

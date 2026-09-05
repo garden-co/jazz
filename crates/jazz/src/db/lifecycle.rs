@@ -1151,6 +1151,16 @@ where
         self.node.detach_connection(connection)
     }
 
+    /// Detach a peer after its connection and storage owner are available.
+    /// The retained future waits without blocking other owner-loop work and
+    /// then applies exactly the synchronous detach's receipt/outbox rules.
+    pub async fn detach_connection_async(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+    ) -> bool {
+        self.node.detach_connection_async(connection).await
+    }
+
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub fn tick(&self) -> impl Future<Output = Result<(), Error>> + '_ {
