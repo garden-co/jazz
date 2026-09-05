@@ -144,12 +144,15 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
   );
   await createRoom(guest, "Guest profile bootstrap");
 
-  const invitee = owner.querySelector<HTMLInputElement>(
-    "input[aria-label='Invite canonical author']",
-  )!;
+  const invitee = currentInput(owner, "input[aria-label='Invite canonical author']");
+  await setInputValue(invitee, guestAuthor);
+  // Creating the guest's bootstrap room can rerender the owner's membership
+  // panel. Reacquire the controlled input after React commits the value so the
+  // submit event reaches the currently connected form.
+  const currentInvitee = currentInput(owner, "input[aria-label='Invite canonical author']");
   const observation = {
-    input: invitee,
-    form: invitee.closest("form")!,
+    input: currentInvitee,
+    form: currentInvitee.closest("form")!,
     expectedValue: guestAuthor,
     submitted: false,
     reachedRoot: false,
@@ -162,10 +165,9 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
     },
     { once: true },
   );
-  await setInputValue(invitee, guestAuthor);
   observation.submitted = true;
   await act(async () =>
-    invitee
+    currentInvitee
       .closest("form")!
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
   );
@@ -219,6 +221,14 @@ async function setInputValue(input: HTMLInputElement, value: string) {
     value,
   );
   await act(async () => input.dispatchEvent(new Event("input", { bubbles: true })));
+}
+
+function currentInput(element: HTMLElement, selector: string): HTMLInputElement {
+  const input = element.querySelector<HTMLInputElement>(selector);
+  if (!input?.isConnected) {
+    throw new Error(`expected a connected input for selector ${selector}`);
+  }
+  return input;
 }
 
 async function createRoom(element: HTMLDivElement, name: string) {
