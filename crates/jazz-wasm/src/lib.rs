@@ -3775,7 +3775,7 @@ fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
 }
 
 fn relation_query_from_bytes(query_bytes: &[u8]) -> Result<RelationQuery, JsValue> {
-    jazz::query::decode_relation_query_v1_exact(query_bytes).map_err(to_js_error)
+    jazz::query::decode_relation_query_postcard(query_bytes).map_err(to_js_error)
 }
 
 async fn open_db<S>(

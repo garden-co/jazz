@@ -245,6 +245,9 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
     const keys = Object.keys(value);
     if (keys.length !== 1 || !tags.includes(keys[0]!)) fail(kind);
   };
+  const exactFields = (value: object, fields: string[], kind: string) => {
+    if (Object.keys(value).some((key) => !fields.includes(key))) fail(kind);
+  };
   const dimension = (value: unknown) => {
     if (value instanceof RawJsonNumber) {
       if (!/^(?:0|[1-9]\d*)$/.test(value.text)) fail("dimension");
@@ -256,9 +259,9 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
     u64(dimensionValue);
   };
   const column = (value: RelColumnRef) => {
+    if (!value || typeof value !== "object") fail("column");
+    exactFields(value, ["scope", "column"], "column");
     if (
-      !value ||
-      typeof value !== "object" ||
       typeof value.column !== "string" ||
       (value.scope !== undefined && typeof value.scope !== "string")
     )
@@ -481,6 +484,7 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
       "expression",
     );
     if ("TableScan" in value) {
+      exactFields(value.TableScan, ["table", "alias"], "table scan");
       u64(0);
       string(value.TableScan.table);
       option(value.TableScan.alias, () => string(value.TableScan.alias!));
@@ -496,6 +500,7 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
         nested(() => expr(arm.input));
       });
     } else if ("Join" in value) {
+      exactFields(value.Join, ["left", "right", "on", "join_kind"], "join");
       u64(3);
       nested(() => expr(value.Join.left));
       nested(() => expr(value.Join.right));
@@ -505,6 +510,7 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
         column(on.left);
         column(on.right);
       });
+      if (value.Join.join_kind !== "Inner" && value.Join.join_kind !== "Left") fail("join kind");
       u64(value.Join.join_kind === "Inner" ? 0 : 1);
     } else if ("Project" in value) {
       u64(4);
@@ -538,7 +544,9 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
       collection(value.OrderBy.terms.length);
       value.OrderBy.terms.forEach((term) => {
         node();
+        exactFields(term, ["column", "direction"], "order term");
         column(term.column);
+        if (term.direction !== "Asc" && term.direction !== "Desc") fail("order direction");
         u64(term.direction === "Asc" ? 0 : 1);
       });
     } else if ("Offset" in value) {

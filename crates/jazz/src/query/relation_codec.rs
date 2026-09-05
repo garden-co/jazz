@@ -1011,7 +1011,7 @@ mod relation_postcard_tests {
             },
         };
         let bytes = encode_relation_query_postcard(&query).unwrap();
-        assert_ne!(&bytes[..bytes.len().min(4)], b"custom relation header");
+        assert!(!bytes.starts_with(b"JRQ\x01"));
         assert_eq!(decode_relation_query_postcard(&bytes).unwrap(), query);
     }
 

@@ -4830,7 +4830,7 @@ fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
 }
 
 fn core_relation_query_from_bytes(query_bytes: &[u8]) -> napi::Result<CoreRelationQuery> {
-    jazz::query::decode_relation_query_v1_exact(query_bytes)
+    jazz::query::decode_relation_query_postcard(query_bytes)
         .map_err(|err| napi::Error::from_reason(err.to_string()))
 }
 

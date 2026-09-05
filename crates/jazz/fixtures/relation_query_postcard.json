@@ -80,6 +80,37 @@
       "postcard_hex": "01000174000000016300000480808080808080fc3f"
     },
     {
+      "name": "predicate_cmp_nested_unicode_literal",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Cmp": {
+                "left": {
+                  "column": "c"
+                },
+                "op": "Eq",
+                "right": {
+                  "Literal": {
+                    "é": [null, true, -4, 1.5],
+                    "猫": {
+                      "nested": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "0100017400000001630000070202c3a9060400010102070480808080808080fc3f03e78cab0701066e65737465640100"
+    },
+    {
       "name": "predicate_nulls",
       "relation": {
         "rel": {

@@ -84,4 +84,29 @@ describe("encodeRelationQueryPostcard", () => {
       }),
     ).toThrow("byte limit");
   });
+  test("rejects unknown relation enum values and fields", () => {
+    expect(() =>
+      encodeRelationQueryPostcard({
+        Join: {
+          left: { TableScan: { table: "a" } },
+          right: { TableScan: { table: "b" } },
+          on: [],
+          join_kind: "Cross",
+        },
+      } as unknown as RelExpr),
+    ).toThrow("join kind");
+    expect(() =>
+      encodeRelationQueryPostcard({
+        OrderBy: {
+          input: { TableScan: { table: "a" } },
+          terms: [{ column: { column: "id" }, direction: "Sideways" }],
+        },
+      } as unknown as RelExpr),
+    ).toThrow("order direction");
+    expect(() =>
+      encodeRelationQueryPostcard({
+        TableScan: { table: "a", unknown: true },
+      } as unknown as RelExpr),
+    ).toThrow("table scan");
+  });
 });

@@ -6271,7 +6271,7 @@ impl Drop for ForegroundReadCoverage {
 fn foreground_relation_query_from_bytes(
     query_bytes: &[u8],
 ) -> Result<jazz::query::RelationQuery, RelayError> {
-    jazz::query::decode_relation_query_v1_exact(query_bytes)
+    jazz::query::decode_relation_query_postcard(query_bytes)
         .map_err(|error| RelayError::ForegroundCommand(format!("decode relation query: {error}")))
 }
 
@@ -11211,10 +11211,10 @@ mod tests {
     #[test]
     fn relation_subscription_command_preserves_append_only_byte_contract() {
         let command = ForegroundDbCommandRequest::SubscribeRelationQuery {
-            query_bytes: b"JRQ\x01\x06\x00".to_vec(),
+            query_bytes: vec![0, 1, b't', 0],
             options_json: "{}".to_owned(),
         };
-        let expected = [37, 6, b'J', b'R', b'Q', 1, 6, 0, 2, b'{', b'}'];
+        let expected = [37, 4, 0, 1, b't', 0, 2, b'{', b'}'];
         assert_eq!(postcard::to_allocvec(&command).unwrap(), expected);
         assert_eq!(
             postcard::from_bytes::<ForegroundDbCommandRequest>(&expected).unwrap(),
@@ -14025,10 +14025,10 @@ mod tests {
             ),
             (
                 ForegroundDbCommandRequest::AllRelationQuery {
-                    query_bytes: b"JRQ\x01\x06\x00".to_vec(),
+                    query_bytes: vec![0, 1, b't', 0],
                     options_json: "{}".into(),
                 },
-                vec![33, 6, b'J', b'R', b'Q', 1, 6, 0, 2, b'{', b'}'],
+                vec![33, 4, 0, 1, b't', 0, 2, b'{', b'}'],
             ),
             (
                 ForegroundDbCommandRequest::LocalCurrentRow {
