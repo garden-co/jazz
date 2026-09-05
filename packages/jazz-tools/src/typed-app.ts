@@ -7,6 +7,8 @@ import type {
   ColumnBuilderValue,
   ColumnTransform,
 } from "./dsl.js";
+import { blake3 } from "@noble/hashes/blake3.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
@@ -1688,9 +1690,9 @@ function createAppForTables(
       }
       const labels = new Set<string>();
       for (const { label } of arms) {
-        if (!label || label.includes("\0") || labels.has(label)) {
+        if (!label || label.length > 4096 || label.includes("\0") || labels.has(label)) {
           throw new Error(
-            "union(...) arm labels must be non-empty, NUL-free, and unique; use named arms for duplicate relations.",
+            "union(...) arm labels must be 1..=4096 bytes, NUL-free, and unique; use named arms for duplicate relations.",
           );
         }
         labels.add(label);
@@ -1718,7 +1720,11 @@ function createAppForTables(
 }
 
 function derivedUnionArmLabel(relation: BuiltRelation): string {
-  return `derived:${canonicalUnionRelation(relation)}`;
+  // Labels are public durable input and therefore have a fixed small bound.
+  // Hash the typed canonical relation instead of embedding JSON: Date, bigint
+  // and byte values have non-JSON semantics, and a large literal must not turn
+  // a valid array union into an overlong inferred label.
+  return `derived:${bytesToHex(blake3(new TextEncoder().encode(canonicalUnionRelation(relation))))}`;
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
@@ -1741,6 +1747,22 @@ function canonicalUnionRelation(relation: BuiltRelation): string {
 }
 
 function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+  if (typeof value === "boolean") return `bool:${value}`;
+  if (typeof value === "bigint") return `bigint:${value}`;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? `number:${value}` : `number:${String(value)}`;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "date:invalid" : `date:${value.toISOString()}`;
+  }
+  if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;
+  if (value instanceof ArrayBuffer) return `bytes:${bytesToHex(new Uint8Array(value))}`;
+  if (ArrayBuffer.isView(value)) {
+    return `typed:${value.constructor.name}:${bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))}`;
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
@@ -1749,7 +1771,7 @@ function canonicalJson(value: unknown): string {
       .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
       .join(",")}}`;
   }
-  return JSON.stringify(value);
+  return `unknown:${String(value)}`;
 }
 
 export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];
