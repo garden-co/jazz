@@ -1441,8 +1441,8 @@ fn validate_exists_rel_join_conditions(
             validate_exists_rel_join_conditions(table, path, input)
         }
         RelExpr::Union { inputs } => {
-            for input in inputs {
-                validate_exists_rel_join_conditions(table, path, input)?;
+            for arm in inputs {
+                validate_exists_rel_join_conditions(table, path, &arm.input)?;
             }
             Ok(())
         }

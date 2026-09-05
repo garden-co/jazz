@@ -104,7 +104,7 @@ pub enum RelationExpr {
         predicate: RelationPredicate,
     },
     Union {
-        inputs: Vec<RelationExpr>,
+        inputs: Vec<RelationUnionArm>,
     },
     Join {
         left: Box<RelationExpr>,
@@ -140,6 +140,13 @@ pub enum RelationExpr {
         input: Box<RelationExpr>,
         limit: usize,
     },
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RelationUnionArm {
+    pub label: String,
+    pub input: RelationExpr,
 }
 
 #[allow(missing_docs)]
