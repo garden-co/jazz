@@ -15,7 +15,7 @@ import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises
 import { dirname, join, resolve } from "node:path";
 import type { ForegroundNodeLease } from "../runtime-source.js";
 
-const FORMAT = "jazz-node-foreground-node-leases-v2";
+const FORMAT = "jazz-node-foreground-node-leases-v1";
 const ACTIVE_DIRECTORY = "active";
 const REUSABLE_DIRECTORY = "reusable";
 const RETIRED_DIRECTORY = "retired";

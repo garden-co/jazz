@@ -68,8 +68,8 @@ export type {
   RelOrderDirection,
   RelOrderByExpr,
   RelExpr,
-  PolicyOperationV2,
-  PolicyExprV2,
+  PolicyOperation,
+  PolicyExpr,
 } from "./ir.js";
 
 // Typed schema app
