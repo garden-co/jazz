@@ -847,7 +847,11 @@ where
         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
         self.subscriber_dirty_epoch.set(next);
         for connection in self.connections.borrow().iter() {
-            let mut connection = connection.borrow_mut();
+            // A suspended peer observes the shared epoch on its next tick.
+            // Local publication must not synchronously reenter that owner.
+            let Some(mut connection) = connection.try_lock() else {
+                continue;
+            };
             if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
                 &mut connection.link
             {
