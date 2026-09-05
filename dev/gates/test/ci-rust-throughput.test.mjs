@@ -743,8 +743,8 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     "the ownership exception must name only the Actions workspace",
   );
   assert.ok(
-    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory)
-      && shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
+    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory) &&
+      shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
     "the safe-directory setup must follow checkout and precede the first Git diagnostic",
   );
   assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
@@ -979,7 +979,10 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
 
 test("a clean checkout seals a Rust shadow source baseline", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-shadow-source-"));
-  const receipt = path.join(os.tmpdir(), `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`);
+  const receipt = path.join(
+    os.tmpdir(),
+    `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`,
+  );
   try {
     const gates = path.join(fixture, "dev/gates");
     fs.mkdirSync(gates, { recursive: true });
@@ -999,7 +1002,12 @@ test("a clean checkout seals a Rust shadow source baseline", () => {
       if (args[0] === "rev-parse") {
         const baseline = spawnSync(
           "node",
-          [path.join(gates, "rust-shadow-matrix.mjs"), "clean-source-baseline", receipt, result.stdout.trim()],
+          [
+            path.join(gates, "rust-shadow-matrix.mjs"),
+            "clean-source-baseline",
+            receipt,
+            result.stdout.trim(),
+          ],
           { cwd: fixture, encoding: "utf8" },
         );
         assert.equal(baseline.status, 0, baseline.stderr);
