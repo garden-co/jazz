@@ -86,6 +86,18 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
+#### Relation-query Postcard grammar in peer and binding envelopes
+
+Where a peer `ShapeAst` or binding `Query.relation`/`ShapeBody::Relation`
+contains a relation subtree, it uses the one typed Postcard relation-query
+grammar specified in [§19, Relation-query Postcard carrier](19_native_relays.md#relation-query-postcard-carrier).
+The direct native relation-read `WireRelationQuery` uses that same grammar; no
+WireFrame- or binding-specific relation subcodec exists. The committed
+`fixtures/relation_query_postcard.json` corpus pins its semantic-to-byte cases,
+the Rust receipt rejects noncanonical payloads, and TypeScript independently
+encodes the corpus and rejects malformed relation input. It is compatibility
+evidence, not a migration input.
+
 **Decision, 2026-08-28 — the sole wire protocol is v1.** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly

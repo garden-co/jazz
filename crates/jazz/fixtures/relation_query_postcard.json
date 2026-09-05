@@ -1,4 +1,5 @@
 {
+  "fixture_set": "jazz-relation-query-postcard-v1",
   "cases": [
     {
       "name": "table_scan",
