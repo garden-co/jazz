@@ -1170,6 +1170,49 @@ mod tests {
         );
     }
 
+    // This is an internal test because a JSON prelude is emitted before a Db
+    // exists. The shared fixture pins the native writer's exact first-message
+    // contract for the server and TypeScript carrier tests.
+    #[test]
+    fn native_writer_matches_websocket_prelude_v1_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../jazz/fixtures/websocket_prelude_v1.json",
+        ))
+        .expect("parse websocket prelude fixture");
+        for entry in fixture["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .filter(|entry| entry["writer"] == "rust-native")
+        {
+            let identity = AuthorSubject::from_canonical(
+                entry["peer_identity"]
+                    .as_str()
+                    .expect("fixture peer identity"),
+            )
+            .expect("fixture canonical peer identity");
+            let auth: AuthConfig =
+                serde_json::from_value(entry["auth"].clone()).expect("fixture native auth");
+            let actual = String::from_utf8(
+                encode_prelude(
+                    identity,
+                    auth,
+                    entry["bootstrap_catalogue"]
+                        .as_bool()
+                        .expect("fixture bootstrap flag"),
+                )
+                .expect("encode fixture prelude"),
+            )
+            .expect("native prelude is UTF-8 JSON");
+            assert_eq!(
+                actual,
+                entry["json"].as_str().expect("fixture JSON"),
+                "native writer drifted for {}",
+                entry["name"].as_str().expect("fixture name")
+            );
+        }
+    }
+
     #[test]
     fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
         let bytes = encode_prelude(AuthorSubject::SYSTEM, AuthConfig::default(), true)
