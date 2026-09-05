@@ -27,7 +27,7 @@ function injectAndroidBuildConfig(root) {
     "        // Schema/app metadata is public; endpoint and ephemeral bearers are",
     "        // launch-only inputs from the local Rust Edge/Core harness.",
     '        buildConfigField "String", "JAZZ_DEVICE_APP_ID", "\\"jazz-device-acceptance\\""',
-    '        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\\"{\\\\\"tables\\\\\":{\\\\\"todos\\\\\":{\\\\\"columns\\\\\":[{\\\\\"name\\\\\":\\\\\"title\\\\\",\\\\\"column_type\\\\\":{\\\\\"type\\\\\":\\\\\"Text\\\\\"},\\\\\"nullable\\\\\":false}]}}}\\""',
+    `        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", ${JSON.stringify(JSON.stringify(JSON.stringify(require("../native/device-fixture.json").schema)))}`, // todos and policy-protected scope_rows
   ].join("\n");
   if (!source.includes(marker))
     throw new Error("Expo app build.gradle no longer has the BuildConfig insertion marker");

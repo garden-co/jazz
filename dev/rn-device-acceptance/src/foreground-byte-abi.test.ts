@@ -1360,3 +1360,13 @@ function encodeSubscriptionDelta({
   writer.vec(() => undefined, 0);
   return writer.finish();
 }
+
+test("scope query and owner cells match the Rust-generated fixture", async () => {
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(
+    readFileSync(new URL("../native/device-fixture.json", import.meta.url), "utf8"),
+  );
+  const { scopeQuery, scopeCells } = await import("./scope-fixture.ts");
+  assert.deepEqual([...scopeQuery], fixture.scopeQuery);
+  assert.deepEqual(scopeCells, fixture.scopeCells);
+});

@@ -121,7 +121,7 @@ static NSData *JazzDeviceAdmitPrivateSession(BOOL userB, NSError **error) {
   NSData *session = [JazzRelayTrustedAdmission beginPrivateSessionWithServerURL:endpoint
       appID:@"jazz-device-acceptance" jwt:bearer error:error];
   if (session == nil) return nil;
-  NSString *schema = @"{\"tables\":{\"todos\":{\"columns\":[{\"name\":\"title\",\"column_type\":{\"type\":\"Text\"},\"nullable\":false}]}}}";
+  NSString *schema = @"{\"tables\":{\"scope_rows\":{\"columns\":[{\"column_type\":{\"type\":\"Text\"},\"name\":\"title\",\"nullable\":false},{\"column_type\":{\"type\":\"Text\"},\"name\":\"owner\",\"nullable\":false}],\"policies\":{\"delete\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":null},\"insert\":{\"using\":null,\"with_check\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}}},\"select\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":null},\"update\":{\"using\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}},\"with_check\":{\"column\":\"owner\",\"op\":\"Eq\",\"type\":\"Cmp\",\"value\":{\"path\":[\"user\"],\"type\":\"SessionRef\"}}}}},\"todos\":{\"columns\":[{\"column_type\":{\"type\":\"Text\"},\"name\":\"title\",\"nullable\":false}]}}}";
   return [JazzRelayTrustedAdmission attachCanonicalSchemaJSON:[schema dataUsingEncoding:NSUTF8StringEncoding]
       sessionCapability:session error:error];
 }

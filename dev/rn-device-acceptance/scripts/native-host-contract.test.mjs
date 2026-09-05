@@ -1491,3 +1491,21 @@ test("Android validates the synchronous boundary sink before awaiting native Cor
   );
   assert.match(android, /setOf\("js-before-core-await"/);
 });
+
+test("both native platforms admit the Rust-generated owner-policy schema", () => {
+  const fixture = JSON.parse(read("native/device-fixture.json"));
+  for (const file of ["native/ios/JazzDeviceFixture.mm", "ios/JazzDeviceFixture.mm"]) {
+    const literal = /NSString \*schema = @(.*);/.exec(read(file))?.[1];
+    assert.ok(literal);
+    assert.deepEqual(JSON.parse(JSON.parse(literal)), fixture.schema);
+  }
+  const literal = /buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", (.*)/.exec(
+    read("android/app/build.gradle"),
+  )?.[1];
+  assert.ok(literal);
+  assert.deepEqual(JSON.parse(JSON.parse(JSON.parse(literal))), fixture.schema);
+  assert.match(
+    read("plugins/with-jazz-device-fixture.cjs"),
+    /require\("\.\.\/native\/device-fixture.json"\)\.schema/,
+  );
+});

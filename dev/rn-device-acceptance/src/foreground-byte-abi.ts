@@ -1,3 +1,4 @@
+import { scopeQuery, scopeCells } from "./scope-fixture.ts";
 import type {
   NativeForegroundCommand,
   NativeForegroundResponse,
@@ -193,7 +194,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
       throw new Error("foreground B could not prepare the todos subscription");
     const subscribed = execute(b, { type: "subscribe", query: prepared.query });
     if (subscribed.type !== "subscribed")
-      throw new Error("foreground B could not subscribe to the todos query");
+      throw new Error("foreground B could not subscribe to the owner-protected scope query");
 
     // Settle and acknowledge B's initial reset before A writes. Subscribe may
     // make the reset immediately ready without scheduling a wake, so Drain must
@@ -390,9 +391,9 @@ export async function proveForegroundScopeIsolation(
       const staged = execute({
         type: "upsert",
         transaction: transaction.transaction,
-        table: "todos",
+        table: "scope_rows",
         rowId,
-        cells: fixtureCells(receipt.write === "a" ? "scope A private row" : "scope B private row"),
+        cells: Uint8Array.from(scopeCells[receipt.write]),
       });
       if (staged.type !== "mutationStaged")
         throw new Error("scope fixture foreground upsert was not staged");
@@ -407,7 +408,7 @@ export async function proveForegroundScopeIsolation(
       // view. This separates write/admission failures from propagation to the
       // independently attached reader below without exposing runtime details.
       markFailure("scope-isolation-writer-read-failed");
-      await readTodos(
+      await readScopeRows(
         openedWriter.runtime,
         codec,
         (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
@@ -421,7 +422,7 @@ export async function proveForegroundScopeIsolation(
     const foreground = openScopeForeground(factory, capability);
     try {
       markFailure("scope-isolation-read-failed");
-      const rows = await readTodos(
+      const rows = await readScopeRows(
         foreground.runtime,
         codec,
         (candidate) =>
@@ -511,7 +512,7 @@ const TODOS_QUERY = Uint8Array.of(
   0,
 );
 
-async function readTodos(
+async function readScopeRows(
   foreground: NativeForegroundRuntime,
   codec: ForegroundByteCodec,
   ready: (rows: Uint8Array) => boolean = () => true,
@@ -521,12 +522,14 @@ async function readTodos(
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
+  const prepared = execute({ type: "prepareQuery", query: scopeQuery });
   if (prepared.type !== "preparedQuery")
-    throw new Error("scope isolation fixture could not prepare the todos query");
+    throw new Error("scope isolation fixture could not prepare the owner-protected scope query");
   const subscribed = execute({ type: "subscribe", query: prepared.query });
   if (subscribed.type !== "subscribed")
-    throw new Error("scope isolation fixture could not subscribe to the todos query");
+    throw new Error(
+      "scope isolation fixture could not subscribe to the owner-protected scope query",
+    );
   let pendingOperation: number | undefined;
   let published = false;
   let failed = true;
@@ -638,14 +641,7 @@ function utf8(value: string): Uint8Array {
 }
 
 function fixtureCells(
-  title:
-    | "mergeable"
-    | "updated"
-    | "upserted"
-    | "rolled back"
-    | "scope A private row"
-    | "scope B private row"
-    | "subscription from foreground A",
+  title: "mergeable" | "updated" | "upserted" | "rolled back" | "subscription from foreground A",
 ): Uint8Array {
   const bytes = {
     mergeable: [
@@ -655,14 +651,6 @@ function fixtureCells(
     upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 2, 117, 112, 115, 101, 114, 116, 101, 100],
     "rolled back": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 2, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
-    ],
-    "scope A private row": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105,
-      118, 97, 116, 101, 45, 114, 111, 119,
-    ],
-    "scope B private row": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 98, 45, 112, 114, 105,
-      118, 97, 116, 101, 45, 114, 111, 119,
     ],
     "subscription from foreground A": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,

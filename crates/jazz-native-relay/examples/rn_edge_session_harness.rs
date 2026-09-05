@@ -4,17 +4,24 @@
 
 use std::{io::Write, time::Duration};
 
+#[path = "support/device_fixture.rs"]
+mod device_fixture;
+
 use jazz::query::Query;
 
-use jazz::tools::{
-    AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, SchemaBuilder,
-    TableSchemaBuilder, Value,
-};
+use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Value};
 use jazz_native_relay as _;
 use jazz_server::{EdgeUpstreamHealth, JazzServer, TestJwtIssuer};
 use jazz_testkit::{connect, native_connector, wait_for_query};
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--print-fixture") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&device_fixture::fixture()).unwrap()
+        );
+        return;
+    }
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -28,9 +35,7 @@ async fn run() {
     let title = format!("high-level-foreground-row:{run_nonce}");
     let issuer = TestJwtIssuer::start().await;
     let app_id = AppId::from_name("jazz-device-acceptance");
-    let schema = SchemaBuilder::new()
-        .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
-        .build();
+    let schema = device_fixture::schema();
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .with_schema(schema.clone())
