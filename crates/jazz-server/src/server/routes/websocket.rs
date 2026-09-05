@@ -1448,6 +1448,68 @@ mod tests {
             .state
     }
 
+    // Internal admission-boundary test: scoped-link selection is made before
+    // the server shell opens, so a public WebSocket client can only observe
+    // its later feature-negotiated consequence.
+    #[tokio::test]
+    async fn ws_scope_isolated_request_requires_session_and_preserves_only_that_request() {
+        let state = make_ws_test_state().await;
+        let identity = AuthorSubject::for_test_bytes([0x72; 16]);
+        let (issuer, user_id) = issuer_and_subject(identity);
+        let scoped_session = ws_admission(
+            WebSocketPrelude {
+                peer_identity: identity.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    backend_secret: Some("backend-secret".to_owned()),
+                    backend_session: Some(serde_json::json!({
+                        "issuer": issuer,
+                        "user_id": user_id,
+                        "claims": {},
+                        "authMode": "external",
+                    })),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("authenticated session scope request");
+        assert_eq!(scoped_session.credential, WebSocketCredential::Session);
+        assert_eq!(
+            scoped_session.requested_link,
+            RequestedWebSocketLink::ScopeIsolatedClientRelay,
+            "a verified session must retain its scope-isolated request for feature negotiation"
+        );
+
+        let backend_scope_request = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                requested_link: RequestedWebSocketLink::ScopeIsolatedClientRelay,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("backend authentication ignores client-only scope request");
+        assert_eq!(
+            backend_scope_request.credential,
+            WebSocketCredential::Backend
+        );
+        assert_eq!(
+            backend_scope_request.requested_link,
+            RequestedWebSocketLink::OrdinarySession,
+            "backend credentials must not select scope-isolated client admission"
+        );
+    }
+
     #[tokio::test]
     async fn ws_admin_authority_capability_is_distinct_from_backend_attribution() {
         let state = make_ws_test_state().await;
@@ -1960,10 +2022,14 @@ mod tests {
         let frames: Vec<Vec<u8>> =
             postcard::from_bytes(&response).expect("decode server hello batch");
         assert_eq!(frames.len(), 1);
-        assert!(matches!(
-            decode_frame(&frames[0]).expect("decode server hello"),
-            WireFrame::Hello(_)
-        ));
+        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode server hello")
+        else {
+            panic!("expected server WireFrame::Hello");
+        };
+        assert_eq!(
+            server_hello.features, features,
+            "server Hello must retain every negotiated client feature"
+        );
     }
 
     async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
