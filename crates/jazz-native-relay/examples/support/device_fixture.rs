@@ -1,6 +1,6 @@
 //! Synthetic device-only schema and canonical byte fixtures. Scope rows need
 //! explicit authorization: separate local roots do not make public rows private.
-use jazz::groove::records::{RecordDescriptor, Value as RecordValue, ValueType};
+use jazz::groove::records::{OwnedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::ids::AuthorSubject;
 use jazz::query::Query;
 use jazz::tools::policy_expr::{eq, session};
@@ -41,17 +41,22 @@ pub fn owner(scope: &str) -> String {
     .to_owned()
 }
 
+fn scope_record(scope: &str) -> OwnedRecord {
+    let descriptor =
+        RecordDescriptor::new([("title", ValueType::String), ("owner", ValueType::String)]);
+    let raw = descriptor
+        .create(&[
+            RecordValue::String(format!("scope-{scope}-private-row")),
+            RecordValue::String(owner(scope)),
+        ])
+        .expect("synthetic owner cells");
+    OwnedRecord::new(raw, descriptor)
+}
+
 pub fn fixture() -> serde_json::Value {
     let cells = |scope: &str| {
-        let descriptor =
-            RecordDescriptor::new([("title", ValueType::String), ("owner", ValueType::String)]);
-        let raw = descriptor
-            .create(&[
-                RecordValue::String(format!("scope-{scope}-private-row")),
-                RecordValue::String(owner(scope)),
-            ])
-            .expect("synthetic owner cells");
-        postcard::to_allocvec(&(descriptor, raw)).expect("canonical scope cells")
+        jazz::binding_codec::encode_named_cells(&scope_record(scope))
+            .expect("canonical named scope cells")
     };
     serde_json::json!({
         "schema": schema(),
@@ -63,6 +68,7 @@ pub fn fixture() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::binding_codec::decode_named_cells;
     use jazz::tools::{AppContext, ClientStorage, DurabilityTier, Value};
     use jazz_server::{JazzServer, TestJwtIssuer};
     use jazz_testkit::{connect, native_connector, wait_for_query};
@@ -75,6 +81,32 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(fixture(), checked);
+    }
+
+    #[test]
+    fn generated_scope_cells_use_the_shared_named_cell_envelope() {
+        let checked: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../dev/rn-device-acceptance/native/device-fixture.json"
+        ))
+        .unwrap();
+        for scope in ["a", "b"] {
+            let bytes: Vec<u8> = serde_json::from_value(checked["scopeCells"][scope].clone())
+                .expect("checked scope cells are bytes");
+            let cells = decode_named_cells(&bytes).expect("fixture uses the shared named-cell ABI");
+            assert_eq!(
+                cells.get("title"),
+                Some(&RecordValue::String(format!("scope-{scope}-private-row")))
+            );
+            assert_eq!(cells.get("owner"), Some(&RecordValue::String(owner(scope))));
+
+            let record = scope_record(scope);
+            let generic = postcard::to_allocvec(&(record.descriptor(), record.raw()))
+                .expect("generic execution serde plant");
+            assert!(
+                decode_named_cells(&generic).is_err(),
+                "execution descriptor serde must not enter the native named-cell ABI"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
