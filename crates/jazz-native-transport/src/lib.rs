@@ -111,6 +111,13 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
+        // An HTTP 5xx response is a typed server-unavailability result before
+        // the authenticated wire handshake. It must retry like a refused
+        // connection; 4xx responses remain terminal authorization/admission
+        // failures.
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().is_server_error()
+        }
         WebSocketClientError::ServerWireError(error) => {
             error.code == jazz::wire::WireErrorCode::NotReady
                 && error.retry == jazz::wire::WireRetry::Later
@@ -898,6 +905,20 @@ mod tests {
         ));
         assert!(native_transport_error(refused).is_retryable());
         assert!(native_transport_error(WebSocketClientError::HandshakeTimeout).is_retryable());
+        for (status, retryable) in [(503, true), (401, false), (403, false), (429, false)] {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None::<Vec<u8>>)
+                .unwrap();
+            assert_eq!(
+                native_transport_error(WebSocketClientError::Connect(
+                    tokio_tungstenite::tungstenite::Error::Http(Box::new(response))
+                ))
+                .is_retryable(),
+                retryable,
+                "HTTP {status} must use its typed availability category"
+            );
+        }
         for (code, retry, expected) in [
             (WireErrorCode::NotReady, WireRetry::Later, true),
             (WireErrorCode::NotReady, WireRetry::AfterAuth, false),
