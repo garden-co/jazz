@@ -14,6 +14,8 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
@@ -855,6 +857,13 @@ impl ForegroundWakeState {
                 delay_ms,
             )
         }
+    }
+
+    fn is_active(&self) -> bool {
+        self.registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 
     /// Prevent every future raw-context call and wait for an in-flight one to
@@ -3186,10 +3195,22 @@ impl NativeRelayClient {
                 .clients
                 .get(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
+            // Registration replacement is an owner operation. Discard any
+            // signal captured by the prior raw callback before publishing the
+            // replacement, so a stale inert Arc cannot suppress its wake.
+            worker
+                .pending_foreground_wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&foreground);
             let scheduler = wake.map(|wake| ForegroundWakeScheduler {
                 wake,
                 foreground,
                 pending: worker.pending_foreground_wakes.clone(),
+                owner_wake: OwnerWakeNotifier {
+                    commands: worker.owner_commands.clone(),
+                    queued: worker.owner_wake_queued.clone(),
+                },
             });
             let has_foreground_scheduler = {
                 let mut foregrounds = worker
@@ -3544,6 +3565,27 @@ impl NativeRelayClient {
 // entry never crosses into a later registration's operation.
 type PendingForegroundWakes = Arc<Mutex<BTreeMap<u64, PendingForegroundWake>>>;
 
+#[derive(Clone)]
+struct OwnerWakeNotifier {
+    commands: mpsc::SyncSender<RelayCommand>,
+    queued: Arc<AtomicBool>,
+}
+
+impl OwnerWakeNotifier {
+    fn signal(&self) {
+        if self.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self
+            .commands
+            .try_send(RelayCommand::FlushForegroundWakes)
+            .is_err()
+        {
+            self.queued.store(false, Ordering::Release);
+        }
+    }
+}
+
 struct PendingForegroundWake {
     wake: Arc<ForegroundWakeState>,
     kind: u8,
@@ -3555,9 +3597,15 @@ struct ForegroundWakeScheduler {
     wake: Arc<ForegroundWakeState>,
     foreground: u64,
     pending: PendingForegroundWakes,
+    owner_wake: OwnerWakeNotifier,
 }
 impl ForegroundWakeScheduler {
     fn wake(&self, kind: u8, delay_ms: u64) {
+        // A retained Context waker can outlive callback replacement. Do not
+        // let its inert registration occupy this foreground's coalescing slot.
+        if !self.wake.is_active() {
+            return;
+        }
         let mut pending = self
             .pending
             .lock()
@@ -3569,6 +3617,13 @@ impl ForegroundWakeScheduler {
                 kind,
                 delay_ms,
             });
+        if !entry.wake.is_active() {
+            *entry = PendingForegroundWake {
+                wake: self.wake.clone(),
+                kind,
+                delay_ms,
+            };
+        }
         if kind == FOREGROUND_WAKE_IMMEDIATE
             || (kind == FOREGROUND_WAKE_DEFERRED && entry.kind == FOREGROUND_WAKE_AFTER)
             || (kind == FOREGROUND_WAKE_AFTER
@@ -3578,6 +3633,8 @@ impl ForegroundWakeScheduler {
             entry.kind = kind;
             entry.delay_ms = delay_ms;
         }
+        drop(pending);
+        self.owner_wake.signal();
     }
 }
 impl TickScheduler for ForegroundWakeScheduler {
@@ -4773,6 +4830,8 @@ struct RelayWorker {
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
+    owner_wake_queued: Arc<AtomicBool>,
+    owner_commands: mpsc::SyncSender<RelayCommand>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
     upstream_attached: bool,
     socket_generation: u64,
@@ -4805,6 +4864,8 @@ impl RelayWorker {
         config: RelayOpenConfig,
         wire: NativeRelayWire,
         liveness: Arc<RelayLiveness>,
+        owner_wake_queued: Arc<AtomicBool>,
+        owner_commands: mpsc::SyncSender<RelayCommand>,
     ) -> Result<Self, RelayError> {
         let column_families = config.schema.column_families();
         let refs = column_families
@@ -4836,6 +4897,8 @@ impl RelayWorker {
         Ok(Self {
             wake,
             pending_foreground_wakes: Arc::default(),
+            owner_wake_queued,
+            owner_commands,
             persistent,
             persistent_tick: None,
             upstream_io,
@@ -6226,6 +6289,7 @@ impl Drop for NormalOwnerQueuePermit {
 }
 
 enum RelayCommand {
+    FlushForegroundWakes,
     Run {
         job: RelayJob,
         _normal_permit: Option<NormalOwnerQueuePermit>,
@@ -6242,13 +6306,18 @@ impl NativeRelay {
         let identity = config.identity;
         let liveness = Arc::new(RelayLiveness::new());
         let wire = NativeRelayWire::for_owner(Arc::clone(&liveness));
+        // One coalesced internal owner-wake may coexist with the normal command
+        // budget and its lifecycle reserve; it never consumes teardown capacity.
         let (commands, receiver) = mpsc::sync_channel::<RelayCommand>(
-            NATIVE_RELAY_OWNER_COMMAND_MAX + NATIVE_RELAY_OWNER_TEARDOWN_RESERVE,
+            NATIVE_RELAY_OWNER_COMMAND_MAX + NATIVE_RELAY_OWNER_TEARDOWN_RESERVE + 1,
         );
         let normal_queue_depth = Arc::new(AtomicUsize::new(0));
+        let owner_wake_queued = Arc::new(AtomicBool::new(false));
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
         let owner_liveness = Arc::clone(&liveness);
+        let owner_wake_queued_for_worker = Arc::clone(&owner_wake_queued);
+        let owner_commands = commands.clone();
         #[cfg(test)]
         if let Some(counter) = &config.thread_start_counter {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -6257,7 +6326,13 @@ impl NativeRelay {
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
                 let _liveness = OwnerLiveness(owner_liveness.clone());
-                let mut worker = match RelayWorker::open(config, owner_wire, owner_liveness) {
+                let mut worker = match RelayWorker::open(
+                    config,
+                    owner_wire,
+                    owner_liveness,
+                    owner_wake_queued_for_worker,
+                    owner_commands,
+                ) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -6287,6 +6362,10 @@ impl NativeRelay {
                         }
                     };
                     match command {
+                        RelayCommand::FlushForegroundWakes => {
+                            worker.owner_wake_queued.store(false, Ordering::Release);
+                            worker.flush_foreground_wakes();
+                        }
                         RelayCommand::Run {
                             job,
                             _normal_permit,
@@ -7769,6 +7848,7 @@ mod tests {
         cancelled: AtomicUsize,
         callbacks_after_cancel: AtomicUsize,
         queued: Mutex<Vec<(u64, u8, u64)>>,
+        callback_ready: Condvar,
         delivered: AtomicUsize,
     }
 
@@ -7782,6 +7862,29 @@ mod tests {
 
         fn queued(&self) -> usize {
             self.queued.lock().unwrap().len()
+        }
+
+        fn wait_for_queued(&self, expected: usize) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let mut queued = self.queued.lock().unwrap();
+            while queued.len() < expected {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                let (next, timeout) = self.callback_ready.wait_timeout(queued, remaining).unwrap();
+                queued = next;
+                if timeout.timed_out() {
+                    return queued.len() >= expected;
+                }
+            }
+            true
+        }
+
+        fn assert_no_callback_for(&self, duration: Duration) {
+            let queued = self.queued.lock().unwrap();
+            let _ = self.callback_ready.wait_timeout(queued, duration).unwrap();
+            assert_eq!(self.callbacks_after_cancel.load(Ordering::Acquire), 0);
         }
 
         /// Run platform turns which were queued before a revoke. Cancellation
@@ -7815,6 +7918,7 @@ mod tests {
         } else {
             wake.callbacks_after_cancel.fetch_add(1, Ordering::AcqRel);
         }
+        wake.callback_ready.notify_all();
     }
 
     struct SaturatedOwner {
@@ -10306,6 +10410,14 @@ mod tests {
         a_wake.queued.lock().unwrap().clear();
         b_wake.queued.lock().unwrap().clear();
         waker.wake_by_ref();
+        assert!(
+            a_wake.wait_for_queued(1),
+            "owner notification must eventually schedule its foreground"
+        );
+        assert!(
+            b_wake.wait_for_queued(1),
+            "owner notification must eventually reach a live sibling"
+        );
         assert_eq!(
             a_wake.queued(),
             1,
@@ -10322,6 +10434,10 @@ mod tests {
         );
         b_wake.queued.lock().unwrap().clear();
         waker.wake_by_ref();
+        assert!(
+            b_wake.wait_for_queued(1),
+            "the shared future must still reach a live sibling"
+        );
         assert_eq!(
             b_wake.queued(),
             1,
@@ -10333,8 +10449,8 @@ mod tests {
             ForegroundDbCommandResponse::Closed { closed: true }
         );
         waker.wake_by_ref();
-        assert_eq!(a_wake.callbacks_after_cancel.load(Ordering::Acquire), 0);
-        assert_eq!(b_wake.callbacks_after_cancel.load(Ordering::Acquire), 0);
+        a_wake.assert_no_callback_for(Duration::from_millis(50));
+        b_wake.assert_no_callback_for(Duration::from_millis(50));
     }
 
     #[test]
@@ -10552,6 +10668,10 @@ mod tests {
                     wake: timer_state,
                     foreground: 1,
                     pending: worker.pending_foreground_wakes.clone(),
+                    owner_wake: OwnerWakeNotifier {
+                        commands: worker.owner_commands.clone(),
+                        queued: worker.owner_wake_queued.clone(),
+                    },
                 };
                 assert!(on_pthread_stack());
                 stacker::grow(8 * 1024 * 1024, || {
@@ -10621,6 +10741,33 @@ mod tests {
             vec![(FOREGROUND_WAKE_DEFERRED, 0, true, true)]
         );
         assert!(receipt.calls.lock().unwrap().is_empty());
+        replacement.calls.lock().unwrap().clear();
+        let stale_state = state.clone();
+        let client_id = client.id;
+        relay
+            .run(move |worker| {
+                // A retained Context waker may still own the cancelled registration.
+                let stale = ForegroundWakeScheduler {
+                    wake: stale_state,
+                    foreground: 1,
+                    pending: worker.pending_foreground_wakes.clone(),
+                    owner_wake: OwnerWakeNotifier {
+                        commands: worker.owner_commands.clone(),
+                        queued: worker.owner_wake_queued.clone(),
+                    },
+                };
+                stale.schedule_tick(TickUrgency::Immediate);
+                worker.clients[&client_id]
+                    .db
+                    .schedule_tick(TickUrgency::Deferred);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            *replacement.calls.lock().unwrap(),
+            vec![(FOREGROUND_WAKE_DEFERRED, 0, true, true)],
+            "stale cancelled scheduler must not suppress a replacement registration's wake"
+        );
         replacement_state.inert();
     }
 
