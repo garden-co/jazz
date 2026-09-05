@@ -79,21 +79,17 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
         Some(Value::U64(9))
     );
     assert_eq!(
-        projected.binding_field_names()[1].as_deref(),
+        projected.publication_fields[1].application_name(),
         Some("__jazz_aggregate_foo")
     );
     let cells = projected.test_cells_by_descriptor();
     assert_eq!(cells["__jazz_aggregate_foo"], Value::U64(9));
-    assert_eq!(
-        cells["$createdBy"],
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned())
-    );
-    assert_eq!(cells["$createdAt"], Value::U64(10));
-    assert_eq!(
-        cells["$updatedBy"],
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned())
-    );
-    assert_eq!(cells["$updatedAt"], Value::U64(20));
+    assert_eq!(projected.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::SYSTEM,
+        created_at: 10,
+        updated_by: AuthorSubject::SYSTEM,
+        updated_at: 20,
+    }));
 }
 
 #[test]
@@ -135,7 +131,7 @@ fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff()
         projected.cell(&table, "title"),
         Some(Value::String("application title".to_owned()))
     );
-    assert_eq!(projected.binding_field_names()[1].as_deref(), Some("title"));
+    assert_eq!(projected.publication_fields[1].application_name(), Some("title"));
 
     let physical_descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
@@ -258,7 +254,7 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     ("created_at".to_owned(), records::ValueType::U64),
                     ("updated_by".to_owned(), records::ValueType::String),
                     ("updated_at".to_owned(), records::ValueType::U64),
-                    ("user_title".to_owned(), records::ValueType::String),
+                    (user_column_field("title"), records::ValueType::String),
                 ]),
                 vec![
                     Value::Bytes(Vec::new()),
@@ -292,7 +288,8 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
             )
         };
         let raw = descriptor.create(&values).unwrap();
-        CurrentRow::new("todos", OwnedRecord::new(raw, descriptor))
+        CurrentRow::new_with_binding_fields("todos", OwnedRecord::new(raw, descriptor),
+            if physical { CurrentRowBindingRole::PhysicalColumn } else { CurrentRowBindingRole::LogicalField })
     }
 
     let created_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x68; 16]));
@@ -369,16 +366,19 @@ fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() 
 
 #[test]
 fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
-    fn query_row(fields: Vec<(String, records::ValueType)>, values: Vec<Value>) -> CurrentRow {
-        let descriptor = records::RecordDescriptor::new(
-            [("row_uuid".to_owned(), records::ValueType::Uuid)]
+    fn query_row(fields: Vec<(&str, &str)>, values: Vec<Value>) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new_with_fields(
+            [records::DescriptorField::new("row_uuid", records::ValueType::Uuid)]
                 .into_iter()
-                .chain(fields)
+                .chain(fields.into_iter().map(|(carrier, logical)| {
+                    records::DescriptorField::new(carrier, records::ValueType::U64)
+                        .with_identity(records::FieldIdentity::Name(logical.to_owned()))
+                }))
                 .chain([
-                    ("$createdBy".to_owned(), records::ValueType::String),
-                    ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::String),
-                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                    records::DescriptorField::new("$createdBy", records::ValueType::String),
+                    records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                    records::DescriptorField::new("$updatedBy", records::ValueType::String),
+                    records::DescriptorField::new("$updatedAt", records::ValueType::U64),
                 ]),
         );
         let values = [Value::Uuid(row(0x6c).0)]
@@ -392,32 +392,29 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
             ])
             .collect::<Vec<_>>();
         let raw = descriptor.create(&values).unwrap();
-        CurrentRow::new("scores", OwnedRecord::new(raw, descriptor))
+        CurrentRow::new_with_binding_fields("scores", OwnedRecord::new(raw, descriptor), CurrentRowBindingRole::LogicalField)
     }
 
     let aggregate_layout = query_row(
         vec![
-            ("foo".to_owned(), records::ValueType::U64),
-            ("__jazz_aggregate_foo".to_owned(), records::ValueType::U64),
+            ("foo", "foo"),
+            ("__jazz_aggregate_foo", "foo"),
         ],
         vec![Value::U64(1), Value::U64(2)],
     );
     let public_layout = query_row(
         vec![
-            (
-                "user___jazz_aggregate_foo".to_owned(),
-                records::ValueType::U64,
-            ),
-            ("user_foo".to_owned(), records::ValueType::U64),
+            ("user___jazz_aggregate_foo", "foo"),
+            ("user_foo", "foo"),
         ],
         vec![Value::U64(2), Value::U64(1)],
     );
     let foo = query_row(
-        vec![("foo".to_owned(), records::ValueType::U64)],
+        vec![("foo", "foo")],
         vec![Value::U64(1)],
     );
     let bar = query_row(
-        vec![("bar".to_owned(), records::ValueType::U64)],
+        vec![("bar", "bar")],
         vec![Value::U64(1)],
     );
 
@@ -435,9 +432,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
         )
         .with_identity(records::FieldIdentity::Name("foo".to_owned())),
         records::DescriptorField::new(
-            "user___jazz_aggregate_foo",
+            user_column_field("user___jazz_aggregate_foo"),
             records::ValueType::U64,
-        ),
+        ).with_identity(records::FieldIdentity::Name("user___jazz_aggregate_foo".to_owned())),
         records::DescriptorField::new("$createdBy", records::ValueType::String),
         records::DescriptorField::new("$createdAt", records::ValueType::U64),
         records::DescriptorField::new("$updatedBy", records::ValueType::String),
@@ -464,12 +461,15 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
                 "user___jazz_aggregate_foo".to_owned(),
                 Value::U64(7),
             ),
-            ("$createdBy".to_owned(), Value::String(AuthorSubject::SYSTEM.canonical().to_owned())),
-            ("$createdAt".to_owned(), Value::U64(10)),
-            ("$updatedBy".to_owned(), Value::String(AuthorSubject::SYSTEM.canonical().to_owned())),
-            ("$updatedAt".to_owned(), Value::U64(20)),
+
         ])
     );
+    assert_eq!(row.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::SYSTEM,
+        created_at: 10,
+        updated_by: AuthorSubject::SYSTEM,
+        updated_at: 20,
+    }));
 }
 
 #[test]

@@ -822,6 +822,24 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                 ("$updatedAt", ValueType::U64),
                 ("$updatedBy", ValueType::Uuid),
             ]);
+            // The resolver owns the mapping from storage carriers to application
+            // identities, just like the catalogue-backed production resolver.
+            let descriptor =
+                RecordDescriptor::new_with_fields(descriptor.fields().iter().map(|field| {
+                    let mut field = field.clone();
+                    match field.name.as_deref() {
+                        Some("_app_title") => {
+                            field.identity =
+                                Some(groove::records::FieldIdentity::Name("title".to_owned()))
+                        }
+                        Some("_app_todo") => {
+                            field.identity =
+                                Some(groove::records::FieldIdentity::Name("todo".to_owned()))
+                        }
+                        _ => {}
+                    }
+                    field
+                }));
             let parent = row(0xd1).0;
             let rows = match request.source.table.as_str() {
                 "todos" => self

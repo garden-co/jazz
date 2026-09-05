@@ -1519,12 +1519,7 @@ where
         };
         let policy = self.query_program_policy_context(identity);
         let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
-        let aggregate_output = shape
-            .query()
-            .aggregate
-            .as_ref()
-            .map(|_| materialization_app_row_schema(plan.as_deref(), program.as_ref()))
-            .transpose()?;
+        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -1571,13 +1566,7 @@ where
         let deltas = deltas_result?;
         retire_result?;
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(
-                shape.query(),
-                aggregate_output
-                    .as_ref()
-                    .expect("aggregate output selected before execution"),
-                deltas,
-            )?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, deltas)?
         } else if shape.query().flat_join.is_some() {
             deltas
                 .iter()
@@ -1599,6 +1588,11 @@ where
             }
             rows
         };
+        if shape.query().aggregate.is_none() {
+            for row in &mut rows {
+                Self::bind_app_row_schema_fields(row, &app_output)?;
+            }
+        }
         // The graph used for synchronous materialization intentionally retains
         // physical provenance fields so policy witnesses can
         // be resolved above.  Do not let that internal descriptor cross the
@@ -1722,12 +1716,7 @@ where
         profile.select_plan = phase_started.elapsed();
 
         let phase_started = Instant::now();
-        let aggregate_output = shape
-            .query()
-            .aggregate
-            .as_ref()
-            .map(|_| materialization_app_row_schema(plan.as_deref(), program.as_ref()))
-            .transpose()?;
+        let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
             None => self
                 .database
@@ -1764,13 +1753,7 @@ where
 
         let phase_started = Instant::now();
         let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(
-                shape.query(),
-                aggregate_output
-                    .as_ref()
-                    .expect("aggregate output selected before execution"),
-                deltas,
-            )?
+            self.materialize_aggregate_query_rows(shape.query(), &app_output, deltas)?
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
@@ -1781,6 +1764,11 @@ where
             }
             rows
         };
+        if shape.query().aggregate.is_none() {
+            for row in &mut rows {
+                Self::bind_app_row_schema_fields(row, &app_output)?;
+            }
+        }
         profile.decode_materialize = phase_started.elapsed();
 
         let query = shape.query();

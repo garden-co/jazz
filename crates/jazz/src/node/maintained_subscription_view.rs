@@ -1823,59 +1823,35 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
     // arrays/records. A collector root may contain both physical `user_*`
     // source cells and logical nested fields, so the presence of one family
     // must not hide the other.
-    let public_fields =
-        rows.descriptor
-            .fields()
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, field)| {
-                let name = field.name.as_deref()?;
-                (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
-                    let carrier = rows
-                        .field_carriers
-                        .get(name)
-                        .copied()
-                        .unwrap_or(rows.carrier);
-                    TerminalRootPublicField {
-                        publication: rows.publication_fields.get(name).cloned().unwrap_or_else(
-                            || crate::node::CurrentRowPublicationField::ResultField {
-                                name: rows
-                                    .public_field_names
-                                    .get(name)
-                                    .cloned()
-                                    .unwrap_or_else(|| name.to_owned()),
-                                visibility:
-                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
-                            },
-                        ),
-                        // The compiler binds this identity before terminal
-                        // publication. Carrier describes encoding, not naming:
-                        // a logical include may legitimately begin with `user_`.
-                        name: rows
-                            .public_field_names
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                rows.descriptor
-                                    .fields()
-                                    .get(slot)
-                                    .and_then(crate::node::query_engine::descriptor_public_name)
-                                    .map(str::to_owned)
-                                    .unwrap_or_else(|| match carrier {
-                                        AppRowCarrier::CurrentRow => name.to_owned(),
-                                        AppRowCarrier::Logical => name.to_owned(),
-                                    })
-                            }),
-                        descriptor_field_name: name.to_owned(),
-                        slot,
-                        carrier: match carrier {
-                            AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
-                            AppRowCarrier::Logical => TerminalRootCarrier::Logical,
-                        },
-                    }
-                })
+    let public_fields = rows
+        .descriptor
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, field)| {
+            let name = field.name.as_deref()?;
+            if slot == root_key_slot || rows.hidden_fields.contains(name) {
+                return None;
+            }
+            let publication = rows.publication_fields.get(name)?.clone();
+            let public_name = publication.public_name()?.to_owned();
+            let carrier = rows
+                .field_carriers
+                .get(name)
+                .copied()
+                .unwrap_or(rows.carrier);
+            Some(TerminalRootPublicField {
+                publication,
+                name: public_name,
+                descriptor_field_name: name.to_owned(),
+                slot,
+                carrier: match carrier {
+                    AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+                    AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+                },
             })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     for field in &public_fields {
         if let Some(descriptor_field) = descriptor_fields.get_mut(field.slot) {
             descriptor_field.identity =

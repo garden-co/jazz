@@ -46,6 +46,12 @@ fn collect_publication_fields(
                 (CollectFieldOrigin::SourceRow, Some(name)) if !field.is_row_id => {
                     source_publication_field(source, name.clone())
                 }
+                (CollectFieldOrigin::SourceRow, _) => CurrentRowPublicationField::ResultField {
+                    name: field.output.clone(),
+                    visibility: crate::node::CurrentRowResultVisibility::current_row_metadata(
+                        field.source_field.as_deref().unwrap_or(&field.output),
+                    ),
+                },
                 _ => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
                     visibility: if field.is_row_id {
@@ -3355,6 +3361,30 @@ fn unprefixed_version_witness_fields_for_tagged_rows(
     prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "")
 }
 
+/// Witness field names identify compiler-owned source carriers, including
+/// metadata whose spelling can collide with an application column identity.
+fn bind_witness_carrier_fields(mut fields: Vec<ProjectField>) -> Vec<ProjectField> {
+    use groove::ivm::{FieldRef, ProjectExpr};
+    for field in &mut fields {
+        let source = match &mut field.expression {
+            ProjectExpr::Field(source)
+            | ProjectExpr::Nullable(source)
+            | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::EnumTagRemap { source, .. }
+            | ProjectExpr::EnumRemap { source, .. }
+            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
+            _ => None,
+        };
+        if let Some(source @ FieldRef::Name(_)) = source {
+            let FieldRef::Name(name) = source else {
+                unreachable!()
+            };
+            *source = FieldRef::stored_name(std::mem::take(name));
+        }
+    }
+    fields
+}
+
 fn prefixed_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
@@ -3408,7 +3438,7 @@ fn prefixed_version_witness_fields_for_tagged_rows(
             branch_or_prefix,
         ));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn inline_version_witness_fields_for_tagged_rows(
@@ -3448,7 +3478,7 @@ fn inline_version_witness_fields_for_tagged_rows(
     if let Some(branch_or_prefix) = version.branch_or_prefix_field {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn deletion_witness_fields_for_tagged_rows(
@@ -3489,7 +3519,7 @@ fn deletion_witness_fields_for_tagged_rows(
     {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(fields)
+    Ok(bind_witness_carrier_fields(fields))
 }
 
 fn relation_edge_schema(

@@ -5613,7 +5613,7 @@ pub(crate) fn terminal_root_publication_fields(
         .collect::<Vec<_>>();
     for field in &layout.public_fields {
         assert_eq!(
-            field.publication.application_name(),
+            field.publication.public_name(),
             Some(field.name.as_str()),
             "terminal publication name must match its public slot mapping"
         );

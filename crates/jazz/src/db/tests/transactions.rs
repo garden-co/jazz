@@ -574,16 +574,10 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         overlay_row
             .encoded_record()
             .0
-            .field_index("user_title")
+            .field_index("title")
             .is_some()
     );
-    assert!(
-        overlay_row
-            .encoded_record()
-            .0
-            .field_index("user_done")
-            .is_some()
-    );
+    assert!(overlay_row.encoded_record().0.field_index("done").is_some());
     assert_eq!(
         overlay_row.cell_at(0),
         Some(Value::String("overlay".to_owned()))
@@ -597,13 +591,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), inserted);
-    assert!(
-        rows[0]
-            .encoded_record()
-            .0
-            .field_index("user_title")
-            .is_some()
-    );
+    assert!(rows[0].encoded_record().0.field_index("title").is_some());
     assert_eq!(
         rows[0].cell_at(0),
         Some(Value::String("attached".to_owned()))

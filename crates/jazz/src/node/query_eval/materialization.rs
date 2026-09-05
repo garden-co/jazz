@@ -1069,6 +1069,13 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "compiled query has no application row schema",
             ))?;
+        Self::bind_app_row_schema_fields(row, schema)
+    }
+
+    pub(super) fn bind_app_row_schema_fields(
+        row: &mut CurrentRow,
+        schema: &AppRowSchema,
+    ) -> Result<(), Error> {
         row.publication_fields = std::sync::Arc::new(
             row.record
                 .descriptor()

@@ -294,7 +294,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                 groove::ivm::TerminalEdit::Update { value, .. }
                 | groove::ivm::TerminalEdit::Insert { value, .. } => {
                     OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
-                        .get("_app_title")
+                        .get("title")
                         .ok()
                         == Some(Value::String("updated title".to_owned()))
                 }
@@ -342,7 +342,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         })
         .expect("local update produces a root payload through the terminal reducer");
     assert_eq!(
-        updated.get("_app_title").expect("decode terminal title"),
+        updated.get("title").expect("decode terminal title"),
         Value::String("updated title".to_owned())
     );
 
@@ -379,7 +379,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .expect("retraction emits the restored root row");
     assert_eq!(
         restored
-            .get("_app_title")
+            .get("title")
             .expect("decode restored terminal title"),
         Value::String("issue-0".to_owned()),
         "retraction removes the local winner and reveals the exact authority carrier"
@@ -464,9 +464,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         })
         .expect("authority replacement emits the current root row");
     assert_eq!(
-        concurrent
-            .get("_app_title")
-            .expect("decode authority title"),
+        concurrent.get("title").expect("decode authority title"),
         Value::String("authority title".to_owned()),
         "higher-HLC authority version wins deterministically while the local write remains pending"
     );
@@ -516,7 +514,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                     .any(|operation| match &operation.edit {
                         groove::ivm::TerminalEdit::Insert { value, .. } =>
                             OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
-                                .get("_app_title")
+                                .get("title")
                                 .ok()
                                 == Some(Value::String("pending-100".to_owned())),
                         _ => false,

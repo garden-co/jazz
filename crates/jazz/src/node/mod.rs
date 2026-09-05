@@ -1445,6 +1445,24 @@ pub enum CurrentRowPublicationField {
 }
 
 impl CurrentRowPublicationField {
+    pub(crate) fn public_name(&self) -> Option<&str> {
+        match self {
+            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
+                Some(output_name)
+            }
+            Self::ResultField {
+                name,
+                visibility:
+                    CurrentRowResultVisibility::ApplicationCell
+                    | CurrentRowResultVisibility::PublicProvenance,
+            } => Some(name),
+            Self::ResultField {
+                visibility: CurrentRowResultVisibility::HiddenMetadata,
+                ..
+            } => None,
+        }
+    }
+
     pub(crate) fn application_name(&self) -> Option<&str> {
         match self {
             Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
@@ -1663,7 +1681,12 @@ impl CurrentRow {
         self.publication_fields
             .iter()
             .map(|field| match field {
-                CurrentRowPublicationField::ResultField { .. } => field.application_name(),
+                CurrentRowPublicationField::ResultField {
+                    name,
+                    visibility:
+                        CurrentRowResultVisibility::ApplicationCell
+                        | CurrentRowResultVisibility::PublicProvenance,
+                } => Some(name.as_str()),
                 _ => None,
             })
             .collect()
@@ -2059,34 +2082,10 @@ impl CurrentRow {
 
     #[cfg(test)]
     pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
-        let user_cells = self
-            .record
-            .descriptor()
-            .field_index("row_uuid")
-            .map_or(CurrentRowRecord::USER_CELLS, |idx| idx + 1);
-        self.record
-            .descriptor()
-            .fields()
-            .iter()
-            .enumerate()
-            .skip(user_cells)
-            .filter_map(|(idx, field)| {
-                let name = field.name.as_ref()?.as_str();
-                let name = if let Some(name) = self::query_engine::descriptor_public_name(field) {
-                    name.to_owned()
-                } else if matches!(field.value_type, records::ValueType::Nullable(_))
-                    && !matches!(name, "authored_columns" | "settle_position")
-                {
-                    name.to_owned()
-                } else {
-                    return None;
-                };
-                let value = match self.record.borrowed().get_idx(idx).ok()? {
-                    Value::Nullable(value) => value.map(|value| *value)?,
-                    value => value,
-                };
-                Some((name, value))
-            })
+        // Expected test maps describe application cells. Compiler carrier names
+        // and metadata visibility are not an alternate publication contract.
+        self.subscription_cells()
+            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value)))
             .collect()
     }
 }

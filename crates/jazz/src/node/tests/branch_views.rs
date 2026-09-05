@@ -1111,7 +1111,7 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         })
         .expect("head rejection must replace the root terminal payload");
     assert_eq!(restored.get("row_uuid"), Ok(Value::Uuid(row_uuid.0)));
-    let title = restored.get("user_title").expect("decode restored title");
+    let title = restored.get("title").expect("decode restored title");
     assert!(
         title == Value::String("frozen base".to_owned())
             || title == Value::Nullable(Some(Box::new(Value::String("frozen base".to_owned())))),
@@ -1164,7 +1164,7 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
             _ => None,
         })
         .expect("replacement head must replace the root terminal payload");
-    let title = replacement.get("user_title").expect("decode replacement title");
+    let title = replacement.get("title").expect("decode replacement title");
     assert!(
         title == Value::String("replacement head".to_owned())
             || title
