@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { createDb, generateAuthSecret, type Db } from "../../src/index.js";
-import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
   liveEdgeApp as app,
@@ -49,7 +48,11 @@ describe("live authoritative overlapping relation replay", () => {
       for (let reopen = 0; reopen < 2; reopen++) {
         const db = cleanup.track(await createDb(config));
         await assertUnrelatedRead(db);
-        const openedPhysical = resolveDefaultPersistentDbName(db.config);
+        const matchingDatabases = (await indexedDB.databases())
+          .map((entry) => entry.name)
+          .filter((name): name is string => name?.startsWith(config.driver.dbName) === true);
+        expect(matchingDatabases).toHaveLength(1);
+        const openedPhysical = matchingDatabases[0]!;
         if (reopen === 0) {
           expect(databasesBeforeOpen).not.toContain(openedPhysical);
           physical = openedPhysical;
