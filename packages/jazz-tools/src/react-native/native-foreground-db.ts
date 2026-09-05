@@ -26,7 +26,11 @@ type ForegroundCommand =
   | { type: "prepareQuery"; query: Uint8Array }
   | { type: "all"; query: number }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | { type: "allRelationQuery" | "subscribeRelationQuery"; queryJson: string; optionsJson: string }
+  | {
+      type: "allRelationQuery" | "subscribeRelationQuery";
+      queryBytes: Uint8Array;
+      optionsJson: string;
+    }
   | {
       type: "allWithOptions" | "allRelationSnapshotWithOptions";
       query: number;
@@ -294,11 +298,14 @@ export class NativeForegroundDb {
     return unsupported("trusted-serving reads");
   }
 
-  allRelationQuery(queryJson: string, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
+  allRelationQuery(
+    queryBytes: Uint8Array,
+    opts: unknown,
+  ): Uint8Array | { poll(): Uint8Array | null } {
     this.tick();
     const response = this.execute({
       type: "allRelationQuery",
-      queryJson,
+      queryBytes,
       optionsJson: JSON.stringify(opts ?? {}),
     });
     if (response.type === "rows") return response.rows;
@@ -311,11 +318,11 @@ export class NativeForegroundDb {
     return unsupported("trusted-serving relation reads");
   }
 
-  subscribeRelationQuery(queryJson: string, opts: unknown): NativeForegroundSubscription {
+  subscribeRelationQuery(queryBytes: Uint8Array, opts: unknown): NativeForegroundSubscription {
     this.tick();
     const response = this.execute({
       type: "subscribeRelationQuery",
-      queryJson,
+      queryBytes,
       optionsJson: JSON.stringify(opts ?? {}),
     });
     if (response.type === "operationError") throw new Error(response.reason);

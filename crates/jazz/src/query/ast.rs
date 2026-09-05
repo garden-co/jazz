@@ -53,11 +53,10 @@ pub struct Query {
     pub relation: Option<RelationQuery>,
 }
 
-/// Human-readable query JSON retains the relation tree. The postcard runtime
-/// envelope instead carries one explicit UTF-8 JSON string, avoiding a second
-/// hand-maintained binary codec for the recursive relation grammar.
-mod relation_query_wire {
-    use super::RelationQuery;
+/// Human-readable query JSON retains the relation tree. Non-human serializers
+/// carry the explicit bounded JRQ v1 binary grammar.
+pub(crate) mod relation_query_wire {
+    use super::{decode_relation_query_v1_exact, encode_relation_query_v1, RelationQuery};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(value: &Option<RelationQuery>, serializer: S) -> Result<S::Ok, S::Error>
@@ -67,10 +66,7 @@ mod relation_query_wire {
         if serializer.is_human_readable() {
             return value.serialize(serializer);
         }
-        value
-            .as_ref()
-            .map(canonical_json)
-            .transpose()
+        value.as_ref().map(encode_relation_query_v1).transpose()
             .map_err(serde::ser::Error::custom)?
             .serialize(serializer)
     }
@@ -82,29 +78,15 @@ mod relation_query_wire {
         if deserializer.is_human_readable() {
             return Option::<RelationQuery>::deserialize(deserializer);
         }
-        Option::<String>::deserialize(deserializer)?
-            .map(|encoded| serde_json::from_str(&encoded).map_err(serde::de::Error::custom))
+        Option::<Vec<u8>>::deserialize(deserializer)?
+            .map(|encoded| decode_relation_query_v1_exact(&encoded).map_err(serde::de::Error::custom))
             .transpose()
     }
 
-    fn canonical_json(value: &RelationQuery) -> Result<String, serde_json::Error> {
-        fn sort(value: serde_json::Value) -> serde_json::Value {
-            match value {
-                serde_json::Value::Array(values) => {
-                    serde_json::Value::Array(values.into_iter().map(sort).collect())
-                }
-                serde_json::Value::Object(values) => {
-                    let mut entries = values.into_iter().collect::<Vec<_>>();
-                    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-                    serde_json::Value::Object(
-                        entries.into_iter().map(|(key, value)| (key, sort(value))).collect(),
-                    )
-                }
-                value => value,
-            }
-        }
-        serde_json::to_string(&sort(serde_json::to_value(value)?))
-    }
+    pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer { if serializer.is_human_readable() { value.serialize(serializer) } else { encode_relation_query_v1(value).map_err(serde::ser::Error::custom)?.serialize(serializer) } }
+    pub fn deserialize_required<'de, D>(deserializer: D) -> Result<RelationQuery, D::Error>
+    where D: Deserializer<'de> { if deserializer.is_human_readable() { RelationQuery::deserialize(deserializer) } else { let bytes=Vec::<u8>::deserialize(deserializer)?; decode_relation_query_v1_exact(&bytes).map_err(serde::de::Error::custom) } }
 }
 
 /// Output-changing relational join syntax.

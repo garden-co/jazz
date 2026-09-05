@@ -31,7 +31,7 @@ use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
-use jazz::query::{Query, RelationExpr, RelationQuery};
+use jazz::query::{Query, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::DurabilityTier;
@@ -2194,14 +2194,14 @@ impl WasmDb {
     #[wasm_bindgen(js_name = allRelationQuery)]
     pub fn all_relation_query(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         opts: JsValue,
         author: Option<Vec<u8>>,
     ) -> Result<js_sys::Promise, JsValue> {
         let inner = self.open_inner()?;
         let opts = read_opts_from_js(opts)?;
         let author = self.read_author(author)?;
-        let query = relation_query_from_json(&query_json)?;
+        let query = relation_query_from_bytes(&query_bytes)?;
         Ok(future_to_promise(async move {
             let mut snapshot = match author {
                 Some(author) => {
@@ -2298,11 +2298,11 @@ impl WasmDb {
     #[wasm_bindgen(js_name = subscribeRelationQuery)]
     pub fn subscribe_relation_query(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         opts: JsValue,
     ) -> Result<JsValue, JsValue> {
         let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_json(&query_json)?;
+        let query = relation_query_from_bytes(&query_bytes)?;
         let inner = self.open_inner()?;
         let stream = inner
             .subscribe_relation_query(&query, opts)
@@ -2313,13 +2313,13 @@ impl WasmDb {
     #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
     pub fn subscribe_relation_query_for_identity(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         author: Vec<u8>,
         opts: JsValue,
     ) -> Result<JsValue, JsValue> {
         let opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
-        let query = relation_query_from_json(&query_json)?;
+        let query = relation_query_from_bytes(&query_bytes)?;
         let inner = self.open_inner()?;
         let stream = inner
             .subscribe_relation_query_for_identity(&query, opts, author)
@@ -2330,12 +2330,12 @@ impl WasmDb {
     #[wasm_bindgen(js_name = subscribeRelationQueryForBackend)]
     pub fn subscribe_relation_query_for_backend(
         &self,
-        query_json: String,
+        query_bytes: Vec<u8>,
         opts: JsValue,
     ) -> Result<JsValue, JsValue> {
         self.require_trusted_backend()?;
         let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_json(&query_json)?;
+        let query = relation_query_from_bytes(&query_bytes)?;
         let inner = self.open_inner()?;
         let stream = inner
             .subscribe_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
@@ -3774,16 +3774,8 @@ fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
     jazz::tools::public_schema_convert::decode_public_schema_json(schema).map_err(to_js_error)
 }
 
-fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, JsValue> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|err| to_js_error(format!("decode query json: {err}")))?;
-    let relation_ir = value
-        .get("relation_ir")
-        .ok_or_else(|| to_js_error("relation query json is missing relation_ir"))?
-        .clone();
-    let rel: RelationExpr = serde_json::from_value(relation_ir)
-        .map_err(|err| to_js_error(format!("decode relation_ir: {err}")))?;
-    Ok(RelationQuery { rel })
+fn relation_query_from_bytes(query_bytes: &[u8]) -> Result<RelationQuery, JsValue> {
+    jazz::query::decode_relation_query_v1_exact(query_bytes).map_err(to_js_error)
 }
 
 async fn open_db<S>(

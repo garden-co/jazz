@@ -86,9 +86,7 @@ use jazz::protocol::{
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
     ReadViewSpec as CoreReadViewSpec,
 };
-use jazz::query::{
-    Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
-};
+use jazz::query::{Query as CoreQuery, RelationQuery as CoreRelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
@@ -3010,14 +3008,14 @@ impl NapiDb {
     #[napi(js_name = "allRelationQuery")]
     pub fn all_relation_query(
         &self,
-        query_json: String,
+        query_bytes: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
     ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
-        let query = core_relation_query_from_json(&query_json)?;
+        let query = core_relation_query_from_bytes(&query_bytes)?;
         let opts = core_read_opts_from_json(opts)?;
         let author = match author {
             Some(author) => Some(core_author_id_from_bytes(&author)?),
@@ -3310,13 +3308,13 @@ impl NapiDb {
     #[napi(js_name = "subscribeRelationQuery")]
     pub fn subscribe_relation_query(
         &self,
-        query_json: String,
+        query_bytes: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
-        let query = core_relation_query_from_json(&query_json)?;
+        let query = core_relation_query_from_bytes(&query_bytes)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
@@ -3344,14 +3342,14 @@ impl NapiDb {
     #[napi(js_name = "subscribeRelationQueryForIdentity")]
     pub fn subscribe_relation_query_for_identity(
         &self,
-        query_json: String,
+        query_bytes: Uint8Array,
         author: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
-        let query = core_relation_query_from_json(&query_json)?;
+        let query = core_relation_query_from_bytes(&query_bytes)?;
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
@@ -3386,14 +3384,14 @@ impl NapiDb {
     #[napi(js_name = "subscribeRelationQueryForBackend")]
     pub fn subscribe_relation_query_for_backend(
         &self,
-        query_json: String,
+        query_bytes: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Subscription> {
         self.require_trusted_backend()?;
-        let query = core_relation_query_from_json(&query_json)?;
+        let query = core_relation_query_from_bytes(&query_bytes)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
@@ -4831,16 +4829,9 @@ fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().copied().map(u32::from).collect()
 }
 
-fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|err| napi::Error::from_reason(format!("decode query json: {err}")))?;
-    let relation_ir = value
-        .get("relation_ir")
-        .ok_or_else(|| napi::Error::from_reason("relation query json is missing relation_ir"))?
-        .clone();
-    let rel: CoreRelationExpr = serde_json::from_value(relation_ir)
-        .map_err(|err| napi::Error::from_reason(format!("decode relation_ir: {err}")))?;
-    Ok(CoreRelationQuery { rel })
+fn core_relation_query_from_bytes(query_bytes: &[u8]) -> napi::Result<CoreRelationQuery> {
+    jazz::query::decode_relation_query_v1_exact(query_bytes)
+        .map_err(|err| napi::Error::from_reason(err.to_string()))
 }
 
 // ============================================================================

@@ -100,3 +100,73 @@ export type PolicyIRExpr =
   | { Not: PolicyIRExpr }
   | "True"
   | "False";
+
+/** Encode a relation IR using the Rust-owned JRQ v1 binary value grammar. */
+export function encodeRelationQueryV1(relation: RelExpr): Uint8Array {
+  const bytes: number[] = [0x4a, 0x52, 0x51, 0x01];
+  const writeLength = (value: number) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid JRQ length");
+    do {
+      let byte = value & 0x7f;
+      value = Math.floor(value / 128);
+      if (value) byte |= 0x80;
+      bytes.push(byte);
+    } while (value);
+  };
+  const text = new TextEncoder();
+  const writeBytes = (value: Uint8Array) => {
+    writeLength(value.length);
+    bytes.push(...value);
+  };
+  const write = (value: unknown): void => {
+    if (value === null) {
+      bytes.push(0);
+      return;
+    }
+    if (value === false) {
+      bytes.push(1);
+      return;
+    }
+    if (value === true) {
+      bytes.push(2);
+      return;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new Error("invalid JRQ number");
+      bytes.push(3);
+      writeBytes(text.encode(String(value)));
+      return;
+    }
+    if (typeof value === "bigint") {
+      bytes.push(4);
+      writeBytes(text.encode(value.toString()));
+      return;
+    }
+    if (typeof value === "string") {
+      bytes.push(4);
+      writeBytes(text.encode(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      bytes.push(5);
+      writeLength(value.length);
+      value.forEach(write);
+      return;
+    }
+    if (value && typeof value === "object") {
+      bytes.push(6);
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      );
+      writeLength(entries.length);
+      for (const [key, child] of entries) {
+        writeBytes(text.encode(key));
+        write(child);
+      }
+      return;
+    }
+    throw new Error("unsupported JRQ value");
+  };
+  write(relation);
+  return Uint8Array.from(bytes);
+}
