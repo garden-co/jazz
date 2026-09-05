@@ -5,7 +5,7 @@
  * exercise the full HTTP API, and clean up afterwards.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import {
   type RunningServer,
   type Todo,
 } from "../src/main.ts";
+import { app } from "../schema.js";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
 
@@ -45,6 +46,22 @@ function authenticatedFetch(
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${identity.token}`);
   return fetch(input, { ...init, headers });
+}
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    // This integration test deliberately bounds platform shutdown with a real timer.
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 describe("Todo Server Integration", () => {
@@ -456,6 +473,87 @@ describe("Todo Server Integration", () => {
           await reader.cancel().catch(() => undefined);
         }
         await stopServer(sseServer);
+      }
+    });
+    it("rejects todo requests admitted after draining begins", async () => {
+      const drainingServer = await startServer(
+        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      const originalClose = drainingServer.server.close.bind(drainingServer.server);
+      let closeCallback: ((error?: Error) => void) | undefined;
+      drainingServer.server.close = vi.fn((callback?: (error?: Error) => void) => {
+        closeCallback = callback;
+        return drainingServer.server;
+      }) as typeof drainingServer.server.close;
+      const shutdown = stopServer(drainingServer);
+      try {
+        const createResponse = await fetch(`${drainingServer.baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Too late" }),
+        });
+        expect(createResponse.status).toBe(503);
+
+        const streamResponse = await fetch(`${drainingServer.baseUrl}/todos/live`);
+        expect(streamResponse.status).toBe(503);
+        await expect(
+          drainingServer.db.all(app.todos.where({ title: "Too late" })),
+        ).resolves.toEqual([]);
+      } finally {
+        drainingServer.server.close = originalClose as typeof drainingServer.server.close;
+        await new Promise<void>((resolve, reject) => {
+          originalClose((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        closeCallback?.();
+        await shutdown;
+      }
+    });
+
+    it("gracefully closes active SSE connections during shutdown", async () => {
+      const sseServer = await startServer(
+        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      const sseBaseUrl = sseServer.baseUrl;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let shutdown: Promise<void> | undefined;
+      let succeeded = false;
+      try {
+        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+        const sseReader = res.body!.getReader();
+        reader = sseReader;
+        let initialEvent = "";
+        const decoder = new TextDecoder();
+        while (!initialEvent.includes("\n\n")) {
+          const { value, done } = await sseReader.read();
+          expect(done).toBe(false);
+          initialEvent += decoder.decode(value, { stream: true });
+        }
+        const dataLine = initialEvent
+          .slice(0, initialEvent.indexOf("\n\n"))
+          .split("\n")
+          .find((line) => line.startsWith("data: "));
+        expect(dataLine).toBeDefined();
+        expect(JSON.parse(dataLine!.slice(6))).toEqual([]);
+
+        const stop = stopServer(sseServer);
+        shutdown = stop;
+        const eof = await withTimeout(sseReader.read(), 10_000);
+        expect(eof.done).toBe(true);
+        await stop;
+        succeeded = true;
+      } finally {
+        if (!succeeded) {
+          await reader?.cancel().catch(() => undefined);
+          await (shutdown ?? stopServer(sseServer)).catch(() => undefined);
+        }
       }
     });
   });
