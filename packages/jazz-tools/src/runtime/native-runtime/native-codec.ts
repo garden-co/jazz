@@ -13,6 +13,7 @@ import {
   writeValueType,
 } from "./native-row-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { encodeRelationQueryV1, type RelExpr } from "../../ir.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -366,19 +367,9 @@ export function queryWithPredicates(
   if (relation == null) writer.none();
   else
     writer.some((relationWriter) =>
-      relationWriter.string(canonicalRelationJson({ rel: relation })),
+      relationWriter.bytes(encodeRelationQueryV1(relation as RelExpr)),
     );
   return writer.finish();
-}
-
-function canonicalRelationJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalRelationJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalRelationJson(record[key])}`)
-    .join(",")}}`;
 }
 
 function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery): void {
