@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -278,6 +279,14 @@ export function assertReactNativeBridgeBoundary(commands) {
     throw new Error("CI-equivalent React Native plan runs tests before the admitted Jazz Tools build.");
   if (!tests.args.includes("vitest.react-native.config.ts"))
     throw new Error("CI-equivalent React Native plan omits the React Native Vitest configuration.");
+  if (tests.args.includes("--passWithNoTests"))
+    throw new Error("CI-equivalent React Native plan permits an empty React Native test run.");
+  const configPath = resolve(root, "packages/jazz-tools/vitest.react-native.config.ts");
+  if (!existsSync(configPath))
+    throw new Error("CI-equivalent React Native plan references a missing React Native Vitest configuration.");
+  const config = readFileSync(configPath, "utf8");
+  if (!/include:\s*\[\s*["']tests\/react-native\/\*\*\/\*\.test\.\{ts,tsx\}["']\s*\]/.test(config))
+    throw new Error("CI-equivalent React Native Vitest configuration does not select React Native tests.");
 }
 
 /**
@@ -365,6 +374,8 @@ async function main(argv) {
       assertReactNativeBridgeBoundary(commands);
       console.log("local-ci: CI-equivalent mode; running every CI command partition serially.");
     }
+    if (mode === "ci-equivalent" || partition === "react-native")
+      assertReactNativeBridgeBoundary(planFor({ partition: "react-native" }));
     await runPlan(commands, runCommand, baseEnvironment);
   } else {
     console.log("local-ci: focused mode only; this is NOT CI-equivalent.");
