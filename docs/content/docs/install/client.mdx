@@ -71,14 +71,14 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 </Tabs>
 
 <Callout type="warn">
-  React Native and Expo are intentionally not part of this application quickstart yet. The
-  installable `jazz-rn` native-relay package has a narrow, capability-gated foreground alpha. It is
-  not a supported React Native Jazz client or a general application setup. It requires a matching
-  native development/release build and trusted platform admission; Expo Go is unsupported. Do not
-  adapt the browser/TypeScript snippets below to React Native. For the current native package
-  boundary, including bare React Native and Expo development-build requirements and unsupported
-  operation families, see the [`jazz-rn` install
-  guide](https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme).
+  React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct
+  `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported.
+  The [canonical Expo
+  scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
+  prepares an `AccountHandle` through `jazz-tools/expo`, opens an effect-owned `createJazzClient`,
+  and supplies it to `JazzClientProvider`. See the [React Native install
+  guide](https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme) for the required New
+  Architecture, Expo plugin, and bare-host setup.
 </Callout>
 
 ## Get an app ID

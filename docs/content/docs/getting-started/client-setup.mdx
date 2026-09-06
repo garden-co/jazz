@@ -70,6 +70,33 @@ Creating a local-first account works offline once the runtime assets are availab
 
 The browser account store retains the local signing root and selection. Provider JWTs are refreshed through `getToken` and are never persisted in this store.
 
+## React Native and Expo
+
+React Native is supported as an alpha through `jazz-tools/react-native`. For
+Expo, prepare the account with `jazz-tools/expo`, then give the resulting
+`AccountHandle` to an effect-owned client. Close that client when the effect is
+retired.
+
+```tsx
+import { createAccountManager } from "jazz-tools/expo";
+import { createJazzClient, JazzClientProvider } from "jazz-tools/react-native";
+
+const accounts = await createAccountManager({ appId, serverUrl });
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+const client = await createJazzClient({ appId, serverUrl, account });
+
+// Render <JazzClientProvider client={client}>…</JazzClientProvider>.
+// On unmount or account change: await client.shutdown();
+```
+
+Install `jazz-rn` directly in the application alongside `jazz-tools`, add its
+Expo config plugin, and build the native app. Expo Go cannot load the relay. A
+bare React Native host uses the same direct dependency and New Architecture,
+with an OS-protected account store. The [canonical Expo
+scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
+shows the complete lifecycle and platform configuration. The alpha has not yet
+proven two physical JSI runtimes attached to one relay.
+
 <Callout type="info">
   For a local-only context, pass `{ ...config, serverUrl: undefined }`. The handle keeps its registry authority; writes stay locally durable. A later context using the matching server URL can synchronize them.
 </Callout>
