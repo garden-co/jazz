@@ -36,7 +36,7 @@ app/
   page.tsx                     ← homepage (header + todo widget + backup UI)
   globals.css
 components/
-  jazz-provider.tsx            ← JazzProvider (per-device secret)
+  jazz-provider.tsx            ← account manager + JazzProvider lifecycle
   todo-widget.tsx              ← Jazz-powered todo list
   auth-backup.tsx              ← recovery phrase + passkey backup/restore
 schema.ts                      ← Jazz app schema (todos table)
@@ -45,12 +45,12 @@ permissions.ts                 ← row-level access policy ($createdBy)
 
 ## How it works
 
-Every browser gets its own Ed25519 secret, generated and stored by
-`BrowserAuthSecretStore` on first load. That secret becomes the identity
-Jazz uses for all subsequent writes. The `JazzProvider` in
-`components/jazz-provider.tsx` uses `<JazzProvider auth="local-first">` to
-load or generate the secret client-side and share the same local-first
-identity with descendants.
+The client-side account manager restores the selected opaque `AccountHandle`
+or creates a local-first account on first load. `components/jazz-provider.tsx`
+observes that manager and passes its handle to `JazzProvider`; no credential is
+kept in a module global or rendered on the server. `components/auth-backup.tsx`
+exports recovery material only when the user requests it and restores it through
+the manager.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -100,9 +100,9 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **Recovery is opt-in.** The secret lives in browser storage, so clearing
-  site data loses the identity unless the user first saved the recovery phrase
-  or passkey backup surfaced by this starter.
+- **Recovery is opt-in.** The selected account lives in browser storage, so
+  clearing site data loses the identity unless the user first saved the
+  recovery phrase or passkey backup surfaced by this starter.
 - **Passkey portability varies.** A passkey backup may be limited to the
   browser or platform that syncs it. Pair it with the recovery phrase when
   users need dependable cross-device recovery.

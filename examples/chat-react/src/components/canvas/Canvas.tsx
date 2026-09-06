@@ -29,7 +29,7 @@ export function CollaborativeCanvas({
 }) {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user ?? null;
+  const userId = session?.user.account ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<string, HTMLCanvasElement | null>>(new Map());
   const drawingRef = useRef(false);
@@ -63,9 +63,10 @@ export function CollaborativeCanvas({
   // Group strokes by Jazz-authenticated author.
   const strokesByOwner: Record<string, StrokeData[]> = {};
   for (const s of allStrokes) {
-    if (!strokesByOwner[s.$createdBy]) strokesByOwner[s.$createdBy] = [];
+    if (!strokesByOwner[s.$createdBy.account ?? "system"])
+      strokesByOwner[s.$createdBy.account ?? "system"] = [];
     const points: Point[] = JSON.parse(s.pointsJson);
-    strokesByOwner[s.$createdBy].push({
+    strokesByOwner[s.$createdBy.account ?? "system"].push({
       id: s.id,
       points,
       color: s.color,
@@ -177,7 +178,7 @@ export function CollaborativeCanvas({
 
   const handleClearMyStrokes = () => {
     if (!userId) return;
-    const myStrokes = allStrokes.filter((s) => s.$createdBy === userId);
+    const myStrokes = allStrokes.filter((s) => s.$createdBy.account === userId);
     for (const s of myStrokes) {
       fireAndReport(db.delete(app.strokes, s.id), "failed to delete stroke");
     }

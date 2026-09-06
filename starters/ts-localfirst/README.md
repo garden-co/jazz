@@ -40,10 +40,10 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-Every browser gets its own Ed25519 secret, generated and stored by
-`BrowserAuthSecretStore` on first load. `src/main.ts` calls
-`BrowserAuthSecretStore.getOrCreateSecret()` and hands the result to
-`createDb({ appId, serverUrl, secret })` — no React provider, no hooks.
+`src/main.ts` prepares an account manager, restores the selected opaque
+`AccountHandle` or creates a local-first account, then passes that handle to
+`createJazzClient`. The backup controls use the manager's export and restore
+APIs, so raw credentials never become application state.
 
 Each widget receives the `Db` handle and wires its DOM straight to it:
 
@@ -105,11 +105,8 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **One device per user.** The secret lives in browser storage; clearing
-  site data wipes the identity and the user starts fresh. There is no
-  account portability between devices or browsers.
-- **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `ts-hybrid` starter instead.
+- **Back up before clearing browser storage.** The selected account is local
+  to this browser until the user saves the recovery phrase or passkey backup.
 
 ## Where to go next
 

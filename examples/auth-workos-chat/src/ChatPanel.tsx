@@ -45,7 +45,9 @@ export function ChatPanel({
     void (async () => {
       const next = Object.fromEntries(
         await Promise.all(
-          ids.map(async (id) => [id, await db.canDelete(app.messages, id)] as const),
+          ids.map(
+            async (id) => [id, (await db.canDelete(app.messages, id)) === "allowed"] as const,
+          ),
         ),
       );
       if (!cancelled) setCanDeleteById(next);

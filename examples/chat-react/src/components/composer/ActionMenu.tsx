@@ -20,7 +20,7 @@ interface ActionMenuProps {
 export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user;
+  const userId = session?.user.account;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "edge" : "local",
   };

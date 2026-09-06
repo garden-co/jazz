@@ -1,6 +1,5 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react-native";
 import {
   ActivityIndicator,
   Pressable,
@@ -10,7 +9,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
+import { createAccountManager } from "jazz-tools/expo";
 import { createResettablePromise, loadSecret, SecretLoadError } from "./src/secret-promise-cache";
 import { TodoList } from "./src/TodoList";
 
@@ -18,17 +17,18 @@ import { TodoList } from "./src/TodoList";
 // Set these in the shell that starts Metro.
 declare const process: { env: Record<string, string | undefined> };
 
-function buildConfig(secret: string): DbConfig {
-  return {
-    appId: process.env.EXPO_PUBLIC_JAZZ_APP_ID!,
-    serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
-    env: "dev",
-    secret,
-  };
-}
-
+const appId = process.env.EXPO_PUBLIC_JAZZ_APP_ID!;
+const serverUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!;
 const authSecret = createResettablePromise(() =>
-  loadSecret(() => ExpoAuthSecretStore.getOrCreateSecret()),
+  loadSecret(async () => {
+    if (!appId || !serverUrl)
+      throw new Error("Set EXPO_PUBLIC_JAZZ_APP_ID and EXPO_PUBLIC_JAZZ_SERVER_URL");
+    const accounts = await createAccountManager({
+      appId,
+      serverUrl,
+    });
+    return accounts.getLoggedIn() ?? accounts.createLocalFirst();
+  }),
 );
 
 const styles = StyleSheet.create({
@@ -130,11 +130,35 @@ class SecretLoadErrorBoundary extends React.Component<
 }
 
 export function App() {
-  const secret = React.use(authSecret.get());
-  const config = React.useMemo(() => buildConfig(secret), [secret]);
+  const account = React.use(authSecret.get());
+  const [client, setClient] = React.useState<JazzClient>();
+  const [error, setError] = React.useState<Error>();
+  React.useEffect(() => {
+    let cancelled = false;
+    let active: JazzClient | undefined;
+    void createJazzClient({ appId, serverUrl, env: "dev", account })
+      .then(async (opened) => {
+        if (cancelled) {
+          await opened.shutdown();
+          return;
+        }
+        active = opened;
+        setClient(opened);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      });
+    return () => {
+      cancelled = true;
+      setClient(undefined);
+      void active?.shutdown().catch(console.error);
+    };
+  }, [account]);
+  if (error) throw error;
+  if (!client) return runtimeFallback;
 
   return (
-    <JazzProvider config={config} fallback={runtimeFallback}>
+    <JazzClientProvider client={client}>
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -142,7 +166,7 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzProvider>
+    </JazzClientProvider>
   );
 }
 

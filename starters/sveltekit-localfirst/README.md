@@ -1,8 +1,7 @@
 # sveltekit-localfirst
 
 A minimal SvelteKit starter for [Jazz](https://jazz.tools) with a pure
-local-first todo app — no accounts, no sign-in wall, data persists under a
-per-device anonymous Jazz identity. The simplest possible Jazz starter.
+local-first todo app. Data persists under a per-device local-first account.
 
 ## What this starter gives you
 
@@ -11,7 +10,7 @@ per-device anonymous Jazz identity. The simplest possible Jazz starter.
   Vite plugin in `vite.config.ts`.
 - Row-level permissions wired through `$createdBy`, so every row is
   automatically scoped to the user who created it.
-- Zero auth code to wade through while you get your bearings.
+- An account manager that restores the selected handle or creates a local-first account.
 
 ## Getting started
 
@@ -36,18 +35,17 @@ src/
     permissions.ts               ← row-level access policy ($createdBy)
     TodoWidget.svelte            ← Jazz-powered todo list
   routes/
-    +layout.svelte               ← mounts the Jazz provider (per-device secret)
+    +layout.svelte               ← observes the account manager and mounts Jazz
     +page.svelte                 ← homepage (header + todo widget)
 ```
 
 ## How it works
 
-Every browser gets its own Ed25519 secret, generated and stored by
-`BrowserAuthSecretStore` on first load. That secret becomes the identity
-Jazz uses for all subsequent writes. `src/routes/+layout.svelte` does
-exactly one thing: instantiate `LocalFirstAuth` (a reactive class from
-`jazz-tools/svelte` that loads or generates the secret client-side) and
-hand `auth.secret` to `createJazzClient`.
+`src/routes/+layout.svelte` creates an account manager in the browser,
+restores the selected opaque `AccountHandle` or creates a local-first account,
+and observes its state while mounting `JazzSvelteProvider`. The backup panel
+exports recovery material only for user-initiated backup and restores it through
+the manager.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -96,12 +94,8 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **One device per user.** The secret lives in browser storage; clearing
-  site data wipes the identity and the user starts fresh. There is no
-  account portability between devices or browsers.
-- **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `sveltekit-hybrid`
-  starter instead.
+- **Back up before clearing browser storage.** The selected account is local
+  to this browser until the user saves the recovery phrase or passkey backup.
 
 ## Adding BetterAuth later
 
@@ -117,8 +111,8 @@ Better Auth session (see the `-auth` variant for the exact pattern), add
 
 ## Where to go next
 
-- `docs/content/docs/auth/local-first-auth.mdx` — full explanation of the
-  local-first auth model and `BrowserAuthSecretStore`.
+- Jazz's local-first authentication documentation — account manager and
+  recovery APIs.
 - `docs/content/docs/authentication.mdx` — overview of all Jazz auth modes.
 - `schema.ts` and `permissions.ts` — the two files you'll touch most when
   extending the starter.

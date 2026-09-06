@@ -8,7 +8,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import { createAccountManager, type DbConfig } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,10 +43,18 @@ describe("Svelte Todo App E2E", () => {
     // Dynamic import so the Svelte compiler processes the component
     const { default: App } = await import("../../src/App.svelte");
 
+    const account =
+      config.account ??
+      (await prepareTestAccount(
+        createAccountManager,
+        config.appId ?? "test-app",
+        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+      ));
     const resolvedConfig: Partial<DbConfig> = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
+      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -229,9 +238,14 @@ describe("Svelte Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const account = await prepareTestAccount(
+      createAccountManager,
+      "test-app",
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -249,7 +263,7 @@ describe("Svelte Todo App E2E", () => {
     await unmountApp(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mountApp({ driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

@@ -22,11 +22,11 @@ pnpm build              # Optional schema validation + production build
 
 **Row-level security** is a schema concern, not an application concern. Policies live in `permissions.ts` in a typed DSL. They compile into a policy AST enforced server-side on every sync request. Components contain no auth logic.
 
-**Public chats** are visible to all connected clients. **Private chats** are restricted to members. A chat carries a `joinCode` column; presenting the code as an ephemeral session claim grants read access before membership is confirmed, which is how invite links work without a round-trip to a backend.
+**Public chats** are visible to all connected clients. **Private chats** are restricted to members. A trusted provider's `join_code` claim may grant an initial read, but the local-first invite flow does not mint or override provider claims.
 
-**The invite flow** works in two steps: `InviteHandler` subscribes to the chat with `{ claims: { join_code: code } }` as a session override. The server matches `chat.joinCode = @session.claims.join_code` and syncs the chat row locally. Once the row is present (FK constraint satisfied), the handler inserts the `chatMembers` row and navigates to the chat.
+**The invite flow** submits a membership row containing the current account ID and the supplied code. The server requires that account to match the author and checks that the chat is public, belongs to the account, or has the matching invite code. Only after the membership write settles does the handler navigate to the chat. Knowing a private chat's ID alone is insufficient to join.
 
-**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access is scoped directly to `{ $createdBy: session.user }`, so provenance is issuer-scoped; the canvas component has no explicit access checks.
+**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access compares `$createdBy.account` with `session.user.account`, so another linked identity on the same account retains access; the canvas component has no explicit access checks.
 
 ## Schema
 

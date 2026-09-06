@@ -1,7 +1,13 @@
 import { mountTodoWidget, type TodoDb } from "./todo-widget.js";
 import { mountAuthBackup } from "./auth-backup.js";
+import type { AccountHandle } from "jazz-tools";
 
-export function mountApp(root: HTMLElement, db: TodoDb): void {
+export function mountApp(
+  root: HTMLElement,
+  db: TodoDb,
+  account: AccountHandle,
+  onRestore: (secret: string) => Promise<void>,
+): void {
   root.innerHTML = `
     <main class="dashboard">
       <header>
@@ -12,5 +18,8 @@ export function mountApp(root: HTMLElement, db: TodoDb): void {
     </main>
   `;
   mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
-  mountAuthBackup(root.querySelector<HTMLElement>('[data-slot="auth-backup"]')!);
+  mountAuthBackup(root.querySelector<HTMLElement>('[data-slot="auth-backup"]')!, {
+    account,
+    onRestore,
+  });
 }

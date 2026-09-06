@@ -20,7 +20,7 @@ interface ChatViewProps {
 export const ChatView = ({ chatId }: ChatViewProps) => {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user ?? null;
+  const userId = session?.user.account ?? null;
   const myProfile = useMyProfile();
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
     () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
@@ -40,7 +40,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
   // chatMember row so they appear in the member list and can send messages.
   const myMembershipsResult = useAll(
-    app.chatMembers.where({ chatId, userId: userId ?? "__none__" }),
+    userId ? app.chatMembers.where({ chatId, userId }) : undefined,
     sharedWriteOptions,
   );
   const myMemberships = myMembershipsResult.data ?? [];

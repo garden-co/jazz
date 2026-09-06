@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useDb } from "jazz-tools/react";
 import { authClient } from "./auth-client";
+import { getToken } from "./accounts";
+import { useJazzLifecycle } from "./main";
 
 export function SignUpForm({ onToggle }: { onToggle: () => void }) {
-  const db = useDb();
+  const lifecycle = useJazzLifecycle();
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
 
@@ -17,28 +18,24 @@ export function SignUpForm({ onToggle }: { onToggle: () => void }) {
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "react-localfirst-signup",
-    });
-
-    if (!proofToken) {
-      setError("Sign up requires an active Jazz session");
-      setIsPending(false);
-      return;
-    }
-
     const { error: signUpError } = await authClient.signUp.email({
       email,
       name,
       password,
-      proofToken,
     } as Parameters<typeof authClient.signUp.email>[0]);
-
-    setIsPending(false);
 
     if (signUpError) {
       setError(signUpError.message ?? "Sign-up failed");
+      setIsPending(false);
+      return;
+    }
+    try {
+      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+    } catch (cause) {
+      lifecycle.reportLinkFailure(cause);
+      setError(cause instanceof Error ? cause.message : "Sign-up failed");
+    } finally {
+      setIsPending(false);
     }
   }
 

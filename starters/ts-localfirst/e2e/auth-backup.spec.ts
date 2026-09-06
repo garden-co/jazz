@@ -33,6 +33,19 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   const phrase = await phraseTextarea.inputValue();
   expect(phrase.trim().split(/\s+/).length).toBe(24);
 
+  // Reopening the same account must still replace the client cleanly.
+  await page.getByLabel("Restore from recovery phrase").fill(phrase);
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await waitForApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  // A rejected recovery still leaves a fresh client for the selected account.
+  await page.getByText("Back up or restore your local-only account").click();
+  await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await waitForApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
   // Clear local storage → a fresh anonymous identity is generated, todo vanishes.
   await page.evaluate(() => localStorage.clear());
   await page.reload();

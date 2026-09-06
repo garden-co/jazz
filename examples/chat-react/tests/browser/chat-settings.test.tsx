@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      secret?: string;
+      account?: import("jazz-tools").AccountHandle;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -59,7 +59,9 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const appId =
       config.appId ?? `test-settings-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
+    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+
+    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -291,7 +293,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const aliceContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`settings-alice-${Date.now()}`),
+      account: await testAccount(`settings-alice-${Date.now()}`),
     });
 
     await waitFor(
@@ -313,7 +315,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const bobContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`settings-bob-${Date.now()}`),
+      account: await testAccount(`settings-bob-${Date.now()}`),
     });
 
     // Wait for Bob to see the chat
