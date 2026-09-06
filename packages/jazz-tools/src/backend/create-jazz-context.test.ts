@@ -641,21 +641,26 @@ describe("backend/create-jazz-context", () => {
     expect(() => context.flush()).not.toThrow();
   });
 
-  it("BC-U07: shutdown releases client and allows re-init", async () => {
-    const context = createJazzContext({
+  it("BC-U07: shutdown is terminal and a new context creates a new runtime", async () => {
+    const config = {
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
       permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-    });
+      driver: { type: "persistent" as const, dataPath: "/tmp/jazz.db" },
+    };
+    const context = createJazzContext(config);
 
     context.db();
     expect(mocks.clients).toHaveLength(1);
 
     await context.shutdown();
+    await context.shutdown();
     expect(mocks.clients[0]!.shutdown).toHaveBeenCalledTimes(1);
+    expect(() => context.db()).toThrow("JazzContext is shutting down or has already shut down.");
+    expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(1);
 
-    context.db();
+    createJazzContext(config).db();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);
     expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(2);
   });

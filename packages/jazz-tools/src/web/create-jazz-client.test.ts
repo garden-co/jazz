@@ -131,7 +131,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
       issuer: "urn:jazz:local-first",
       authMode: "local-first",
     };
-    const db = createMockDb("test-app", session);
+    const db = createMockDb(config.appId, session);
 
     mocks.createDb.mockResolvedValue(db);
 

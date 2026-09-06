@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { createAccountManager, type DbConfig } from "jazz-tools";
+import { createAccountManager, type AccountStore, type DbConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
@@ -68,20 +68,40 @@ async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000)
   throw new Error(`${message}; diagnostics=${failureDiagnostics()}`);
 }
 
-async function mount(
-  config: DbConfig = {
-    appId: "band-chat-browser-receipt",
+function inMemoryAccountStore(): AccountStore {
+  let selected: string | null = null;
+  return {
+    async read() {
+      return selected;
+    },
+    async update(transform) {
+      selected = transform(selected);
+    },
+  };
+}
+
+async function localPreviewConfig(): Promise<DbConfig> {
+  const appId = "band-chat-browser-receipt";
+  const accounts = await createAccountManager({
+    appId,
+    serverUrl: "https://band-chat-preview.example",
+    store: inMemoryAccountStore(),
+  });
+  return {
+    appId,
     driver: { type: "memory" },
-    secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
-  },
-  label: PreviewLabel = "local",
-) {
+    account: accounts.createLocalFirst(),
+  };
+}
+
+async function mount(config: DbConfig | undefined = undefined, label: PreviewLabel = "local") {
+  const selectedConfig = config ?? (await localPreviewConfig());
   const element = document.createElement("div");
   document.body.append(element);
   const root = createRoot(element);
   mounts.push({ root, element, label });
   await act(async () => {
-    root.render(<BandChatPreview config={config} />);
+    root.render(<BandChatPreview config={selectedConfig} />);
   });
   await waitFor(() => element.querySelector("#room-name") !== null, "room composer should render");
   return element;
