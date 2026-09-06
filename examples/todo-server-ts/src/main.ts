@@ -53,6 +53,13 @@ export interface RunningServer extends TodoServer {
 export interface TodoServerOptions {
   /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
   jwksUrl?: string;
+  /** The deployed Jazz app used to admit external identities. */
+  appId?: string;
+  /** Upstream Jazz server that owns the account registry. */
+  serverUrl?: string;
+  /** Server-only credential for durable backend writes. */
+  backendSecret?: string;
+  adminSecret?: string;
 }
 
 // ============================================================================
@@ -70,13 +77,18 @@ export async function createServer(
   options: TodoServerOptions = {},
 ): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
+  const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
+  const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
+  const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
 
   const context = createJazzContext({
     appId,
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
+    serverUrl,
+    backendSecret,
+    adminSecret: options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET,
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,

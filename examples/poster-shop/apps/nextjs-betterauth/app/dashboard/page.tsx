@@ -1,18 +1,26 @@
 "use client";
 import { PosterShopApp } from "@/src/App";
 import { useEffect, useState } from "react";
-import { authClient } from "@/src/lib/auth-client";
+import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
 export default function Dashboard() {
   const { data: session } = authClient.useSession();
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
-    void fetch("/api/bootstrap", { method: "POST", credentials: "same-origin" }).then(
-      (response) => {
-        if (!cancelled) setBootstrap(response.ok ? "ready" : "failed");
-      },
-    );
+    void getJwtFromBetterAuth()
+      .then((token) =>
+        token
+          ? fetch("/api/bootstrap", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { authorization: `Bearer ${token}` },
+            })
+          : undefined,
+      )
+      .then((response) => {
+        if (!cancelled) setBootstrap(response?.ok ? "ready" : "failed");
+      });
     return () => {
       cancelled = true;
     };
