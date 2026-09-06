@@ -14,11 +14,12 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   const [connection, setConnection] = useState<
     { client: JazzClient; sessionId: string; userId: string } | undefined
   >();
-  const [error, setError] = useState<Error>();
+  const [error, setError] = useState<{ cause: Error; sessionId: string; userId: string }>();
   const clientRef = useRef<JazzClient | undefined>(undefined);
   useEffect(() => {
     if (!session?.user) return;
     let cancelled = false;
+    setError(undefined);
     void (async () => {
       const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
       const credential = { getToken: requireBetterAuthToken };
@@ -26,11 +27,17 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       const opened = await createJazzClient({ appId, serverUrl, account });
       if (cancelled) return void opened.shutdown();
       await clientRef.current?.shutdown({ waitForSync: true });
+      if (cancelled) return void opened.shutdown();
       clientRef.current = opened;
       setError(undefined);
       setConnection({ client: opened, sessionId: session.session.id, userId: session.user.id });
     })().catch((cause) => {
-      if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      if (!cancelled)
+        setError({
+          cause: cause instanceof Error ? cause : new Error(String(cause)),
+          sessionId: session.session.id,
+          userId: session.user.id,
+        });
     });
     return () => {
       cancelled = true;
@@ -41,7 +48,11 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     };
   }, [session?.session.id, session?.user.id]);
   if (!session?.user) return <>{children}</>;
-  if (error) return <p role="alert">Could not open poster studio: {error.message}</p>;
+  const visibleError =
+    error?.sessionId === session.session.id && error.userId === session.user.id
+      ? error.cause
+      : undefined;
+  if (visibleError) return <p role="alert">Could not open poster studio: {visibleError.message}</p>;
   const client =
     connection?.sessionId === session.session.id && connection.userId === session.user.id
       ? connection.client

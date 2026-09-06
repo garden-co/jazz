@@ -17,6 +17,8 @@ export async function POST(request: Request) {
     jwksUrl: `${origin}/api/auth/jwks`,
     jwtIssuer: origin,
   });
+  if (jazzSession.user_id !== session.user.id)
+    return Response.json({ error: "session identity mismatch" }, { status: 401 });
   if (!jazzSession.account_id) return Response.json({ error: "account required" }, { status: 401 });
   await ensurePersonalCanvas(jazzSession.account_id, session.user.name);
   return Response.json({ ok: true });

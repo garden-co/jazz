@@ -13,7 +13,16 @@ export async function loginOrRegister(
     return await accounts.loginJWT(credential);
   } catch (cause) {
     if (!(cause instanceof AccountAuthError) || cause.code !== "identity_not_assigned") throw cause;
-    return await accounts.registerJWT(credential);
+    try {
+      return await accounts.registerJWT(credential);
+    } catch (registerCause) {
+      if (
+        !(registerCause instanceof AccountAuthError) ||
+        registerCause.code !== "identity_already_assigned"
+      )
+        throw registerCause;
+      return await accounts.loginJWT(credential);
+    }
   }
 }
 

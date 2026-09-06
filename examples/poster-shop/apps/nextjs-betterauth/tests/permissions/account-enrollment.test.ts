@@ -28,6 +28,21 @@ describe("PosterShop account bootstrap", () => {
     expect(accounts.registerJWT).not.toHaveBeenCalled();
   });
 
+  it("retries login when another strict-mode instance enrolled first", async () => {
+    const account = { id: crypto.randomUUID(), identity: { issuer: "issuer", subject: "user" } };
+    const accounts = {
+      loginJWT: vi
+        .fn()
+        .mockRejectedValueOnce(new AccountAuthError("identity_not_assigned"))
+        .mockResolvedValueOnce(account),
+      registerJWT: vi.fn().mockRejectedValue(new AccountAuthError("identity_already_assigned")),
+    };
+    await expect(loginOrRegister(accounts as never, { getToken: async () => "jwt" })).resolves.toBe(
+      account,
+    );
+    expect(accounts.loginJWT).toHaveBeenCalledTimes(2);
+  });
+
   it("passes the admitted bearer to bootstrap", async () => {
     const request = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", request);
