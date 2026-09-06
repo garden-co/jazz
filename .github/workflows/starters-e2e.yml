@@ -176,6 +176,11 @@ jobs:
           name: starters-e2e-build-state
           path: .
 
+      - name: Verify restored NAPI harness runtime
+        # Fail before creating a starter when the artifact handoff is missing
+        # any generated bootstrap file required by jazz-tools/dev.
+        run: node -e 'require("./crates/jazz-napi")'
+
       - name: Cache Playwright browsers
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:

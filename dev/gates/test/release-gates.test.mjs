@@ -83,6 +83,10 @@ test("release starter gate exercises packaged artifacts through create-jazz-e2e"
     );
   }
   assert.match(e2e, /name: starters-e2e-build-state/);
+  assert.match(
+    e2e,
+    /name: Restore prebuilt artifacts[\s\S]*?name: Verify restored NAPI harness runtime[\s\S]*?require\("\.\/crates\/jazz-napi"\)/,
+  );
   assert.match(e2e, /--tarball-dir "\$GITHUB_WORKSPACE\/_e2e-state\/tarballs"/);
   assert.match(e2e, /--verbose --keep/);
 });
