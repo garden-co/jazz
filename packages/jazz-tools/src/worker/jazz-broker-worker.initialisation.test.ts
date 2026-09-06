@@ -584,7 +584,8 @@ describe("broker worker context initialization", () => {
       });
       await leaseAttached;
       const rejectedLease = leasePort.waitForLeaseOutcome();
-      leasePort.emitMessage((field === "connect-runtime"
+      leasePort.emitMessage(
+        field === "connect-runtime"
           ? {
               type: "connect-runtime" as const,
               tabId: "forbidden",
@@ -596,7 +597,8 @@ describe("broker worker context initialization", () => {
               dbName: expected.dbName,
               storageOwner: expected.storageOwner,
               [field]: expected[field] + "-other",
-            }));
+            },
+      );
       await expect(rejectedLease).resolves.toMatchObject({
         type: "foreground-node-lease-error",
         error: expect.objectContaining({

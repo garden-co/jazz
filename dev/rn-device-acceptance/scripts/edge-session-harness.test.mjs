@@ -42,12 +42,12 @@ test("shared harness requires a child-produced run-bound observation and handles
   const directory = mkdtempSync(join(tmpdir(), "jazz-rn-harness-contract-"));
   const oldPath = process.env.PATH;
   try {
-    for (const planted of [valid, { ...valid, source: "edge" }, null]) {
+    for (const planted of [valid, { ...valid, source: "edge" }, null, "legacy-readiness"]) {
       writeFileSync(
         join(directory, "cargo"),
         `#!${process.execPath}
 if (process.argv[2] === "build") process.exit(0);
-const line = 'JAZZ_RN_EDGE_SESSION ' + JSON.stringify({edge_port:12345,bearer_a:'ephemeral-a',bearer_b:'ephemeral-b'}) + '\\n';
+const line = 'JAZZ_RN_EDGE_SESSION ' + JSON.stringify(${JSON.stringify(planted === "legacy-readiness" ? { edge_port: 12345, bearer_a: "synthetic-retired-input" } : { edge_port: 12345 })}) + '\\n';
 process.stdout.write(line.slice(0, 25));
 setTimeout(() => {
   process.stdout.write(line.slice(25));
@@ -59,11 +59,17 @@ setInterval(() => {}, 1000);
         { mode: 0o755 },
       );
       process.env.PATH = `${directory}:${oldPath}`;
-      const harness = await startLocalEdgeSessionHarness({
-        device: "contract-device",
-        runNonce: nonce,
-        host: "127.0.0.1",
-      });
+      const start = () =>
+        startLocalEdgeSessionHarness({
+          device: "contract-device",
+          runNonce: nonce,
+          host: "127.0.0.1",
+        });
+      if (planted === "legacy-readiness") {
+        await assert.rejects(start(), /malformed session material/);
+        continue;
+      }
+      const harness = await start();
       try {
         assert.equal(harness.endpoint, "http://127.0.0.1:12345");
         if (planted === valid) assert.deepEqual(await harness.waitForCoreObservation(150), valid);

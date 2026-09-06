@@ -67,6 +67,7 @@ describe("React Native account preparation", () => {
   });
 
   it("prepares a handle-bound local context and releases an unused setup on normal shutdown", async () => {
+    vi.stubGlobal("crypto", undefined);
     const subject = "00000000-0000-4000-8000-000000000001";
     const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: subject }))}.signature`;
     const capability = new Uint8Array(32).fill(9);

@@ -117,10 +117,6 @@ try {
         control.endpoint,
         "-JazzDeviceEdgeEndpoint",
         localSession.endpoint,
-        "-JazzDeviceBearerA",
-        localSession.bearerA,
-        "-JazzDeviceBearerB",
-        localSession.bearerB,
       ]),
     );
     const expected = {

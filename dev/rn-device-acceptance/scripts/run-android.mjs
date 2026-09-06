@@ -90,12 +90,6 @@ try {
       "--es",
       "jazzDeviceEdgeEndpoint",
       localSession.endpoint,
-      "--es",
-      "jazzDeviceBearerA",
-      localSession.bearerA,
-      "--es",
-      "jazzDeviceBearerB",
-      localSession.bearerB,
     ]);
     const expected = {
       platform: "android",

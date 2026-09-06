@@ -21,9 +21,8 @@ const harnessRoot = resolve(import.meta.dirname, "../../..");
 const harnessCargoArgs = ["-p", "jazz-native-relay", "--example", "rn_edge_session_harness"];
 
 export function boundedHarnessOutput(output) {
-  // The one machine-readable line deliberately contains ephemeral bearer
-  // material. It must remain readable by this process but never appear in a
-  // failure diagnostic.
+  // Keep readiness/control lines bounded and private to the driver. Retain
+  // token redaction defensively for any authentication diagnostics upstream.
   return output
     .replace(/^JAZZ_RN_EDGE_SESSION .+$/gm, "JAZZ_RN_EDGE_SESSION [redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted-token]")
@@ -153,11 +152,10 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
     });
   });
   if (
+    Object.keys(session).some((key) => key !== "edge_port") ||
     !Number.isInteger(session.edge_port) ||
     session.edge_port < 1 ||
-    session.edge_port > 65_535 ||
-    typeof session.bearer_a !== "string" ||
-    typeof session.bearer_b !== "string"
+    session.edge_port > 65_535
   ) {
     await terminateHarness(child);
     throw new Error("local Edge/Core harness emitted malformed session material");
@@ -186,8 +184,6 @@ export async function startLocalEdgeSessionHarness({ device, runNonce, host }) {
       await waitForLine("JAZZ_RN_EDGE_RECOVERED ");
     },
     endpoint: `http://${host}:${session.edge_port}`,
-    bearerA: session.bearer_a,
-    bearerB: session.bearer_b,
   };
 }
 

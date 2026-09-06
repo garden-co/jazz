@@ -36,11 +36,7 @@ export function accountRegistryUrl(serverUrl: string, appId: string): string {
   return url.href;
 }
 
-/** @internal Environment factories provide their native runtime source. */
-export async function createAccountDbWithRuntimeSource(
-  config: AccountDbConfig,
-  runtimeSource: RuntimeSource<DbConfig>,
-): Promise<Db> {
+function accountContextScope(config: AccountDbConfig): string {
   for (const key of [
     "secret",
     "jwtToken",
@@ -51,7 +47,7 @@ export async function createAccountDbWithRuntimeSource(
   ]) {
     if (Object.hasOwn(config, key)) throw new AccountAuthError("account_handle_required");
   }
-  const { account, ...runtimeConfig } = config;
+  const { account } = config;
   const registry = accountRegistry(account);
   // Offline creation still has a configured registry authority; no request is made.
   if (
@@ -61,6 +57,37 @@ export async function createAccountDbWithRuntimeSource(
   ) {
     throw new AccountAuthError("account_application_mismatch");
   }
+  return registry;
+}
+
+/** @internal Resolve a handle for a host adapter; never accept copied credentials. */
+export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
+  const registry = accountContextScope(config);
+  const { account, ...runtimeConfig } = config;
+  const jwtToken = await accountToken(account, registry);
+  const resolved: DbConfig = {
+    ...runtimeConfig,
+    jwtToken,
+    accountId: account.id,
+    accountRegistryAuthority: registry,
+  };
+  if (account.identity.issuer === "urn:jazz:local-first") {
+    setTrustedReservedSession(
+      resolved,
+      internalSessionFromVerifiedReservedJwtPayload(parseJwtPayload(jwtToken) ?? {}, "local-first"),
+    );
+  }
+  admitAccountConfig(resolved, account);
+  return resolved;
+}
+
+/** @internal Environment factories provide their native runtime source. */
+export async function createAccountDbWithRuntimeSource(
+  config: AccountDbConfig,
+  runtimeSource: RuntimeSource<DbConfig>,
+): Promise<Db> {
+  accountContextScope(config);
+  const { account } = config;
   let invalidated = false;
   let db: Db | undefined;
   const unsubscribe = onAccountInvalidated(account, () => {
@@ -75,23 +102,8 @@ export async function createAccountDbWithRuntimeSource(
     }
   });
   try {
-    const jwtToken = await accountToken(account, registry);
-    const resolved: DbConfig = {
-      ...runtimeConfig,
-      jwtToken,
-      accountId: account.id,
-      accountRegistryAuthority: registry,
-    };
-    if (account.identity.issuer === "urn:jazz:local-first") {
-      setTrustedReservedSession(
-        resolved,
-        internalSessionFromVerifiedReservedJwtPayload(
-          parseJwtPayload(jwtToken) ?? {},
-          "local-first",
-        ),
-      );
-    }
-    admitAccountConfig(resolved, account);
+    const resolved = await resolveAccountRuntimeConfig(config);
+    const jwtToken = resolved.jwtToken!;
     db = await createDbWithRuntimeSource(resolved, runtimeSource);
     if (invalidated) {
       await db.shutdown();
