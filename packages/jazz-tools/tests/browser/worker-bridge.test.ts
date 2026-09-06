@@ -8,7 +8,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
+import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
 import {
   Db,
   getDbSubscriptionSource,
@@ -1991,7 +1992,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }, 60000);
 
   it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl, adminSecret } =
+    const { appId, serverUrl } =
       await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
     const db = track(
       await createDb({
@@ -2001,7 +2002,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
           dbName: uniqueDbName("subscribe-initial-jwt"),
         },
         serverUrl,
-        adminSecret,
         jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
       }),
     );
@@ -2249,8 +2249,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-admin-write-authority",
       readOnlyPermissions,
     );
-    const db = track(
-      await createDb({
+    // A browser worker is a persistent client runtime, never a trusted
+    // backend. Keeping backend credentials out of it avoids handing a
+    // privileged capability to browser storage or worker ports.
+    await expect(
+      createPublicDb({
         appId: syncServer.appId,
         serverUrl: syncServer.serverUrl,
         adminSecret: syncServer.adminSecret,
@@ -2259,15 +2262,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
           dbName: uniqueDbName("sync-admin-write-authority"),
         },
         schema: app,
-      }),
-    );
-
-    // A browser worker is a persistent client runtime, never a trusted
-    // backend. Keeping backend credentials out of it avoids handing a
-    // privileged capability to browser storage or worker ports.
-    expect(() => db.insert(todos, { title: `backend-write-${Date.now()}`, done: false })).toThrow(
-      "Persistent browser workers require a verified client session",
-    );
+      } as never),
+    ).rejects.toThrow("account_handle_required");
   });
 
   it("server permissions check rejects client optimistic insert - wait notification", async () => {
@@ -2928,7 +2924,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = syncServer;
+    const { appId, serverUrl } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
@@ -2938,7 +2934,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
-      adminSecret,
       localFirstSecret: sharedLocalAuthToken,
     });
 
@@ -3092,7 +3087,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = syncServer;
+    const { appId, serverUrl } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
@@ -3102,7 +3097,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
-      adminSecret,
       localFirstSecret: sharedLocalAuthToken,
     });
 

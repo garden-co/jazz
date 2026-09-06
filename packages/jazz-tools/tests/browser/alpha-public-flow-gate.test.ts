@@ -360,7 +360,6 @@ describe("alpha public package flow", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
-      adminSecret,
       localFirstSecret: sharedSecret,
     });
     try {

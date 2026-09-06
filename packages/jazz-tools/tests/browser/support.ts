@@ -5,13 +5,15 @@
  * primitives, query helpers, cleanup tracking, and synced-Db factory.
  */
 
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createDb as createAccountDb } from "../../src/runtime/default-create-db.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import type { AccountHandle } from "../../src/accounts/state.js";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
 import type { JazzServerInfo } from "./testing-server.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
+import type { DbConfig } from "../../src/runtime/db.js";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -25,6 +27,52 @@ export function sleep(ms: number): Promise<void> {
 /** Generate a unique dbName to isolate persistent browser state between tests. */
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Browser integration fixtures acquire a real opaque account from an account
+ * manager before opening a public Db.  Keeping this at the fixture boundary
+ * prevents legacy credential-shaped configs from leaking into test callers.
+ */
+export async function createBrowserTestDb(
+  config: Omit<DbConfig, "secret" | "jwtToken" | "adminSecret"> & {
+    account?: AccountHandle;
+    secret?: string;
+    jwtToken?: string;
+    adminSecret?: string;
+  },
+): Promise<Db> {
+  const { account: selectedAccount, secret, jwtToken, adminSecret, ...dbConfig } = config;
+  if (adminSecret !== undefined)
+    throw new Error("Browser test fixtures do not admit backend credentials");
+  if (secret !== undefined && jwtToken !== undefined)
+    throw new Error("Browser test fixtures select either a local-first secret or a JWT");
+
+  // Each fixture manager owns its issued handle.  A small private store keeps
+  // test account selection out of the browser's shared localStorage namespace.
+  let account = selectedAccount;
+  if (!account) {
+    let stored: string | null = null;
+    const accounts = await createAccountManager({
+      appId: config.appId,
+      serverUrl: config.serverUrl ?? "http://127.0.0.1:1",
+      store: {
+        async read() {
+          return stored;
+        },
+        async update(transform) {
+          stored = transform(stored);
+        },
+      },
+    });
+    account =
+      secret !== undefined
+        ? accounts.restoreLocalFirst(secret)
+        : jwtToken !== undefined
+          ? await accounts.loginJWT(jwtToken)
+          : accounts.createLocalFirst();
+  }
+  return await createAccountDb({ ...dbConfig, account });
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +289,7 @@ export async function createSyncedDb(
   const accounts = await createAccountManager({ appId, serverUrl });
   const account = accounts.restoreLocalFirst(localFirstSecret);
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
