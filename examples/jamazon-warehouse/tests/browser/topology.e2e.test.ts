@@ -35,6 +35,8 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
     let owner: Db;
     let observer: Db;
     let nextOperator: Db;
+    let ownerAccount: string;
+    let nextOperatorAccount: string;
     let ownerToken: string;
     let ownerDbName: string;
     let warehouse: { id: string };
@@ -76,7 +78,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   .insert(app.warehouses, {
                     name: "Forged warehouse",
                     region: "outside",
-                    operator_id: "jamazon-owner",
+                    operator_id: ownerAccount,
                   })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
@@ -118,11 +120,13 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 "next-operator",
                 await getJazzServerJwtForUser("jamazon-next-operator", undefined, server.appId),
               );
+              ownerAccount = accountFromDb(owner);
+              nextOperatorAccount = accountFromDb(nextOperator);
               warehouse = await owner
                 .insert(app.warehouses, {
                   name: "East instruments",
                   region: "east",
-                  operator_id: "jamazon-owner",
+                  operator_id: ownerAccount,
                 })
                 .wait({ tier: "edge" });
               district = await owner
@@ -145,7 +149,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   sku: "JAM-001",
                   name: "Jazzmaster strings",
                   unit_price_cents: 2_500,
-                  operator_id: "jamazon-owner",
+                  operator_id: ownerAccount,
                 })
                 .wait({ tier: "edge" });
               stock = await owner
@@ -533,7 +537,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 20_000,
                 "edge",
               );
-              expect(observed[0]?.operator_id).toBe("jamazon-owner");
+              expect(observed[0]?.operator_id).toBe(ownerAccount);
               const allOrders = await owner.all(
                 completeOrdersForTopology({ warehouseId: warehouse.id, districtId: district.id }),
                 {
@@ -551,7 +555,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
             name: "transfer warehouse authority and reject the revoked operator",
             run: async () => {
               await owner
-                .update(app.warehouses, warehouse.id, { operator_id: "jamazon-next-operator" })
+                .update(app.warehouses, warehouse.id, { operator_id: nextOperatorAccount })
                 .wait({ tier: "edge" });
               await expect(
                 owner
@@ -604,6 +608,12 @@ async function openClient(
       driver: { type: "persistent", dbName },
     }),
   );
+}
+
+function accountFromDb(db: Db): string {
+  const account = db.getAuthState().session?.user.account;
+  if (!account) throw new Error("test client is missing an admitted account");
+  return account;
 }
 
 function publicDb(db: Db): PublicDb {

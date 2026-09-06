@@ -14,7 +14,7 @@ const schema = {
   }),
   members: s.table({
     bandId: s.ref("bands"),
-    userId: s.string(),
+    userId: s.uuid(),
   }),
   stops: s.table({
     bandId: s.ref("bands"),

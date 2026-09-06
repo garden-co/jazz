@@ -2,8 +2,8 @@ import { expect, it } from "vitest";
 import { roleForActiveCanvas } from "../../src/lib/identity.js";
 
 it("selects controls only from the active canvas row owned by the current canonical author", () => {
-  const viewer = JSON.stringify(["https://issuer.example", "viewer"]);
-  const admin = JSON.stringify(["https://issuer.example", "admin"]);
+  const viewer = "00000000-0000-4000-8000-000000000001";
+  const admin = "00000000-0000-4000-8000-000000000002";
   const memberships = [
     { canvasId: "active", memberAuthor: admin, role: "admin" as const },
     { canvasId: "active", memberAuthor: viewer, role: "viewer" as const },

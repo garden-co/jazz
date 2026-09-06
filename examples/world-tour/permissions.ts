@@ -2,7 +2,7 @@ import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
 export default s.definePermissions(app, ({ policy, session, anyOf }) => {
-  const isBandMember = policy.members.exists.where({ userId: session.user });
+  const isBandMember = policy.members.exists.where({ userId: session.user.account });
 
   // Open inserts for bands, members, and venues allow the demo app to
   // bootstrap seed data without an external auth provider. In a production
@@ -12,7 +12,7 @@ export default s.definePermissions(app, ({ policy, session, anyOf }) => {
   policy.bands.allowUpdate.where(isBandMember);
   policy.bands.allowDelete.where(isBandMember);
 
-  policy.members.allowRead.where({ userId: session.user });
+  policy.members.allowRead.where({ userId: session.user.account });
   policy.members.allowInsert.where({});
 
   policy.venues.allowRead.where({});

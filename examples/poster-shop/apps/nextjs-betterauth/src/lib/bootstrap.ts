@@ -5,8 +5,8 @@ import { authorForSession } from "@/src/lib/identity";
 
 // The only first-open side effect. It executes server-side with backend
 // authority, never from a query hook or a browser-held secret.
-export async function ensurePersonalCanvas(issuer: string, userId: string, displayName: string) {
-  const memberAuthor = authorForSession(issuer, userId);
+export async function ensurePersonalCanvas(accountId: string, displayName: string) {
+  const memberAuthor = authorForSession(accountId);
   const db = authJazzContext().asBackend(app);
   for (;;) {
     try {
