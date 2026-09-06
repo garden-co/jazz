@@ -5,7 +5,11 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
+import {
+  isPermissionIntrospectionColumn,
+  isProvenanceMagicColumn,
+  magicColumnType,
+} from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
@@ -286,6 +290,14 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       }
       return v.value.map((entry) => unwrapValue(entry));
     case "Row":
+      if (columnType?.type === "Row" && columnName && isProvenanceMagicColumn(columnName)) {
+        return Object.fromEntries(
+          columnType.columns.map((column, index) => [
+            column.name,
+            unwrapValue(v.value.values[index]!, column.column_type, `${columnName}.${column.name}`),
+          ]),
+        );
+      }
       if (columnType?.type === "Row") {
         return v.value.values.map((entry, index) =>
           unwrapValue(entry, columnType.columns[index]?.column_type),

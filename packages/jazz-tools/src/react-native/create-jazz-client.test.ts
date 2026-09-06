@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
+import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
 import { schema as s } from "../index.js";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
@@ -51,6 +53,13 @@ const app = s.defineApp({
 });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
+
+let selectedConfig: AccountDbConfig;
+
+async function accountConfig(appId: string, subject = "reader") {
+  selectedConfig = await enrolledAccountConfig(appId, subject);
+  return selectedConfig;
+}
 
 function installJsiForegroundFactory() {
   (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
@@ -118,7 +127,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("rejects a server-only credential copied through a React Native client config", async () => {
     const serverConfig = {
-      appId: "react-native-backend-secret-boundary",
+      ...(await accountConfig("react-native-backend-secret-boundary")),
       driver: { type: "memory" as const },
       backendSecret: "server-only",
     };
@@ -130,7 +139,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("rejects explicit memory configuration instead of importing the browser WASM runtime", async () => {
     const error = await createJazzClient({
-      appId: "react-native-memory-launch-test",
+      ...(await accountConfig("react-native-memory-launch-test")),
       driver: { type: "memory" },
     }).catch((error: unknown) => error);
 
@@ -138,26 +147,22 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect((error as Error).message).toBe(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   });
 
-  it("accepts native admission only through the public RN client config", () => {
+  it("accepts native admission with an account through the public RN client config", async () => {
     const config: JazzClientConfig = {
-      appId: "react-native-native-relay-public-config",
+      ...(await accountConfig("react-native-native-relay-public-config")),
       nativeRelay: { capability: nativeRelayCapability },
-      cookieSession: {
-        issuer: "https://issuer.example",
-        user_id: "public-config-reader",
-        claims: {},
-        authMode: "external",
-      },
     };
     expect(config.nativeRelay?.capability).toBe(nativeRelayCapability);
   });
 
-  it("rejects the default persistent configuration", async () => {
+  it("requires a compatible installed JSI engine for persistent accounts", async () => {
     const error = await createDb({
-      appId: "react-native-default-persistent-boundary-test",
+      ...(await accountConfig("react-native-default-persistent-boundary-test")),
     }).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
+    expect((error as Error).message).toMatch(
+      /native build did not install a compatible JSI foreground engine/,
+    );
   });
 
   it("runs a schema-backed foreground insert, query, subscription, and shutdown without loading WASM", async () => {
@@ -230,14 +235,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
     const relay = nativeRelayReceipt();
     client = await createJazzClient({
-      appId: "react-native-native-foreground-read-receipt",
+      ...(await accountConfig("react-native-native-foreground-read-receipt")),
       nativeRelay: relay.config,
-      cookieSession: {
-        issuer: "https://issuer.example",
-        user_id: "reader",
-        claims: {},
-        authMode: "external",
-      },
       runtimeSources: {
         get wasmModule(): never {
           throw new Error("native foreground must not inspect WASM sources");
@@ -308,14 +307,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     };
 
     client = await createJazzClient({
-      appId: "react-native-native-foreground-auth-rotation",
+      ...(await accountConfig("react-native-native-foreground-auth-rotation", "old-reader")),
       nativeRelay: nativeRelayReceipt().config,
-      cookieSession: {
-        issuer: "https://issuer.example",
-        user_id: "old-reader",
-        claims: {},
-        authMode: "external",
-      },
     });
 
     await expect(client.db.all(app.notes)).resolves.toMatchObject([
@@ -340,7 +333,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   it("rejects an opaque relay capability when memory mode would ignore it", async () => {
     const relay = nativeRelayReceipt();
     const error = await createDb({
-      appId: "react-native-native-relay-memory-boundary",
+      ...(await accountConfig("react-native-native-relay-memory-boundary")),
       driver: { type: "memory" },
       nativeRelay: relay.config,
     }).catch((error: unknown) => error);
@@ -358,7 +351,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     };
 
     const error = await createDb({
-      appId: "react-native-persistent-boundary-test",
+      ...(await accountConfig("react-native-persistent-boundary-test")),
       sqliteStorage,
     }).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(Error);
@@ -375,7 +368,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     };
 
     const error = await createDb({
-      appId: "react-native-memory-sqlite-ambiguity-test",
+      ...(await accountConfig("react-native-memory-sqlite-ambiguity-test")),
       driver: { type: "memory" },
       sqliteStorage,
     }).catch((error: unknown) => error);
@@ -386,7 +379,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("keeps the Node-only memory scaffold out of the React Native entrypoint", async () => {
     const config = {
-      appId: "react-native-memory-reopen-test",
+      ...(await accountConfig("react-native-memory-reopen-test")),
       driver: { type: "memory" as const },
     };
     const error = await createJazzClient(config).catch((error: unknown) => error);
@@ -463,7 +456,21 @@ function encodeSubscriptionEvents(delta: Uint8Array): Uint8Array {
 function encodeNativeSession(userId: string): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(18);
-  writer.string("https://issuer.example");
-  writer.string(userId);
-  return writer.finish();
+  const identity = new PostcardWriter();
+  identity.string(accountRegistryUrl("https://core.example", selectedConfig.appId));
+  identity.u64(1);
+  const accountBytes = Uint8Array.from(
+    selectedConfig.account.id.replaceAll("-", "").match(/../g)!,
+    (byte) => Number.parseInt(byte, 16),
+  );
+  const principal = new PostcardWriter();
+  principal.string("https://issuer.example");
+  principal.string(userId);
+  return Uint8Array.from([
+    ...writer.finish(),
+    ...new Uint8Array(16).fill(4),
+    ...identity.finish(),
+    ...accountBytes,
+    ...principal.finish(),
+  ]);
 }

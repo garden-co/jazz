@@ -142,7 +142,7 @@ export function selfSignedClientProofFromConfig(
   return {
     token: config.jwtToken,
     appId: config.appId,
-    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id),
+    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
 }
 

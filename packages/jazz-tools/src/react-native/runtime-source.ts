@@ -69,6 +69,10 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
+  override get defaultDurabilityTier(): "local" {
+    return "local";
+  }
+
   private admittedSession: Session | null = null;
   private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
@@ -285,6 +289,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           jwtToken: context.config.jwtToken,
           cookieSession: context.config.cookieSession,
           tier: "local",
+          defaultDurabilityTier: this.defaultDurabilityTier,
         };
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {

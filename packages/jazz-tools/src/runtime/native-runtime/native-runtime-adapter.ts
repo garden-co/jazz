@@ -1,3 +1,4 @@
+import { stripColumnQualifier } from "../query-column-name.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -39,7 +40,7 @@ import {
 } from "../client-session.js";
 import {
   authorBytesForSession,
-  decodeCanonicalAuthorSubjectBytes,
+  validateStructuredAuthorValue,
   isUsableSubject,
   parseCanonicalAuthorSubject,
 } from "../author-id.js";
@@ -572,6 +573,7 @@ type AuxiliaryRelayTrace = {
 };
 
 type RuntimeSession = {
+  account_id?: string;
   issuer: string;
   user_id: string;
   authMode?: string;
@@ -640,7 +642,7 @@ type NativeRowFieldPlan = {
   includeInValues: boolean;
 };
 
-const textDecoder = new TextDecoder();
+const textDecoder = new TextDecoder("utf-8", { fatal: true });
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 const MAX_DEFERRED_PLACEHOLDER_CHUNKS = 16;
@@ -2876,7 +2878,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!author) {
       throw new Error("backend attribution must be a canonical author subject string");
     }
-    return authorBytesForSession({ issuer: author.issuer, user_id: author.user_id });
+    return authorBytesForSession(author);
   }
 
   private stagedRowForWriteMerge(
@@ -4305,6 +4307,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
+      account_id?: unknown;
       issuer?: unknown;
       user_id?: unknown;
       claims?: unknown;
@@ -4312,6 +4315,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       attribution?: unknown;
       [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
       session?: {
+        account_id?: unknown;
         issuer?: unknown;
         user_id?: unknown;
         claims?: unknown;
@@ -4338,7 +4342,10 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
       throw new Error("session is missing issuer");
     }
-    const session: Pick<Session, "issuer" | "user_id" | "authMode"> = {
+    const session: Pick<Session, "account_id" | "issuer" | "user_id" | "authMode"> = {
+      account_id: parsedAccountId(
+        attributedAuthor ? attributedAuthor.account_id : (parsed.session ?? parsed).account_id,
+      ),
       issuer,
       user_id: userId,
       authMode: (typeof parsed.session?.authMode === "string"
@@ -4353,6 +4360,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       session.authMode,
       parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
         parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+      session.account_id,
     );
     const reservedToken =
       parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
@@ -4371,6 +4379,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     if (
       error instanceof Error &&
       (error.message === "session is missing issuer" ||
+        error.message === "session has invalid account_id" ||
         error.message === "Native runtime public session uses reserved issuer")
     ) {
       throw error;
@@ -4379,12 +4388,12 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   }
 }
 
-function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
+function parsePublicCanonicalAuthor(value: string) {
   const parsed = parseCanonicalAuthorSubject(value);
   if (parsed && isReservedJazzIssuer(parsed.issuer)) {
     throw new Error("Native runtime public session uses reserved issuer");
   }
-  return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
+  return parsed;
 }
 
 function assertPublicSessionIssuer(
@@ -4392,12 +4401,16 @@ function assertPublicSessionIssuer(
   userId: string,
   authMode: string | undefined,
   trustedToken?: unknown,
+  accountId?: string,
 ): void {
   if (
     isReservedJazzIssuer(issuer) &&
     !(
       (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
-      isTrustedReservedSession({ issuer, user_id: userId, authMode }, trustedToken)
+      isTrustedReservedSession(
+        { issuer, user_id: userId, authMode, account_id: accountId },
+        trustedToken,
+      )
     )
   ) {
     throw new Error("Native runtime public session uses reserved issuer");
@@ -4519,9 +4532,21 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
 
+function parsedAccountId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+  ) {
+    throw new Error("session has invalid account_id");
+  }
+  return value;
+}
+
 function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
   const parsed = JSON.parse(sessionJson) as {
+    account_id?: unknown;
     issuer?: unknown;
     user_id?: unknown;
     claims?: unknown;
@@ -4535,6 +4560,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     throw new Error("Native runtime session is missing issuer");
   }
   const session = {
+    account_id: parsedAccountId(parsed.account_id),
     issuer: parsed.issuer,
     user_id: parsed.user_id,
     authMode: (typeof parsed.authMode === "string"
@@ -4546,6 +4572,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     session.user_id,
     session.authMode,
     parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+    session.account_id,
   );
   const backendAuthority =
     session.issuer === SYSTEM_SESSION_ISSUER &&
@@ -4783,7 +4810,7 @@ function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
 }
 
 function unqualifiedColumn(column: string): string {
-  return column.split(".").at(-1) ?? column;
+  return stripColumnQualifier(column);
 }
 
 function subscriptionOutputColumns(
@@ -4964,7 +4991,7 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
         if (!nested || typeof nested !== "object") continue;
         const outerColumn = (nested as { outer_column?: unknown }).outer_column;
         if (typeof outerColumn !== "string") continue;
-        const column = outerColumn.split(".").at(-1) ?? outerColumn;
+        const column = stripColumnQualifier(outerColumn);
         if (!(readSelectColumns(record.select_columns) ?? []).includes(column)) {
           record.select_columns.push(column);
         }
@@ -5741,7 +5768,7 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
     }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
-    const column = record.column.split(".").at(-1) ?? record.column;
+    const column = stripColumnQualifier(record.column);
     switch (record.op) {
       case "eq":
         if (record.value === null) {
@@ -5912,7 +5939,7 @@ function readColumnRef(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const column = (value as { column?: unknown }).column;
   if (typeof column !== "string") return null;
-  return column.split(".").at(-1) ?? column;
+  return stripColumnQualifier(column);
 }
 
 function readLiteral(value: unknown): QueryLiteral | null {
@@ -6508,14 +6535,6 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      if (
-        fieldName !== undefined &&
-        isProvenanceMagicColumn(fieldName) &&
-        type.type === "Text" &&
-        storageType?.tag === 8
-      ) {
-        return { type: "Text", value: decodeProvenanceText(bytes) };
-      }
       if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
@@ -6535,8 +6554,8 @@ function decodeBytes(
           nestedRowCarrier,
         ),
       };
-    case "Row":
-      return {
+    case "Row": {
+      const value: Value = {
         type: "Row",
         value: decodeNestedRowBytes(
           type.columns,
@@ -6545,11 +6564,11 @@ function decodeBytes(
           nestedRowCarrier,
         ),
       };
+      if (fieldName === "$createdBy" || fieldName === "$updatedBy")
+        validateStructuredAuthorValue(value);
+      return value;
+    }
   }
-}
-
-function decodeProvenanceText(bytes: Uint8Array): string {
-  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
@@ -7135,8 +7154,13 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
     case "BigInt":
     case "Double":
     case "Timestamp":
-    case "Row":
       return "value" in right && left.value === right.value;
+    case "Row":
+      return (
+        right.type === "Row" &&
+        left.value.id === right.value.id &&
+        rowValuesEqual(left.value.values, right.value.values)
+      );
   }
 }
 

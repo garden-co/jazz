@@ -3,9 +3,9 @@ import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, ShutdownOptions } from "../runtime/db.js";
 import { getDbSubscriptionSource } from "../runtime/db.js";
-import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
+import type { AccountDbConfig } from "../accounts/context.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { accountRegistry } from "../accounts/enrollment.js";
-import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
@@ -21,7 +21,7 @@ export interface JazzClient {
 }
 
 async function createJazzClientInternal(config: AccountDbConfig): Promise<JazzClient> {
-  const db = await createAccountDbWithRuntimeSource(config, new DefaultRuntimeSource());
+  const db = await createDb(config);
   let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },

@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s, schemaToWasm, TypedTableQueryBuilder } from "../../src/index.js";
 import { schemaDefinitionToAst } from "../../src/migrations.js";
@@ -104,7 +105,7 @@ describe("TS transformed columns", () => {
 
   beforeEach(async () => {
     db = await createDb({
-      appId: "test-app",
+      ...(await localAccountConfig("test-app")),
       driver: { type: "persistent", dbName: uniqueDbName("transformed-columns") },
     });
   });

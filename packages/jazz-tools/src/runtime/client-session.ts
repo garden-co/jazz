@@ -40,7 +40,7 @@ const trustedReservedSessions = new WeakSet<Session>();
 const trustedReservedSessionTokens = new WeakMap<Session, string>();
 const trustedReservedSessionTokenValues = new Map<
   string,
-  { issuer: string; user_id: string; authMode: Session["authMode"] }
+  { account_id?: string; issuer: string; user_id: string; authMode: Session["authMode"] }
 >();
 
 function newTrustedReservedSessionToken(): string {
@@ -70,6 +70,7 @@ export function trustedReservedSessionToken(session: Session): string | undefine
     trustedReservedSessionTokens.set(session, token);
   }
   trustedReservedSessionTokenValues.set(token, {
+    account_id: session.account_id,
     issuer: session.issuer,
     user_id: session.user_id,
     authMode: session.authMode,
@@ -78,13 +79,14 @@ export function trustedReservedSessionToken(session: Session): string | undefine
 }
 
 export function isTrustedReservedSession(
-  session: Pick<Session, "issuer" | "user_id" | "authMode">,
+  session: Pick<Session, "account_id" | "issuer" | "user_id" | "authMode">,
   token: unknown,
 ): boolean {
   if (!isReservedJazzIssuer(session.issuer) || typeof token !== "string") return false;
   const trusted = trustedReservedSessionTokenValues.get(token);
   return (
     trusted?.issuer === session.issuer &&
+    trusted.account_id === session.account_id &&
     trusted.user_id === session.user_id &&
     trusted.authMode === session.authMode
   );

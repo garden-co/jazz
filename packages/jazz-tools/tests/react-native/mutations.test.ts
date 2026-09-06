@@ -14,10 +14,37 @@ describe("React Native public mutations through the real foreground C ABI", () =
         .insert(app.documents, { title: "original", done: false })
         .wait({ tier: "local" });
       await db.update(app.documents, row.id, { title: "patched" }).wait({ tier: "local" });
+      expect(
+        await db.one(app.documents.select("$createdBy", "$updatedBy").where({ id: row.id })),
+      ).toMatchObject({
+        $createdBy: {
+          account: fixture.config.account.id,
+          identity: fixture.config.account.identity,
+        },
+        $updatedBy: {
+          account: fixture.config.account.id,
+          identity: fixture.config.account.identity,
+        },
+      });
       expect(await db.one(app.documents.where({ id: row.id }))).toEqual({
         ...row,
         title: "patched",
       });
+      const author = {
+        account: fixture.config.account.id,
+        identity: fixture.config.account.identity,
+      };
+      expect(await db.all(app.documents.where({ $createdBy: author }))).toHaveLength(1);
+      expect(
+        await db.all(app.documents.where({ "$createdBy.account": author.account })),
+      ).toHaveLength(1);
+      expect(
+        await db.all(app.documents.where({ "$createdBy.identity": author.identity })),
+      ).toHaveLength(1);
+      expect(await db.all(app.documents.where({ $createdBy: { ne: author } }))).toEqual([]);
+      expect(
+        await db.all(app.documents.where({ $createdBy: { ne: { ...author, account: null } } })),
+      ).toHaveLength(1);
       await db.upsert(app.documents, row.id, { done: true }).wait({ tier: "local" });
       expect(await db.one(app.documents.where({ id: row.id }))).toEqual({
         ...row,

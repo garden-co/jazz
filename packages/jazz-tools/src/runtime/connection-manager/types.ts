@@ -1,3 +1,4 @@
+import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
@@ -96,6 +97,7 @@ export abstract class ConnectionManager {
 
     this.installRuntimeTelemetry();
     const runtimeConfig = { ...config };
+    copyAccountConfigAdmission(config, runtimeConfig);
     // Reserved local-first/anonymous sessions are carried by a package-private
     // capability sidecar, not an enumerable config property. Preserve that
     // capability when isolating the runtime's config object so native opens

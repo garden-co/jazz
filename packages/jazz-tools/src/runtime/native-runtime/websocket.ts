@@ -1,7 +1,11 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
-import { canonicalAuthorSubject, isUsableSubject } from "../author-id.js";
+import {
+  canonicalAuthorSubject,
+  isUsableSubject,
+  parseCanonicalAuthorSubject,
+} from "../author-id.js";
 import { parseJwtPayload } from "../client-session.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
@@ -487,8 +491,9 @@ export function encodeWebSocketPrelude(
  *
  * `peerIdentity` on a native runtime is the verified logical author that
  * opened its raw-core storage handle. A WebSocket still derives the assertion
- * from the credential's full issuer and subject pair: that makes the wire
- * contract explicit and never relies on a bare `sub` or unrelated fallback.
+ * from the credential's full issuer and subject pair. An account-bound runtime
+ * retains its account only when that pair matches; the server independently
+ * verifies the registry assignment.
  *
  * A credential without a usable session subject (for example an admin-only
  * connection) retains the caller's transport identity. It cannot accidentally
@@ -513,6 +518,25 @@ export function peerIdentityForWebSocketAuth(
     return new TextEncoder().encode(canonicalAuthorSubject("urn:jazz:system", "system"));
   }
   const canonical = canonicalAuthorForWebSocketAuth(auth);
+  let existing: ReturnType<typeof parseCanonicalAuthorSubject> = null;
+  try {
+    existing = parseCanonicalAuthorSubject(
+      new TextDecoder("utf-8", { fatal: true }).decode(fallbackIdentity),
+    );
+  } catch {
+    // Non-author transport identities have no account association to preserve.
+  }
+  if (existing?.account_id && canonical) {
+    const credential = parseCanonicalAuthorSubject(canonical)!;
+    if (
+      credential.issuer !== existing.issuer ||
+      credential.user_id !== existing.user_id ||
+      (credential.account_id !== undefined && credential.account_id !== existing.account_id)
+    ) {
+      throw new Error("WebSocket credential must match the context account identity");
+    }
+    return fallbackIdentity;
+  }
   return canonical ? new TextEncoder().encode(canonical) : fallbackIdentity;
 }
 
@@ -558,8 +582,12 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
   // server-side impersonation request, so it uses the same canonical author.
   // It also has the server's highest session-authentication precedence.
   if (typeof auth.backend_secret === "string" && hasUsableBackendSession(auth)) {
-    const session = auth.backend_session as { issuer: string; user_id: string };
-    return canonicalAuthorSubject(session.issuer, session.user_id);
+    const session = auth.backend_session as {
+      issuer: string;
+      user_id: string;
+      account_id?: string;
+    };
+    return canonicalAuthorSubject(session.issuer, session.user_id, session.account_id);
   }
 
   if (typeof auth.jwt_token === "string") {
@@ -580,14 +608,7 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
 }
 
 function canonicalAuthorSubjectPart(author: string): string | null {
-  try {
-    const parsed = JSON.parse(author) as unknown;
-    return Array.isArray(parsed) && parsed.length === 2 && typeof parsed[1] === "string"
-      ? parsed[1]
-      : null;
-  } catch {
-    return null;
-  }
+  return parseCanonicalAuthorSubject(author)?.user_id ?? null;
 }
 
 export async function connectWebSocketCarrier(

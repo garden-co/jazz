@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Db } from "./db.js";
-import { createDb } from "./default-create-db.js";
+import { createDb } from "./testing/create-internal-db.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;

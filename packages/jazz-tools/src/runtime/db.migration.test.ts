@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { generateAuthSecret } from "./auth-secret-store.js";
+import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
@@ -81,16 +81,10 @@ describe("schema migrations", () => {
     });
 
     oldDb = await createDb({
-      appId,
-      driver: { type: "memory" },
-      serverUrl,
-      secret: generateAuthSecret(),
+      ...(await localAccountConfig(appId, serverUrl)),
     });
     newDb = await createDb({
-      appId,
-      driver: { type: "memory" },
-      serverUrl,
-      secret: generateAuthSecret(),
+      ...(await localAccountConfig(appId, serverUrl)),
     });
   });
 

@@ -1,3 +1,4 @@
+import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { expect, it, type Mock, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -48,7 +49,9 @@ it("continues React Native database teardown after orchestrator shutdown fails",
   };
   mocks.createDb.mockResolvedValueOnce(db);
 
-  const client = await createJazzClient({ appId: "react-native-shutdown-failure" });
+  const client = await createJazzClient(
+    await enrolledAccountConfig("react-native-shutdown-failure"),
+  );
   const manager = mocks.orchestratorInstances[0]!;
   manager.shutdown.mockRejectedValueOnce(managerError);
 
