@@ -131,6 +131,30 @@ async function settle(): Promise<void> {
 }
 
 describe("Db ReadTier.RemoteIfPossible", () => {
+  it("uses the Db's admitted session for a direct subscription", async () => {
+    const client = makeClient();
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external" as const,
+    };
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "direct-subscription-session",
+        serverUrl: "https://example.test",
+        cookieSession: session,
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+
+    const unsubscribe = db.subscribe(query(), () => undefined);
+
+    expect(client.subscribe.mock.calls.at(-1)?.[3]).toEqual(session);
+    unsubscribe();
+  });
+
   it("keeps explicit Local reads propagating whether connected or explicitly offline", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(

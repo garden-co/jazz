@@ -2759,7 +2759,11 @@ export class Db {
             },
           },
           subscriptionOptions,
-          context?.readSession ?? context?.session ?? session,
+          context?.readSession ??
+            context?.session ??
+            session ??
+            getDbInternalSession(this) ??
+            undefined,
         );
       } catch (error) {
         subscription.installing = false;
