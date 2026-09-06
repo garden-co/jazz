@@ -11,24 +11,35 @@ const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = authClient.useSession();
   const [client, setClient] = useState<JazzClient>();
+  const [error, setError] = useState<Error>();
   const clientRef = useRef<JazzClient | undefined>(undefined);
   useEffect(() => {
     if (!session?.user) return;
     let cancelled = false;
     void (async () => {
       const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
-      const token = await requireBetterAuthToken();
-      const selected = accounts.getLoggedIn();
-      const account: AccountHandle =
-        selected?.identity.subject === session.user.id
-          ? await accounts.loginJWT({ getToken: async () => token })
-          : await accounts.registerJWT({ getToken: async () => token });
+      const credential = { getToken: requireBetterAuthToken };
+      let account: AccountHandle;
+      try {
+        account = await accounts.loginJWT(credential);
+      } catch (cause) {
+        if (
+          !/not_registered|not found|404/i.test(
+            cause instanceof Error ? cause.message : String(cause),
+          )
+        )
+          throw cause;
+        account = await accounts.registerJWT(credential);
+      }
       const opened = await createJazzClient({ appId, serverUrl, account });
       if (cancelled) return void opened.shutdown();
       await clientRef.current?.shutdown({ waitForSync: true });
       clientRef.current = opened;
+      setError(undefined);
       setClient(opened);
-    })();
+    })().catch((cause) => {
+      if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+    });
     return () => {
       cancelled = true;
       const opened = clientRef.current;
@@ -37,7 +48,9 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       void opened?.shutdown();
     };
   }, [session?.session.id, session?.user.id]);
-  if (!session?.user || !client) return <p>Opening poster studio…</p>;
+  if (!session?.user) return <>{children}</>;
+  if (error) return <p role="alert">Could not open poster studio: {error.message}</p>;
+  if (!client) return <p>Opening poster studio…</p>;
   return <JazzClientProvider client={client}>{children}</JazzClientProvider>;
 }
 

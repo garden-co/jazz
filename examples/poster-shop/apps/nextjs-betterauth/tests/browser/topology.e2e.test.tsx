@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
+import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
+import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -243,15 +244,7 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "revoke editor before owner lifecycle fault",
             run: async () => {
-              const authority = ctx.track(
-                await createDb({
-                  appId: server.appId,
-                  serverUrl: server.serverUrl,
-                  adminSecret: server.adminSecret,
-                  driver: { type: "memory" },
-                }),
-              );
-              await authority.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
+              await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
           },
@@ -414,10 +407,11 @@ async function openClient(
   dbName = uniqueDbName(`poster-shop-${label}`),
 ): Promise<Db> {
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       serverUrl,
       jwtToken,
+      registerJwt: true,
       driver: { type: "persistent", dbName },
     }),
   );

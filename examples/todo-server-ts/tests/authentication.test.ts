@@ -134,6 +134,15 @@ describe("Todo Server request authentication", () => {
     await response.body?.cancel();
   });
 
+  it("rejects a valid external JWT until its identity is registered with this app", async () => {
+    const token = jwtIssuer.jwtForUser("todo-rest-unregistered", {}, { issuer: EXTERNAL_ISSUER });
+    const response = await fetch(`${baseUrl}/todos`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(401);
+    await response.body?.cancel();
+  });
+
   it("derives ownership from the credential and enforces it across CRUD", async () => {
     const createResponse = await fetch(`${baseUrl}/todos`, {
       method: "POST",
