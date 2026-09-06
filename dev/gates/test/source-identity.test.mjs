@@ -20,6 +20,26 @@ function fixture() {
   git(root, ["commit", "--quiet", "-m", "base"]);
   return root;
 }
+
+test("large corpus patches retain trailing changes in staged and unstaged identity", () => {
+  const root = fixture();
+  try {
+    const prefix = "synthetic corpus ".repeat(100_000);
+    fs.writeFileSync(path.join(root, "tracked.txt"), `${prefix}first\n`);
+    const first = sourceIdentity(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), `${prefix}second\n`);
+    const second = sourceIdentity(root);
+    assert.notEqual(first.unstaged, second.unstaged);
+    git(root, ["add", "tracked.txt"]);
+    const staged = sourceIdentity(root);
+    assert.notEqual(staged.staged, first.staged);
+    fs.writeFileSync(path.join(root, "tracked.txt"), `${prefix}third\n`);
+    git(root, ["add", "tracked.txt"]);
+    assert.notEqual(sourceIdentity(root).staged, staged.staged);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 for (const [name, secret, mutate, restore] of [
   [
     "staged",

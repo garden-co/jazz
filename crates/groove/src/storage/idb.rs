@@ -28,6 +28,7 @@ pub struct IdbStorage<S> {
     column_families: Rc<RefCell<BTreeSet<String>>>,
     mutation_gate: Rc<Mutex<()>>,
     needs_reset: Rc<Cell<bool>>,
+    tree_epoch: Rc<Cell<u64>>,
 }
 
 impl<S> IdbStorage<S>
@@ -46,6 +47,7 @@ where
             )),
             mutation_gate: Rc::new(Mutex::new(())),
             needs_reset: Rc::new(Cell::new(false)),
+            tree_epoch: Rc::new(Cell::new(0)),
         })
     }
 
@@ -85,6 +87,39 @@ where
         self.tree.borrow().clone()
     }
 
+    // A retained query future may be polled once and then parked until its
+    // owner gets another turn. It must not keep the mutation gate while cold
+    // page I/O is pending: that owner may first need a different storage read.
+    // Hydrate without the gate, discard that speculative result, and retry
+    // against the current tree under the gate. Only a resident, serialized
+    // attempt may return a value, including after a failed writer reset.
+    async fn read_resident<T, F, R>(&self, read: F) -> Result<T, Error>
+    where
+        F: Fn(IdbTree<S>) -> R,
+        R: std::future::Future<Output = Result<T, idb_tree::Error>>,
+    {
+        loop {
+            let guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
+            let epoch = self.tree_epoch.get();
+            let mut pending = std::pin::pin!(read(self.tree()));
+            let attempt = std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await;
+            match attempt {
+                Poll::Ready(result) => return result.map_err(Error::from),
+                Poll::Pending => {
+                    drop(guard);
+                    if let Err(error) = pending.await {
+                        let _guard = self.mutation_gate.lock().await;
+                        self.ensure_ready().await?;
+                        if self.tree_epoch.get() == epoch {
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn reopen_after_generation_conflict(&self) -> Result<(), Error> {
         // An independent browser tab owns a distinct IdbTree cache and can
         // commit between our read and flush. Discard this stale cache rather
@@ -92,6 +127,7 @@ where
         // batch from the newly durable tree.
         let tree = IdbTree::open(self.store.clone(), Options::default()).await?;
         *self.tree.borrow_mut() = tree;
+        self.tree_epoch.set(self.tree_epoch.get().wrapping_add(1));
         self.needs_reset.set(false);
         Ok(())
     }
@@ -199,10 +235,12 @@ where
 {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
             let key = self.encoded_key(&cf, &key)?;
-            Ok(self.tree().get(&key).await?)
+            self.read_resident(|tree| {
+                let key = key.clone();
+                async move { tree.get(&key).await }
+            })
+            .await
         })
     }
 
@@ -334,8 +372,6 @@ where
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
             let ScanRequest {
                 cf,
                 bounds,
@@ -357,11 +393,17 @@ where
                 }
             };
             let limit = max_items.unwrap_or(usize::MAX);
-            let tree = self.tree();
-            let rows = match direction {
-                ScanDirection::Forward => tree.range_limit(&start, &end, limit).await?,
-                ScanDirection::Reverse => tree.range_reverse(&start, &end, limit).await?,
-            };
+            let rows = self
+                .read_resident(|tree| {
+                    let (start, end) = (start.clone(), end.clone());
+                    async move {
+                        match direction {
+                            ScanDirection::Forward => tree.range_limit(&start, &end, limit).await,
+                            ScanDirection::Reverse => tree.range_reverse(&start, &end, limit).await,
+                        }
+                    }
+                })
+                .await?;
             Ok(Box::new(ReadyStorageCursor::new(Self::decode_rows(rows)?)) as StorageScan<'_>)
         })
     }
@@ -372,13 +414,13 @@ where
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
             let start = self.encoded_key(&cf, &prefix)?;
             let end = super::prefix_successor(&start).unwrap_or_else(|| vec![0xff]);
             let row = self
-                .tree()
-                .range_reverse(&start, &end, 1)
+                .read_resident(|tree| {
+                    let (start, end) = (start.clone(), end.clone());
+                    async move { tree.range_reverse(&start, &end, 1).await }
+                })
                 .await?
                 .into_iter()
                 .next();
@@ -393,14 +435,14 @@ where
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
-            self.ensure_ready().await?;
             let start = self.encoded_key(&cf, &prefix)?;
             let mut end = self.encoded_key(&cf, &upper)?;
             end.push(0);
             let row = self
-                .tree()
-                .range_reverse(&start, &end, 1)
+                .read_resident(|tree| {
+                    let (start, end) = (start.clone(), end.clone());
+                    async move { tree.range_reverse(&start, &end, 1).await }
+                })
                 .await?
                 .into_iter()
                 .next();
@@ -483,6 +525,8 @@ mod tests {
         inner: MemoryPageStore,
         fail_next_commit: Rc<Cell<bool>>,
         fail_next_reopen: Rc<Cell<bool>>,
+        pause_next_read:
+            Rc<RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>>,
     }
 
     impl PageStore for CommitErrorPageStore {
@@ -494,7 +538,15 @@ mod tests {
         }
 
         fn read_page(&self, page_id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
-            self.inner.read_page(page_id)
+            let pause = self.pause_next_read.borrow_mut().take();
+            Box::pin(async move {
+                if let Some(pause) = pause {
+                    pause
+                        .await
+                        .map_err(|_| "read pause cancelled".to_owned())??;
+                }
+                self.inner.read_page(page_id).await
+            })
         }
 
         fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
@@ -533,6 +585,94 @@ mod tests {
                 Err("generation changed: deterministic injected conflict".to_owned())
             })
         }
+    }
+
+    /// A retained cold query must not block a second storage read or writer.
+    /// This storage-level receipt controls a single page future, a scheduling
+    /// boundary which cannot be asserted deterministically through a server.
+    #[test]
+    fn parked_cold_reads_release_the_gate_and_recheck_after_a_write() {
+        futures::executor::block_on(async {
+            for read_kind in 0..5 {
+                let pages = CommitErrorPageStore::default();
+                let writer = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+                writer
+                    .set("records".into(), b"key".to_vec(), b"before".to_vec())
+                    .await
+                    .unwrap();
+                let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+                let (release, paused) = futures::channel::oneshot::channel();
+                *pages.pause_next_read.borrow_mut() = Some(paused);
+                let mut first = Box::pin(async {
+                    match read_kind {
+                        0 => storage.get("records".into(), b"key".to_vec()).await,
+                        1 | 2 => {
+                            let mut request = ScanRequest::prefix("records".into(), b"k".to_vec());
+                            if read_kind == 2 {
+                                request.direction = ScanDirection::Reverse;
+                            }
+                            let mut scan = storage.scan(request).await?;
+                            Ok(scan
+                                .next_batch()
+                                .await?
+                                .and_then(|rows| rows.into_iter().next().map(|(_, value)| value)))
+                        }
+                        3 => Ok(storage
+                            .last_with_prefix("records".into(), b"k".to_vec())
+                            .await?
+                            .map(|(_, value)| value)),
+                        _ => Ok(storage
+                            .last_with_prefix_before_or_at(
+                                "records".into(),
+                                b"k".to_vec(),
+                                b"key".to_vec(),
+                            )
+                            .await?
+                            .map(|(_, value)| value)),
+                    }
+                });
+                assert!(futures::poll!(first.as_mut()).is_pending());
+                let mut second = storage.get("records".into(), b"key".to_vec());
+                assert!(
+                    matches!(futures::poll!(second.as_mut()), Poll::Ready(Ok(Some(value))) if value == b"before"),
+                    "read {read_kind} retained the gate while parked"
+                );
+                storage
+                    .set("records".into(), b"key".to_vec(), b"after".to_vec())
+                    .await
+                    .unwrap();
+                release.send(Ok(())).unwrap();
+                assert_eq!(first.await.unwrap(), Some(b"after".to_vec()));
+            }
+        });
+    }
+
+    /// A failed writer replaces its dirty tree while a cold read is parked.
+    /// The old read's late failure must not poison a healthy durable retry.
+    #[test]
+    fn cold_read_retries_after_a_failed_writer_replaces_its_tree() {
+        futures::executor::block_on(async {
+            let pages = CommitErrorPageStore::default();
+            let writer = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            writer
+                .set("records".into(), b"key".to_vec(), b"durable".to_vec())
+                .await
+                .unwrap();
+            let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            let (release, paused) = futures::channel::oneshot::channel();
+            *pages.pause_next_read.borrow_mut() = Some(paused);
+            let mut read = storage.get("records".into(), b"key".to_vec());
+            assert!(futures::poll!(read.as_mut()).is_pending());
+            pages.fail_next_commit.set(true);
+            assert!(
+                storage
+                    .set("records".into(), b"key".to_vec(), b"uncommitted".to_vec())
+                    .await
+                    .is_err()
+            );
+            release.send(Err("old tree page failed".into())).unwrap();
+            assert_eq!(read.await.unwrap(), Some(b"durable".to_vec()));
+        });
     }
 
     #[test]
