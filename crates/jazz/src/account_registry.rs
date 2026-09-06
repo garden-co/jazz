@@ -105,7 +105,7 @@ pub enum AccountError {
 
 /// Authenticated registry operation. The server supplies the principal and time;
 /// neither is trusted from the request body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccountCommand {
     /// Register a verified local-first founding identity deterministically.
     FoundLocalFirst {

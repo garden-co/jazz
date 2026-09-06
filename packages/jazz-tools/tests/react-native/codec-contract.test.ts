@@ -12,6 +12,11 @@ const txId = Uint8Array.from({ length: 16 }, () => 7);
 const optionsJson = '{"readTier":"local","view":{"head":"main"}}';
 const cases: [string, unknown, unknown][] = [
   [
+    "graceful shutdown",
+    { type: "waitForPendingWrites", tier: "core" },
+    { WaitForPendingWrites: { tier: "core" } },
+  ],
+  [
     "insert advice",
     {
       type: "permissionAdvice",
