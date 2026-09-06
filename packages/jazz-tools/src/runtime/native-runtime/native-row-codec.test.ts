@@ -7,6 +7,7 @@ import { encodeCellsForPatch, encodeCellsForRow } from "./native-runtime-adapter
 import {
   createRecord,
   decodeNativeTerminalRow,
+  decodeNativeTerminalRowWithDescriptor,
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
@@ -20,6 +21,7 @@ import {
   writeDescriptor,
 } from "./native-row-codec.js";
 import type { ColumnDescriptor, Value } from "../../drivers/types.js";
+import { authorColumnType } from "../../magic-columns.js";
 
 type NativeRowCodecFixture = {
   cases: NativeRowCodecCase[];
@@ -32,6 +34,62 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("decodes structured authors without inventing entity keys and rejects swapped identity fields", () => {
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const accountId = "00000000-0000-4000-8000-000000000002";
+    const columns: ColumnDescriptor[] = [
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
+    ];
+    const identity = [
+      { name: "issuer", valueType: { tag: 8 } },
+      { name: "subject", valueType: { tag: 8 } },
+    ];
+    const author = [
+      { name: "account", valueType: { tag: 15, inner: { tag: 11 } } },
+      { name: "identity", valueType: { tag: 16, record: identity } },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
+      { name: "$createdBy", valueType: { tag: 16, record: author } },
+    ];
+    const encodeText = (value: string) => Uint8Array.from([2, ...new TextEncoder().encode(value)]);
+    const identityBytes = createRecord(identity, [
+      encodeText("https://issuer.example"),
+      encodeText("alice"),
+    ]);
+    for (const accountBytes of [
+      new Uint8Array(17),
+      Uint8Array.from([1, ...uuidBytes(accountId)]),
+    ]) {
+      const bytes = createRecord(descriptor, [
+        uuidBytes(rootId),
+        createRecord(author, [accountBytes, identityBytes]),
+      ]);
+      const decoded = decodeNativeTerminalRowWithDescriptor(rootId, descriptor, columns, bytes);
+      expect(decoded.values[0]).toMatchObject({
+        type: "Row",
+        value: {
+          values: [
+            accountBytes[0] === 0 ? { type: "Null" } : { type: "Uuid", value: accountId },
+            {
+              type: "Row",
+              value: {
+                values: [
+                  { type: "Text", value: "https://issuer.example" },
+                  { type: "Text", value: "alice" },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      const value = decoded.values[0];
+      expect(value.type === "Row" && value.value.id).toBeUndefined();
+    }
+    const swapped = structuredClone(descriptor);
+    swapped[1]!.valueType.record![1]!.valueType.record!.reverse();
+    expect(() => assertTerminalRootDescriptorCompatible(swapped, columns)).toThrow();
+  });
   it("resolves publication names from typed roles without exposing hidden metadata", () => {
     const text = { tag: 8 } as const;
 

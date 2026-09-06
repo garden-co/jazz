@@ -4626,6 +4626,12 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// Identity captured by a trusted request scope, if one was attached.
+    pub fn request_identity(&self) -> Option<AuthorSubject> {
+        self.request_identity_claims
+            .as_ref()
+            .map(|(author, _)| *author)
+    }
     /// Capture the admitted claims for this trusted-serving request.
     /// Clones retain the same immutable scope across asynchronous owner waits.
     pub fn with_identity_claims(

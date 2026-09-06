@@ -244,6 +244,7 @@ struct WriteResult {
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
+#[derive(Clone)]
 enum NapiDbInnerStorage {
     Memory(Rc<CoreDb<CoreMemoryStorage>>),
     Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
@@ -3927,6 +3928,31 @@ impl NapiDb {
         }
     }
 
+    #[napi(js_name = "waitForPendingWrites")]
+    pub fn wait_for_pending_writes(
+        &self,
+        tier: String,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let tier = core_durability_tier_from_str(&tier)?;
+        let inner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi::Error::from_reason("database closed"))?;
+        native_read_or_pending(Box::pin(async move {
+            match inner {
+                NapiDbInnerStorage::Memory(db) => {
+                    db.wait_for_pending_writes(tier).await.map_err(napi_error)?
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.wait_for_pending_writes(tier).await.map_err(napi_error)?
+                }
+            }
+            Ok(Uint8Array::new(Vec::new()))
+        }))
+    }
+
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let inner = self.inner.borrow_mut().take();
@@ -4238,9 +4264,7 @@ fn core_claims_from_json(
     // or one already verified by a distinct first-party proof ABI. The shared
     // constructor namespaces raw provider values and derives reserved fields.
     Ok(jazz::tools::policy_claims::canonical_policy_binding_claims(
-        &author,
-        claims,
-        CoreValue::String,
+        &author, claims,
     ))
 }
 

@@ -35,7 +35,7 @@ impl Principal {
 }
 
 /// Stable account identity within one application registry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub Uuid);
 
 /// Deterministic founding account, scoped to the application's registry.

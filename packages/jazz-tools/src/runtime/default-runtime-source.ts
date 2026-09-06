@@ -232,6 +232,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
     const context: AppContext = {
       appId: config.appId,
+      accountId: config.accountId,
       schema,
       driver: config.driver,
       serverUrl: config.serverUrl,

@@ -2,6 +2,8 @@ import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
 
 export interface ClientSessionInput {
+  /** @internal Assignment supplied by a validated account handle. */
+  accountId?: string;
   appId: string;
   jwtToken?: string;
   cookieSession?: Session;
@@ -303,15 +305,22 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
       trustedReservedSessionToken(config.trustedReservedSession),
     )
   ) {
+    const internalSession = config.accountId
+      ? markTrustedReservedSession({
+          ...config.trustedReservedSession,
+          account_id: config.accountId,
+        })
+      : config.trustedReservedSession;
     return {
       transport: "bearer",
-      session: withCanonicalUser(config.trustedReservedSession),
-      internalSession: config.trustedReservedSession,
+      session: withCanonicalUser(internalSession),
+      internalSession,
     };
   }
 
   const payload = parseJwtPayload(config.jwtToken ?? "");
   const jwtInternal = payload ? internalSessionFromJwtPayload(payload) : null;
+  if (jwtInternal && config.accountId) jwtInternal.account_id = config.accountId;
   if (jwtInternal) {
     return {
       transport: "bearer",

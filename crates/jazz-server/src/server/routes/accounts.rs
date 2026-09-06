@@ -15,6 +15,85 @@ use uuid::Uuid;
 
 type Failure = (StatusCode, &'static str);
 
+/// Edges preserve end-user bearer proof; they never substitute service authority.
+pub(super) async fn forward_if_edge(
+    State(state): State<Arc<ServerState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if state.accounts.is_some() {
+        return next.run(request).await;
+    }
+    match forward_account_request(&state, request).await {
+        Ok(response) => response,
+        Err(failure) => failure.into_response(),
+    }
+}
+
+async fn forward_account_request(
+    state: &ServerState,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, Failure> {
+    let base = state.upstream_http_url.as_deref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "account_registry_unavailable",
+    ))?;
+    let authorization = request
+        .headers()
+        .get("authorization")
+        .filter(|_| !request.headers().contains_key("x-jazz-session"))
+        .cloned()
+        .ok_or((StatusCode::UNAUTHORIZED, "account_bearer_required"))?;
+    let path = request.uri().path();
+    let operation = [
+        "links/request",
+        "links/accept",
+        "found-local-first",
+        "register",
+        "login",
+        "revoke",
+    ]
+    .into_iter()
+    .find(|operation| path.ends_with(&format!("/{operation}")))
+    .ok_or((StatusCode::NOT_FOUND, "unknown_account_operation"))?;
+    let url = format!(
+        "{}/apps/{}/accounts/{operation}",
+        base.trim_end_matches('/'),
+        state.app_id
+    );
+    let body = axum::body::to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "account_request_too_large"))?;
+    let mut upstream = state
+        .http_client
+        .post(url)
+        .header("authorization", authorization)
+        .header("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "account_registry_unavailable"))?;
+    let status = upstream.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = upstream
+        .chunk()
+        .await
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "account_registry_unavailable"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+            return Err((StatusCode::BAD_GATEWAY, "invalid_account_response"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    axum::response::Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid_account_response"))
+}
+
 async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, Failure> {
     // Explicit bearer auth only: ambient cookies cannot authorize an account
     // mutation, and backend impersonation is not proof of the user's intent.

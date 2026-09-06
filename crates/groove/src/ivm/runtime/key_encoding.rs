@@ -341,6 +341,23 @@ fn record_field_literal_ordering(
 ) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
     let field = record.field(field_idx)?;
     match (&field.value_type, value) {
+        (
+            ValueType::Record(descriptor),
+            LiteralValue::NativeRecord {
+                descriptor: expected,
+                raw,
+            },
+        ) => {
+            let expected: crate::records::RecordDescriptor =
+                postcard::from_bytes(expected).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+            if descriptor.as_ref() != &expected {
+                return Ok(FieldLiteralOrdering::Unsupported);
+            }
+            let Value::Record(actual) = record.get_idx(field_idx)? else {
+                return Ok(FieldLiteralOrdering::Unsupported);
+            };
+            Ok(ordering(actual.raw(), raw.as_slice()))
+        }
         (ValueType::U8, LiteralValue::U8(expected)) => {
             Ok(ordering(&record.get_u8(field_idx)?, expected))
         }

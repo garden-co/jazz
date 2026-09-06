@@ -45,6 +45,7 @@ export interface BrowserWorkerConnection {
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
   flushLocal(): Promise<void>;
+  waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(): Promise<MessagePort>;
   shutdown(): Promise<void>;
   /** Present only after an authenticated Inspector control-port attachment. */
@@ -54,6 +55,7 @@ export interface BrowserWorkerConnection {
 export interface BrowserFollowerConnection {
   ready(): Promise<void>;
   flushLocal(): Promise<void>;
+  waitForPendingWrites(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
   detachForReconnect(): void;

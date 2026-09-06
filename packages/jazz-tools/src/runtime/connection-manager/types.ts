@@ -1,3 +1,4 @@
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
@@ -226,6 +227,14 @@ export abstract class ConnectionManager {
         collectorUrl,
         runtimeThread: "main",
       }) ?? null;
+  }
+
+  async waitForPendingWrites(): Promise<void> {
+    const runtime = this.getCurrentClient()?.getRuntime();
+    if (!runtime) return;
+    if (!(runtime instanceof NativeRuntimeAdapter))
+      throw new Error("Runtime does not support graceful sync shutdown");
+    await runtime.waitForPendingWrites("global");
   }
 
   async shutdown(): Promise<void> {

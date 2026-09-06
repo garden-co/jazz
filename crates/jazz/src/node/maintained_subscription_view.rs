@@ -2665,7 +2665,7 @@ fn decode_typed_version_witness(
         )?),
         tx_time,
         parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
-        created_by: AuthorSubject::from_canonical(record.get_str(plan.created_by_idx)?)
+        created_by: AuthorSubject::from_value(record.get_idx(plan.created_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
         // Current-row provenance is public Unix milliseconds. Witness state
         // needs the corresponding history form only to identify/materialize
@@ -2676,7 +2676,7 @@ fn decode_typed_version_witness(
                     "maintained witness created_at_ms exceeds packed HLC range",
                 )
             })?,
-        updated_by: AuthorSubject::from_canonical(record.get_str(plan.updated_by_idx)?)
+        updated_by: AuthorSubject::from_value(record.get_idx(plan.updated_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
         updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
             .map_err(|_| {

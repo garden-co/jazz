@@ -1016,6 +1016,9 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
         }
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
+            if let Some(name) = crate::query::author_claim_path_key(path) {
+                return Ok(Operand::Claim(name));
+            }
             match path.as_slice() {
                 [name] => Ok(Operand::Claim(name.clone())),
                 [claims, name] if claims == "claims" => {

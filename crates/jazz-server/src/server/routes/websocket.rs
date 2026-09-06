@@ -334,10 +334,40 @@ async fn ws_admission(
         serde_json::to_string(&error).unwrap_or_else(|_| "authentication failed".to_owned())
     })?;
 
-    let Some(session) = session else {
+    let Some(mut session) = session else {
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
+    {
+        let account = peer_identity
+            .account_id()
+            .ok_or("public sessions require an enrolled account identity")?;
+        let principal = jazz::account_registry::Principal {
+            issuer: session.issuer.clone(),
+            subject: session.user_id.clone(),
+        };
+        let registry = state
+            .accounts
+            .as_ref()
+            .ok_or("account admission requires the core authority")?;
+        if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+            registry
+                .execute(jazz::account_registry::AccountCommand::FoundLocalFirst {
+                    principal: principal.clone(),
+                    app: *state.app_id.uuid(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let assignment = registry
+            .login(principal)
+            .await
+            .map_err(|error| error.to_string())?;
+        if assignment.account != account {
+            return Err("account does not match authenticated identity assignment".into());
+        }
+        session.account_id = Some(account);
+    }
     ws_validate_session_identity(&session, peer_identity)?;
     Ok(WebSocketAdmission {
         identity: peer_identity,
@@ -346,6 +376,23 @@ async fn ws_admission(
         credential: WebSocketCredential::Session,
         requested_link,
     })
+}
+
+async fn account_still_admitted(state: &ServerState, identity: Option<AuthorSubject>) -> bool {
+    let Some(identity) = identity else {
+        return true;
+    };
+    let Some(account) = identity.account_id() else {
+        return false;
+    };
+    let Some(registry) = &state.accounts else {
+        return false;
+    };
+    let (issuer, subject) = identity.principal_parts();
+    registry
+        .login(jazz::account_registry::Principal { issuer, subject })
+        .await
+        .is_ok_and(|assignment| assignment.account == account)
 }
 
 fn session_claims(
@@ -814,7 +861,17 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
+    let account_identity =
+        matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
+    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
     let mut activity_rx = core_server_shell.subscribe_activity();
+    // Subscribe before checking: a revocation concurrent with this check must
+    // remain visible even if no application traffic arrives afterward.
+    if !account_still_admitted(&state, account_identity).await {
+        close_ws_for_policy(&mut socket, "account identity revoked").await;
+        core_server_shell.close(session);
+        return;
+    }
     if let Err(error) = drain_ws_outbound(&mut socket, &core_server_shell, session).await {
         send_ws_error(
             &mut socket,
@@ -828,6 +885,15 @@ async fn handle_ws_connection(
 
     'connection: loop {
         tokio::select! {
+            _ = async {
+                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
+                else { std::future::pending::<()>().await; }
+            } => {
+                if !account_still_admitted(&state, account_identity).await {
+                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    break;
+                }
+            }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
                     send_ws_error(
@@ -851,6 +917,10 @@ async fn handle_ws_connection(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
+                    if !account_still_admitted(&state, account_identity).await {
+                        close_ws_for_policy(&mut socket, "account identity revoked").await;
+                        break;
+                    }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
@@ -895,6 +965,10 @@ async fn handle_ws_connection(
                                 break 'connection;
                             }
                         };
+                        if !account_still_admitted(&state, account_identity).await {
+                            close_ws_for_policy(&mut socket, "account identity revoked").await;
+                            break 'connection;
+                        }
                         if !outbound.is_empty()
                             && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await
                         {
@@ -920,6 +994,10 @@ async fn handle_ws_connection(
                 _ => {}
             },
             changed = activity_rx.changed() => {
+                if !account_still_admitted(&state, account_identity).await {
+                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    break;
+                }
                 if changed.is_err() {
                     break;
                 }

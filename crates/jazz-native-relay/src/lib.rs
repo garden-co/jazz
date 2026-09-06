@@ -543,6 +543,10 @@ pub enum ForegroundDbCommandRequest {
     PermissionAdvice {
         action: ForegroundPermissionAdviceAction,
     },
+    /// General shutdown barrier; identity remains bound to the native capability.
+    WaitForPendingWrites {
+        tier: String,
+    },
 }
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
@@ -2769,6 +2773,25 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
+        ForegroundDbCommandRequest::WaitForPendingWrites { tier } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            let tier = match tier.as_str() {
+                "local" => CoreDurabilityTier::Local,
+                "edge" => CoreDurabilityTier::Edge,
+                "global" => CoreDurabilityTier::Global,
+                _ => return JazzNativeRelayStatus::InvalidArgument,
+            };
+            match client.wait_for_pending_writes(tier) {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
         ForegroundDbCommandRequest::WaitForTransaction { tx_id, tier } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
@@ -3420,6 +3443,15 @@ impl NativeRelayClient {
         self.relay.run(move |worker| {
             worker.subscribe_foreground_relation_query(id, query_bytes, options_json)
         })
+    }
+
+    fn wait_for_pending_writes(
+        &self,
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.wait_for_pending_writes(id, tier))
     }
 
     fn wait_for_foreground_transaction(
@@ -6106,6 +6138,28 @@ impl RelayWorker {
             .borrow_mut()
             .insert(public_id, Rc::new(write));
         Ok(public_id)
+    }
+
+    fn wait_for_pending_writes(
+        &mut self,
+        client: u64,
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let foreground = Rc::clone(&self.foreground_client(client)?.db);
+        let persistent = Rc::clone(&self.persistent);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            foreground
+                .wait_for_pending_writes(tier)
+                .await
+                .map_err(RelayError::Db)?;
+            persistent
+                .wait_for_pending_writes(tier)
+                .await
+                .map_err(RelayError::Db)?;
+            // Empty byte completion uses the existing pollable command result.
+            Ok(ForegroundOperationResult::Rows(Vec::new()))
+        });
+        self.start_foreground_operation(client, None, future)
     }
 
     fn wait_for_core_transaction(

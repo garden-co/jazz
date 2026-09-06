@@ -1016,15 +1016,14 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
             )?,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: AuthorSubject::from_canonical(
-                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            made_by: AuthorSubject::from_value(
+                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-            permission_subject: record
-                .get_nullable_string(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
-                .map(AuthorSubject::from_canonical)
-                .transpose()
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+            permission_subject: <Option<AuthorSubject> as groove::records::RecordField>::read(
+                &record,
+                TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX,
+            )?,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,

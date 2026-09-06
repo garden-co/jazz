@@ -5,7 +5,7 @@ import type { AuthMode } from "../runtime/context.js";
 
 export interface AuthStateInfo {
   authMode: AuthMode;
-  user: string | null;
+  user: import("../magic-columns.js").RowAuthor | null;
   claims: Record<string, unknown>;
   error?: AuthFailureReason;
 }

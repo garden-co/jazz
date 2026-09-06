@@ -115,6 +115,7 @@ export type NativeForegroundCommand =
   | { type: 'rollbackTransaction'; transaction: number }
   | { type: 'subscribeWithOptions'; query: number; optionsJson: string }
   | { type: 'waitForTransaction'; txId: Uint8Array; tier: string }
+  | { type: 'waitForPendingWrites'; tier: string }
   | { type: 'disconnectNativeUpstream' }
   | { type: 'reconnectNativeUpstream' }
   | { type: 'nativeConnectionStatus' }
@@ -307,6 +308,8 @@ export function encodeNativeForegroundCommand(
   }
   if (command.type === 'subscribeWithOptions')
     return concatForegroundBytes(Uint8Array.of(20), encodeForegroundU64(command.query), encodeForegroundString(command.optionsJson));
+  if (command.type === 'waitForPendingWrites')
+    return concatForegroundBytes(Uint8Array.of(39), encodeForegroundString(command.tier));
   if (command.type === 'waitForTransaction')
     return concatForegroundBytes(Uint8Array.of(21), encodeForegroundId(command.txId, 'transaction id'), encodeForegroundString(command.tier));
   if (command.type === 'all')

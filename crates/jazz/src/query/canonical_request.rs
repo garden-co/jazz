@@ -599,21 +599,40 @@ fn canonical_query_bytes_for_schema(
 /// sort lexicographically and scalar JSON values retain their exact content.
 /// This prevents array-derived labels from accidentally collapsing distinct
 /// literal values while keeping the public serde envelope out of shape ids.
-fn canonical_relation_query_key(query: &crate::query::RelationQuery) -> Result<Vec<u8>, QueryError> {
-    let value = serde_json::to_value(query)
-        .map_err(|error| QueryError::UnsupportedRelationQuery(format!("encode relation query: {error}")))?;
+fn canonical_relation_query_key(
+    query: &crate::query::RelationQuery,
+) -> Result<Vec<u8>, QueryError> {
+    let value = serde_json::to_value(query).map_err(|error| {
+        QueryError::UnsupportedRelationQuery(format!("encode relation query: {error}"))
+    })?;
     fn write(value: &serde_json::Value, out: &mut Vec<u8>) {
         match value {
             serde_json::Value::Null => out.push(b'n'),
             serde_json::Value::Bool(value) => out.push(if *value { b't' } else { b'f' }),
-            serde_json::Value::Number(value) => { out.push(b'#'); put_str(out, &value.to_string()); }
-            serde_json::Value::String(value) => { out.push(b's'); put_str(out, value); }
-            serde_json::Value::Array(values) => { out.push(b'['); put_len(out, values.len()); for value in values { write(value, out); } }
+            serde_json::Value::Number(value) => {
+                out.push(b'#');
+                put_str(out, &value.to_string());
+            }
+            serde_json::Value::String(value) => {
+                out.push(b's');
+                put_str(out, value);
+            }
+            serde_json::Value::Array(values) => {
+                out.push(b'[');
+                put_len(out, values.len());
+                for value in values {
+                    write(value, out);
+                }
+            }
             serde_json::Value::Object(values) => {
-                out.push(b'{'); put_len(out, values.len());
+                out.push(b'{');
+                put_len(out, values.len());
                 let mut entries = values.iter().collect::<Vec<_>>();
                 entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-                for (key, value) in entries { put_str(out, key); write(value, out); }
+                for (key, value) in entries {
+                    put_str(out, key);
+                    write(value, out);
+                }
             }
         }
     }
@@ -655,9 +674,7 @@ fn value_type(value: &Value) -> ColumnType {
             .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))),
         Value::Nullable(Some(value)) => ColumnType::Nullable(Box::new(value_type(value))),
         Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
-        Value::Record(_) => {
-            panic!("record-valued query bindings are not part of the current Jazz query surface")
-        }
+        Value::Record(record) => ColumnType::Record(Box::new(record.descriptor().clone())),
         Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
         }
@@ -697,9 +714,9 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         (Value::Nullable(Some(value)), ColumnType::Nullable(inner)) => {
             value_matches_type(value, inner)
         }
-        // Jazz has no public record column type in this step, so records are
-        // never accepted as query-bound values.
-        (Value::Record(_), _) => false,
+        (Value::Record(record), ColumnType::Record(descriptor)) => {
+            record.descriptor() == descriptor.as_ref()
+        }
         (Value::Enum(_), _) => false,
         // Indirect descriptors are engine-owned and cannot be supplied as a
         // public query binding; callers bind the ordinary logical primitive.
@@ -781,8 +798,13 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(1);
             put_value(bytes, value);
         }
-        Value::Record(_) => {
-            panic!("record-valued query bindings have no current canonical encoding")
+        Value::Record(record) => {
+            bytes.push(16);
+            put_column_type(
+                bytes,
+                &ColumnType::Record(Box::new(record.descriptor().clone())),
+            );
+            put_bytes(bytes, record.raw());
         }
         Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
@@ -839,6 +861,24 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                         put_str(bytes, name);
                     }
                     None => bytes.push(0),
+                }
+                // Physical slot identity is part of a record literal's type.
+                // Equal display names must not alias distinct typed columns.
+                match &field.identity {
+                    None => bytes.push(0),
+                    Some(groove::records::FieldIdentity::Name(name)) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    Some(groove::records::FieldIdentity::Slot(slot)) => {
+                        bytes.push(2);
+                        bytes.extend_from_slice(&slot.to_be_bytes());
+                    }
+                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
+                        bytes.push(3);
+                        put_str(bytes, name);
+                        bytes.extend_from_slice(&slot.to_be_bytes());
+                    }
                 }
                 put_column_type(bytes, &field.value_type);
             }

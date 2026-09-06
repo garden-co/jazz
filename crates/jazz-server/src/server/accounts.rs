@@ -23,6 +23,7 @@ enum Request {
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
     closed: std::sync::atomic::AtomicBool,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl AccountRegistryOwner {
@@ -30,6 +31,8 @@ impl AccountRegistryOwner {
         durable: Option<(Arc<dyn StorageFactory>, PathBuf)>,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
+        let (changes, _) = tokio::sync::watch::channel(0u64);
+        let notify = changes.clone();
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
@@ -74,7 +77,11 @@ impl AccountRegistryOwner {
                 while let Ok(request) = receiver.recv() {
                     match request {
                         Request::Execute(command, response) => {
-                            let _ = response.send(jazz::db::block_on(registry.execute(&command)));
+                            let result = jazz::db::block_on(registry.execute(&command));
+                            if result.is_ok() {
+                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            }
+                            let _ = response.send(result);
                         }
                         Request::Login(principal, response) => {
                             let _ = response.send(jazz::db::block_on(registry.login(&principal)));
@@ -95,8 +102,13 @@ impl AccountRegistryOwner {
             .map_err(|_| "account registry owner exited during startup".to_owned())??;
         Ok(Self {
             sender,
+            changes,
             closed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {

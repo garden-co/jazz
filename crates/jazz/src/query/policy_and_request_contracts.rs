@@ -649,9 +649,7 @@ impl PolicyExpressionDecodeBudget {
     where
         E: serde::de::Error,
     {
-        use crate::protocol_limits::{
-            MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
-        };
+        use crate::protocol_limits::{MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError};
 
         let remaining = MAX_POLICY_EXPRESSION_NODES - self.nodes;
         if children > remaining {
@@ -743,31 +741,14 @@ impl<'de> serde::de::Visitor<'de> for PredicateVisitor<'_> {
                 })
                 .map(Box::new)
                 .map(Predicate::Not),
-            PredicateVariant::Eq => {
-                decode_binary_predicate(access, Predicate::Eq)
-            }
-            PredicateVariant::Ne => {
-                decode_binary_predicate(access, Predicate::Ne)
-            }
-            PredicateVariant::In => access.tuple_variant(
-                2,
-                InPredicateVisitor,
-            ),
-            PredicateVariant::Gt => {
-                decode_binary_predicate(access, Predicate::Gt)
-            }
-            PredicateVariant::Gte => {
-                decode_binary_predicate(access, Predicate::Gte)
-            }
-            PredicateVariant::Lt => {
-                decode_binary_predicate(access, Predicate::Lt)
-            }
-            PredicateVariant::Lte => {
-                decode_binary_predicate(access, Predicate::Lte)
-            }
-            PredicateVariant::Contains => {
-                decode_binary_predicate(access, Predicate::Contains)
-            }
+            PredicateVariant::Eq => decode_binary_predicate(access, Predicate::Eq),
+            PredicateVariant::Ne => decode_binary_predicate(access, Predicate::Ne),
+            PredicateVariant::In => access.tuple_variant(2, InPredicateVisitor),
+            PredicateVariant::Gt => decode_binary_predicate(access, Predicate::Gt),
+            PredicateVariant::Gte => decode_binary_predicate(access, Predicate::Gte),
+            PredicateVariant::Lt => decode_binary_predicate(access, Predicate::Lt),
+            PredicateVariant::Lte => decode_binary_predicate(access, Predicate::Lte),
+            PredicateVariant::Contains => decode_binary_predicate(access, Predicate::Contains),
             PredicateVariant::EnumMatch => access.struct_variant(
                 &["column", "case", "payload"],
                 EnumMatchPredicateVisitor {
@@ -775,9 +756,7 @@ impl<'de> serde::de::Visitor<'de> for PredicateVisitor<'_> {
                     depth: child_depth,
                 },
             ),
-            PredicateVariant::IsNull => access
-                .newtype_variant()
-                .map(Predicate::IsNull),
+            PredicateVariant::IsNull => access.newtype_variant().map(Predicate::IsNull),
         }
     }
 }
@@ -840,12 +819,10 @@ impl<'de> serde::de::Visitor<'de> for PredicateVecVisitor<'_> {
             None => 0,
         };
         let mut predicates = Vec::with_capacity(capacity);
-        while let Some(predicate) =
-            sequence.next_element_seed(PredicateSeed {
-                budget: self.budget,
-                depth: self.depth,
-            })?
-        {
+        while let Some(predicate) = sequence.next_element_seed(PredicateSeed {
+            budget: self.budget,
+            depth: self.depth,
+        })? {
             predicates.push(predicate);
         }
         Ok(predicates)
@@ -859,11 +836,7 @@ fn decode_binary_predicate<'de, A>(
 where
     A: serde::de::VariantAccess<'de>,
 {
-    serde::de::VariantAccess::tuple_variant(
-        access,
-        2,
-        BinaryPredicateVisitor { constructor },
-    )
+    serde::de::VariantAccess::tuple_variant(access, 2, BinaryPredicateVisitor { constructor })
 }
 
 struct BinaryPredicateVisitor {
@@ -984,9 +957,7 @@ impl<'de> serde::de::Visitor<'de> for EnumMatchPredicateVisitor<'_> {
         Ok(Predicate::EnumMatch {
             column: column.ok_or_else(|| serde::de::Error::missing_field("column"))?,
             case: case.ok_or_else(|| serde::de::Error::missing_field("case"))?,
-            payload: Box::new(
-                payload.ok_or_else(|| serde::de::Error::missing_field("payload"))?,
-            ),
+            payload: Box::new(payload.ok_or_else(|| serde::de::Error::missing_field("payload"))?),
         })
     }
 }
@@ -1027,9 +998,30 @@ pub(crate) fn provider_claim_operand_key(name: &str) -> String {
 }
 
 pub(crate) fn operand_claim_path(name: &str) -> Vec<String> {
+    if matches!(
+        name,
+        "user.account" | "user.identity" | "user.identity.issuer" | "user.identity.subject"
+    ) {
+        return name.split('.').map(str::to_owned).collect();
+    }
     name.strip_prefix(PROVIDER_CLAIM_PREFIX)
         .map(|name| vec!["claims".to_owned(), name.to_owned()])
         .unwrap_or_else(|| vec![name.to_owned()])
+}
+
+/// Recognize the finite structured author vocabulary without interpreting
+/// provider claim names as paths.
+pub fn author_claim_path_key(path: &[String]) -> Option<String> {
+    let name = path.join(".");
+    let valid = matches!(
+        name.as_str(),
+        "user"
+            | "user.account"
+            | "user.identity"
+            | "user.identity.issuer"
+            | "user.identity.subject"
+    );
+    (valid && path.iter().all(|part| !part.contains('.'))).then_some(name)
 }
 
 pub(crate) fn operand_claim_storage_key(name: &str) -> String {

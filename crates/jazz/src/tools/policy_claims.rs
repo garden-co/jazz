@@ -14,25 +14,46 @@ use crate::query::provider_claim_key;
 /// `session.authMode` values are overwritten here, after provider claims, so a
 /// transport caller cannot create a competing identity revision by spelling a
 /// reserved field in its claim object.
-pub fn canonical_policy_binding_claims<T>(
+pub fn canonical_policy_binding_claims(
     author: &AuthorSubject,
-    provider_claims: BTreeMap<String, T>,
-    string: impl Fn(String) -> T,
-) -> BTreeMap<String, T> {
-    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
-        .expect("author subjects always have canonical issuer/subject JSON");
+    provider_claims: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let (issuer, subject) = author.principal_parts();
     let mut admitted = provider_claims
         .into_iter()
         .map(|(name, value)| (provider_claim_key(&name), value))
         .collect::<BTreeMap<_, _>>();
-    admitted.insert(provider_claim_key("iss"), string(issuer.clone()));
-    admitted.insert(provider_claim_key("sub"), string(subject));
-    admitted.insert("user".to_owned(), string(author.canonical().to_owned()));
+    admitted.insert(provider_claim_key("iss"), Value::String(issuer.clone()));
+    admitted.insert(provider_claim_key("sub"), Value::String(subject));
+    admitted.extend(author_policy_claims(*author));
     admitted.insert(
         "authMode".to_owned(),
-        string(auth_mode_for_author_issuer(&issuer).to_owned()),
+        Value::String(auth_mode_for_author_issuer(&issuer).to_owned()),
     );
     admitted
+}
+
+/// Reserved structured author bindings, derived only from admitted identity.
+/// Flat keys address explicit public paths; provider keys have another namespace.
+pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    let value = author.to_value();
+    let Value::Record(record) = &value else {
+        unreachable!()
+    };
+    let account = record.get("account").expect("author account field");
+    let identity = record.get("identity").expect("author identity field");
+    let Value::Record(principal) = &identity else {
+        unreachable!()
+    };
+    let issuer = principal.get("issuer").expect("author issuer field");
+    let subject = principal.get("subject").expect("author subject field");
+    BTreeMap::from([
+        ("user".into(), value),
+        ("user.account".into(), account),
+        ("user.identity".into(), identity),
+        ("user.identity.issuer".into(), issuer),
+        ("user.identity.subject".into(), subject),
+    ])
 }
 
 fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
@@ -145,36 +166,44 @@ mod tests {
         let claims = canonical_policy_binding_claims(
             &author,
             BTreeMap::from([
-                ("user".to_owned(), "provider-user".to_owned()),
-                ("iss".to_owned(), "spoofed-issuer".to_owned()),
-                ("sub".to_owned(), "spoofed-subject".to_owned()),
-                ("authMode".to_owned(), "spoofed-mode".to_owned()),
-                ("role".to_owned(), "writer".to_owned()),
+                ("user".to_owned(), Value::String("provider-user".to_owned())),
+                ("iss".to_owned(), Value::String("spoofed-issuer".to_owned())),
+                (
+                    "sub".to_owned(),
+                    Value::String("spoofed-subject".to_owned()),
+                ),
+                (
+                    "authMode".to_owned(),
+                    Value::String("spoofed-mode".to_owned()),
+                ),
+                ("role".to_owned(), Value::String("writer".to_owned())),
             ]),
-            |value| value,
         );
 
-        assert_eq!(claims.get("user"), Some(&author.canonical().to_owned()));
-        assert_eq!(claims.get("authMode"), Some(&"external".to_owned()));
+        assert_eq!(claims.get("user"), Some(&author.to_value()));
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&Value::String("external".to_owned()))
+        );
         assert_eq!(
             claims.get(&provider_claim_key("iss")),
-            Some(&"https://issuer.example".to_owned())
+            Some(&Value::String("https://issuer.example".to_owned()))
         );
         assert_eq!(
             claims.get(&provider_claim_key("sub")),
-            Some(&"alice".to_owned())
+            Some(&Value::String("alice".to_owned()))
         );
         assert_eq!(
             claims.get(&provider_claim_key("user")),
-            Some(&"provider-user".to_owned())
+            Some(&Value::String("provider-user".to_owned()))
         );
         assert_eq!(
             claims.get(&provider_claim_key("authMode")),
-            Some(&"spoofed-mode".to_owned())
+            Some(&Value::String("spoofed-mode".to_owned()))
         );
         assert_eq!(
             claims.get(&provider_claim_key("role")),
-            Some(&"writer".to_owned())
+            Some(&Value::String("writer".to_owned()))
         );
     }
 
@@ -185,12 +214,11 @@ mod tests {
             (AuthorSubject::ANONYMOUS_ISSUER, "anonymous"),
         ] {
             let author = AuthorSubject::reserved(issuer, "alice").unwrap();
-            let claims = canonical_policy_binding_claims(
-                &author,
-                BTreeMap::<String, String>::new(),
-                |value| value,
+            let claims = canonical_policy_binding_claims(&author, BTreeMap::new());
+            assert_eq!(
+                claims.get("authMode"),
+                Some(&Value::String(expected.to_owned()))
             );
-            assert_eq!(claims.get("authMode"), Some(&expected.to_owned()));
         }
     }
 

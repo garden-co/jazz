@@ -58,6 +58,9 @@ pub fn unverified_jwt_scope_subject(jwt: &str) -> Option<(String, String)> {
 /// expressions to check row access permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Registry-admitted account. Provider claims never populate this field.
+    #[serde(default, alias = "accountId", skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<crate::account_registry::AccountId>,
     /// Validated JWT issuer (`iss`).
     pub issuer: String,
     /// Required user identifier.
@@ -74,7 +77,7 @@ impl Session {
     /// Return the canonical author subject admitted by this session's auth mode.
     /// Reserved issuers are valid only for their matching first-party modes.
     pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
-        match self.auth_mode {
+        let principal = match self.auth_mode {
             AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
             AuthMode::LocalFirst if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
                 AuthorSubject::reserved(&self.issuer, self.get_user_id())
@@ -85,7 +88,10 @@ impl Session {
             _ => Err(crate::ids::AuthorSubjectError::ReservedIssuer(
                 self.issuer.clone(),
             )),
-        }
+        }?;
+        Ok(self
+            .account_id
+            .map_or(principal, |account| principal.with_account(account)))
     }
 
     fn is_auth_mode_path(path: &[String]) -> bool {
@@ -95,6 +101,7 @@ impl Session {
     /// Create a session from a validated issuer and subject.
     pub fn new(issuer: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
+            account_id: None,
             issuer: issuer.into(),
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),

@@ -54,6 +54,10 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
     return this.connection.deleteStorage();
   }
 
+  waitForPendingWrites(): Promise<void> {
+    return this.connection.waitForPendingWrites();
+  }
+
   flushLocal(): Promise<void> {
     return this.connection.flushLocal();
   }

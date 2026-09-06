@@ -148,3 +148,16 @@ export * from "./permissions/index.js";
 // publishes the handle for the same-origin overlay iframe.
 export * from "./dev/inspector-overlay/inspector-host-types.js";
 export { installInspectorHost, type InspectorHostDb } from "./dev/inspector-overlay/host-bridge.js";
+
+export {
+  createAccountManager,
+  type AccountManagerConfig,
+} from "./accounts/create-account-manager.js";
+export type {
+  AccountHandle,
+  AccountIdentity,
+  AccountSnapshot,
+  AccountManager,
+} from "./accounts/state.js";
+export { AccountAuthError, type JWTAuth } from "./accounts/enrollment.js";
+export type { AccountStore } from "./accounts/persistence.js";

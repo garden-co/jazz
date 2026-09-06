@@ -182,16 +182,22 @@ groove::impl_record_field_enum!(RejectionReasonTag {
 });
 
 impl records::RecordField for AuthorSubject {
+    fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
+        AuthorSubject::from_value(<Value as records::RecordField>::read_raw(
+            bytes, value_type,
+        )?)
+        .map_err(|_| records::Error::NonCanonicalRecord)
+    }
     fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        AuthorSubject::from_canonical(record.get_str(idx)?)
+        AuthorSubject::from_value(record.get_idx(idx)?)
             .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn to_value(&self) -> Value {
-        Value::String(self.canonical().to_owned())
+        (*self).to_value()
     }
 
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::String;
+    const COLUMN_KIND: records::FieldKind = records::FieldKind::Record;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2208,10 +2214,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_CREATED_BY_IDX
         };
-        AuthorSubject::from_canonical(
+        AuthorSubject::from_value(
             self.record
                 .borrowed()
-                .get_str(idx)
+                .get_idx(idx)
                 .expect("valid created_by"),
         )
         .expect("canonical created_by")
@@ -2237,10 +2243,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_UPDATED_BY_IDX
         };
-        AuthorSubject::from_canonical(
+        AuthorSubject::from_value(
             self.record
                 .borrowed()
-                .get_str(idx)
+                .get_idx(idx)
                 .expect("valid updated_by"),
         )
         .expect("canonical updated_by")
@@ -3648,7 +3654,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
         Value::U32(tx.n_total_writes),
-        Value::String(tx.made_by.canonical().to_owned()),
+        tx.made_by.to_value(),
         Value::Nullable(None),
         Value::Nullable(None),
         Value::Nullable(None),
@@ -3659,10 +3665,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
                 .map(|value| Box::new(Value::String(value))),
         ),
         contribution_merge,
-        Value::Nullable(
-            tx.permission_subject
-                .map(|id| Box::new(Value::String(id.canonical().to_owned()))),
-        ),
+        Value::Nullable(tx.permission_subject.map(|id| Box::new(id.to_value()))),
         Value::Nullable(
             view_scoped_cardinality
                 .then(|| Box::new(Value::String("view-scoped-cardinality".to_owned()))),
@@ -3692,7 +3695,7 @@ pub(super) fn rejected_transaction_values(
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
-        Value::String(tx.made_by.canonical().to_owned()),
+        tx.made_by.to_value(),
         Value::String(rejection_reason_tag_for_reason(&reason)),
         Value::Nullable(
             rejection_reason_cascade_root_for_reason(&reason)
@@ -3993,9 +3996,9 @@ pub(super) fn history_values_from_parts(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::String(version.created_by.canonical().to_owned()),
+        version.created_by.to_value(),
         Value::U64(version.created_at.0),
-        Value::String(version.updated_by.canonical().to_owned()),
+        version.updated_by.to_value(),
         Value::U64(version.updated_at.0),
     ];
     for column in &table.columns {
@@ -4028,7 +4031,7 @@ fn history_values_from_wire(
             .map(|parent| tx_id_value(*parent))
             .collect(),
     ));
-    values.push(Value::String(version.created_by().canonical().to_owned()));
+    values.push(version.created_by().to_value());
     // Wire provenance carries public Unix milliseconds. Reconstruct the
     // internal HLC with logical counter zero at this ingestion boundary.
     values.push(Value::U64(
@@ -4036,7 +4039,7 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(Value::String(version.updated_by().canonical().to_owned()));
+    values.push(version.updated_by().to_value());
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
@@ -4070,9 +4073,9 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::String(version.created_by.canonical().to_owned()),
+        version.created_by.to_value(),
         Value::U64(version.created_at.0),
-        Value::String(version.updated_by.canonical().to_owned()),
+        version.updated_by.to_value(),
         Value::U64(version.updated_at.0),
         deletion_event_value(deletion),
     ])
@@ -4098,7 +4101,7 @@ fn register_values_from_wire(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::String(version.created_by().canonical().to_owned()),
+        version.created_by().to_value(),
         Value::U64(
             TxTime::from_physical_ms(version.created_at_ms())
                 .map_err(|_| {
@@ -4106,7 +4109,7 @@ fn register_values_from_wire(
                 })?
                 .0,
         ),
-        Value::String(version.updated_by().canonical().to_owned()),
+        version.updated_by().to_value(),
         Value::U64(
             TxTime::from_physical_ms(version.updated_at_ms())
                 .map_err(|_| {
@@ -4158,9 +4161,9 @@ fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::String(version.created_by().canonical().to_owned()),
+        version.created_by().to_value(),
         Value::U64(version.created_at().0),
-        Value::String(version.updated_by().canonical().to_owned()),
+        version.updated_by().to_value(),
         Value::U64(version.updated_at().0),
     ]
 }
@@ -4486,9 +4489,9 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::String(created.created_by().canonical().to_owned()));
+    values.push(created.created_by().to_value());
     values.push(Value::U64(created.created_at().physical_ms()));
-    values.push(Value::String(updated.updated_by().canonical().to_owned()));
+    values.push(updated.updated_by().to_value());
     values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
@@ -4514,9 +4517,9 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::String(provenance.created_by.canonical().to_owned()));
+    values.push(provenance.created_by.to_value());
     values.push(Value::U64(provenance.created_at));
-    values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+    values.push(provenance.updated_by.to_value());
     values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
@@ -4548,13 +4551,9 @@ fn current_row_prefix_and_cells_from_version(
 }
 
 fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
-    values.push(Value::String(
-        provenance.created_by().canonical().to_owned(),
-    ));
+    values.push(provenance.created_by().to_value());
     values.push(Value::U64(provenance.created_at().physical_ms()));
-    values.push(Value::String(
-        provenance.updated_by().canonical().to_owned(),
-    ));
+    values.push(provenance.updated_by().to_value());
     values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
@@ -4624,9 +4623,9 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         }))
         .chain(
             [
-                ("$createdBy".to_owned(), records::ValueType::String),
+                ("$createdBy".to_owned(), AuthorSubject::value_type()),
                 ("$createdAt".to_owned(), records::ValueType::U64),
-                ("$updatedBy".to_owned(), records::ValueType::String),
+                ("$updatedBy".to_owned(), AuthorSubject::value_type()),
                 ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),

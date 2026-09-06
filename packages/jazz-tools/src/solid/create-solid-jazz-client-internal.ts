@@ -1,6 +1,6 @@
 import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
 import { serializeClientConfig } from "../runtime/client-config-key.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachSubscriptionStore,

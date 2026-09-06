@@ -173,6 +173,11 @@ pub(super) fn prepared_claim_value(
             ));
         }
     };
+    if let Some(name) = crate::query::author_claim_path_key(&path.0) {
+        return Ok(
+            crate::tools::policy_claims::author_policy_claims(*permission_subject).remove(&name),
+        );
+    }
     let name = match path.0.as_slice() {
         [name] => name.clone(),
         [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),

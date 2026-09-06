@@ -184,6 +184,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
@@ -2476,6 +2477,27 @@ export class NativeRuntimeAdapter implements Runtime {
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);
+  }
+
+  /** General graceful-shutdown barrier, including recovered durable writes. */
+  async waitForPendingWrites(tier = "global"): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier);
+    if (!this.db.waitForPendingWrites)
+      throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
+    await this.flushLocalSettlements();
+    this.throwServerTransportErrorForTier(tier);
+    void this.pumpServerTransport();
+    const failure = this.waitForServerTransportError(tier);
+    try {
+      const wait = this.awaitNativeRead(
+        Promise.resolve(this.db.waitForPendingWrites(tier)).then(
+          (result) => result ?? new Uint8Array(),
+        ),
+      );
+      await (failure ? Promise.race([wait, failure.promise]) : wait);
+    } finally {
+      failure?.cancel();
+    }
   }
 
   async flushLocalSettlements(): Promise<void> {
@@ -4893,7 +4915,11 @@ function outputColumnsForTable(
       if (declared) return wildcard && rootTerminal ? { ...declared, sparse: true } : declared;
       const magicType = magicColumnType(columnName);
       return magicType
-        ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
+        ? ({
+            name: columnName,
+            column_type: magicType,
+            nullable: columnName === "$createdBy.account" || columnName === "$updatedBy.account",
+          } satisfies ColumnDescriptor)
         : undefined;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);

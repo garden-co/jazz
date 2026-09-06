@@ -846,6 +846,24 @@ where
         self.node.take_queued_mutation_failure(tx_id)
     }
 
+    /// Wait for this author's pending writes, including recovered durable writes.
+    ///
+    /// This snapshots after settling already-queued local mutations. Callers
+    /// performing graceful shutdown must stop admitting new mutations first.
+    /// Transport progress remains owned by the normal runtime scheduler.
+    pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        self.node.settle_local_publications().await?;
+        let pending = {
+            let mut node = self.node.node.lock().await;
+            node.pending_transaction_ids_for_author(self.identity.author)
+                .await?
+        };
+        for tx_id in pending {
+            self.wait_for_transaction(tx_id, tier).await?;
+        }
+        Ok(())
+    }
+
     /// Wait until `tx_id` reaches `tier` or is rejected.
     ///
     /// An explicit wait consumes a rejection, preventing the same failure from

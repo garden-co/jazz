@@ -315,3 +315,40 @@ describe("client-registry", () => {
     expect(ok).toBeTruthy();
   });
 });
+
+describe("graceful synchronization before shutdown", () => {
+  it("preserves the same owner when synchronization fails and lets it retry", async () => {
+    const shutdown = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(undefined);
+    const client = { shutdown };
+    const create = vi.fn(async () => client);
+    const holder = {};
+    await acquireClient("graceful", create, holder);
+    await expect(releaseClient("graceful", holder, { waitForSync: true })).rejects.toThrow(
+      "offline",
+    );
+    expect(await acquireClient("graceful", create, holder)).toBe(client);
+    expect(create).toHaveBeenCalledOnce();
+    await releaseClient("graceful", holder, { waitForSync: true });
+    expect(shutdown).toHaveBeenLastCalledWith({ waitForSync: true });
+    const replacement = await acquireClient("graceful", async () => fakeClient(), {});
+    expect(replacement).not.toBe(client);
+  });
+
+  it("requires other holders to release before a graceful close", async () => {
+    const client = fakeClient();
+    const first = {};
+    const second = {};
+    await acquireClient("shared-graceful", async () => client, first);
+    await acquireClient("shared-graceful", async () => client, second);
+    await expect(releaseClient("shared-graceful", first, { waitForSync: true })).rejects.toThrow(
+      "other holders",
+    );
+    expect(client.shutdown).not.toHaveBeenCalled();
+    await releaseClient("shared-graceful", second);
+    await releaseClient("shared-graceful", first, { waitForSync: true });
+    expect(client.shutdown).toHaveBeenCalledOnce();
+  });
+});

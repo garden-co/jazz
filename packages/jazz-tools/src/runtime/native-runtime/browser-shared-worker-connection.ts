@@ -589,6 +589,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     this.worker = null;
   }
 
+  async waitForPendingWrites(): Promise<void> {
+    await this.ready();
+    await this.connection?.waitForPendingWrites();
+  }
+
   async flushLocal(): Promise<void> {
     await this.ready();
     await this.connection?.flushLocal();

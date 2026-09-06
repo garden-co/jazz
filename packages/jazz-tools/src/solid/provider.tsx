@@ -6,7 +6,8 @@ import {
   type SolidJazzClient,
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
-import type { Db, DbConfig } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 type JazzClientContextValue = SolidJazzClient;

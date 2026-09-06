@@ -1,4 +1,5 @@
 import { sha1 } from "@noble/hashes/legacy.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { parseJwtPayload } from "../runtime/client-session.js";
 import type { LocalFirstAccountFactory } from "./enrollment.js";
@@ -35,23 +36,29 @@ export function localFirstAccountId(appId: string, subject: string): string {
 export function localFirstFactory(options: {
   appId: string;
   mintToken(secret: string, audience: string): string;
-  retainSecret(secret: string): void;
+  retainSecret(secret: string): void | Promise<void>;
 }): LocalFirstAccountFactory {
-  return {
-    create() {
-      const secret = generateAuthSecret();
-      const getToken = async () => options.mintToken(secret, options.appId);
-      const token = options.mintToken(secret, options.appId);
-      const payload = parseJwtPayload(token);
-      if (payload?.iss !== "urn:jazz:local-first" || typeof payload.sub !== "string") {
-        throw new Error("Native runtime returned an invalid local-first identity");
-      }
-      options.retainSecret(secret);
-      return {
-        accountId: localFirstAccountId(options.appId, payload.sub),
-        identity: { issuer: payload.iss, subject: payload.sub },
-        auth: { getToken },
-      };
-    },
+  const restore = (secret: string) => {
+    parseAuthSecret(secret);
+    const token = options.mintToken(secret, options.appId);
+    const payload = parseJwtPayload(token);
+    if (payload?.iss !== "urn:jazz:local-first" || typeof payload.sub !== "string") {
+      throw new Error("Native runtime returned an invalid local-first identity");
+    }
+    const retained = Promise.resolve(options.retainSecret(secret));
+    // A synchronous handle may exist before asynchronous platform persistence
+    // finishes, but no context can use its key before durable retention.
+    // Observe rejection immediately even if the app never opens a context.
+    void retained.catch(() => {});
+    const getToken = async () => {
+      await retained;
+      return options.mintToken(secret, options.appId);
+    };
+    return {
+      accountId: localFirstAccountId(options.appId, payload.sub),
+      identity: { issuer: payload.iss, subject: payload.sub },
+      auth: { getToken },
+    };
   };
+  return { create: () => restore(generateAuthSecret()), restore };
 }

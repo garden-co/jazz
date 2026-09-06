@@ -1,3 +1,4 @@
+import type { ShutdownOptions } from "./db.js";
 /**
  * Framework-agnostic, refcounted client registry. Callers resolving to the same
  * `key` share one client, so a page with several providers for one identity runs
@@ -7,7 +8,7 @@
  */
 
 export interface RegisteredClient {
-  shutdown(): Promise<void>;
+  shutdown(options?: ShutdownOptions): Promise<void>;
 }
 
 interface Entry {
@@ -121,9 +122,40 @@ export function acquireClient<T extends RegisteredClient>(
  * tick (so a same-tick re-acquire keeps it alive); the promise resolves once
  * teardown has settled, or immediately if other holders remain.
  */
-export function releaseClient(key: string, holder: object): Promise<void> {
+export function releaseClient(
+  key: string,
+  holder: object,
+  options?: ShutdownOptions,
+): Promise<void> {
   const entry = registry.get(key);
   if (!entry) return Promise.resolve();
+
+  if (options?.waitForSync) {
+    if (entry.holders.size > 1) {
+      return Promise.reject(
+        new Error("Release other holders before gracefully shutting down a shared Jazz client"),
+      );
+    }
+    if (entry.closing) return entry.closing;
+    if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
+    entry.releaseTimer = null;
+    entry.holders.delete(holder);
+    const closing = entry.promise.then((client) => client.shutdown(options));
+    entry.closing = closing;
+    return closing.then(
+      () => {
+        if (registry.get(key) === entry) registry.delete(key);
+        entry.pendingRelease?.resolve();
+        entry.pendingRelease = null;
+      },
+      (error) => {
+        // A failed sync barrier never began teardown; preserve the usable owner.
+        entry.closing = null;
+        entry.holders.add(holder);
+        throw error;
+      },
+    );
+  }
 
   entry.holders.delete(holder);
   if (entry.holders.size > 0) return Promise.resolve();
