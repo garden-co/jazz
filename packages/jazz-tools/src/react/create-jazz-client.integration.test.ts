@@ -26,7 +26,7 @@ describe("react/create-jazz-client integration", () => {
         title: "buy milk",
         done: false,
       });
-      const rows = await client.db.all(allTodosQuery);
+      const rows = await client.db.all(allTodosQuery, { tier: "local" });
 
       expect(
         rows.some(
@@ -53,7 +53,7 @@ describe("react/create-jazz-client integration", () => {
         { title: "with external id", done: false },
         { id: externalId },
       );
-      const rows = await client.db.all(allTodosQuery);
+      const rows = await client.db.all(allTodosQuery, { tier: "local" });
 
       expect(inserted.id).toBe(externalId);
       expect(
@@ -75,7 +75,7 @@ describe("react/create-jazz-client integration", () => {
       client = await createJazzClient(await localAccountConfig(makeAppId("shutdown")));
       await client.db.disconnect();
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
-      await client.db.all(allTodosQuery);
+      await client.db.all(allTodosQuery, { tier: "local" });
 
       await expect(client.shutdown()).resolves.toBeUndefined();
       client = null;
