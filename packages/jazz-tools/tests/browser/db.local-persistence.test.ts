@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { schema as s, generateAuthSecret } from "../../src/index.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
 
 const app = s.defineApp({
   tasks: s.table({ title: s.string(), done: s.boolean() }),

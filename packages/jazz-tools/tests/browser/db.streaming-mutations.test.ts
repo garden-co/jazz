@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import type { Db } from "../../src/runtime/db.js";
-import { uniqueDbName } from "./support.js";
 
 const app = s.defineApp({
   todos: s.table({

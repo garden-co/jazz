@@ -17,7 +17,6 @@ import { createAccountManager, schema as s, type DbConfig } from "../../src/inde
 import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
 import { type Db } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
@@ -34,7 +33,13 @@ import {
   getJazzServerInfo,
   unblockJazzServerNetwork,
 } from "./testing-server.js";
-import { sleep, TestCleanup, uniqueDbName, withTimeout } from "./support.js";
+import {
+  createBrowserTestDb as createDb,
+  sleep,
+  TestCleanup,
+  uniqueDbName,
+  withTimeout,
+} from "./support.js";
 
 const app = s.defineApp({
   projects: s.table({
