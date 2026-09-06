@@ -50,6 +50,7 @@ describe("Better Auth storage boundary", () => {
       {
         issuer: "https://auth.example.test",
         user_id: "ordinary-client",
+        account_id: "00000000-0000-4000-8000-000000000001",
         claims: {},
         authMode: "external",
       },

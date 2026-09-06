@@ -18,13 +18,13 @@ const prose = (text) => text.replace(/[`*]/g, "").replace(/\s+/g, " ").trim();
 function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   assert.match(
     packageReadme,
-    /narrow alpha rather than general React Native support/,
-    "the package must not claim broad RN support",
+    /supported React Native alpha/,
+    "the package must describe the supported alpha client",
   );
   assert.match(
     packageReadme,
-    /matching native development or release build.*capability issued by trusted platform admission/i,
-    "persistent foreground use must retain both native-build and trusted-admission requirements",
+    /AccountHandle.*createJazzClient.*matching native development or release build/i,
+    "persistent clients must retain account-handle admission and native-build requirements",
   );
   assert.match(
     packageReadme,
@@ -33,8 +33,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     installGuide,
-    /narrow, capability-gated foreground alpha.*matching native development\/release build.*trusted platform admission/i,
-    "the public install guide must describe the same constrained boundary",
+    /supported as an alpha.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
+    "the public install guide must retain the alpha native-build boundary",
   );
   assert.match(
     spec,
