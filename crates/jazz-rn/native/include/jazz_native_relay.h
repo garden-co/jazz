@@ -34,6 +34,16 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
 } jazz_native_relay_status;
 
+/* Stateless account crypto. No database or network is opened. Secret output
+ * is exactly 32 OS-random bytes; mint output is the shared local-first JWT in
+ * UTF-8. Release successful outputs with jazz_native_relay_bytes_free. */
+jazz_native_relay_status jazz_native_relay_account_secret(jazz_native_relay_bytes *out);
+jazz_native_relay_status jazz_native_relay_mint_local_first_token(
+    const uint8_t *seed, size_t seed_len,
+    const uint8_t *audience, size_t audience_len,
+    uint64_t ttl_seconds, uint64_t now_seconds,
+    jazz_native_relay_bytes *out);
+
 typedef struct jazz_native_relay_host jazz_native_relay_host;
 typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
 typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);

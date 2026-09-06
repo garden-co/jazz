@@ -37,6 +37,7 @@ export function localFirstFactory(options: {
   appId: string;
   mintToken(secret: string, audience: string): string;
   retainSecret(secret: string): void | Promise<void>;
+  generateSecret?(): string;
 }): LocalFirstAccountFactory {
   const restore = (secret: string) => {
     parseAuthSecret(secret);
@@ -60,5 +61,5 @@ export function localFirstFactory(options: {
       auth: { getToken },
     };
   };
-  return { create: () => restore(generateAuthSecret()), restore };
+  return { create: () => restore((options.generateSecret ?? generateAuthSecret)()), restore };
 }

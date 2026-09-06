@@ -6,6 +6,10 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
+mod account_crypto;
+pub use account_crypto::{
+    jazz_native_relay_account_secret, jazz_native_relay_mint_local_first_token,
+};
 mod foreground_mutations;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -3051,7 +3055,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     JazzNativeRelayStatus::Ok
 }
 
-/// Release a response buffer returned by [`jazz_native_relay_execute`].
+/// Release any owned response buffer returned by this native C ABI.
 ///
 /// The struct is reset before returning, making repeated frees of the *same
 /// struct* a no-op. Copying the struct and freeing both copies is invalid.
@@ -3071,7 +3075,7 @@ pub unsafe extern "C" fn jazz_native_relay_bytes_free(bytes: *mut JazzNativeRela
         bytes.len = 0;
         return;
     }
-    // SAFETY: only `jazz_native_relay_execute` creates this allocation, with
+    // SAFETY: the native C ABI creates this allocation with
     // exactly the recorded length and capacity. Reset before dropping so a
     // second call on this struct cannot free it again.
     let allocation = unsafe { Vec::from_raw_parts(bytes.data, bytes.len, bytes.len) };
