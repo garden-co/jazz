@@ -697,6 +697,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   let committed = false;
   let opened = 0;
   let emitCommitWake = true;
+  let postCommitWakeAfterBTicks = 0;
+  let pendingPostCommitWake = false;
   const schedulers: Array<((urgency: string) => void) | undefined> = [];
   const ticks = [0, 0];
   const factory = {
@@ -721,7 +723,10 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                       ? (setTimeout(() => {
                           committed = true;
                           const bTicksBeforeWake = ticks[1];
-                          if (emitCommitWake) schedulers[1]?.("immediate");
+                          if (emitCommitWake) {
+                            if (postCommitWakeAfterBTicks === 0) schedulers[1]?.("immediate");
+                            else pendingPostCommitWake = true;
+                          }
                           assert.equal(
                             ticks[1],
                             bTicksBeforeWake,
@@ -780,6 +785,10 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         },
         tick() {
           ticks[peer] += 1;
+          if (peer === 1 && pendingPostCommitWake && ticks[peer] >= postCommitWakeAfterBTicks) {
+            pendingPostCommitWake = false;
+            schedulers[peer]?.("immediate");
+          }
         },
         setTickScheduler(callback: (urgency: string) => void) {
           schedulers[peer] = callback;
@@ -823,6 +832,33 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "same-runtime-delta-row-id-failed",
     "same-runtime-unsubscribe-failed",
   ]);
+
+  // Android's CallInvoker may need more than the former 96 zero-delay turns
+  // after a release build. The receipt still waits for B's actual scheduler
+  // callback before draining; a late callback may not be replaced with a read.
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  postCommitWakeAfterBTicks = 192;
+  pendingPostCommitWake = false;
+  const lateWake: Array<{ elapsedMs: number; turns: number }> = [];
+  await proveSameJsiRuntimeWriteSubscription(
+    factory,
+    capability,
+    command,
+    subscriptionRowId,
+    undefined,
+    {
+      timeoutMs: 1_000,
+      now: () => performance.now(),
+      yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      onWake: (details) => lateWake.push(details),
+    },
+  );
+  assert.equal(lateWake.length, 1, "the delayed scheduler callback is still required");
+  assert.ok(lateWake[0]!.turns > 96, "the receipt tolerates an Android-late native callback");
+  postCommitWakeAfterBTicks = 0;
 
   committed = false;
   opened = 0;
@@ -1103,8 +1139,15 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   emitCommitWake = false;
   await assert.rejects(
     async () =>
-      proveSameJsiRuntimeWriteSubscription(factory, capability, command, subscriptionRowId),
-    /did not observe foreground A's committed row/,
+      proveSameJsiRuntimeWriteSubscription(
+        factory,
+        capability,
+        command,
+        subscriptionRowId,
+        undefined,
+        shortPostCommitWakeTiming(),
+      ),
+    /did not observe foreground A's committed row after \d+ turns and \d+ms without a post-commit native wake/,
   );
 
   committed = false;
@@ -1126,6 +1169,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         capability,
         command,
         subscriptionRowId,
+        undefined,
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1171,6 +1216,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => noObservationStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1244,6 +1290,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongObservationStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1270,6 +1317,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongResetStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1293,6 +1341,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongMixedStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1318,6 +1367,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongWrittenContentStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1327,6 +1377,14 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "the written fixture content with another row id is an identity mismatch, not unrelated data",
   );
 });
+
+function shortPostCommitWakeTiming() {
+  return {
+    timeoutMs: 96,
+    now: () => performance.now(),
+    yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+  };
+}
 
 function utf8(value: string): number[] {
   return Array.from(new TextEncoder().encode(value));
