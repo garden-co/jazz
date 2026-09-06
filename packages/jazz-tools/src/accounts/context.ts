@@ -18,7 +18,7 @@ import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
   DbConfig,
-  "secret" | "jwtToken" | "cookieSession" | "adminSecret" | "accountId"
+  "secret" | "jwtToken" | "cookieSession" | "adminSecret" | "accountId" | "accountRegistryAuthority"
 > & {
   account: AccountHandle;
 };
@@ -41,13 +41,24 @@ export async function createAccountDbWithRuntimeSource(
   config: AccountDbConfig,
   runtimeSource: RuntimeSource<DbConfig>,
 ): Promise<Db> {
-  for (const key of ["secret", "jwtToken", "cookieSession", "adminSecret", "accountId"]) {
+  for (const key of [
+    "secret",
+    "jwtToken",
+    "cookieSession",
+    "adminSecret",
+    "accountId",
+    "accountRegistryAuthority",
+  ]) {
     if (Object.hasOwn(config, key)) throw new AccountAuthError("account_handle_required");
   }
   const { account, ...runtimeConfig } = config;
   const registry = accountRegistry(account);
   // Offline creation still has a configured registry authority; no request is made.
-  if (!config.serverUrl || accountRegistryUrl(config.serverUrl, config.appId) !== registry) {
+  if (
+    !new URL(registry).pathname.endsWith(`/apps/${accountAppId(config.appId)}/accounts`) ||
+    (config.serverUrl !== undefined &&
+      accountRegistryUrl(config.serverUrl, config.appId) !== registry)
+  ) {
     throw new AccountAuthError("account_application_mismatch");
   }
   let invalidated = false;
@@ -65,7 +76,12 @@ export async function createAccountDbWithRuntimeSource(
   });
   try {
     const jwtToken = await accountToken(account, registry);
-    const resolved: DbConfig = { ...runtimeConfig, jwtToken, accountId: account.id };
+    const resolved: DbConfig = {
+      ...runtimeConfig,
+      jwtToken,
+      accountId: account.id,
+      accountRegistryAuthority: registry,
+    };
     if (account.identity.issuer === "urn:jazz:local-first") {
       setTrustedReservedSession(
         resolved,

@@ -30,6 +30,12 @@ async function signIn(getToken: () => Promise<string>) {
 `loginJWT` requires an existing active assignment. Merely obtaining or decoding a
 JWT does neither. Refresh callbacks must keep the exact issuer and subject.
 
+The handle retains its registry authority independently of context transport.
+Omit `serverUrl` when opening a local-only context; supplying it enables the
+configured upstream and must match the handle's authority. Local storage is
+scoped by registry, application, environment, and account. Linked identities
+share that durable root but always open distinct live authorization sessions.
+
 Browser managers restore local selection from localStorage. Other hosts supply
 an `AccountStore`. Local keys remain retained after logout; provider tokens are
 never written to this store. Each server-rendering request owns its own manager.

@@ -68,6 +68,12 @@ const admin: PackageDbConfig = { ...enrolled, adminSecret: "admin" };
 const backend: PackageDbConfig = { ...enrolled, backendSecret: "backend" };
 // @ts-expect-error Raw account IDs cannot substitute for opaque handles.
 const forged: PackageDbConfig = { appId: "app", account: { id: "account" } };
+// @ts-expect-error Registry authority is obtained only from the handle.
+const forgedAuthority: PackageDbConfig = {
+  ...enrolled,
+  accountRegistryAuthority: "https://other.example",
+};
+void forgedAuthority;
 void runtimeEnrolled;
 void forged;
 

@@ -175,11 +175,21 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
 
 function browserStorageScope(
   config: DbConfig,
-): BrowserAuthScope | { kind: "account"; account: string } {
+): BrowserAuthScope | { kind: "account"; account: string; registry: string } {
   if (config.accountId && !config.adminSecret) {
-    return { kind: "account", account: config.accountId };
+    return {
+      kind: "account",
+      account: config.accountId,
+      registry: accountRegistryAuthority(config),
+    };
   }
   return browserAuthScope(config);
+}
+
+function accountRegistryAuthority(config: DbConfig): string {
+  if (!config.accountRegistryAuthority)
+    throw new Error("Account storage requires its registry authority");
+  return config.accountRegistryAuthority;
 }
 
 /** Stable, non-secret exact namespace for one browser authentication scope. */
@@ -191,6 +201,7 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
     appId: config.appId,
     env: config.env ?? "dev",
     auth: browserAuthScope(config),
+    ...(config.accountId ? { registry: accountRegistryAuthority(config) } : {}),
   });
 }
 

@@ -135,6 +135,16 @@ account mutation forwarding never substitutes an edge service credential.
 
 ## Context lifecycle and linking
 
+An account's enrollment authority is independent of its context's active
+transport. Omitted context `serverUrl` means local-only; it must not be filled
+implicitly from the handle. A supplied URL must match the handle's registry.
+The handle-derived registry authority participates in the durable account
+namespace even without transport: registry, application, environment, and
+account identify the root. Exact acting identity additionally partitions live
+sessions. Two registries assigning identical account UUIDs must never alias
+local storage. Applications cannot supply or override this internal authority
+field separately from the opaque handle.
+
 Enrollment has no dependency on an open database or a framework. `linkJWT`
 operates on the selected handle's credential and the core registry only; it
 never enumerates contexts, drains uploads, or rewrites transaction authors.

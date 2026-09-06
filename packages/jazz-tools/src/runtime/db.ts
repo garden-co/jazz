@@ -90,6 +90,8 @@ type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
 export type DbConfig = {
   /** @internal Assigned by validated account-handle context creation. */
   accountId?: string;
+  /** @internal Handle-derived enrollment authority, independent of active transport. */
+  accountRegistryAuthority?: string;
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
