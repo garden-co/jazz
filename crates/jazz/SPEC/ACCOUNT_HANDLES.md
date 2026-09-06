@@ -230,3 +230,24 @@ class and policy trust are separate dimensions. Impersonated sessions retain
 session relay eligibility and per-principal connection caps, but public registry
 liveness checks apply only to public credentials. Missing or incorrect backend
 secrets cannot enter the impersonation path.
+
+## Expo account selection
+
+The Expo helper prepares accounts outside contexts, using shared JavaScript
+selection semantics and native Rust entropy/signing. Retained roots use the
+existing `jazz-account-selection-v1` JSON preference record in OS SecureStore;
+this is neither row storage nor a server wire format. The key is
+`jazz.account-selection-v1.` followed by lowercase SHA-256 hex over UTF-8
+`JSON.stringify(["jazz-account-selection-v1", canonicalRegistry, env, profile])`.
+Defaults are `dev` and `default`; the registry already includes the canonical
+application UUID, so app-name/UUID aliases share the same selection.
+
+Each read/transform/write runs synchronously under a native exclusive `flock`
+on `account-selection-v1.lock` in the platform-owned application storage root.
+JavaScript cannot supply this path. The lock spans separate runtimes/processes,
+rejects same-thread recursion, and releases on normal return, exception, or
+process death. No relay lifecycle mutex spans lock acquisition or the callback.
+The callback must return undefined synchronously; SecureStore operations use no
+biometric-prompt options. Older native builds without the lock fail preparation.
+Persistence errors remain observable and prevent a new handle from supplying
+credentials until retention succeeds; roots are never truncated to fit storage.

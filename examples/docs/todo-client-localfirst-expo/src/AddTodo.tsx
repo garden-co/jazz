@@ -10,8 +10,8 @@ export function AddTodo() {
 
   const handleAdd = () => {
     const trimmed = title.trim();
-    if (!trimmed || !session?.user) return;
-    db.insert(app.todos, { title: trimmed, done: false, owner_id: session.user });
+    if (!trimmed || !session?.user.account) return;
+    db.insert(app.todos, { title: trimmed, done: false, owner_id: session.user.account });
     setTitle("");
   };
 
