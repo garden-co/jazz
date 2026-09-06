@@ -1,255 +1,79 @@
 ---
 title: Authentication
-description: "How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
-reviewedAt: "b29b48d1a"
+description: "Create accounts, authenticate identities, and link ordinary provider JWTs."
+reviewedAt: "f14d92bf11"
 ---
 
-Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
+A Jazz context always belongs to an account and acts as one exact identity. An identity is the pair of JWT claims `iss` (issuer) and `sub` (subject). An account is a stable ID that can admit several identities.
 
-| Mode          | What it does                                                                | When to use it                                   |
-| ------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
-| `anonymous`   | Ephemeral read-only identity with no stored credential                      | Public/marketing surfaces, try-before-anything   |
-| `local-first` | Stable identity from a device secret, no server needed                      | Production offline-first apps, try-before-signup |
-| `external`    | Validates a JWT from your auth provider via JWKS or a configured static key | Production apps with real user accounts          |
-
-Anonymous sessions can subscribe to queries but are **structurally denied writes**. Client APIs reject inserts, updates, and deletes with `AnonymousWriteDeniedError`; independently, the fate authority rejects raw-wire or relayed commits whose admitted permission subject is anonymous before evaluating table policy. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
-
-## Local-first auth
-
-Local-first auth lets users start using your app without signing up. They can later upgrade to an external provider while keeping their identity. See [Local-first auth](/docs/auth/local-first-auth) for the full guide.
-
-## External auth for production
-
-Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your server's configured JWKS endpoint or static key.
-
-<Callout type="info" title="JWT? JWKS?">
-  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz either retrieves the signing key from the JWKS endpoint you specify or uses a single configured JWK / public key directly.
-
-For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web-tokens) are a great starting point.
-
-</Callout>
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-jwt-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthJwt.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthJwt.svelte#auth-jwt-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthJwt.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-jwt-ts
-    </include>
-  </Tab>
-</Tabs>
-
-<Callout type="warn">
-  Use `jwtToken` in `JazzProvider` or `createDb(...)` for initial setup and whenever the signed-in
-  user changes. Recreate the client for sign-in, sign-out, or principal switches. Reserve
-  `db.updateAuthToken(...)` for refreshing a JWT for the same user on an already-authenticated
-  client.
-</Callout>
-
-Jazz requires both JWT `iss` and `sub`. It derives the logical `session.user` from their canonical
-pair for every write. The complete verified JWT payload, including those registered fields, is
-inspectable through public `session.claims`, but it never creates a second authorship identity.
-Two providers may issue the same `sub` without becoming the same Jazz author; `$createdBy`
-distinguishes them by `iss`.
-Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
-
-- In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
-  of the user account
-- Avoid email addresses, as these can and do change.
-- Do not use any ephemeral identifier (e.g. a session ID).
-
-If your provider doesn't provide a stable ID in `sub` by default, either configure it
-or remint the token through your own JWT layer that rewrites `sub`.
-
-<Callout type="info">
-  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`. The complete verified JWT
-  payload, including registered fields such as `iss` and `sub`, remains inspectable under
-  `session.claims`; none of those fields is a second authorship path. Authorship identity is the
-  exact `[iss, sub]` pair, so changing either component creates a different author.
-</Callout>
-
-### Managing JWT changes on a live client
-
-For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config:
-
-```tsx
-const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
-const { secret, isLoading } = useLocalFirstAuth({ appId: "my-app" });
-
-if (!jwtToken && (isLoading || !secret)) return <p>Loading…</p>;
-
-const config = jwtToken
-  ? {
-      appId: "my-app",
-      serverUrl: "https://sync.example.com",
-      jwtToken,
-    }
-  : {
-      appId: "my-app",
-      serverUrl: "https://sync.example.com",
-      secret: secret!,
-    };
-
-<JazzProvider key={jwtToken ? "external" : "local"} config={config} />;
-```
-
-On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer token with a new JWT for
-the same principal:
-
-- `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
-- Backend-scoped wrappers from `createJazzContext().asBackend()`, `.forRequest()`, and `.forSession()` do not own shared bearer auth and ignore `updateAuthToken(...)`.
-- Do not use `db.updateAuthToken(null)` for logout or local-first fallback on a live client.
-- Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
-  Recreate `Db` or `JazzProvider` when the authenticated user changes.
-
-If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is the
-recommended path for login, logout, and any principal change. See
-[Lifecycle](/docs/auth/lifecycle) for logout, storage reset, and local-first identity storage.
-
-### Cookie-based auth
-
-Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active.
+Prepare an account manager before creating a context:
 
 ```ts
-const db = await createDb({
-  appId: "my-app",
-  serverUrl: "https://sync.example.com",
-  cookieSession: {
-    issuer: "https://auth.example.com",
-    user_id: "user_123",
-    claims: { role: "member" },
-    authMode: "external",
+import { createAccountManager, createDb } from "jazz-tools";
+
+const config = { appId: "my-app", serverUrl: "https://core.example" };
+const accounts = await createAccountManager(config);
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+const db = await createDb({ ...config, account });
+```
+
+`createAccountManager` prepares the host's crypto and restores local selection. After that, `createLocalFirst()` is synchronous and works offline. A local-first account lets someone use your app before signing up with a provider.
+
+Contexts accept an opaque `AccountHandle`, rather than raw JWTs or signing secrets. A handle fixes both the account and acting identity. The server still verifies credentials independently; copying an account ID into a JWT or object grants no access.
+
+## External authentication
+
+Configure the Jazz core with your provider's signing keys, issuer, and audience. The provider can issue ordinary JWTs; it does not need to put a Jazz account ID or linking assertion in their claims.
+
+Choose the operation that matches the user's intent:
+
+| Operation                    | Result                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `accounts.registerJWT(auth)` | Create an account for a fresh external identity.                                              |
+| `accounts.loginJWT(auth)`    | Select an existing, active account assignment.                                                |
+| `accounts.linkJWT(auth)`     | Attach a fresh external identity to the currently selected account and select its new handle. |
+| `accounts.getLoggedIn()`     | Read the locally selected handle, or `undefined`.                                             |
+| `accounts.logout()`          | Clear selection and invalidate this manager's issued credentials.                             |
+
+Registration, login, and linking require a connection to the core. Authenticating with your provider does not implicitly register a Jazz account. A failed operation preserves the previous selection.
+
+```ts
+const account = await accounts.loginJWT({
+  getToken: async () => {
+    const token = await getTokenFromYourProvider();
+    return token;
   },
 });
+const db = await createDb({ ...config, account });
 ```
 
-You must choose between `cookieSession` and `secret`/`jwtToken`. If the same user is signed in, but their session changes (e.g. new claims, refreshed cookie), call `db.updateCookieSession(nextSession)`. To sign in, sign out, or authenticate as a different user, recreate `Db` or `JazzProvider` with a new config.
+`auth` can also be a JWT string. Use a `getToken` callback for renewable credentials. The shared account context refreshes them across all framework bindings; there is no provider-level `onJWTExpired` callback. Every refreshed token must have the same exact issuer and subject. A callback that does not settle within 30 seconds fails that attempt; its eventual result cannot replace a later credential.
 
-### Reacting to expiry and unauthenticated responses
+## Linking identities
 
-Auth state is flat:
+An exact identity can belong to only one account, permanently. Revocation prevents its use but does not free it for reassignment. Linking therefore accepts only a fresh identity. If the identity already belongs to a different account, the app must decide how to migrate data; Jazz does not merge accounts.
+
+Linking happens outside contexts. Close the old context normally, link through the account manager, then open a new context. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
+
+The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.
+
+## Ownership and provenance
+
+Public sessions and author columns expose the same structured value:
 
 ```ts
-interface AuthState {
-  authMode: "anonymous" | "local-first" | "external";
-  session: Session | null;
-  error?: "expired" | "missing" | "invalid" | "disabled";
+{
+  account: "00000000-0000-4000-8000-000000000001",
+  identity: { issuer: "https://issuer.example", subject: "alice" },
 }
 ```
 
-Presence of `error` indicates trouble; `authMode` and the last-known `session` are always available.
+Compare `.account` for account-owned data. Comparing the whole structure also compares issuer and subject. Two linked identities share account ownership while retaining distinct authorship.
 
-#### React: `onJWTExpired` prop
+Provider claims remain under `session.claims`. They cannot override `session.user.account` or the acting identity. See [Sessions](/docs/auth/sessions) and [Permissions](/docs/auth/permissions).
 
-For JWT refresh, pass `onJWTExpired` to `JazzProvider`. Jazz calls it when the sync server rejects
-the current token as expired, serialized so concurrent failed writes trigger a single refresh:
+## Backend request contexts
 
-```tsx
-<JazzProvider
-  config={{ appId: "my-app", jwtToken }}
-  onJWTExpired={async () => await fetchFreshJwt()}
->
-  <App />
-</JazzProvider>
-```
+`createJazzContext(...).forRequest(request)` verifies the original bearer and resolves its active account through the core before opening a requester context. Configure `serverUrl` as well as JWT verification. External identities must already be registered; local-first proofs can establish their deterministic founding account.
 
-Read auth state from any component with `useAuthState()`:
-
-```ts
-const { authMode, user, claims, error } = useAuthState();
-```
-
-#### TypeScript: `db.onAuthChanged`
-
-Outside React, subscribe to auth-state changes on `Db`:
-
-```ts
-const stop = db.onAuthChanged(async (state) => {
-  if (state.error !== "expired") return;
-
-  const freshJwt = await getFreshJwtForCurrentUser().catch(() => null);
-  if (freshJwt) {
-    db.updateAuthToken(freshJwt);
-    return;
-  }
-
-  // Sign-out or principal change: recreate Jazz without bearer auth.
-  setJwtToken(null);
-});
-```
-
-Read the current snapshot synchronously with `db.getAuthState()`.
-
-When Jazz receives a structured unauthenticated response from the sync server, it:
-
-- sets `error` on the auth state
-- preserves the last known `session`
-- pauses authenticated sync and reconnects until the app either refreshes the same user's JWT with
-  `db.updateAuthToken(...)` or recreates the client with a new auth config
-
-<Callout type="info">
-  `useSession()` and `db.getAuthState().session` can still return the last known session while
-  `error` is set. That's intentional: it keeps user-scoped UI and local authorship stable while your
-  app refreshes or replaces the JWT. For signed-in vs signed-out UI, check whether `error` is set
-  (or the `authMode` you expect) instead of only whether a session exists.
-</Callout>
-
-### Server configuration
-
-See [Server Setup](/docs/getting-started/server-setup) for the full list of server flags and storage options.
-
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
-</include>
-
-### Session resolution
-
-When the server receives a request, it tries each auth method in priority order and uses the first match:
-
-1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
-2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the configured `--jwks-url` or `--jwt-public-key`.
-3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
-4. **Anonymous auth**&hairsp;—&hairsp;the request includes a self-signed anonymous bearer token.
-5. **No session**&hairsp;—&hairsp;none of the above matched.
-
-Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
-
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` accepts external and
-local-first bearer tokens, but not anonymous bearer tokens. Configure `jwksUrl` or `jwtPublicKey` on
-the backend context to verify external JWTs there too, but not both. Application session cookies are
-resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from an
-application cookie, use `context.forSession(session)`. If the sync server should authenticate
-WebSocket upgrades from a Jazz JWT cookie, configure `--auth-cookie-name` /
-`JAZZ_AUTH_COOKIE_NAME` as described in [Server Setup](/docs/getting-started/server-setup).
-
-### Upgrading to external auth
-
-Users on local-first auth can sign up with an external provider and keep the same identity. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full walkthrough.
-
-## Next steps
-
-- [Sessions](/docs/auth/sessions)&hairsp;—&hairsp;read the current user and scope queries to their identity
-- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies
+`forSession(session)` is explicit, trusted backend impersonation. A backend may supply an account and principal itself, and row policies evaluate that chosen session. Use it only after making the relevant authorization decision in trusted server code.

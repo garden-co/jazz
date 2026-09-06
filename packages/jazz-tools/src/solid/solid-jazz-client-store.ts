@@ -9,14 +9,15 @@ interface StoreState {
   session: PublicSession | null;
 }
 
-const NULL_STATE: StoreState = {
-  authState: null,
-  session: null,
-};
+function emptyState(): StoreState {
+  // Solid stores mutate their backing object. Never share the empty object
+  // between providers, or one account's session can overwrite another's.
+  return { authState: null, session: null };
+}
 
 function getStoreState(client: JazzClient | undefined): StoreState {
   if (!client || typeof client.db?.getAuthState !== "function") {
-    return NULL_STATE;
+    return emptyState();
   }
 
   const authState = client.db.getAuthState();
@@ -33,7 +34,7 @@ export function createSolidJazzClientStore(client: Accessor<JazzClient | undefin
     const nextClient = client();
 
     if (!nextClient || typeof nextClient.db?.onAuthChanged !== "function") {
-      setStore(NULL_STATE);
+      setStore(emptyState());
       return;
     }
     setStore(reconcile(getStoreState(nextClient)));

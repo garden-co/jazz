@@ -1,22 +1,8 @@
 import * as React from "react";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
-
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-
-// #region context-setup-react
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  return {
-    appId,
-    env: "dev",
-    serverUrl,
-    secret,
-    ...overrides,
-  };
-}
-// #endregion context-setup-react
+import { prepareAccountConfig } from "./account.js";
 
 type AppProps = {
   config?: Partial<DbConfig>;
@@ -26,15 +12,28 @@ type AppProps = {
 
 // #region context-setup-react
 export function App({ config, fallback, children }: AppProps = {}) {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  if (isLoading || !secret) {
-    return <>{fallback ?? <p>Loading...</p>}</>;
-  }
-
-  const resolvedConfig = defaultConfig(secret, config);
+  const [resolved, setResolved] = React.useState<DbConfig>();
+  const [error, setError] = React.useState<Error>();
+  React.useEffect(() => {
+    let cancelled = false;
+    setResolved(undefined);
+    setError(undefined);
+    prepareAccountConfig(config).then(
+      (value) => {
+        if (!cancelled) setResolved(value);
+      },
+      (cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+  if (error) throw error;
+  if (!resolved) return <>{fallback ?? <p>Loading...</p>}</>;
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzProvider config={resolved} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
       {children}

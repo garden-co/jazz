@@ -1,5 +1,5 @@
 import type { ShutdownOptions } from "./db.js";
-import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
+import { GracefulShutdownSyncError, SharedClientShutdownError } from "./graceful-shutdown-error.js";
 /**
  * Framework-agnostic, refcounted client registry. Callers resolving to the same
  * `key` share one client, so a page with several providers for one identity runs
@@ -141,9 +141,7 @@ export function releaseClient(
     if (entry.closing) return entry.closing;
     if (!entry.holders.has(holder)) return Promise.resolve();
     if (entry.holders.size > 1) {
-      return Promise.reject(
-        new Error("Release other holders before gracefully shutting down a shared Jazz client"),
-      );
+      return Promise.reject(new SharedClientShutdownError());
     }
     if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
     entry.releaseTimer = null;

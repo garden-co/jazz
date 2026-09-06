@@ -1,10 +1,6 @@
-import { createDb, BrowserAuthSecretStore, type DbConfig, type Db } from "jazz-tools";
+import { prepareAccountConfig } from "./account.js";
+import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
-
-function readEnvAppId(): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-    ?.JAZZ_APP_ID;
-}
 
 function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   const todoIds = new Set(todos.map((todo) => todo.id));
@@ -51,21 +47,12 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
-
-  const secret = config?.secret ?? (await BrowserAuthSecretStore.getOrCreateSecret({ appId }));
-
-  const resolvedConfig: DbConfig = {
-    appId,
-    env: "dev",
-    secret,
-    ...config,
-  };
+  const resolvedConfig = await prepareAccountConfig(config);
 
   // #region context-setup-ts-client
   const db = await createDb(resolvedConfig);
   // #endregion context-setup-ts-client
-  let sessionUserId = db.getAuthState().session?.user ?? null;
+  let sessionUserId = db.getAuthState().session?.user.account ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -163,7 +150,7 @@ export async function startApp(
     list.replaceChildren(items);
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user ?? null);
+    syncAuthState(session?.user.account ?? null);
   });
 
   // Add todo form

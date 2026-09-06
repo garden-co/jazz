@@ -10,18 +10,23 @@ import { createAccountManager, createJazzClient } from "jazz-tools/client";
 const config = { appId: "my-app", serverUrl: "https://core.example" };
 const accounts = await createAccountManager(config);
 const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-let client = await createJazzClient({ ...config, account });
+let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
+  ...config,
+  account,
+});
 
 async function signIn(getToken: () => Promise<string>) {
   // General graceful shutdown, before linking and outside the next context.
-  // Failure here leaves the existing context and selection usable.
-  await client.shutdown({ waitForSync: true });
+  // A sync-barrier failure leaves the existing context usable; a later
+  // teardown failure does not. Release other shared holders first.
+  await client?.shutdown({ waitForSync: true });
+  client = undefined;
   try {
     await accounts.linkJWT({ getToken });
   } finally {
-    // A failed link preserves the old handle. A successful link selects the
-    // new acting identity, on the same account.
-    client = await createJazzClient({ ...config, account: accounts.getLoggedIn()! });
+    // A failed link preserves selection unless another action logged out.
+    const selected = accounts.getLoggedIn();
+    if (selected) client = await createJazzClient({ ...config, account: selected });
   }
 }
 ```
