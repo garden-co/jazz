@@ -11,7 +11,8 @@ const wasmArtifactFiles = [
   "jazz_wasm.d.ts",
   "jazz_wasm.js",
 ];
-export function stageNativeFingerprints(root, { local = false } = {}) {
+export function stageNativeFingerprints(root, { local = false, workspace = false } = {}) {
+  if (local && workspace) throw new Error("--local and --workspace are mutually exclusive");
   const wasm = read(join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"));
   const napi = local
     ? read(
@@ -24,7 +25,9 @@ export function stageNativeFingerprints(root, { local = false } = {}) {
           ".jazz-artifact-manifest.json",
         ),
       )
-    : read(join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"));
+    : workspace
+      ? read(join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.manifest.json"))
+      : read(join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"));
   for (const [name, manifest] of [
     ["wasm", wasm],
     ["napi", napi],
@@ -73,7 +76,10 @@ export function stageNativeFingerprints(root, { local = false } = {}) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
   try {
-    stageNativeFingerprints(root, { local: process.argv.includes("--local") });
+    stageNativeFingerprints(root, {
+      local: process.argv.includes("--local"),
+      workspace: process.argv.includes("--workspace"),
+    });
   } catch (error) {
     console.error(`stage native fingerprints: ${error.message}`);
     process.exitCode = 1;

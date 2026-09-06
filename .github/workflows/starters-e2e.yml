@@ -75,6 +75,9 @@ jobs:
       - name: Build core workspace
         run: pnpm run build:core
 
+      - name: Verify starter package artifact hand-off
+        run: node dev/artifacts/verify-starter-e2e-artifacts.mjs
+
       - name: Pack workspace tarballs
         # Mirrors PACKAGES_TO_PACK in run-starter.ts. The harness picks these up
         # via `--tarball-dir` and pins them as `pnpm.overrides` in each

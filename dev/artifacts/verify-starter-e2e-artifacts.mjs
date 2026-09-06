@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+/**
+ * The starter E2E prepare job packs jazz-tools and jazz-wasm separately.  A
+ * Jazz Tools build must therefore be compiled after the generated runtime
+ * fingerprint sources are staged from the exact native artifacts being packed.
+ * Check that hand-off before the matrix can turn it into twelve opaque browser
+ * timeouts.
+ */
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+
+function manifestFingerprint(path, kind) {
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  if (manifest.kind !== kind || manifest.profile !== "release")
+    throw new Error(`${kind} manifest has an unexpected kind or profile`);
+  if (!/^[a-f0-9]{64}$/.test(manifest.nativeArtifactFingerprint ?? ""))
+    throw new Error(`${kind} manifest lacks a native artifact fingerprint`);
+  return manifest.nativeArtifactFingerprint;
+}
+
+function compiledFingerprint(path, symbol) {
+  const source = readFileSync(path, "utf8");
+  const match = source.match(new RegExp(`export const ${symbol} = "([a-f0-9]{64})"`));
+  if (!match) throw new Error(`${symbol} is missing from ${path}`);
+  return match[1];
+}
+
+async function wasmFingerprint(root) {
+  const pkg = join(root, "crates/jazz-wasm/pkg");
+  const bindings = await import(pathToFileURL(join(pkg, "jazz_wasm.js")).href);
+  bindings.initSync({ module: readFileSync(join(pkg, "jazz_wasm_bg.wasm")) });
+  const actual = bindings.nativeArtifactFingerprint();
+  if (!/^[a-f0-9]{64}$/.test(actual)) throw new Error("WASM module lacks a native artifact fingerprint");
+  return actual;
+}
+
+export async function verifyStarterE2EArtifacts(root = repositoryRoot) {
+  const expected = {
+    wasm: manifestFingerprint(
+      join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"),
+      "wasm",
+    ),
+    napi: manifestFingerprint(
+      join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.manifest.json"),
+      "napi",
+    ),
+  };
+  const compiled = {
+    wasm: compiledFingerprint(
+      join(root, "packages/jazz-tools/dist/runtime/native-artifact-fingerprint-wasm.js"),
+      "EXPECTED_WASM_ARTIFACT_FINGERPRINT",
+    ),
+    napi: compiledFingerprint(
+      join(root, "packages/jazz-tools/dist/runtime/native-artifact-fingerprint-napi.js"),
+      "EXPECTED_NAPI_ARTIFACT_FINGERPRINT",
+    ),
+  };
+  for (const kind of ["wasm", "napi"]) {
+    if (compiled[kind] !== expected[kind])
+      throw new Error(
+        `starter E2E ${kind.toUpperCase()} package hand-off mismatch: jazz-tools expects ${compiled[kind]}, native artifact is ${expected[kind]}. Re-stage native fingerprints and rebuild jazz-tools.`,
+      );
+  }
+  const actualWasm = await wasmFingerprint(root);
+  if (actualWasm !== expected.wasm)
+    throw new Error(
+      `starter E2E WASM package hand-off mismatch: manifest expects ${expected.wasm}, module returns ${actualWasm}.`,
+    );
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await verifyStarterE2EArtifacts();
+  console.log("starter E2E package hand-off: jazz-tools matches release WASM and NAPI artifacts");
+}
