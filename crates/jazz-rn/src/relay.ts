@@ -136,7 +136,7 @@ export type NativeForegroundCommand =
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
 
 export type NativeForegroundResponse =
-  | { type: 'nativeSessionMetadata'; issuer: string; userId: string }
+  | { type: 'nativeSessionMetadata'; accountId: string | null; issuer: string; userId: string }
   | { type: 'nativeConnectionStatus'; configured: boolean; explicitlyOffline: boolean; connected: boolean }
   | { type: 'probe'; abiVersion: number }
   | { type: 'ticked' }
@@ -517,15 +517,24 @@ export function decodeNativeForegroundResponse(
     };
   if (tag === 16) return { type: 'transactionSettled', txId: decodeForegroundId(bytes.subarray(1), 'settled txId') };
   if (tag === 18) {
-    // Postcard strings use canonical u64 lengths. Read the first bounded
-    // field, then require the second field to consume every remaining byte.
-    let end = 1;
+    // Postcard Option<[u8; 16]> followed by two canonical strings.
+    const present = bytes[1];
+    if (present !== 0 && present !== 1)
+      throw new Error('Malformed native session account');
+    const start = present === 1 ? 18 : 2;
+    if (bytes.length <= start) throw new Error('Malformed native session metadata');
+    const hex = present === 1
+      ? Array.from(bytes.subarray(2, 18), byte => byte.toString(16).padStart(2, '0')).join('')
+      : null;
+    const accountId = hex === null ? null
+      : `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    let end = start;
     while (end < bytes.length && (bytes[end]! & 0x80) !== 0) end++;
     if (end >= bytes.length) throw new Error('Malformed native session metadata');
-    const length = decodeForegroundU64(bytes.subarray(1, end + 1), 'issuer length');
+    const length = decodeForegroundU64(bytes.subarray(start, end + 1), 'issuer length');
     const next = end + 1 + length;
     if (next > bytes.length) throw new Error('Malformed native session metadata');
-    return { type: 'nativeSessionMetadata', issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'), userId: decodeForegroundString(bytes.subarray(next), 'user id') };
+    return { type: 'nativeSessionMetadata', accountId, issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'), userId: decodeForegroundString(bytes.subarray(next), 'user id') };
   }
 
   if (tag === 19) return { type: 'writeState', stateJson: decodeForegroundString(bytes.subarray(1), 'write state') };

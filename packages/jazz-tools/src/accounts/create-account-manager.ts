@@ -38,13 +38,18 @@ function browserAccountStore(registry: string, env: string): AccountStore {
   if (typeof localStorage === "undefined") {
     throw new Error("createAccountManager requires an AccountStore outside the browser");
   }
+  if (typeof navigator === "undefined" || !navigator.locks) {
+    throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
+  }
   const key = `jazz-account-selection-v1:${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
   return {
     async read() {
       return localStorage.getItem(key);
     },
-    async write(value) {
-      localStorage.setItem(key, value);
+    async update(transform) {
+      await navigator.locks.request(key, () => {
+        localStorage.setItem(key, transform(localStorage.getItem(key)));
+      });
     },
   };
 }

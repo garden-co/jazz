@@ -5,7 +5,11 @@ import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 /** Platform storage: use browser storage or an OS-protected store on native hosts. */
 export interface AccountStore {
   read(): Promise<string | null>;
-  write(value: string): Promise<void>;
+  /** Atomically read/transform/write across every manager sharing this store.
+   * The callback is synchronous and may be retried by a transactional host.
+   * Resolve only after the replacement is durable; leave the old value on failure.
+   */
+  update(transform: (current: string | null) => string): Promise<void>;
 }
 
 // Local helper preferences, not a database/wire codec. Keep every local root:
@@ -44,10 +48,22 @@ export async function prepareAccountManager(options: {
   const stored = decode(await options.store.read());
   let writes = Promise.resolve();
   const save = () => {
-    const value = JSON.stringify(stored);
+    const roots = [...stored.roots];
+    const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
     // Serialize snapshots even for an asynchronous native secure store. A
     // rejected save does not prevent a later explicit selection from retrying.
-    writes = writes.catch(() => {}).then(() => options.store.write(value));
+    writes = writes
+      .catch(() => {})
+      .then(() =>
+        options.store.update((current) => {
+          const latest = decode(current);
+          // Independent managers may have discovered roots since we loaded. Never
+          // replace their key inventory with this manager's older snapshot.
+          for (const root of roots) if (!latest.roots.includes(root)) latest.roots.push(root);
+          latest.selected = selected === null ? null : latest.roots.indexOf(selected);
+          return JSON.stringify(latest);
+        }),
+      );
     void writes.catch(() => {});
     return writes;
   };

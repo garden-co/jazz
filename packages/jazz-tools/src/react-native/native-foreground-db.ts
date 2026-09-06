@@ -130,7 +130,7 @@ type NativeConnectionStatus = {
 
 type ForegroundResponse =
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
-  | { type: "nativeSessionMetadata"; issuer: string; userId: string }
+  | { type: "nativeSessionMetadata"; accountId: string | null; issuer: string; userId: string }
   | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
@@ -381,7 +381,7 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
-  nativeSessionMetadata(): { issuer: string; userId: string } {
+  nativeSessionMetadata(): { accountId: string | null; issuer: string; userId: string } {
     const response = this.execute({ type: "nativeSessionMetadata" });
     if (response.type !== "nativeSessionMetadata")
       return unexpected("nativeSessionMetadata", response.type);

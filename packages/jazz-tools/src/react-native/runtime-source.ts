@@ -101,6 +101,16 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         );
         try {
           const metadata = opened.nativeSessionMetadata();
+          const selected = resolveNativeSession(config);
+          if (
+            metadata.accountId !== (config.accountId ?? null) ||
+            metadata.issuer !== selected.issuer ||
+            metadata.userId !== selected.user_id
+          ) {
+            throw new Error(
+              "React Native admitted session does not match the selected account identity",
+            );
+          }
           const configured = opened.nativeConnectionStatus().configured;
           // The admitted scope's transport configuration is immutable. Lifecycle
           // actions use the application owner, rather than opening a recovery
@@ -111,6 +121,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
           };
           this.admittedSession = markTrustedReservedSession({
+            account_id: metadata.accountId ?? undefined,
             issuer: metadata.issuer,
             user_id: metadata.userId,
             claims: {},

@@ -660,6 +660,7 @@ pub enum ForegroundDbCommandResponse {
         connected: bool,
     },
     NativeSessionMetadata {
+        account_id: Option<[u8; 16]>,
         issuer: String,
         user_id: String,
     },
@@ -2600,12 +2601,13 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Some(admitted) => admitted,
                 None => return JazzNativeRelayStatus::InvalidHandle,
             };
-            let [issuer, user_id]: [String; 2] =
-                match serde_json::from_str(admitted.config.identity.author.canonical()) {
-                    Ok(subject) => subject,
-                    Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-                };
-            ForegroundDbCommandResponse::NativeSessionMetadata { issuer, user_id }
+            let author = admitted.config.identity.author;
+            let (issuer, user_id) = author.principal_parts();
+            ForegroundDbCommandResponse::NativeSessionMetadata {
+                account_id: author.account_id().map(|account| *account.0.as_bytes()),
+                issuer,
+                user_id,
+            }
         }
         ForegroundDbCommandRequest::DisconnectNativeUpstream => {
             match host.foreground_connectivity(foreground, Some(true)) {
@@ -13454,6 +13456,11 @@ mod tests {
     #[test]
     fn foreground_command_c_abi_uses_one_binary_runtime_vocabulary() {
         let directory = tempfile::tempdir().unwrap();
+        // Internal ABI test: public row APIs cannot expose native metadata
+        // framing or prove the admitted account survives the capability boundary.
+        let author = AuthorSubject::for_test_bytes([0xa2; 16]).with_account(
+            jazz::account_registry::AccountId(NodeUuid::from_bytes([7; 16]).0),
+        );
         let host = jazz_native_relay_host_new();
         let capability = unsafe {
             (*host)
@@ -13474,7 +13481,7 @@ mod tests {
                     schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
                     identity: DbIdentity {
                         node: NodeUuid::from_bytes([0xa1; 16]),
-                        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                        author,
                     },
                     claims: BTreeMap::new(),
                 })
@@ -13510,6 +13517,17 @@ mod tests {
             unsafe { jazz_native_relay_bytes_free(&mut response) };
             (status, bytes)
         };
+        let (status, response) = execute(ForegroundDbCommandRequest::NativeSessionMetadata);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        let (issuer, user_id) = author.principal_parts();
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::NativeSessionMetadata {
+                account_id: Some([7; 16]),
+                issuer,
+                user_id,
+            }
+        );
         let (status, response) = execute(ForegroundDbCommandRequest::Probe);
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         assert_eq!(
@@ -14127,10 +14145,19 @@ mod tests {
         let responses = [
             (
                 ForegroundDbCommandResponse::NativeSessionMetadata {
+                    account_id: None,
                     issuer: "i".into(),
                     user_id: "u".into(),
                 },
-                vec![18, 1, 105, 1, 117],
+                vec![18, 0, 1, 105, 1, 117],
+            ),
+            (
+                ForegroundDbCommandResponse::NativeSessionMetadata {
+                    account_id: Some([7; 16]),
+                    issuer: "i".into(),
+                    user_id: "u".into(),
+                },
+                [vec![18, 1], vec![7; 16], vec![1, 105, 1, 117]].concat(),
             ),
             (
                 ForegroundDbCommandResponse::WriteState {

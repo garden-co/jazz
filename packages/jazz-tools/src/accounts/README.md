@@ -49,3 +49,10 @@ account-operation errors beside the app's login controls.
 Compare `.account` for account ownership. Comparing the whole author also checks
 issuer and subject. Linking therefore shares account-owned access without
 pretending that the new identity authored earlier rows.
+
+`AccountStore.update` must perform an atomic read/transform/write across all
+managers using that store. Browser defaults use Web Locks with localStorage;
+server/native hosts supply the equivalent transaction or process-wide lock.
+The shared helper merges retained roots inside that transaction, so a stale
+manager cannot erase another manager's offline key. Selection follows the
+last successful operation; external provider credentials are never persisted.
