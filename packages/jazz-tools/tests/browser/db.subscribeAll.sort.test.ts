@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getDbSubscriptionSource, type Db } from "../../src/runtime/db.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import {
   todos,

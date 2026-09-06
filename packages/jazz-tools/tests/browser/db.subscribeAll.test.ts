@@ -5,7 +5,7 @@ import {
   type QueryBuilder,
   type TableProxy,
 } from "../../src/runtime/db.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 
