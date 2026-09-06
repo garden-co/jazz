@@ -16,11 +16,15 @@ import {
   getTrustedReservedSession,
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
-import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
 import { REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR } from "./storage.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
+import {
+  beginNativeAccountSession,
+  attachNativeAccountSchema,
+  resolveNativeSession,
+} from "./account-session.js";
 import { serializeSchemaSource } from "../drivers/schema-wire.js";
 import {
   NativeForegroundDb,
@@ -93,28 +97,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const session = resolveNativeSession(config);
         const module = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         const factory = module.installNativeForegroundRuntime();
-        if (
-          !factory.beginAccountSession ||
-          !factory.attachAccountSchema ||
-          !factory.releaseAccountSession ||
-          !factory.refreshAccountSession
-        )
-          throw new Error(
-            "React Native accounts require a matching native account-admission build",
-          );
-        this.pendingCapability = factory.beginAccountSession(
-          JSON.stringify({
-            registry: config.accountRegistryAuthority,
-            app_id: config.appId,
-            env: config.env ?? "dev",
-            account_id: config.accountId,
-            issuer: session.issuer,
-            subject: session.user_id,
-            jwt: config.jwtToken,
-            claims: session.claims,
-            server_url: config.serverUrl ?? null,
-          }),
-        );
+        this.pendingCapability = beginNativeAccountSession(factory, config, session);
         this.foregroundFactory = factory;
         this.foregroundModule = module;
         this.ownsAdmission = true;
@@ -238,14 +221,13 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     if (this.pendingCapability) {
       const pending = this.pendingCapability;
       try {
-        this.admittedCapability = this.foregroundFactory!.attachAccountSchema!(
+        this.admittedCapability = attachNativeAccountSchema(
+          this.foregroundFactory!,
           pending,
           serializeSchemaSource(context.schema),
         );
       } finally {
-        // Schema attachment consumes the one-shot setup on success or failure.
         this.pendingCapability = null;
-        this.foregroundFactory!.releaseAccountSession!(pending);
       }
     }
     if (this.admittedCapability) {
@@ -335,16 +317,4 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 function assertNativeRelay(relay: NonNullable<ReactNativeDbConfig["nativeRelay"]>): void {
   if (!(relay.capability instanceof Uint8Array) || relay.capability.byteLength !== 32)
     throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
-}
-
-function resolveNativeSession(config: ReactNativeDbConfig) {
-  const session = resolveClientInternalSessionSync({
-    ...config,
-    trustedReservedSession: getTrustedReservedSession(config),
-  });
-  if (!session)
-    throw new Error(
-      "React Native native foreground requires an already verified jwtToken or cookieSession; native token minting is not implemented",
-    );
-  return session;
 }

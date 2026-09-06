@@ -124,7 +124,11 @@
       "types": "./dist/passkey-backup.d.ts",
       "default": "./dist/passkey-backup.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./_dev/native-account-session": {
+      "types": "./dist/_dev/native-account-session.d.ts",
+      "default": "./dist/_dev/native-account-session.js"
+    }
   },
   "publishConfig": {
     "access": "public",

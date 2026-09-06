@@ -5,8 +5,6 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
-import com.jazzrn.JazzRelayTrustedAdmission
-import android.util.Base64
 import android.os.Build
 import android.system.Os
 import android.util.Log
@@ -20,15 +18,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
 
-/**
- * Test-app-only trusted fixture. It is compiled into the development build,
- * not sourced from Metro, an intent, or an OTA update. JavaScript receives
- * only the random capability; endpoint and short-lived bearers arrive from
- * the local Edge/Core harness as launch-only native inputs. No bearer,
- * signing material, or trusted generic-admission configuration is checked in.
- */
+/** Test-app-only endpoint, lifecycle control, and receipt adapter. Account
+ * credentials and admission use the production JavaScript/native path. */
 class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
-  private var capability: ByteArray? = null
   private val diagnosticCodes = setOf(
     "fixture-metadata-failed",
     "native-admission-failed",
@@ -90,66 +82,20 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   )
   override fun getName() = "JazzDeviceFixture"
 
-  private data class PrivateSessionInputs(val endpoint: String, val bearer: String)
-
-  /** The harness is the only source of endpoint/bearer material. JavaScript
-   * never sees either value; it receives only the capability returned after
-   * the Rust private-session and credential-free schema handoff. */
-  private fun privateSessionInputs(scope: String): PrivateSessionInputs {
-    val activity = reactApplicationContext.currentActivity
-      ?: error("acceptance activity is unavailable")
-    val endpoint = activity.intent.getStringExtra("jazzDeviceEdgeEndpoint")
-      ?: error("acceptance launch did not include a local Edge endpoint")
-    val bearerKey = if (scope == "b") "jazzDeviceBearerB" else "jazzDeviceBearerA"
-    val bearer = activity.intent.getStringExtra(bearerKey)
-      ?: error("acceptance launch did not include an ephemeral bearer")
-    require(endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
-      "invalid local Edge endpoint"
-    }
-    require(bearer.length in 16..16_384 && bearer.count { it == '.' } == 2) {
-      "invalid ephemeral bearer"
-    }
-    return PrivateSessionInputs(endpoint, bearer)
-  }
-
-  private fun admitPrivateSession(scope: String): ByteArray {
-    val inputs = privateSessionInputs(scope)
-    val setup: ByteArray = JazzRelayTrustedAdmission.beginPrivateSession(
-      reactApplicationContext,
-      inputs.endpoint,
-      BuildConfig.JAZZ_DEVICE_APP_ID,
-      inputs.bearer,
-    )
-    return JazzRelayTrustedAdmission.attachCanonicalSchema(setup, BuildConfig.JAZZ_DEVICE_SCHEMA_JSON)
-  }
-
-  @ReactMethod fun admittedCapability(promise: Promise) {
+  @ReactMethod fun edgeEndpoint(promise: Promise) {
     try {
-      capability ?: admitPrivateSession("a")
-        .also { capability = it }
-      promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
+      val endpoint = reactApplicationContext.currentActivity?.intent
+        ?.getStringExtra("jazzDeviceEdgeEndpoint")
+        ?: error("acceptance launch did not include a local Edge endpoint")
+      val uri = java.net.URI(endpoint)
+      require(uri.scheme in setOf("http", "https") && !uri.host.isNullOrEmpty() &&
+        uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null) {
+        "invalid local Edge endpoint"
+      }
+      promise.resolve(endpoint)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }
 
-  @ReactMethod fun logout(promise: Promise) {
-    capability?.let(JazzRelayTrustedAdmission::revoke)
-    capability = null
-    promise.resolve(null)
-  }
-
-  /** The native fixture revokes A before it accepts harness bearer B, so stale
-   * JS capability bytes cannot cross the authenticated scope boundary. */
-  @ReactMethod fun switchAuthScope(promise: Promise) {
-    try {
-      capability?.let(JazzRelayTrustedAdmission::revoke)
-      capability = null
-      admitPrivateSession("b").also { capability = it }
-      promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
-    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
-  }
-
-  /** The host acknowledges only after its independent Core reader sees the
-   * run's write. No bearer or endpoint is exposed to JavaScript. */
   // Runs on the JS calling thread, so a later synchronous native stall cannot
   // strand this fixed marker in the asynchronous native-module queue.
   @ReactMethod(isBlockingSynchronousMethod = true)

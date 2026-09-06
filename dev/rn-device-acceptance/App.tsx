@@ -19,7 +19,7 @@ import {
   admittedNativeRelay,
   clearDeviceDiagnostic,
   deviceReceiptContext,
-  logoutNativeRelay,
+  closeNativeRelay,
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
   recordDeviceReceipt,
@@ -40,7 +40,9 @@ import {
 import { createDeviceDiagnosticTracker } from "./src/diagnostic-lifecycle";
 import { rowIdForRun } from "./src/run-marker";
 
-async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
+async function observeTrustedAdmissionLifecycleInner(
+  markFailure: (code: DeviceDiagnosticCode) => void,
+) {
   // The native fixture returns the same host-issued nonce from both launches.
   // It is also bound into every accepted device receipt, so use it to make
   // retained app data from an old install unable to satisfy this run's reopen
@@ -56,7 +58,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
     markFailure("native-admission-failed");
     const reopened = await admittedNativeRelay();
     markFailure("public-client-restart-failed");
-    await proveHighLevelForegroundRestart(reopened.capability, receipt.runNonce);
+    await proveHighLevelForegroundRestart(reopened, receipt.runNonce);
     markFailure("foreground-byte-abi-failed");
     const foregroundFactory = installNativeForegroundRuntime();
     const foregroundCodec = {
@@ -88,7 +90,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
       markFailure,
     );
     markFailure("logout-revocation-failed");
-    await logoutNativeRelay();
+    await closeNativeRelay();
     return { phase, receipt };
   }
   markFailure("native-admission-failed");
@@ -110,7 +112,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   await proveLogoutRevocation(
     admitted,
     async () => {
-      await logoutNativeRelay();
+      await closeNativeRelay();
       proveForegroundRevoked(revocableForeground, foregroundCodec.encode);
     },
     admittedNativeRelay,
@@ -118,19 +120,28 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("native-admission-failed");
   const scopeA = await admittedNativeRelay();
   markFailure("public-client-seed-failed");
-  await seedHighLevelForegroundRuntime(
-    scopeA.capability,
-    receipt.runNonce,
-    markFailure,
-    waitForNativeCoreObservation,
-    recordNativeSeedBoundary,
-  );
+  // Keep a raw foreground alive while the public client opens and closes.
+  // Public shutdown must not revoke the independently owned shared lease.
+  const rawSibling = foregroundFactory.openAttached(scopeA.capability);
+  try {
+    await seedHighLevelForegroundRuntime(
+      scopeA,
+      receipt.runNonce,
+      markFailure,
+      waitForNativeCoreObservation,
+      recordNativeSeedBoundary,
+    );
+    const tick = foregroundCodec.decode(rawSibling.execute(foregroundCodec.encode("tick")));
+    if (tick.type !== "ticked") throw new Error("public shutdown invalidated its raw sibling");
+  } finally {
+    rawSibling.execute(foregroundCodec.encode("close"));
+  }
   // The first client is now fully shut down. A new public foreground must
   // read the run-bound row through the persistent relay before the driver
   // terminates the whole app; this keeps the later restart receipt from being
   // the first proof that the seed escaped its in-memory UI preview.
   markFailure("public-client-relay-readback-failed");
-  await proveHighLevelForegroundRelayReadback(scopeA.capability, receipt.runNonce);
+  await proveHighLevelForegroundRelayReadback(scopeA, receipt.runNonce);
   markFailure("scope-isolation-failed");
   await proveForegroundScopeIsolation(
     foregroundFactory,
@@ -179,9 +190,9 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   );
   // Closing B's trusted relay before re-admitting A forces its scope owner and
   // SQLite handle to be recreated. A's row must survive that lifecycle while
-  // B's distinct native-selected path never observed it.
+  // B's account-scoped store and ownership policy never exposed it.
   markFailure("scope-reopen-failed");
-  await logoutNativeRelay();
+  await closeNativeRelay();
   const reopenedScopeA = await admittedNativeRelay();
   await proveForegroundScopeIsolation(
     foregroundFactory,
@@ -194,8 +205,16 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
     markFailure,
   );
   markFailure("logout-revocation-failed");
-  await logoutNativeRelay();
+  await closeNativeRelay();
   return { phase, receipt };
+}
+
+async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
+  try {
+    return await observeTrustedAdmissionLifecycleInner(markFailure);
+  } finally {
+    await closeNativeRelay();
+  }
 }
 
 export default function App() {

@@ -1,3 +1,4 @@
+import { installTrustedReservedSessionEntropy } from "../runtime/client-session.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
 import { formatAuthSecret, parseAuthSecret } from "../runtime/auth-secret-codec.js";
@@ -23,6 +24,7 @@ export async function createAccountManager(config: AccountManagerConfig) {
   }
   if (!config.store)
     throw new Error("React Native accounts require an atomic OS-protected AccountStore");
+  installTrustedReservedSessionEntropy(generateSecret);
   return prepareAccountManager({
     appId: config.appId,
     registry,

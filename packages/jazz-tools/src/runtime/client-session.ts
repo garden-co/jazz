@@ -43,11 +43,25 @@ const trustedReservedSessionTokenValues = new Map<
   { account_id?: string; issuer: string; user_id: string; authMode: Session["authMode"] }
 >();
 
+let hostSessionEntropy: (() => Uint8Array) | undefined;
+
+/** @internal Native hosts supply their existing OS-backed entropy capability. */
+export function installTrustedReservedSessionEntropy(source: () => Uint8Array): void {
+  hostSessionEntropy = source;
+}
+
 function newTrustedReservedSessionToken(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   if (globalThis.crypto?.getRandomValues) {
     const bytes = new Uint8Array(16);
     globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  if (hostSessionEntropy) {
+    const bytes = hostSessionEntropy();
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 16) {
+      throw new Error("Native session entropy returned fewer than 128 bits");
+    }
     return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
   throw new Error("Trusted reserved sessions require a cryptographically secure runtime");
