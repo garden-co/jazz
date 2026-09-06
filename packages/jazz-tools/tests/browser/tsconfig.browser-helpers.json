@@ -11,6 +11,8 @@
     "browser-commands.ts",
     "testing-server.ts",
     "topology-harness.ts",
-    "browser-helpers.typecheck.ts"
+    "browser-helpers.typecheck.ts",
+    "account-fixtures.ts",
+    "support.ts"
   ]
 }

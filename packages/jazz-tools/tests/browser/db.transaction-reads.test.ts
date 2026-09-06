@@ -331,13 +331,16 @@ describe("db exclusive transaction reads browser integration", () => {
       serverUrl,
       adminSecret,
       schema: app.wasmSchema,
-      permissions: {},
+      permissions: schema.definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.always(),
+        policy.todos.allowInsert.always(),
+        policy.todos.allowUpdate.always(),
+      ]),
     });
 
     const writer = await createDb({
       appId,
       serverUrl,
-      adminSecret,
       driver: { type: "memory" },
     });
     const reader = await createDb({
