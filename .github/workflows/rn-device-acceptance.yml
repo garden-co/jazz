@@ -10,11 +10,11 @@ on:
       - "crates/jazz-native-relay/**"
       - "crates/jazz/**"
       - "crates/groove/**"
-      - "packages/jazz-tools/src/accounts/**"
-      - "packages/jazz-tools/src/expo/**"
-      - "packages/jazz-tools/src/_dev/native-account-session.ts"
-      - "packages/jazz-tools/src/runtime/**"
-      - "packages/jazz-tools/src/react-native/**"
+      - "crates/idb-tree/**"
+      - "crates/jazz-compression/**"
+      - "crates/jazz-storage-sqlite/**"
+      - "crates/jazz-native-transport/**"
+      - "packages/jazz-tools/src/**"
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -94,7 +94,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/groove/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz-compression/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-native-transport/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -182,7 +182,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/groove/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz-compression/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-native-transport/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .cache/android-device-acceptance
