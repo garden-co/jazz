@@ -1,6 +1,6 @@
 import { createJazzContext, Db, type JazzContext } from "../backend/index.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
 import { ANONYMOUS_JWT_ISSUER } from "../runtime/client-session.js";
-import { testAccountId } from "../runtime/testing/account-fixtures.js";
 import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -68,6 +68,13 @@ export type TestDb = Db & {
  * policy actors receive a stable synthetic account so rejected writes reach
  * the policy gate instead of the durable-author precondition.
  */
+function policyTestAccountId(session: Session): string {
+  return localFirstAccountId(
+    "jazz-runtime-test-account-fixtures",
+    JSON.stringify([session.issuer, session.user_id]),
+  );
+}
+
 function withPolicyTestAccount(session: Session): Session {
   if (
     session.account_id !== undefined ||
@@ -77,7 +84,7 @@ function withPolicyTestAccount(session: Session): Session {
     return session;
   return {
     ...session,
-    account_id: testAccountId(JSON.stringify([session.issuer, session.user_id])),
+    account_id: policyTestAccountId(session),
   };
 }
 
