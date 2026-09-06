@@ -438,6 +438,7 @@ pub(crate) mod legacy_test_future {
 pub use groove;
 
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
+pub mod account_registry;
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
