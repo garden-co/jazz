@@ -17,6 +17,7 @@ import { openConfig } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -440,7 +441,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   it("selects and filters public provenance authors as structured records", async () => {
     const { NapiDb } = await loadNapiModule();
     const authorSeed = "jazz-napi-public-provenance:author";
-    const author = { account: null, identity: { issuer: "urn:jazz:test", subject: authorSeed } };
+    const author = {
+      account: testAccountId(authorSeed),
+      identity: { issuer: "urn:jazz:test", subject: authorSeed },
+    };
     const provenanceApp = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -479,7 +483,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
             type: "Row",
             value: expect.objectContaining({
               values: [
-                { type: "Null" },
+                { type: "Uuid", value: author.account },
                 expect.objectContaining({
                   type: "Row",
                   value: expect.objectContaining({
@@ -496,7 +500,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
             type: "Row",
             value: expect.objectContaining({
               values: [
-                { type: "Null" },
+                { type: "Uuid", value: author.account },
                 expect.objectContaining({
                   type: "Row",
                   value: expect.objectContaining({
@@ -2398,10 +2402,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     }
   });
 });
-
-function testAuthorBytes(seed: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
-}
 
 function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;

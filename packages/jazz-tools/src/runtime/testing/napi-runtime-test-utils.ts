@@ -3,6 +3,7 @@ import { onTestFinished } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
+import { testAuthorBytes } from "./account-fixtures.js";
 
 type NapiModule = typeof import("jazz-napi");
 export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };
@@ -109,10 +110,6 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   registerRuntimeCleanup(runtime);
 
   return runtime;
-}
-
-function testAuthorBytes(seed: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
 }
 
 function deterministicBytes(seed: string): Uint8Array {

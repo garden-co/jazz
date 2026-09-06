@@ -43,8 +43,27 @@ describe("React Native public mutations through the real foreground C ABI", () =
       ).toHaveLength(1);
       expect(await db.all(app.documents.where({ $createdBy: { ne: author } }))).toEqual([]);
       expect(
-        await db.all(app.documents.where({ $createdBy: { ne: { ...author, account: null } } })),
+        await db.all(
+          app.documents.where({
+            $createdBy: { ne: { ...author, account: "11111111-1111-4111-8111-111111111111" } },
+          }),
+        ),
       ).toHaveLength(1);
+      // Row authors are durable, admitted identities. Accountless sessions can
+      // read, but cannot be represented as a `$createdBy` predicate.
+      await expect(
+        db.all(
+          app.documents.where({
+            $createdBy: {
+              ne: {
+                ...author,
+                // @ts-expect-error Persisted row authors always have an account.
+                account: null,
+              },
+            },
+          }),
+        ),
+      ).rejects.toThrow('Invalid structured author condition for "$createdBy"');
       await db.upsert(app.documents, row.id, { done: true }).wait({ tier: "local" });
       expect(await db.one(app.documents.where({ id: row.id }))).toEqual({
         ...row,

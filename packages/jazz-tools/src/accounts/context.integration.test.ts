@@ -16,6 +16,13 @@ describe("account context authority", () => {
         $createdBy: { account: config.account.id, identity: config.account.identity },
       });
       const author = { account: config.account.id, identity: config.account.identity };
+      const otherAuthor = {
+        ...author,
+        account:
+          author.account === "00000000-0000-4000-8000-000000000001"
+            ? "00000000-0000-4000-8000-000000000002"
+            : "00000000-0000-4000-8000-000000000001",
+      };
       expect(await db.all(app.notes.where({ $createdBy: author }))).toHaveLength(1);
       expect(await db.all(app.notes.where({ "$createdBy.account": author.account }))).toHaveLength(
         1,
@@ -24,9 +31,14 @@ describe("account context authority", () => {
         await db.all(app.notes.where({ "$createdBy.identity": author.identity })),
       ).toHaveLength(1);
       expect(await db.all(app.notes.where({ $createdBy: { ne: author } }))).toEqual([]);
-      expect(
-        await db.all(app.notes.where({ $createdBy: { ne: { ...author, account: null } } })),
-      ).toHaveLength(1);
+      const accountlessAuthor = { ...author, account: null };
+      await expect(async () =>
+        db.all(
+          // @ts-expect-error Durable row-author conditions require an account.
+          app.notes.where({ $createdBy: { ne: accountlessAuthor } }),
+        ),
+      ).rejects.toThrow('Invalid structured author condition for "$createdBy"');
+      expect(await db.all(app.notes.where({ $createdBy: { ne: otherAuthor } }))).toHaveLength(1);
       expect(
         await db.all(
           app.notes.where({
@@ -38,7 +50,7 @@ describe("account context authority", () => {
         await db.all(
           app.union([
             app.notes.where({ $createdBy: author }),
-            app.notes.where({ $createdBy: { ...author, account: null } }),
+            app.notes.where({ $createdBy: otherAuthor }),
           ]),
         ),
       ).toHaveLength(1);

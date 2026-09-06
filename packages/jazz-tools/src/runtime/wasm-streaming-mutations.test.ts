@@ -13,6 +13,7 @@ import {
   hasJazzWasmBuild,
   loadWasmModuleForTest,
 } from "./testing/wasm-runtime-test-utils.js";
+import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 
 const app = s.defineApp({
   todos: s.table({
@@ -108,9 +109,7 @@ async function createBrowserWasmFixture() {
   const wasmModule = await loadWasmModuleForTest();
   const node = new Uint8Array(16);
   node[0] = 1;
-  const author = new TextEncoder().encode(
-    JSON.stringify(["urn:jazz:test", "wasm-streaming-abort:author"]),
-  );
+  const author = testAuthorBytes("wasm-streaming-abort:author");
   const pageStore = createTestPageStore();
   const db = await wasmModule.WasmDb.openBrowser(
     pageStore.pageStore,
@@ -341,9 +340,10 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
 
   it("selects and filters public provenance authors as structured records", async () => {
     const appId = "wasm-public-provenance";
+    const authorSeed = `${appId}:test:default:author`;
     const author = {
-      account: null,
-      identity: { issuer: "urn:jazz:test", subject: `${appId}:test:default:author` },
+      account: testAccountId(authorSeed),
+      identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
     const runtime = await createWasmRuntime(app.wasmSchema, { appId });
     const inserted = runtime.insert("todos", {
@@ -374,7 +374,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
             type: "Row",
             value: expect.objectContaining({
               values: [
-                { type: "Null" },
+                { type: "Uuid", value: author.account },
                 expect.objectContaining({
                   type: "Row",
                   value: expect.objectContaining({
@@ -391,7 +391,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
             type: "Row",
             value: expect.objectContaining({
               values: [
-                { type: "Null" },
+                { type: "Uuid", value: author.account },
                 expect.objectContaining({
                   type: "Row",
                   value: expect.objectContaining({
