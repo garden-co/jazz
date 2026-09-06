@@ -16,7 +16,7 @@ export const CreateChatRedirect = () => {
     [db],
   );
 
-  const userId = session?.user ?? null;
+  const userId = session?.user.account ?? null;
   const myProfile = useMyProfile();
 
   useEffect(() => {

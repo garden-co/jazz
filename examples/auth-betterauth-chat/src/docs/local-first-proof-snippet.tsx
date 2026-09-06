@@ -1,95 +1,39 @@
-import { useEffect, useMemo, useState } from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
+import { createAccountManager } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
 import { authClient, getJwtFromBetterAuth } from "../lib/auth-client";
 
-function YourApp() {
-  return null;
-}
+// #region local-first-config-resolution
+const config = {
+  appId: "my-app",
+  serverUrl: "https://your-jazz-server.example.com",
+};
+export async function openLocalFirstApp() {
+  const accounts = await createAccountManager(config);
+  let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
+    ...config,
+    account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+  });
+  // #endregion local-first-config-resolution
 
-// #region local-first-proof-signup
-function SignUpButton() {
-  const db = useDb();
-
-  async function handleSignUp(email: string, password: string) {
-    // Generate proof of ownership of the current Jazz identity
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "betterauth-signup",
-    });
-
-    if (!proofToken) {
-      throw new Error("Sign up requires an active Jazz session");
-    }
-
-    const res = await authClient.signUp.email({
-      email,
-      name: email,
-      password,
-      proofToken,
-    } as Parameters<typeof authClient.signUp.email>[0]);
-
-    if (res.error) {
-      throw new Error(res.error.message);
+  // #region local-first-proof-signup
+  async function signUp(email: string, password: string) {
+    const result = await authClient.signUp.email({ email, name: email, password });
+    if (result.error) throw new Error(result.error.message);
+    await client?.shutdown({ waitForSync: true });
+    client = undefined;
+    try {
+      await accounts.linkJWT({
+        getToken: async () => {
+          const token = await getJwtFromBetterAuth();
+          if (!token) throw new Error("Missing provider token");
+          return token;
+        },
+      });
+    } finally {
+      const account = accounts.getLoggedIn();
+      if (account) client = await createJazzClient({ ...config, account });
     }
   }
-
-  return <button onClick={() => handleSignUp("user@example.com", "password")}>Sign Up</button>;
+  // #endregion local-first-proof-signup
+  return { accounts, signUp, getClient: () => client };
 }
-// #endregion local-first-proof-signup
-
-// #region local-first-config-resolution
-function useBetterAuthJWT() {
-  const { data, isPending } = authClient.useSession();
-  const [jwt, setJwt] = useState<string | null>(null);
-  const [isFetching, setIsFetching] = useState(false);
-
-  useEffect(() => {
-    if (isPending) return;
-    if (!data?.session) {
-      setJwt(null);
-      return;
-    }
-    setIsFetching(true);
-    void getJwtFromBetterAuth().then((token) => {
-      setJwt(token ?? null);
-      setIsFetching(false);
-    });
-  }, [isPending, data?.session?.id]);
-
-  return {
-    isLoading: isPending || isFetching,
-    jwt,
-    getRefreshedJWT: () => getJwtFromBetterAuth(),
-  };
-}
-
-function App() {
-  const betterAuth = useBetterAuthJWT();
-  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
-
-  const config = useMemo<DbConfig>(() => {
-    const shared = {
-      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-    };
-    return betterAuth.jwt
-      ? { ...shared, jwtToken: betterAuth.jwt }
-      : { ...shared, secret: localFirstSecret ?? undefined };
-  }, [betterAuth.jwt, localFirstSecret]);
-
-  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) return <p>Loading auth…</p>;
-
-  return (
-    <JazzProvider
-      config={config}
-      onJWTExpired={() => betterAuth.getRefreshedJWT()}
-      fallback={<p>Loading Jazz DB…</p>}
-    >
-      <YourApp />
-    </JazzProvider>
-  );
-}
-// #endregion local-first-config-resolution
-
-export { App, SignUpButton };

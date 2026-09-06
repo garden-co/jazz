@@ -1,21 +1,28 @@
 import type { Db } from "jazz-tools";
-import { BrowserAuthSecretStore } from "jazz-tools";
 import { authClient, type AuthSession } from "./auth-client.js";
 import { mountTodoWidget } from "./todo-widget.js";
 import { mountAuthBackup } from "./auth-backup.js";
 import { mountSignInForm } from "./sign-in-form.js";
 import { mountSignUpForm } from "./sign-up-form.js";
+import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import { getToken } from "./accounts.js";
 
 type View = "dashboard" | "signin" | "signup";
 
 export interface AppHandle {
-  setDb(db: Db): void;
+  setDb(db: Db | undefined): void;
   destroy(): void;
 }
 
-export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
-  let db = initialDb;
+export function mountApp(
+  root: HTMLElement,
+  initialDb: Db,
+  lifecycle: JazzLifecycle,
+  initialProviderLinkError?: Error,
+): AppHandle {
+  let db: Db | undefined = initialDb;
   let view: View = "dashboard";
+  let providerLinkError = initialProviderLinkError;
   let unsubscribeTodos: (() => void) | null = null;
 
   const sessionAtom = authClient.useSession;
@@ -31,9 +38,27 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
   }
 
   async function handleSignOut() {
-    await BrowserAuthSecretStore.clearSecret();
-    await authClient.signOut();
+    await lifecycle.transition(async (manager) => {
+      await authClient.signOut();
+      manager.logout();
+      manager.createLocalFirst();
+    });
     setView("dashboard");
+  }
+
+  function reportProviderLinkFailure(cause: unknown) {
+    providerLinkError = cause instanceof Error ? cause : new Error(String(cause));
+    render();
+  }
+
+  async function retryLink() {
+    try {
+      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+      providerLinkError = undefined;
+    } catch (cause) {
+      providerLinkError = cause instanceof Error ? cause : new Error(String(cause));
+    }
+    render();
   }
 
   function render() {
@@ -41,6 +66,11 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
     unsubscribeTodos = null;
 
     if (session.isPending) {
+      root.innerHTML = `<div>Loading…</div>`;
+      return;
+    }
+
+    if (!db) {
       root.innerHTML = `<div>Loading…</div>`;
       return;
     }
@@ -54,8 +84,11 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
           <div data-slot="signup"></div>
         </main>
       `;
-      mountSignUpForm(root.querySelector<HTMLElement>('[data-slot="signup"]')!, db, () =>
-        setView("signin"),
+      mountSignUpForm(
+        root.querySelector<HTMLElement>('[data-slot="signup"]')!,
+        lifecycle,
+        () => setView("signin"),
+        reportProviderLinkFailure,
       );
       return;
     }
@@ -67,7 +100,7 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
           <div data-slot="signin"></div>
         </main>
       `;
-      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!, () =>
+      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!, lifecycle, () =>
         setView("signup"),
       );
       return;
@@ -91,12 +124,21 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
             }
           </div>
         </header>
+        ${
+          providerLinkError
+            ? `<aside class="alert-error" role="alert">
+                 Your signed-in account has not been linked to this local data yet. ${escapeHtml(providerLinkError.message)}
+                 <button type="button" data-action="retry-link">Retry linking</button>
+               </aside>`
+            : ""
+        }
         <section data-slot="todo"></section>
         ${signedIn ? "" : `<section data-slot="auth-backup"></section>`}
       </main>
     `;
 
     root.querySelector('[data-action="signout"]')?.addEventListener("click", handleSignOut);
+    root.querySelector('[data-action="retry-link"]')?.addEventListener("click", retryLink);
     root
       .querySelector('[data-action="signup"]')
       ?.addEventListener("click", () => setView("signup"));
@@ -107,7 +149,7 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
     unsubscribeTodos = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
 
     const authBackupSlot = root.querySelector<HTMLElement>('[data-slot="auth-backup"]');
-    if (authBackupSlot) mountAuthBackup(authBackupSlot);
+    if (authBackupSlot) mountAuthBackup(authBackupSlot, lifecycle);
   }
 
   render();

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { getDb } from "jazz-tools/svelte";
   import { authClient } from "$lib/auth-client";
+  import { credential } from "$lib/accounts";
+  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
 
-  const db = getDb();
+  const lifecycle = getJazzLifecycle();
+
 
   let error = $state<string | null>(null);
 
@@ -15,28 +17,22 @@
     const email = formData.get("email") as string;
     const password = formData.get("password") as string;
 
-    // Sign a short-lived token bound to the browser's current anonymous
-    // Jazz identity. The server's BetterAuth hook verifies it and reuses
-    // the proved user id when creating the BetterAuth user, so todos
-    // created anonymously carry over to the new account.
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "sveltekit-localfirst-signup",
-    });
-    if (!proofToken) {
-      error = "Sign up requires an active Jazz session";
-      return;
-    }
-
     const res = await authClient.signUp.email({
       email,
       name,
       password,
-      proofToken,
     } as Parameters<typeof authClient.signUp.email>[0]);
 
     if (res.error) {
       error = res.error.message ?? "Sign-up failed";
+      return;
+    }
+
+    try {
+      await lifecycle.transition((manager) => manager.linkJWT({ getToken: credential }));
+    } catch (cause) {
+      lifecycle.reportLinkFailure(cause);
+      error = cause instanceof Error ? cause.message : "Sign-up failed";
       return;
     }
 

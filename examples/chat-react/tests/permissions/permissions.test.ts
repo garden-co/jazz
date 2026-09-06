@@ -1,4 +1,3 @@
-import { userIdentity } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../schema.js";
@@ -6,12 +5,18 @@ import permissions from "../../permissions.js";
 
 let testApp: PolicyTestApp;
 const issuer = "https://chat.example";
-const alice = userIdentity(issuer, "alice");
-const bob = userIdentity(issuer, "bob");
-const carol = userIdentity(issuer, "carol");
+const alice = "00000000-0000-4000-8000-000000000001";
+const bob = "00000000-0000-4000-8000-000000000002";
+const carol = "00000000-0000-4000-8000-000000000003";
 
 function externalSession(user_id: string, claims: Record<string, unknown> = {}) {
-  return { issuer, user_id, claims, authMode: "external" as const };
+  return {
+    issuer,
+    user_id,
+    account_id: ({ alice, bob, carol } as Record<string, string>)[user_id],
+    claims,
+    authMode: "external" as const,
+  };
 }
 
 beforeEach(async () => {
@@ -110,10 +115,10 @@ describe("chat permissions", () => {
     );
   });
 
-  it("does not treat a raw subject fixture as the authenticated identity", async () => {
+  it("does not infer account membership from the provider subject", async () => {
     const privateChat = await testApp.seed((db) =>
       db.insert(app.chats, {
-        name: "Canonical identities only",
+        name: "Account membership only",
         isPublic: false,
         joinCode: "invite-canonical",
       }),
@@ -121,13 +126,72 @@ describe("chat permissions", () => {
     await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
-        userId: "alice",
+        userId: carol,
         joinCode: "invite-canonical",
       }),
     );
 
     const aliceDb = testApp.as(externalSession("alice"));
     await expect(aliceDb.all(app.chats.where({ id: privateChat.id }))).resolves.toEqual([]);
+  });
+
+  it("requires the private invite code before a nonmember can join", async () => {
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Invite controlled",
+        isPublic: false,
+        joinCode: "synthetic-secret-invite",
+      }),
+    );
+    const bobDb = testApp.as(externalSession("bob"));
+    const withoutCode = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "No invitation issued",
+        isPublic: false,
+      }),
+    );
+    await bobDb.expectDenied((db) =>
+      db.insert(app.chatMembers, {
+        chatId: withoutCode.id,
+        userId: bob,
+      }),
+    );
+    await bobDb.expectDenied((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: bob,
+        joinCode: "wrong-code",
+      }),
+    );
+    await bobDb
+      .insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: bob,
+        joinCode: "synthetic-secret-invite",
+      })
+      .wait({ tier: "edge" });
+    await expect(bobDb.all(app.chats.where({ id: chat.id }))).resolves.toEqual([
+      expect.objectContaining({ id: chat.id }),
+    ]);
+  });
+
+  it("keeps membership and ownership when a linked identity uses the same account", async () => {
+    const aliceDb = testApp.as(externalSession("alice"));
+    const profile = await aliceDb
+      .insert(app.profiles, { userId: alice, name: "Alice" })
+      .wait({ tier: "edge" });
+    const linked = testApp.as({
+      issuer: "https://linked.example",
+      user_id: "different-subject",
+      account_id: alice,
+      claims: {},
+      authMode: "external",
+    });
+    await linked.update(app.profiles, profile.id, { name: "Linked Alice" }).wait({ tier: "edge" });
+    await expect(linked.all(app.profiles.where({ id: profile.id }))).resolves.toEqual([
+      expect.objectContaining({ name: "Linked Alice", userId: alice }),
+    ]);
+    await linked.expectDenied((db) => db.update(app.profiles, profile.id, { userId: bob }));
   });
 
   it("allows message inserts only for chat members", async () => {

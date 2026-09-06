@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ describe("Chat App E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      secret?: string;
+      account?: import("jazz-tools").AccountHandle;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -144,7 +144,9 @@ describe("Chat App E2E", () => {
     const appId =
       config.appId ?? `test-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
+    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+
+    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     // Wait for the app to initialise and redirect to a chat
     await waitFor(
@@ -194,7 +196,6 @@ describe("Chat App E2E", () => {
 
   it("creates a public chat on initial load with seed message", async () => {
     const el = await mountApp();
-
     await waitFor(
       () => el.textContent?.includes("Hello world") ?? false,
       10000,
@@ -453,7 +454,7 @@ describe("Chat App E2E", () => {
     const aliceContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`chat-access-user-a-${Date.now()}`),
+      account: await testAccount(`chat-access-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -538,7 +539,7 @@ describe("Chat App E2E", () => {
     const bobContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`chat-access-user-b-${Date.now()}`),
+      account: await testAccount(`chat-access-user-b-${Date.now()}`),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers

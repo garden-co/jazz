@@ -28,7 +28,7 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const db = useDb();
   const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const sessionUserId = session?.user.account ?? null;
 
   const { data: rows = [] } = useAll(
     app.messages

@@ -6,17 +6,20 @@ import { useRouter } from "next/navigation";
 import { TodoWidget } from "@/components/todo-widget";
 import { AuthBackup } from "@/components/auth-backup";
 import { authClient } from "@/lib/auth-client";
-import { useLocalFirstAuth } from "jazz-tools/react";
+import { useJazzLifecycle } from "@/components/jazz-provider";
 
 function HeaderActions() {
   const router = useRouter();
+  const lifecycle = useJazzLifecycle();
   const { data: authSession } = authClient.useSession();
-  const auth = useLocalFirstAuth();
 
   if (authSession?.session) {
     async function handleSignOut() {
-      await authClient.signOut();
-      await auth.signOut();
+      await lifecycle.transition(async (manager) => {
+        await authClient.signOut();
+        manager.logout();
+        manager.createLocalFirst();
+      });
       router.push("/");
     }
 

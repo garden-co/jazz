@@ -1,18 +1,19 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { LocalFirstAuth } from "jazz-tools/svelte";
+  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
   import TodoWidget from "$lib/TodoWidget.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
-  // Auto-syncs with the layout's LocalFirstAuth instance via the shared
-  // per-store notifier, so signOut here clears the secret everywhere.
-  const auth = new LocalFirstAuth();
+  const lifecycle = getJazzLifecycle();
 
   async function handleSignOut() {
-    await auth.signOut();
-    await authClient.signOut();
+    await lifecycle.transition(async (manager) => {
+      await authClient.signOut();
+      manager.logout();
+      manager.createLocalFirst();
+    });
     await goto("/");
   }
 </script>

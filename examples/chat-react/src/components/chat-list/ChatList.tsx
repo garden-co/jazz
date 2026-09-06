@@ -11,7 +11,7 @@ import { DurabilityTier } from "jazz-tools";
 export const ChatList = () => {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user ?? null;
+  const userId = session?.user.account ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "edge" : "local",
   };
@@ -19,7 +19,7 @@ export const ChatList = () => {
   const myProfile = useMyProfile();
 
   const { data: memberships = [] } = useAll(
-    app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true }),
+    userId ? app.chatMembers.where({ userId }).include({ chat: true }) : undefined,
   );
 
   const createPublicChat = async () => {

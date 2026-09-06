@@ -27,11 +27,11 @@ export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
     /^(\p{Extended_Pictographic}|\p{Emoji_Component}|\p{Emoji_Presentation}|\s)+$/u;
 
   const addReaction = (emoji: string) => {
-    if (!session?.user) return;
+    if (!session?.user.account) return;
     fireAndReport(
       db.insert(app.reactions, {
         messageId,
-        userId: session.user,
+        userId: session.user.account,
         emoji,
       }),
       "failed to add reaction",

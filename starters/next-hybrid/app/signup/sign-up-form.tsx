@@ -2,35 +2,32 @@
 
 import Image from "next/image";
 import { useActionState } from "react";
-import { useDb } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
+import { getToken } from "@/lib/accounts";
+import { useJazzLifecycle } from "@/components/jazz-provider";
 
 export function SignUpForm() {
-  const db = useDb();
+  const lifecycle = useJazzLifecycle();
 
   async function signUpAction(_prev: string | null, formData: FormData): Promise<string | null> {
     const name = formData.get("name") as string;
     const email = formData.get("email") as string;
     const password = formData.get("password") as string;
 
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "next-localfirst-signup",
-    });
-
-    if (!proofToken) {
-      return "Sign up requires an active Jazz session";
-    }
-
     const { error } = await authClient.signUp.email({
       email,
       name,
       password,
-      proofToken,
     } as Parameters<typeof authClient.signUp.email>[0]);
 
     if (error) {
       return error.message ?? "Sign-up failed";
+    }
+    try {
+      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+    } catch (cause) {
+      lifecycle.reportLinkFailure(cause);
+      return cause instanceof Error ? cause.message : "Sign-up failed";
     }
 
     window.location.assign("/");

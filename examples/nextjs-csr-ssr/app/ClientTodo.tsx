@@ -2,25 +2,40 @@
 
 import { useState, useEffect } from "react";
 import { app } from "../schema";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { createAccountManager, type AccountHandle } from "jazz-tools";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
 export default function ClientTodo() {
-  const [secret, setSecret] = useState("");
+  const [account, setAccount] = useState<AccountHandle>();
+  const [error, setError] = useState<string>();
   const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 
   useEffect(() => {
-    BrowserAuthSecretStore.getOrCreateSecret({ appId }).then(setSecret);
+    let cancelled = false;
+    void createAccountManager({
+      appId,
+      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+    })
+      .then((accounts) => {
+        if (!cancelled) setAccount(accounts.getLoggedIn() ?? accounts.createLocalFirst());
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [appId]);
 
-  if (!secret) return null;
+  if (error) return <p role="alert">{error}</p>;
+  if (!account) return <p>Loading account…</p>;
 
   return (
     <JazzProvider
       config={{
         appId,
         serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-        secret,
+        account,
       }}
     >
       <TodoForm />

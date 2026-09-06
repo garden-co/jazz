@@ -1,6 +1,10 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
+  import { accounts, credential } from "$lib/accounts";
+  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+
+  const lifecycle = getJazzLifecycle();
 
   let error = $state<string | null>(null);
 
@@ -14,6 +18,12 @@
     const res = await authClient.signIn.email({ email, password });
     if (res.error) {
       error = res.error.message ?? "Sign-in failed";
+      return;
+    }
+    try {
+      await lifecycle.transition((manager) => manager.loginJWT({ getToken: credential }));
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : "Sign-in failed";
       return;
     }
     // Refresh the reactive session store so the layout observes
