@@ -43,6 +43,7 @@ export async function prepareAccountManager(options: {
   registry: string;
   store: AccountStore;
   mintToken(secret: string, audience: string): string;
+  generateSecret?(): string;
   fetch?: typeof fetch;
 }) {
   const stored = decode(await options.store.read());
@@ -74,6 +75,7 @@ export async function prepareAccountManager(options: {
     localFirst: localFirstFactory({
       appId: options.appId,
       mintToken: options.mintToken,
+      generateSecret: options.generateSecret,
       retainSecret(secret) {
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;

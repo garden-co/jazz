@@ -36,3 +36,13 @@ export {
 export { REACT_NATIVE_UNSUPPORTED_ERROR } from "./native-foreground-db.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
+
+export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
+export type {
+  AccountHandle,
+  AccountIdentity,
+  AccountSnapshot,
+  AccountManager,
+} from "../accounts/state.js";
+export type { AccountStore } from "../accounts/persistence.js";
+export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";

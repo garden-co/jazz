@@ -385,12 +385,22 @@ std::vector<uint8_t> copyForegroundCommand(Runtime &runtime, const Value &value)
   return std::vector<uint8_t>(begin, begin + length);
 }
 
+class NativeResponseOwner final {
+ public:
+  explicit NativeResponseOwner(jazz_native_relay_bytes *bytes) noexcept : bytes_(bytes) {}
+  ~NativeResponseOwner() { jazz_native_relay_bytes_free(bytes_); }
+  NativeResponseOwner(const NativeResponseOwner &) = delete;
+  NativeResponseOwner &operator=(const NativeResponseOwner &) = delete;
+ private:
+  jazz_native_relay_bytes *bytes_;
+};
+
 Value foregroundResponse(Runtime &runtime, jazz_native_relay_bytes *response) {
+  NativeResponseOwner ownership(response);
   std::vector<uint8_t> bytes;
   if (response->len != 0) {
     bytes.assign(response->data, response->data + response->len);
   }
-  jazz_native_relay_bytes_free(response);
   auto arrayBuffer = ArrayBuffer(runtime, std::make_shared<VectorMutableBuffer>(std::move(bytes)));
   auto uint8Array = runtime.global().getPropertyAsFunction(runtime, "Uint8Array");
   return uint8Array.callAsConstructor(runtime, std::move(arrayBuffer));
@@ -571,6 +581,48 @@ class ForegroundFactory final : public HostObject {
     if (property == "abiVersion") {
       return Value(jazz_native_relay_abi_version());
     }
+    if (property == "accountSecret") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "accountSecret"), 0,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *, size_t count) {
+            if (count != 0) throw JSError(runtime, "Jazz accountSecret takes no arguments");
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            jazz_native_relay_bytes output{nullptr, 0};
+            const auto status = jazz_native_relay_account_secret(&output);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "accountSecret");
+            return foregroundResponse(runtime, &output);
+          });
+    }
+    if (property == "mintLocalFirstToken") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "mintLocalFirstToken"), 4,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != 4 || !args[1].isString() || !args[2].isNumber() || !args[3].isNumber()) {
+              throw JSError(runtime, "Jazz local-first mint requires seed, audience, TTL, and timestamp");
+            }
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            const auto seed = copyForegroundCommand(runtime, args[0]);
+            const auto audience = args[1].asString(runtime).utf8(runtime);
+            const auto ttl = args[2].asNumber();
+            const auto now = args[3].asNumber();
+            constexpr double maxSafeInteger = 9007199254740991.0;
+            if (seed.size() != 32 || !std::isfinite(ttl) || ttl <= 0 || ttl > maxSafeInteger ||
+                std::floor(ttl) != ttl || !std::isfinite(now) || now < 0 || now > maxSafeInteger ||
+                std::floor(now) != now) {
+              throw JSError(runtime, "Jazz local-first mint arguments are invalid");
+            }
+            jazz_native_relay_bytes output{nullptr, 0};
+            const auto status = jazz_native_relay_mint_local_first_token(
+                seed.data(), seed.size(), reinterpret_cast<const uint8_t *>(audience.data()),
+                audience.size(), static_cast<uint64_t>(ttl), static_cast<uint64_t>(now), &output);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "mintLocalFirstToken");
+            NativeResponseOwner ownership(&output);
+            const std::string token(reinterpret_cast<const char *>(output.data), output.len);
+            return Value(facebook::jsi::String::createFromUtf8(runtime, token));
+          });
+    }
     if (property == "openAttached") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "openAttached"), 1,
@@ -605,7 +657,9 @@ class ForegroundFactory final : public HostObject {
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(2);
+    names.reserve(4);
+    names.emplace_back(PropNameID::forAscii(runtime, "accountSecret"));
+    names.emplace_back(PropNameID::forAscii(runtime, "mintLocalFirstToken"));
     names.emplace_back(PropNameID::forAscii(runtime, "abiVersion"));
     names.emplace_back(PropNameID::forAscii(runtime, "openAttached"));
     return names;

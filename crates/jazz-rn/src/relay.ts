@@ -30,6 +30,9 @@ function requireNativeRelay() {
 export type NativeForegroundRuntimeFactory = {
   /** Must match the enclosing native relay ABI before a runtime is opened. */
   readonly abiVersion: number;
+  /** OS entropy and shared Rust signing; neither opens a database. */
+  accountSecret?(): Uint8Array;
+  mintLocalFirstToken?(seed: Uint8Array, audience: string, ttlSeconds: number, nowSeconds: number): string;
   /**
    * Create one memory-only foreground runtime for an already admitted scope.
    * The returned JSI HostObject is consumed only by Jazz's internal native
@@ -230,6 +233,8 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
   const installed = factory as NativeForegroundRuntimeFactory;
   return {
     abiVersion: installed.abiVersion,
+    accountSecret: typeof installed.accountSecret === 'function' ? installed.accountSecret.bind(installed) : undefined,
+    mintLocalFirstToken: typeof installed.mintLocalFirstToken === 'function' ? installed.mintLocalFirstToken.bind(installed) : undefined,
     openAttached(capability: Uint8Array): NativeForegroundRuntime {
       // This is not the authorization check--the native host still validates
       // capability admission and copies its bytes before queuing work. It does
