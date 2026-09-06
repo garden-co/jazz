@@ -7,6 +7,7 @@
  * timeouts.
  */
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -49,10 +50,19 @@ async function wasmFingerprint(root) {
     throw new Error("WASM module lacks a native artifact fingerprint");
   return actual;
 }
+function napiFingerprints(root) {
+  const pointer = join(root, "crates/jazz-napi/native-binding.pointer.cjs");
+  const { nativeBinding, expectedNativeArtifactFingerprint } = createRequire(pointer)(pointer);
+  return {
+    actual: nativeBinding.nativeArtifactFingerprint(),
+    expected: expectedNativeArtifactFingerprint,
+  };
+}
 
 export async function verifyStarterE2EArtifacts(
   root = repositoryRoot,
   loadWasmFingerprint = wasmFingerprint,
+  loadNapiFingerprints = napiFingerprints,
 ) {
   const expected = {
     wasm: manifestFingerprint(
@@ -81,6 +91,15 @@ export async function verifyStarterE2EArtifacts(
   if (actualWasm !== expected.wasm)
     throw new Error(
       `starter E2E WASM package hand-off mismatch: manifest expects ${expected.wasm}, module returns ${actualWasm}.`,
+    );
+  const napi = await loadNapiFingerprints(root);
+  if (
+    napi.actual !== expected.napi ||
+    napi.expected !== expected.napi ||
+    napi.actual !== compiled.napi
+  )
+    throw new Error(
+      `starter E2E NAPI package hand-off mismatch: manifest and jazz-tools expect ${expected.napi}, pointer expects ${napi.expected}, module returns ${napi.actual}.`,
     );
 }
 
