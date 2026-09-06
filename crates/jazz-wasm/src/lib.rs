@@ -5348,7 +5348,7 @@ mod dynamic_schema_view_tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&Value::String(author.canonical().to_owned())),
+            Some(&author.to_value()),
             "session.user must come from the admitted transport identity"
         );
         assert_eq!(

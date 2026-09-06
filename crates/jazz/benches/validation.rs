@@ -542,7 +542,7 @@ impl Rng {
 }
 
 fn schema() -> JazzSchema {
-    let owner = schema_fixture::session_user_id_column("owner");
+    let owner = schema_fixture::session_subject_column("owner");
     schema_fixture::compile(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
@@ -613,10 +613,7 @@ fn commit_parts(unit: &SyncMessage) -> (Transaction, Vec<VersionRecord>) {
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::String(owner.principal_parts().1)),
     ])
 }
 
