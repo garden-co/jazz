@@ -39,10 +39,19 @@ export async function createBrowserTestDb(
     account?: AccountHandle;
     secret?: string;
     jwtToken?: string;
+    /** Fixture-only explicit registry enrollment before obtaining a login handle. */
+    registerJwt?: boolean;
     adminSecret?: string;
   },
 ): Promise<Db> {
-  const { account: selectedAccount, secret, jwtToken, adminSecret, ...dbConfig } = config;
+  const {
+    account: selectedAccount,
+    secret,
+    jwtToken,
+    registerJwt,
+    adminSecret,
+    ...dbConfig
+  } = config;
   if (adminSecret !== undefined)
     throw new Error("Browser test fixtures do not admit backend credentials");
   if (secret !== undefined && jwtToken !== undefined)
@@ -65,12 +74,14 @@ export async function createBrowserTestDb(
         },
       },
     });
-    account =
-      secret !== undefined
-        ? accounts.restoreLocalFirst(secret)
-        : jwtToken !== undefined
-          ? await accounts.loginJWT(jwtToken)
-          : accounts.createLocalFirst();
+    if (secret !== undefined) {
+      account = accounts.restoreLocalFirst(secret);
+    } else if (jwtToken !== undefined) {
+      if (registerJwt) await accounts.registerJWT(jwtToken);
+      account = await accounts.loginJWT(jwtToken);
+    } else {
+      account = accounts.createLocalFirst();
+    }
   }
   return await createAccountDb({ ...dbConfig, account });
 }

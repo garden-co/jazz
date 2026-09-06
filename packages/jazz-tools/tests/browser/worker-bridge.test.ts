@@ -1492,6 +1492,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1521,6 +1522,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1539,6 +1541,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
       }),
     );
@@ -2003,6 +2006,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         },
         serverUrl,
         jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
+        registerJwt: true,
       }),
     );
 
@@ -3806,22 +3810,20 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
     const appId = uniqueDbName("explicit-browser-owner-app");
     const dbName = uniqueDbName("shared-device-cache");
-    const aliceJwt = makeStructurallyValidJwt("explicit-base-alice");
-    const bobJwt = makeStructurallyValidJwt("explicit-base-bob");
+    const aliceSecret = generateAuthSecret();
+    const bobSecret = generateAuthSecret();
     const aliceConfig = {
       appId,
-      jwtToken: aliceJwt,
+      secret: aliceSecret,
       driver: { type: "persistent" as const, dbName },
     };
-    const bobConfig = { appId, jwtToken: bobJwt, driver: { type: "persistent" as const, dbName } };
-    const alicePhysicalName = resolveDefaultPersistentDbName(aliceConfig);
-    const bobPhysicalName = resolveDefaultPersistentDbName(bobConfig);
-    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
-    expect(alicePhysicalName).not.toBe(bobPhysicalName);
-    expect(alicePhysicalName).not.toContain(aliceJwt);
-    expect(bobPhysicalName).not.toContain(bobJwt);
+    const bobConfig = { appId, secret: bobSecret, driver: { type: "persistent" as const, dbName } };
 
     let alice: Db | null = track(await createDb(aliceConfig));
+    const alicePhysicalName = resolveDefaultPersistentDbName(alice.config);
+    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
+    expect(alicePhysicalName).not.toContain(aliceSecret);
+
     let aliceSecondTab: Db | null = null;
     let bob: Db | null = null;
     let aliceReopened: Db | null = null;
@@ -3841,6 +3843,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (await aliceSecondTab.all(allTodos, { tier: "local" })).map((row) => row.title),
       ).toEqual(["Alice durable row"]);
       bob = track(await createDb(bobConfig));
+      const bobPhysicalName = resolveDefaultPersistentDbName(bob.config);
+      expect(alicePhysicalName).not.toBe(bobPhysicalName);
+      expect(bobPhysicalName).not.toContain(bobSecret);
       await expect(bob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
       bob.insert(todos, { title: "Bob durable row", done: false });
       await waitForTodos(
@@ -3889,6 +3894,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId,
         serverUrl,
         jwtToken: validJwt,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3897,6 +3903,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId,
         serverUrl,
         jwtToken: validJwt,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3944,7 +3951,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }, 60000);
 
   it("rejects a principal-changing live auth update before local or worker state changes", async () => {
-    const { appId } = await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
+    const { appId, serverUrl } =
+      await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
     const dbName = uniqueDbName("live-auth-owner-guard");
     const aliceJwt = await getJazzServerJwtForUser(
       "00000000-0000-0000-0000-00000000aa11",
@@ -3957,7 +3965,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       appId,
     );
     const db = track(
-      await createDb({ appId, jwtToken: aliceJwt, driver: { type: "persistent", dbName } }),
+      await createDb({
+        appId,
+        serverUrl,
+        jwtToken: aliceJwt,
+        registerJwt: true,
+        driver: { type: "persistent", dbName },
+      }),
     );
     try {
       await db.all(allTodos, { tier: "local" });
