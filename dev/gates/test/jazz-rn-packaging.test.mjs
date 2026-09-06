@@ -739,33 +739,51 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
-test("React Native installation docs retain the narrow alpha boundary while the Expo example documents the account-handle client", async () => {
-  const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] =
-    await Promise.all([
-      readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
-      readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
-      readFile(
-        new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
-        "utf8",
-      ),
-      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-    ]);
+test("React Native docs advertise the supported alpha account-handle client", async () => {
+  const [
+    readme,
+    installGuide,
+    clientSetupGuide,
+    durabilityGuide,
+    examplesGuide,
+    exampleReadme,
+    previewWorkflow,
+  ] = await Promise.all([
+    readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
+    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../docs/content/docs/reference/examples.mdx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+  ]);
 
-  assert.match(readme, /pnpm add jazz-rn@alpha/);
+  assert.match(readme, /pnpm add jazz-tools@alpha jazz-rn@alpha/);
   assert.match(readme, /"plugins": \["jazz-rn"\]/);
   assert.match(readme, /npx expo prebuild --clean/);
   assert.match(readme, /newArchEnabled=true/);
   assert.match(readme, /RCT_NEW_ARCH_ENABLED=1 bundle exec pod install/);
   assert.match(readme, /Expo Go is not\s+supported/);
-  assert.match(readme, /not yet a supported high-level React Native Jazz client/);
+  assert.match(readme, /supported React Native\s+alpha/);
+  assert.match(readme, /`jazz-tools\/react-native`/);
+  assert.match(readme, /`AccountHandle`/);
+  assert.match(readme, /`createJazzClient`/);
+  assert.match(readme, /canonical Expo scaffold/);
+  assert.match(readme, /two physical JSI runtimes/);
+  assert.doesNotMatch(readme, /not yet a supported high-level React Native Jazz client/);
+  assert.doesNotMatch(
+    readme,
+    /Remote tiers and structured relation terminal\s+operations remain unavailable/,
+  );
   assert.match(readme, /rn-preview-release/);
   assert.match(
     previewWorkflow,
@@ -774,20 +792,23 @@ test("React Native installation docs retain the narrow alpha boundary while the 
   );
   assert.match(
     installGuide,
-    /React Native and Expo are intentionally not part of this application quickstart yet[\s\S]*not a supported React Native Jazz client/,
-    "the public install guide must put the unsupported RN boundary before its runtime quickstart",
+    /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo scaffold/,
+    "the public install guide must direct RN users to the supported account-handle client path",
   );
-  for (const [name, guide] of [
-    ["install guide", installGuide],
-    ["client setup guide", clientSetupGuide],
-    ["durability guide", durabilityGuide],
-  ]) {
-    assert.doesNotMatch(
-      guide,
-      /<Tab value="Expo">|jazz-tools\/expo|todo-client-localfirst-expo/,
-      `${name} must not retain runnable-looking Expo tabs or RN runtime snippets`,
-    );
-  }
+  assert.match(clientSetupGuide, /React Native and Expo/);
+  assert.match(clientSetupGuide, /createAccountManager.*jazz-tools\/expo/);
+  assert.match(clientSetupGuide, /createJazzClient.*JazzClientProvider/s);
+  assert.match(clientSetupGuide, /await client\.shutdown/);
+  assert.match(clientSetupGuide, /canonical Expo\s+scaffold/);
+  assert.match(
+    durabilityGuide,
+    /React Native\/Expo alpha uses these same read and write durability tiers/,
+  );
+  assert.match(durabilityGuide, /account-handle client with `createJazzClient`/);
+  assert.match(
+    examplesGuide,
+    /Supported alpha app:[\s\S]*`AccountHandle`[\s\S]*`createJazzClient`/,
+  );
   assert.match(
     exampleReadme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
