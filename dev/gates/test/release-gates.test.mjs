@@ -68,6 +68,20 @@ test("release starter gate exercises packaged artifacts through create-jazz-e2e"
   assert.match(prepare, /pnpm run build:core/);
   assert.match(prepare, /for pkg in jazz-tools jazz-napi jazz-wasm;/);
   assert.match(prepare, /name: starters-e2e-build-state/);
+  // The clean matrix checkout keeps tracked bootstrap files, but the NAPI
+  // loader, its fingerprint receipt, native binary, and manifest are build
+  // outputs restored from the prepare artifact.
+  for (const runtimeArtifact of [
+    "crates/jazz-napi/*.node",
+    "crates/jazz-napi/*.manifest.json",
+    "crates/jazz-napi/native-loader.cjs",
+    "crates/jazz-napi/native-artifact-fingerprint.cjs",
+  ]) {
+    assert.ok(
+      prepare.includes(runtimeArtifact),
+      `missing NAPI runtime artifact ${runtimeArtifact}`,
+    );
+  }
   assert.match(e2e, /name: starters-e2e-build-state/);
   assert.match(e2e, /--tarball-dir "\$GITHUB_WORKSPACE\/_e2e-state\/tarballs"/);
   assert.match(e2e, /--verbose --keep/);

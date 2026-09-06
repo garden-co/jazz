@@ -108,15 +108,21 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: starters-e2e-build-state
-          # Tarballs feed `--tarball-dir`. jazz-tools/dist and jazz-napi's JS +
-          # native binary are needed at *harness* runtime (the harness imports
-          # `jazz-tools/dev`, which in turn requires jazz-napi).
+          # Tarballs feed `--tarball-dir`. jazz-tools/dist and jazz-napi's
+          # generated root runtime closure are needed at *harness* runtime (the
+          # harness imports `jazz-tools/dev`, which in turn requires jazz-napi).
+          # The tracked bootstrap loads native-loader.cjs and its fingerprint
+          # receipt when the machine-local build pointer is absent in a clean
+          # matrix checkout.
           path: |
             _e2e-state/tarballs/**
             packages/jazz-tools/dist/**
             crates/jazz-napi/index.js
             crates/jazz-napi/index.d.ts
             crates/jazz-napi/*.node
+            crates/jazz-napi/*.manifest.json
+            crates/jazz-napi/native-loader.cjs
+            crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
           retention-days: 1
 
