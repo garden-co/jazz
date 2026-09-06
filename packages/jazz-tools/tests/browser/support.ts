@@ -5,15 +5,13 @@
  * primitives, query helpers, cleanup tracking, and synced-Db factory.
  */
 
-import { createDb as createAccountDb } from "../../src/runtime/default-create-db.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
-import type { AccountHandle } from "../../src/accounts/state.js";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
 import type { JazzServerInfo } from "./testing-server.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import type { DbConfig } from "../../src/runtime/db.js";
+export { createBrowserTestDb } from "./account-fixtures.js";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -27,63 +25,6 @@ export function sleep(ms: number): Promise<void> {
 /** Generate a unique dbName to isolate persistent browser state between tests. */
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * Browser integration fixtures acquire a real opaque account from an account
- * manager before opening a public Db.  Keeping this at the fixture boundary
- * prevents legacy credential-shaped configs from leaking into test callers.
- */
-export async function createBrowserTestDb(
-  config: Omit<DbConfig, "secret" | "jwtToken" | "adminSecret"> & {
-    account?: AccountHandle;
-    secret?: string;
-    jwtToken?: string;
-    /** Fixture-only explicit registry enrollment before obtaining a login handle. */
-    registerJwt?: boolean;
-    adminSecret?: string;
-  },
-): Promise<Db> {
-  const {
-    account: selectedAccount,
-    secret,
-    jwtToken,
-    registerJwt,
-    adminSecret,
-    ...dbConfig
-  } = config;
-  if (adminSecret !== undefined)
-    throw new Error("Browser test fixtures do not admit backend credentials");
-  if (secret !== undefined && jwtToken !== undefined)
-    throw new Error("Browser test fixtures select either a local-first secret or a JWT");
-
-  // Each fixture manager owns its issued handle.  A small private store keeps
-  // test account selection out of the browser's shared localStorage namespace.
-  let account = selectedAccount;
-  if (!account) {
-    let stored: string | null = null;
-    const accounts = await createAccountManager({
-      appId: config.appId,
-      serverUrl: config.serverUrl ?? "http://127.0.0.1:1",
-      store: {
-        async read() {
-          return stored;
-        },
-        async update(transform) {
-          stored = transform(stored);
-        },
-      },
-    });
-    if (secret !== undefined) {
-      account = accounts.restoreLocalFirst(secret);
-    } else if (jwtToken !== undefined) {
-      if (registerJwt) await accounts.registerJWT(jwtToken);
-      account = await accounts.loginJWT(jwtToken);
-    } else {
-      account = accounts.createLocalFirst();
-    }
-  }
-  return await createAccountDb({ ...dbConfig, account });
 }
 
 // ---------------------------------------------------------------------------

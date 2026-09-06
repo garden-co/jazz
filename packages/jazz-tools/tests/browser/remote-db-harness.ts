@@ -1,7 +1,7 @@
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { createBrowserTestDb } from "./support.js";
+import { createBrowserTestDb } from "./account-fixtures.js";
 
 export interface RemoteBrowserDbCreateInput {
   id: string;
