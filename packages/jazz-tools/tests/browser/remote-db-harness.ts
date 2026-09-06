@@ -1,7 +1,7 @@
-import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { createBrowserTestDb } from "./support.js";
 
 export interface RemoteBrowserDbCreateInput {
   id: string;
@@ -67,6 +67,8 @@ function makeAllRowsQuery(
 }
 
 export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): Promise<void> {
+  if (input.adminSecret !== undefined)
+    throw new Error("Remote browser fixtures do not admit backend credentials");
   const store = getRemoteStateStore();
   const existing = store.get(input.id);
   if (existing) {
@@ -75,7 +77,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
   }
 
   const schema = JSON.parse(input.schemaJson) as WasmSchema;
-  const db = await createDb({
+  const db = await createBrowserTestDb({
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
@@ -83,7 +85,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
       ? { jwtToken: input.jwtToken }
       : input.localFirstSecret
         ? { secret: input.localFirstSecret }
-        : { adminSecret: input.adminSecret }),
+        : {}),
     logLevel: input.logLevel,
   });
 
