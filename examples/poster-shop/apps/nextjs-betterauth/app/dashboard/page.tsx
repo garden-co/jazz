@@ -2,6 +2,7 @@
 import { PosterShopApp } from "@/src/App";
 import { useEffect, useState } from "react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { bootstrapPersonalCanvas } from "@/src/lib/account-enrollment";
 export default function Dashboard() {
   const { data: session } = authClient.useSession();
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
@@ -9,15 +10,7 @@ export default function Dashboard() {
     if (!session) return;
     let cancelled = false;
     void getJwtFromBetterAuth()
-      .then((token) =>
-        token
-          ? fetch("/api/bootstrap", {
-              method: "POST",
-              credentials: "same-origin",
-              headers: { authorization: `Bearer ${token}` },
-            })
-          : undefined,
-      )
+      .then((token) => (token ? bootstrapPersonalCanvas(token) : undefined))
       .then((response) => {
         if (!cancelled) setBootstrap(response?.ok ? "ready" : "failed");
       });
