@@ -628,7 +628,7 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
 });
 
-test("the canonical Expo scaffold preserves the direct native-package contract", async () => {
+test("the canonical Expo scaffold documents the account-handle client and direct native-package contract", async () => {
   const [manifestText, appConfigText, readme] = await Promise.all([
     readFile(
       new URL("../../../examples/todo-client-localfirst-expo/package.json", import.meta.url),
@@ -653,7 +653,13 @@ test("the canonical Expo scaffold preserves the direct native-package contract",
   assert.match(readme, /jazz-rn@alpha/);
   assert.match(readme, /direct app dependency/);
   assert.match(readme, /does \*\*not\*\* run in Expo Go/);
-  assert.match(readme, /not a runnable persistent Jazz client/);
+  assert.match(
+    readme,
+    /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
+  );
+  assert.match(readme, /creates or restores a local-first `AccountHandle`/);
+  assert.match(readme, /effect-owned client/);
+  assert.match(readme, /account-scoped persistent relay admission is handled by the runtime/);
 });
 
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
@@ -733,7 +739,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
-test("React Native installation docs advertise only the currently proven package boundary", async () => {
+test("React Native installation docs retain the narrow alpha boundary while the Expo example documents the account-handle client", async () => {
   const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] =
     await Promise.all([
       readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
@@ -782,8 +788,14 @@ test("React Native installation docs advertise only the currently proven package
       `${name} must not retain runnable-looking Expo tabs or RN runtime snippets`,
     );
   }
-  assert.match(exampleReadme, /native-relay install\/ABI boundary/);
-  assert.match(exampleReadme, /not a runnable persistent Jazz client/);
+  assert.match(
+    exampleReadme,
+    /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
+  );
+  assert.match(exampleReadme, /creates or restores a local-first `AccountHandle`/);
+  assert.match(exampleReadme, /Expo SecureStore/);
+  assert.match(exampleReadme, /effect-owned client/);
+  assert.doesNotMatch(exampleReadme, /not a runnable persistent Jazz client/);
 });
 
 test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", async () => {
