@@ -516,10 +516,9 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = AuthorSubject::from_canonical(
-                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+            let made_by =
+                AuthorSubject::from_value(record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
@@ -575,8 +574,8 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || AuthorSubject::from_canonical(
-                    record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                || AuthorSubject::from_value(
+                    record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                     != author
@@ -763,7 +762,10 @@ where
                 .map(|key| DirectRecordStoreWrite::Delete { key })
                 .collect::<Vec<_>>();
             for fact in adds {
-                operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
+                operations.push(settled_program_fact_storage_write(
+                    &authority_result_key,
+                    fact,
+                )?);
             }
             store.write_many(&operations).await?;
             return Ok(());

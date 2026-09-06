@@ -1061,11 +1061,8 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            let encoded = borrowed.get_str(index).map_err(|_| malformed())?;
-            let author = AuthorSubject::from_canonical(encoded).map_err(|_| malformed())?;
-            if author.canonical().as_bytes() != encoded.as_bytes() {
-                return Err(malformed());
-            }
+            AuthorSubject::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+                .map_err(|_| malformed())?;
         }
         borrowed
             .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
@@ -1166,9 +1163,9 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
-            Value::String(created_by.canonical().to_owned()),
+            created_by.to_value(),
             Value::U64(created_at_ms),
-            Value::String(updated_by.canonical().to_owned()),
+            updated_by.to_value(),
             Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
@@ -1276,10 +1273,10 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        AuthorSubject::from_canonical(
+        AuthorSubject::from_value(
             self.record
                 .borrowed()
-                .get_str(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
@@ -1295,10 +1292,10 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        AuthorSubject::from_canonical(
+        AuthorSubject::from_value(
             self.record
                 .borrowed()
-                .get_str(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")

@@ -4212,8 +4212,10 @@ fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
 }
 
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
+    if let Some(ty) = AuthorSubject::metadata_type(column) {
+        return Some(ty);
+    }
     match column {
-        "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::String),
         "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
         _ => None,
     }

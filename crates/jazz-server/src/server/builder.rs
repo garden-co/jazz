@@ -209,6 +209,7 @@ impl ServerBuilder {
 
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
         let http_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 

@@ -1824,9 +1824,9 @@ impl CurrentRow {
         let record = self.record.borrowed();
         Ok(Some(match column {
             "$createdBy" | "$updatedBy" => {
-                let author = AuthorSubject::from_canonical(record.get_str(index)?)
+                let author = AuthorSubject::from_value(record.get_idx(index)?)
                     .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
-                Value::String(author.canonical().to_owned())
+                author.to_value()
             }
             "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
             _ => unreachable!("provenance_field_index accepts only provenance columns"),
@@ -1850,10 +1850,10 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
+            created_by: AuthorSubject::from_value(borrowed.get_idx(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             created_at: borrowed.get_u64(created_at_idx)?,
-            updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
+            updated_by: AuthorSubject::from_value(borrowed.get_idx(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             updated_at: borrowed.get_u64(updated_at_idx)?,
         }))
@@ -1896,9 +1896,9 @@ impl CurrentRow {
             .with_identity(records::FieldIdentity::Name(public_name))
         }));
         descriptor_fields.extend([
-            records::DescriptorField::new("$createdBy", records::ValueType::String),
+            records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
             records::DescriptorField::new("$createdAt", records::ValueType::U64),
-            records::DescriptorField::new("$updatedBy", records::ValueType::String),
+            records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
             records::DescriptorField::new("$updatedAt", records::ValueType::U64),
             records::DescriptorField::new("tx_time", records::ValueType::U64),
             records::DescriptorField::new("tx_node_id", records::ValueType::U64),
@@ -1949,9 +1949,9 @@ impl CurrentRow {
             binding_field_names.push(Some(public_name));
         }
         if let Some(provenance) = self.provenance()? {
-            values.push(Value::String(provenance.created_by.canonical().to_owned()));
+            values.push(provenance.created_by.to_value());
             values.push(Value::U64(provenance.created_at));
-            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+            values.push(provenance.updated_by.to_value());
             values.push(Value::U64(provenance.updated_at));
             binding_fields.extend(
                 ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
@@ -1968,9 +1968,9 @@ impl CurrentRow {
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         } else {
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
+            values.push(AuthorSubject::SYSTEM.to_value());
             values.push(Value::U64(0));
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
+            values.push(AuthorSubject::SYSTEM.to_value());
             values.push(Value::U64(0));
             binding_fields.extend([CurrentRowBindingRole::LogicalField; 4]);
             binding_field_names.extend(std::iter::repeat_n(None, 4));

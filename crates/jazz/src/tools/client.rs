@@ -594,7 +594,12 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        StackSafeFuture::new(self.0.all(prepared, opts)).await
+        match prepared.request_identity() {
+            Some(author) => {
+                StackSafeFuture::new(self.0.all_for_identity(prepared, opts, author)).await
+            }
+            None => StackSafeFuture::new(self.0.all(prepared, opts)).await,
+        }
     }
 
     async fn transaction_all_for_identity(
@@ -616,7 +621,12 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        StackSafeFuture::new(self.0.subscribe(prepared, opts)).await
+        match prepared.request_identity() {
+            Some(author) => {
+                StackSafeFuture::new(self.0.subscribe_for_identity(prepared, opts, author)).await
+            }
+            None => StackSafeFuture::new(self.0.subscribe(prepared, opts)).await,
+        }
     }
 
     fn write_state(
@@ -921,9 +931,10 @@ impl ClientDb {
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage, scope).await
     }
 
     async fn query_transaction_rows(
@@ -961,6 +972,7 @@ impl ClientDb {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         cancellation: oneshot::Receiver<()>,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
         self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(
@@ -971,6 +983,7 @@ impl ClientDb {
             table,
             tx,
             cancellation,
+            scope,
         )
         .await
     }
@@ -1849,6 +1862,7 @@ impl ClientDbInner {
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -1859,6 +1873,10 @@ impl ClientDbInner {
                     .prepare_query(&query)
                     .map_err(|error| JazzError::Query(error.to_string()))?,
             )
+        };
+        let prepared = match scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
         };
         let rows = if wait_for_coverage {
             Self::read_remote_one_shot_from_subscription(&db, &prepared, opts).await?
@@ -1978,6 +1996,7 @@ impl ClientDbInner {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
         // Register before cloning the backend or awaiting core admission. A
         // concurrent shutdown can therefore cancel and await this path even
@@ -1990,6 +2009,10 @@ impl ClientDbInner {
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?;
             (inner.backend_clone()?, prepared)
+        };
+        let prepared = match scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
         };
         let stream = tokio::select! {
             biased;
@@ -2386,6 +2409,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         _ => crate::tools::public_api::session::AuthMode::External,
     };
     Some(Session {
+        account_id: None,
         issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
         claims: serde_json::Value::Object(
@@ -2525,10 +2549,9 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
-    core_claims.insert(
-        "user".to_owned(),
-        CoreValue::String(session.author_subject()?.canonical().to_owned()),
-    );
+    core_claims.extend(crate::tools::policy_claims::author_policy_claims(
+        session.author_subject()?,
+    ));
     Ok(core_claims)
 }
 
@@ -2887,6 +2910,22 @@ fn transaction_rejected_before_tier_message(
 }
 
 impl JazzClient {
+    fn read_scope(&self) -> Result<Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>> {
+        let Some(session) = self
+            .write_context
+            .as_ref()
+            .and_then(|context| context.session())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            core_author_from_session(session)?,
+            session_claims_to_core_claims(session)?
+                .into_iter()
+                .collect(),
+        )))
+    }
+
     fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         let session = self
             .write_context
@@ -3332,7 +3371,7 @@ impl PublicQueryDecoder {
                 };
                 match value {
                     CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
-                    CoreValue::String(author) => Value::Text(author),
+                    author @ CoreValue::Record(_) => core_to_public_value(author)?,
                     _ => unreachable!("provenance_value returns typed timestamps or authors"),
                 }
             }
@@ -3486,7 +3525,7 @@ impl JazzClient {
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
         let (cancellation, cancellation_rx) = oneshot::channel();
         self.db
-            .subscribe(query, opts, table, tx, cancellation_rx)
+            .subscribe(query, opts, table, tx, cancellation_rx, self.read_scope()?)
             .await?;
         Ok(SubscriptionStream::new(rx, cancellation))
     }
@@ -3593,7 +3632,13 @@ impl JazzClient {
             // local maintained graph has settled that exact coverage.
             let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
             self.db
-                .query_rows(query.clone(), opts, table, wait_for_coverage)
+                .query_rows(
+                    query.clone(),
+                    opts,
+                    table,
+                    wait_for_coverage,
+                    self.read_scope()?,
+                )
                 .await?
         };
         self.db

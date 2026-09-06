@@ -472,6 +472,21 @@ fn collect_value_requirements(
 }
 
 fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
+    if let Some((root, _)) = crate::ids::AuthorSubject::metadata_path(&field) {
+        requirements
+            .metadata
+            .insert(SourceMetadataRequirement::AuthorPath(field.clone()));
+        requirements
+            .metadata
+            .insert(SourceMetadataRequirement::Provenance(
+                if root == "$createdBy" {
+                    ProvenanceField::CreatedBy
+                } else {
+                    ProvenanceField::UpdatedBy
+                },
+            ));
+        return;
+    }
     match &mut requirements.app_fields {
         FieldRequirement::None => {
             requirements.app_fields = FieldRequirement::Fields(BTreeSet::from([field]));

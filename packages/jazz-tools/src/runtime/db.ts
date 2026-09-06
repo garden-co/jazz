@@ -1,3 +1,6 @@
+import type { AccountHandle } from "../accounts/state.js";
+import { accountToken, accountRegistry } from "../accounts/enrollment.js";
+import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
  * High-level database class for typed queries and mutations.
  *
@@ -84,6 +87,8 @@ type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
  * Configuration for creating a Db instance.
  */
 export type DbConfig = {
+  /** @internal Assigned by validated account-handle context creation. */
+  accountId?: string;
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
@@ -1483,6 +1488,11 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * });
  * ```
  */
+export interface ShutdownOptions {
+  /** Wait for pending writes to reach the core before releasing resources. */
+  waitForSync?: boolean;
+}
+
 export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
@@ -1513,6 +1523,7 @@ export class Db {
     runtimeSource: AnyRuntimeSource,
     authStateOptions?: AuthStateStoreOptions,
   ) {
+    assertAccountConfig(config);
     this.config = config;
     this.runtimeSource = runtimeSource;
     const sessionInput = {
@@ -1848,6 +1859,28 @@ export class Db {
       return operation();
     } finally {
       this.runtimeOperationContextOverride = previous;
+    }
+  }
+
+  /** @internal Refresh only through the immutable handle that owns this context. */
+  async refreshAccountAuth(account: AccountHandle): Promise<string> {
+    assertAccountConfig(this.config);
+    if (account.id !== this.config.accountId) throw new Error("Account context mismatch");
+    try {
+      const token = await accountToken(account, accountRegistry(account));
+      if (this.shutdownAbort.signal.aborted) throw new Error("Account context closed");
+      const reserved =
+        account.identity.issuer === "urn:jazz:local-first"
+          ? internalSessionFromVerifiedReservedJwtPayload(
+              parseJwtPayload(token) ?? {},
+              "local-first",
+            )
+          : undefined;
+      this.applyAuthUpdate(token, reserved ?? undefined);
+      return token;
+    } catch (error) {
+      this.markUnauthenticated("invalid");
+      throw error;
     }
   }
 
@@ -2898,10 +2931,22 @@ export class Db {
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    this.shutdownPromise = this.runShutdown();
-    return this.shutdownPromise;
+    this.shutdownPromise = this.runShutdown(options);
+    try {
+      await this.shutdownPromise;
+    } catch (error) {
+      if (!this.isShuttingDown) this.shutdownPromise = null;
+      throw error;
+    }
+  }
+
+  private cancelSyncShutdown: (() => void) | undefined;
+
+  /** @internal Credential invalidation must interrupt a graceful sync wait. */
+  abortGracefulShutdown(): void {
+    this.cancelSyncShutdown?.();
   }
 
   private assertOpen(): void {
@@ -2910,8 +2955,38 @@ export class Db {
     }
   }
 
-  private async runShutdown(): Promise<void> {
+  private readonly shutdownListeners = new Set<() => void>();
+
+  /** @internal Dispose account refresh and invalidation observers with the context. */
+  onShutdown(listener: () => void): () => void {
+    if (this.isShuttingDown) listener();
+    else this.shutdownListeners.add(listener);
+    return () => this.shutdownListeners.delete(listener);
+  }
+
+  private async runShutdown(options: ShutdownOptions): Promise<void> {
     this.isShuttingDown = true;
+    if (options.waitForSync) {
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        this.cancelSyncShutdown = () => reject(new Error("Graceful shutdown cancelled"));
+      });
+      try {
+        await Promise.race([this.connection.waitForPendingWrites(), cancelled]);
+      } catch (error) {
+        this.isShuttingDown = false;
+        throw error;
+      } finally {
+        this.cancelSyncShutdown = undefined;
+      }
+    }
+    for (const listener of this.shutdownListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Context cleanup failed", error);
+      }
+    }
+    this.shutdownListeners.clear();
     this.shutdownAbort.abort();
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
@@ -3059,6 +3134,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
+  assertAccountConfig(config);
   assertNoClientBackendSecret(config);
   if (config.secret && config.cookieSession) {
     throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
@@ -3076,6 +3152,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   const parsedLocalFirstSeed = config.secret ? authSecretSeedForMinting(config.secret) : null;
 
   let resolvedConfig: DbConfig = { ...config };
+  setTrustedReservedSession(resolvedConfig, getTrustedReservedSession(config));
   await runtimeSource.load(config);
   const {
     secret: _secret,
@@ -3116,6 +3193,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
+  copyAccountConfigAdmission(config, resolvedConfig);
   runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

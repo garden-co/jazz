@@ -86,6 +86,20 @@ pub(super) fn project_descriptor(
         .iter()
         .map(|project_field| {
             let value_type = match &project_field.expression {
+                ProjectExpr::RecordField { source, path } => {
+                    let index = resolve_field_ref(input, source)?;
+                    let mut ty = input.fields()[index].value_type.clone();
+                    for name in path {
+                        let ValueType::Record(record) = ty else {
+                            return Err(IvmRuntimeError::UnsupportedOperator);
+                        };
+                        let index = record
+                            .field_index(name)
+                            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                        ty = record.fields()[index].value_type.clone();
+                    }
+                    ty
+                }
                 ProjectExpr::Field(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
                     input
@@ -617,6 +631,7 @@ pub(super) fn project_field_expr(
     let mut expression = field.expression.clone();
     match &mut expression {
         ProjectExpr::Field(source)
+        | ProjectExpr::RecordField { source, .. }
         | ProjectExpr::Nullable(source)
         | ProjectExpr::NullableFlat(source)
         | ProjectExpr::EnumTagRemap { source, .. }
@@ -655,6 +670,16 @@ pub(super) fn project_record(
         };
         values.push(match &expr.expression {
             ProjectExpr::Field(field) => resolved(field)?,
+            ProjectExpr::RecordField { source, path } => {
+                let mut value = resolved(source)?;
+                for name in path {
+                    let Value::Record(record) = value else {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    };
+                    value = record.get(name)?;
+                }
+                value
+            }
             ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
                 value.to_value()
             }
@@ -970,7 +995,8 @@ pub(super) fn raw_projection_fields(
                         .ok()?,
                 })
             }
-            ProjectExpr::EnumTagRemap { .. }
+            ProjectExpr::RecordField { .. }
+            | ProjectExpr::EnumTagRemap { .. }
             | ProjectExpr::EnumRemap { .. }
             | ProjectExpr::RecursiveEnumRemap { .. } => None,
         })

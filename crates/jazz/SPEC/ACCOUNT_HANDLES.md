@@ -79,6 +79,15 @@ adapters, not separate implementations of the state machine.
 Account ownership and exact principal provenance must both survive writes,
 replication, and reopening. Equality must be explicit and consistent across
 policies, joins, indexes, and JS; no partially comparing principal tuple.
+`$createdBy` and `$updatedBy` are structured author values:
+`{ account, identity: { issuer, subject } }`. Normal account contexts supply an
+account ID; internal principals without an account expose a null account.
+Rust interns the entire author structure, including account and both principal
+fields. Intern handles are process-local implementation details and never enter
+storage or wire encodings. Account ownership policies compare `.account`;
+whole-author equality compares every field, so two linked identities acting for
+one account remain distinct authors. JavaScript object reference identity is
+not a portable equality contract.
 The final PR must document exact before/after ownership representation and all
 new durable and wire codecs before review. This work precedes storage freeze.
 
@@ -105,3 +114,38 @@ server authentication and internal tests, not as an application context bypass.
 Implementation details and remaining work are tracked in #2611. The PR must
 resolve ownership representation, durable registry integration, and remote
 revocation semantics before it is considered ready.
+
+## Revocation ordering
+
+Revocation is an admission boundary, not an erase or synchronous drain barrier.
+Registry login and revocation are serialized by the core authority. A bounded
+operation admitted before revocation may finish, including an already-admitted
+write or subscription delivery. Every later inbound operation and outbound
+subscription tick must recheck admission; idle sessions observe registry changes
+and close. Trusted backend/admin service connections use their separate
+authority and are not public account sessions.
+
+## Context lifecycle and linking
+
+Enrollment has no dependency on an open database or a framework. `linkJWT`
+operates on the selected handle's credential and the core registry only; it
+never enumerates contexts, drains uploads, or rewrites transaction authors.
+
+The application or local-first auth helper uses the general lifecycle sequence:
+
+1. Stop admitting application work and call `oldContext.shutdown({ waitForSync: true })`.
+2. If synchronization fails, retain the existing selection and usable context;
+   do not proceed to linking.
+3. Call `accounts.linkJWT(externalCredential)` outside any Jazz context.
+4. Open a new context with the returned handle. If linking fails, a new context
+   may be opened with the manager's unchanged previous handle.
+
+Ordinary shutdown without `waitForSync` retains its local-durability behavior,
+including offline teardown. The explicit graceful-sync option waits for pending
+writes to reach the core and then closes. It is a general context facility, not
+an account-protocol primitive. A shared client must release other holders before
+its final holder requests graceful-sync teardown.
+
+Transactions retain their complete original author. An external identity must
+never upload pending local-first transactions as if it were that author. This
+release uses sync-before-switch; it does not add cross-author replay authority.

@@ -655,8 +655,8 @@ function terminalLayoutValueTypeMatchesColumn(
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
   // Provenance lives in fixed CurrentRow system fields, not nullable _app_
-  // carriers. Author subjects are already canonical text at the native/public
-  // boundary; timestamps retain their native scalar storage type.
+  // carriers. Authors are structured native records; timestamps retain their
+  // native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
@@ -811,20 +811,30 @@ function terminalValueTypeMatchesColumn(
           false,
         )
       );
-    case "Row":
+    case "Row": {
       // Terminal trees retain nested records, while ordinary packed rows use
       // an opaque byte envelope. Both are sanctioned producer representations;
       // any other variable-width type is not.
+      if (valueType.tag === 9) return true;
+      if (valueType.tag !== 16 || !valueType.record) return false;
+      const fields = valueType.record;
+      const columns = column.column_type.columns;
+      // Entity rows carry row_uuid; value records (including authors) do not.
+      const offset = fields.length === columns.length ? 0 : 1;
+      if (offset && (fields[0]?.name !== "row_uuid" || fields[0]?.valueType.tag !== 11)) {
+        return false;
+      }
       return (
-        valueType.tag === 9 ||
-        (valueType.tag === 16 &&
-          valueType.record !== undefined &&
-          valueType.record.length === column.column_type.columns.length + 1 &&
-          valueType.record[0]?.valueType.tag === 11 &&
-          column.column_type.columns.every((nested, index) =>
-            terminalValueTypeMatchesColumn(valueType.record?.[index + 1]?.valueType, nested, false),
-          ))
+        fields.length === columns.length + offset &&
+        columns.every((nested, index) => {
+          const field = fields[index + offset];
+          return (
+            field?.name === nested.name &&
+            terminalValueTypeMatchesColumn(field.valueType, nested, false)
+          );
+        })
       );
+    }
   }
 }
 
@@ -833,6 +843,29 @@ function decodeTerminalColumnBytes(
   bytes: Uint8Array,
   valueType: ValueType | undefined,
 ): Value {
+  const recordType = nonNullableValueType(valueType);
+  if (column.column_type.type === "Row" && recordType?.tag === 16 && recordType.record) {
+    const descriptor = recordType.record;
+    assertRecordLayoutIsComplete(descriptor, bytes);
+    const columns = column.column_type.columns;
+    const offset = descriptor.length === columns.length ? 0 : 1;
+    const values = columns.map((nested, index): Value => {
+      const fieldIndex = index + offset;
+      const payload = decodeRecordValue(descriptor, bytes, fieldIndex);
+      return payload == null
+        ? { type: "Null" }
+        : decodeTerminalColumnBytes(nested, payload, descriptor[fieldIndex]?.valueType);
+    });
+    const key = offset ? decodeRecordValue(descriptor, bytes, 0) : undefined;
+    return {
+      type: "Row",
+      value: {
+        ...(key ? { id: formatUuid(key) } : {}),
+        values,
+        valuesByColumn: new Map(columns.map((nested, index) => [nested.name, values[index]!])),
+      },
+    };
+  }
   if (
     isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&

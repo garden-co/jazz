@@ -111,6 +111,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/login", post(accounts::login))
         .route("/links/request", post(accounts::request_link))
         .route("/links/accept", post(accounts::accept_link))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            accounts::forward_if_edge,
+        ))
         .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
         .nest("/accounts", account_routes)

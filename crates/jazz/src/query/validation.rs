@@ -377,7 +377,12 @@ fn validate_retained_relation_union(
     }
     if let Some(terms) = parts.order_by {
         for term in terms {
-            if term.column.scope.as_deref().is_some_and(|scope| scope != output_table) {
+            if term
+                .column
+                .scope
+                .as_deref()
+                .is_some_and(|scope| scope != output_table)
+            {
                 return Err(QueryError::UnsupportedRelationQuery(
                     "union order_by must be scoped to the union output table".to_owned(),
                 ));
@@ -487,17 +492,12 @@ fn flat_join_filter_schema(
                     .clone(),
             ));
         }
-        columns.extend(
-            table
-                .columns
-                .iter()
-                .map(|column| {
-                    JazzColumnSchema::new(
-                        format!("{scope}.{}", column.name),
-                        column.column_type.clone(),
-                    )
-                }),
-        );
+        columns.extend(table.columns.iter().map(|column| {
+            JazzColumnSchema::new(
+                format!("{scope}.{}", column.name),
+                column.column_type.clone(),
+            )
+        }));
     }
     Ok(TableSchema::new("flat join", columns))
 }
@@ -642,6 +642,9 @@ fn flat_join_source_name(table: &str, alias: &Option<String>) -> String {
 }
 
 fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
+    if let Some(index) = field.find(".$") {
+        return Ok((&field[..index], &field[index + 1..]));
+    }
     field
         .rsplit_once('.')
         .ok_or_else(|| QueryError::UnknownColumn {
@@ -944,13 +947,15 @@ fn has_declared_id(table: &TableSchema) -> bool {
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
+    if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
+        return Ok(Some(ty));
+    }
     if is_permission_introspection_magic_column(column) {
         return Err(QueryError::UnsupportedMagicColumn {
             column: column.to_owned(),
         });
     }
     match column {
-        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::String)),
         "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
         _ => Ok(None),
     }
@@ -960,7 +965,11 @@ fn is_permission_introspection_magic_column(column: &str) -> bool {
     matches!(column, "$canRead")
 }
 
-fn validate_include(schema: &RuntimeSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {
+fn validate_include(
+    schema: &RuntimeSchema,
+    root: &TableSchema,
+    path: &str,
+) -> Result<(), QueryError> {
     let mut current = root.clone();
     for segment in path.split('.') {
         column_type(&current, segment)?;
@@ -1297,9 +1306,7 @@ fn validate_comparable_operands(
             && !matches!(&*right, Operand::Literal(_))
         {
             coerce_integer_literal_for_type(left, right_known)
-        } else if matches!(&*right, Operand::Literal(_))
-            && !matches!(&*left, Operand::Literal(_))
-        {
+        } else if matches!(&*right, Operand::Literal(_)) && !matches!(&*left, Operand::Literal(_)) {
             coerce_integer_literal_for_type(right, left_known)
         } else {
             false
@@ -1502,8 +1509,12 @@ fn operand_type(
 }
 
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
+    if let Some(suffix) = name.strip_prefix("user") {
+        if let Some(ty) = crate::ids::AuthorSubject::metadata_type(&format!("$createdBy{suffix}")) {
+            return Ok(Some(ty.clone()));
+        }
+    }
     match name {
-        "user" => Ok(Some(ColumnType::String)),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
         _ => Ok(None),

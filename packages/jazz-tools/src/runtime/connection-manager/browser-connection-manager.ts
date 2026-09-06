@@ -273,6 +273,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     reloadAfterStorageInvalidation();
   }
 
+  override async waitForPendingWrites(): Promise<void> {
+    await this.connection?.waitForPendingWrites();
+  }
+
   override async shutdown(): Promise<void> {
     const connection = this.connection;
     const admissionFailed = this.connectionError !== null;

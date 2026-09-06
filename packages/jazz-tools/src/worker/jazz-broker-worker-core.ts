@@ -1366,6 +1366,16 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       result(peer, message.id);
       return;
     }
+    if (message.type === "flush-pending-writes") {
+      // Never occupy the owner queue while waiting for upstream progress.
+      // Normal transport/tick messages must continue to settle these writes.
+      void peer.context.runtime!.waitForPendingWrites("global").then(
+        () => result(peer, message.id),
+        (error) =>
+          result(peer, message.id, error instanceof Error ? error : new Error(String(error))),
+      );
+      return;
+    }
     if (message.type === "flush-local") {
       if (peer.flushRequestId !== null) {
         result(peer, message.id, new Error("Browser tab already has a local flush in progress"));

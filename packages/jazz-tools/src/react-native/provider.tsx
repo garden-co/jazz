@@ -9,7 +9,7 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import type { DbConfig } from "./create-db.js";
+import type { JazzClientConfig as DbConfig } from "./create-jazz-client.js";
 
 const createClient: CreateJazzClient = (config) =>
   createJazzClient(config as DbConfig) as Promise<CreatedJazzClient>;

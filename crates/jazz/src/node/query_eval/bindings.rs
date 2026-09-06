@@ -159,23 +159,19 @@ pub(super) fn default_permission_scope_claim_values(
 pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
-    BUILTIN_POLICY_CLAIMS
-        .iter()
-        .map(|name| {
-            let value = match *name {
-                "user" => Value::String(writer.canonical().to_owned()),
-                "isAdmin" => Value::Bool(false),
-                _ => unreachable!("unknown built-in policy claim"),
-            };
-            ((*name).to_owned(), value)
-        })
-        .collect()
+    let mut claims = crate::tools::policy_claims::author_policy_claims(writer);
+    claims.insert("isAdmin".into(), Value::Bool(false));
+    claims
 }
 
 const BUILTIN_POLICY_CLAIMS: &[&str] = &["user", "isAdmin"];
 
 fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)
+        || matches!(
+            name,
+            "user.account" | "user.identity" | "user.identity.issuer" | "user.identity.subject"
+        )
 }
 
 pub(super) fn bind_scope_claim_operands(

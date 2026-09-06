@@ -2528,6 +2528,30 @@ impl WasmDb {
             })
     }
 
+    #[wasm_bindgen(js_name = waitForPendingWrites)]
+    pub fn wait_for_pending_writes(&self, tier: String) -> js_sys::Promise {
+        let inner = match self.open_inner() {
+            Ok(inner) => inner,
+            Err(error) => return js_sys::Promise::reject(&error),
+        };
+        future_to_promise(async move {
+            let tier = durability_tier_from_str(&tier)?;
+            match inner {
+                WasmDbInner::Memory(db) => db
+                    .wait_for_pending_writes(tier)
+                    .await
+                    .map_err(to_js_error)?,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db
+                    .wait_for_pending_writes(tier)
+                    .await
+                    .map_err(to_js_error)?,
+                WasmDbInner::Closed => return Err(JsValue::from_str("database closed")),
+            }
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     #[wasm_bindgen(js_name = tick)]
     pub fn tick(&self) -> js_sys::Promise {
         let inner = match self.open_inner() {
@@ -4038,7 +4062,7 @@ fn admit_binding_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
+    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
 }
 
 fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsValue> {
@@ -5291,7 +5315,9 @@ mod dynamic_schema_view_tests {
             Value::F64(7.5)
         );
         assert_eq!(
-            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap().unwrap(),
+            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64))
+                .unwrap()
+                .unwrap(),
             Value::F64(9_007_199_254_740_992.0),
             "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
         );

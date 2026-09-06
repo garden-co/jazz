@@ -46,7 +46,17 @@ export class AccountManager<Auth> {
   private listeners = new Set<() => void>();
 
   /** @internal Public factories supply the verified enrollment adapter. */
-  constructor(private readonly enrollment: AccountEnrollment<Auth>) {}
+  constructor(
+    private readonly enrollment: AccountEnrollment<Auth>,
+    initialAccount?: AccountHandle,
+  ) {
+    if (initialAccount)
+      this.snapshot = Object.freeze({
+        account: initialAccount,
+        pending: undefined,
+        error: undefined,
+      });
+  }
 
   readonly getSnapshot = (): AccountSnapshot => this.snapshot;
   readonly subscribe = (listener: () => void): (() => void) => {
@@ -55,6 +65,12 @@ export class AccountManager<Auth> {
       this.listeners.delete(listener);
     };
   };
+
+  /** @internal Surface host storage failure without changing the selected account. */
+  reportPersistenceError(cause: unknown): void {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    this.publish({ ...this.snapshot, error });
+  }
 
   getLoggedIn(): AccountHandle | undefined {
     return this.snapshot.account;
@@ -100,6 +116,7 @@ export class AccountManager<Auth> {
       const account = await enroll();
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       this.publish({ account, pending: undefined, error: undefined });
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
       return account;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -112,6 +129,12 @@ export class AccountManager<Auth> {
 
   private publish(snapshot: AccountSnapshot): void {
     this.snapshot = Object.freeze(snapshot);
-    for (const listener of [...this.listeners]) listener();
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Account state observer failed", error);
+      }
+    }
   }
 }

@@ -178,6 +178,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       );
       const appContext: AppContext = {
         appId: context.config.appId,
+        accountId: context.config.accountId,
         schema: context.schema,
         driver: context.config.driver,
         serverUrl: context.config.serverUrl,

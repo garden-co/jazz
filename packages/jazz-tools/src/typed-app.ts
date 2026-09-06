@@ -518,10 +518,18 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
 };
 
 type ProvenanceMagicColumns = {
-  $createdBy: string;
+  $createdBy: import("./magic-columns.js").RowAuthor;
   $createdAt: Date;
-  $updatedBy: string;
+  $updatedBy: import("./magic-columns.js").RowAuthor;
   $updatedAt: Date;
+  "$createdBy.account": string | null;
+  "$createdBy.identity": import("./magic-columns.js").RowAuthor["identity"];
+  "$createdBy.identity.issuer": string;
+  "$createdBy.identity.subject": string;
+  "$updatedBy.account": string | null;
+  "$updatedBy.identity": import("./magic-columns.js").RowAuthor["identity"];
+  "$updatedBy.identity.issuer": string;
+  "$updatedBy.identity.subject": string;
 };
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =

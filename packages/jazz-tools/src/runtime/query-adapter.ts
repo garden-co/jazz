@@ -67,6 +67,9 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
 }
 
 function stripQualifier(column: string): string {
+  if (column.startsWith("$")) return column;
+  const magic = column.indexOf(".$");
+  if (magic >= 0) return column.slice(magic + 1);
   const parts = column.split(".");
   return parts[parts.length - 1] ?? column;
 }

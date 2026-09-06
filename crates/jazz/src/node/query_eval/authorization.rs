@@ -375,10 +375,7 @@ where
             } else if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
-            claims.insert(
-                "user".to_owned(),
-                Value::String(identity.canonical().to_owned()),
-            );
+            claims.extend(crate::tools::policy_claims::author_policy_claims(identity));
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -1476,7 +1473,7 @@ pub(super) fn permission_scope_claim_values(
     // claims such as `sub` and `user_id` retain their admitted values, while
     // other Jazz defaults remain fallbacks.
     for (name, value) in default_permission_scope_claim_values(writer) {
-        if name == "user" {
+        if name == "user" || name.starts_with("user.") {
             claim_values.insert(name, value);
         } else {
             claim_values.entry(name).or_insert(value);
@@ -1839,7 +1836,7 @@ mod authorization_scope_compiler_tests {
         );
         assert_eq!(
             permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("user"),
-            Some(&Value::String(identity.canonical().to_owned()))
+            Some(&identity.to_value())
         );
     }
 

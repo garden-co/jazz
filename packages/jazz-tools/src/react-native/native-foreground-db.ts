@@ -69,6 +69,7 @@ type ForegroundCommand =
   | { type: "rollbackTransaction"; transaction: number }
   | { type: "subscribeWithOptions"; query: number; optionsJson: string }
   | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | { type: "waitForPendingWrites"; tier: string }
   | {
       type: "stageMutation";
       transaction: number;
@@ -489,6 +490,20 @@ export class NativeForegroundDb {
         return cancelled.cancelled;
       },
     };
+  }
+
+  async waitForPendingWrites(tier: string): Promise<Uint8Array> {
+    let response = this.execute({ type: "waitForPendingWrites", tier });
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "rows" || response.rows.length !== 0)
+      return unexpected("waitForPendingWrites", response.type);
+    return response.rows;
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {

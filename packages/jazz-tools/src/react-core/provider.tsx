@@ -13,7 +13,7 @@ import {
   releaseClient as registryReleaseClient,
 } from "../runtime/client-registry.js";
 import type { PublicSession } from "../runtime/context.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
 
 type CoreJazzDb = {

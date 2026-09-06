@@ -143,3 +143,34 @@ function retiredScopeHash(value: string): string {
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
+
+describe("account storage and principal runtime isolation", () => {
+  it("reopens the same account root without sharing live authorization between linked identities", async () => {
+    const {
+      createBrowserPhysicalDatabaseName,
+      createBrowserStorageOwner,
+      createBrowserAuthSessionKey,
+      createBrowserWorkerFingerprint,
+      assertBrowserStorageOwnerUnchanged,
+    } = await import("./browser-worker-config.js");
+    const jwtToken = (sub: string) =>
+      `e30.${btoa(JSON.stringify({ iss: "https://issuer.example", sub }))}.sig`;
+    const alice = {
+      appId: "account-test",
+      accountId: "00000000-0000-4000-8000-000000000001",
+      jwtToken: jwtToken("alice"),
+    };
+    const linked = { ...alice, jwtToken: jwtToken("alice-linked") };
+    const other = { ...alice, accountId: "00000000-0000-4000-8000-000000000002" };
+    const name = createBrowserPhysicalDatabaseName(alice, "test");
+    expect(createBrowserPhysicalDatabaseName(linked, "test")).toBe(name);
+    expect(createBrowserStorageOwner(linked)).toBe(createBrowserStorageOwner(alice));
+    expect(createBrowserPhysicalDatabaseName(other, "test")).not.toBe(name);
+    expect(createBrowserAuthSessionKey(linked)).not.toBe(createBrowserAuthSessionKey(alice));
+    expect(createBrowserWorkerFingerprint(linked, name, "schema")).not.toBe(
+      createBrowserWorkerFingerprint(alice, name, "schema"),
+    );
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, linked)).toThrow("Cannot change");
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, { ...alice })).not.toThrow();
+  });
+});

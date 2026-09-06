@@ -395,14 +395,12 @@ pub fn admitted_session_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    let (author_issuer, author_subject): (String, String) =
-        serde_json::from_str(author.canonical())
-            .expect("admitted authors always have canonical issuer/subject JSON");
+    let (author_issuer, author_subject) = author.principal_parts();
     debug_assert_eq!(
         (author_issuer, author_subject),
         (issuer.to_owned(), subject.to_owned())
     );
-    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
+    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {

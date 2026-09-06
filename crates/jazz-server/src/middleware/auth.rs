@@ -1056,6 +1056,7 @@ pub fn resolve_verified_jwt_session(
     let claims = verified.claims;
 
     Ok(Session {
+        account_id: None,
         issuer,
         user_id: subject,
         claims,
@@ -1172,6 +1173,7 @@ pub async fn extract_session(
                 _ => jazz::tools::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
+                account_id: None,
                 issuer: verified.issuer.to_owned(),
                 user_id: verified.user_id,
                 // The verified key proves the issuer-scoped subject above; it

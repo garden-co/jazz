@@ -884,6 +884,7 @@ export class JazzClient {
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
       appId: this.context.appId,
+      accountId: this.context.accountId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
       trustedReservedSession: getTrustedReservedSession(this.context),

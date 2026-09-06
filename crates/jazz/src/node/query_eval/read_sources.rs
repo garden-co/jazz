@@ -3433,6 +3433,16 @@ where
     S: OrderedKvStorage,
 {
     let mut fields = canonical_current_source_fields(table, false);
+    for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
+            let (root, path) = AuthorSubject::metadata_path(name).expect("validated author path");
+            fields.push(ProjectField::record_field(
+                root,
+                path.iter().copied(),
+                name.clone(),
+            ));
+        }
+    }
     let mut metadata = BTreeMap::new();
     let needs_version_witnesses = requirements
         .metadata
@@ -3495,6 +3505,14 @@ where
         );
     }
     for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
+            metadata.insert(
+                requirement.clone(),
+                SourceMetadataFields::Provenance {
+                    field: name.clone(),
+                },
+            );
+        }
         if let SourceMetadataRequirement::Provenance(field) = requirement {
             metadata.insert(
                 SourceMetadataRequirement::Provenance(*field),
@@ -3861,14 +3879,24 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             current_row_column_field(column, value_type)
         }))
         .chain([
-            records::DescriptorField::new("$createdBy", ValueType::String),
+            records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
             records::DescriptorField::new("$createdAt", ValueType::U64),
-            records::DescriptorField::new("$updatedBy", ValueType::String),
+            records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
             records::DescriptorField::new("$updatedAt", ValueType::U64),
             records::DescriptorField::new("tx_time", ValueType::U64),
             records::DescriptorField::new("tx_node_id", ValueType::U64),
         ])
         .collect::<Vec<_>>();
+    for requirement in metadata.keys() {
+        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
+            fields.push(records::DescriptorField::new(
+                name.clone(),
+                AuthorSubject::metadata_type(name)
+                    .expect("author path")
+                    .clone(),
+            ));
+        }
+    }
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
             records::DescriptorField::new("table", ValueType::String),
@@ -3885,9 +3913,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
                 "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
-            records::DescriptorField::new("created_by", ValueType::String),
+            records::DescriptorField::new("created_by", AuthorSubject::value_type()),
             records::DescriptorField::new("created_at", ValueType::U64),
-            records::DescriptorField::new("updated_by", ValueType::String),
+            records::DescriptorField::new("updated_by", AuthorSubject::value_type()),
             records::DescriptorField::new("updated_at", ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
@@ -4540,14 +4568,14 @@ fn inline_current_record(
         values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
     }
     if let Some(provenance) = row.provenance()? {
-        values.push(Value::String(provenance.created_by.canonical().to_owned()));
+        values.push(provenance.created_by.to_value());
         values.push(Value::U64(provenance.created_at));
-        values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+        values.push(provenance.updated_by.to_value());
         values.push(Value::U64(provenance.updated_at));
     } else {
-        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
+        values.push(AuthorSubject::SYSTEM.to_value());
         values.push(Value::U64(0));
-        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
+        values.push(AuthorSubject::SYSTEM.to_value());
         values.push(Value::U64(0));
     }
     let (tx_time, tx_node_alias) = row
@@ -4555,6 +4583,19 @@ fn inline_current_record(
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
+    let provenance = row.provenance()?;
+    append_author_projection_values(
+        &mut values,
+        descriptor,
+        provenance
+            .as_ref()
+            .map(|p| p.created_by)
+            .unwrap_or(AuthorSubject::SYSTEM),
+        provenance
+            .as_ref()
+            .map(|p| p.updated_by)
+            .unwrap_or(AuthorSubject::SYSTEM),
+    );
     Ok(descriptor.create(&values)?)
 }
 
@@ -4706,6 +4747,14 @@ pub(super) fn inline_source_metadata(
         );
     }
     for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
+            metadata.insert(
+                requirement.clone(),
+                SourceMetadataFields::Provenance {
+                    field: name.clone(),
+                },
+            );
+        }
         if let SourceMetadataRequirement::Provenance(field) = requirement {
             metadata.insert(
                 SourceMetadataRequirement::Provenance(*field),
@@ -4805,15 +4854,21 @@ fn inline_current_record_with_source_metadata_and_deletion(
         updated_at: 0,
     });
     values.extend([
-        Value::String(provenance.created_by.canonical().to_owned()),
+        provenance.created_by.to_value(),
         Value::U64(provenance.created_at),
-        Value::String(provenance.updated_by.canonical().to_owned()),
+        provenance.updated_by.to_value(),
         Value::U64(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+    append_author_projection_values(
+        &mut values,
+        descriptor,
+        provenance.created_by,
+        provenance.updated_by,
+    );
     if descriptor.field_index("table").is_some() {
         values.extend([
             Value::String(table.name.clone()),
@@ -4821,9 +4876,9 @@ fn inline_current_record_with_source_metadata_and_deletion(
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
             Value::Nullable(None),
-            Value::String(provenance.created_by.canonical().to_owned()),
+            provenance.created_by.to_value(),
             Value::U64(provenance.created_at),
-            Value::String(provenance.updated_by.canonical().to_owned()),
+            provenance.updated_by.to_value(),
             Value::U64(provenance.updated_at),
         ]);
     }
@@ -5297,5 +5352,34 @@ mod tests {
             .unwrap(),
             None,
         );
+    }
+}
+
+fn append_author_projection_values(
+    values: &mut Vec<Value>,
+    descriptor: &RecordDescriptor,
+    created_by: AuthorSubject,
+    updated_by: AuthorSubject,
+) {
+    for field in descriptor.fields() {
+        let Some(name) = field.name.as_deref() else {
+            continue;
+        };
+        let Some((root, path)) = AuthorSubject::metadata_path(name) else {
+            continue;
+        };
+        let author = if root == "$createdBy" {
+            created_by
+        } else {
+            updated_by
+        };
+        let mut value = author.to_value();
+        for member in path {
+            let Value::Record(record) = value else {
+                unreachable!("validated author record")
+            };
+            value = record.get(member).expect("validated author field");
+        }
+        values.push(value);
     }
 }
