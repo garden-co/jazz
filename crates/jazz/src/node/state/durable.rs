@@ -526,13 +526,15 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by =
-                AuthorSubject::from_value(record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
-                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+            let made_by = RowAuthor::from_value(
+                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            )
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+            .as_author_subject();
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
-            if author.is_some_and(|author| made_by != author)
+            if author.is_some_and(|author| !durable_author_matches(author, made_by))
                 || if edge_only {
                     fate != 1 || durability != DurabilityTier::Edge
                 } else {
@@ -571,6 +573,14 @@ where
         let Some(node_alias) = self.node_aliases.get(&node).copied() else {
             return Ok(PendingTransactionScan::default());
         };
+        // `$madeBy` is durable provenance. A local system capability records
+        // its specific node origin, while authority evaluation continues to
+        // use `AuthorSubject::SYSTEM` separately.
+        let durable_author = if author == AuthorSubject::SYSTEM {
+            AuthorSubject::system_at(node)
+        } else {
+            author
+        };
 
         let mut scan = PendingTransactionScan::default();
         for raw in self
@@ -585,11 +595,12 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || AuthorSubject::from_value(
+                || RowAuthor::from_value(
                     record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                    != author
+                .as_author_subject()
+                    != durable_author
             {
                 continue;
             }
@@ -1249,5 +1260,14 @@ where
     /// Return accumulated storage-read metrics and reset them.
     pub fn take_storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.take_storage_read_metrics()
+    }
+}
+
+/// Compare an authority/session request with durable provenance without ever
+/// turning persisted node attribution back into the system capability.
+fn durable_author_matches(requested: AuthorSubject, stored: AuthorSubject) -> bool {
+    match requested {
+        AuthorSubject::System => matches!(stored, AuthorSubject::SystemAt(_)),
+        _ => stored == requested,
     }
 }

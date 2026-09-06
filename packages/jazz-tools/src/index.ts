@@ -1,5 +1,6 @@
 // Public exports
 export type { RowAuthor } from "./magic-columns.js";
+export { SYSTEM_ACCOUNT_ID, SYSTEM_ISSUER } from "./magic-columns.js";
 
 // DSL for schema definitions
 export {

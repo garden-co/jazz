@@ -5331,7 +5331,11 @@ mod dynamic_schema_view_tests {
 
     #[test]
     fn binding_claim_admission_derives_identity_and_shadows_identity_named_provider_claims() {
-        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
+                0x5301,
+            )));
         let claims = admit_binding_claims(
             author,
             BTreeMap::from([
@@ -5348,7 +5352,11 @@ mod dynamic_schema_view_tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&author.to_value()),
+            Some(
+                &jazz::ids::RowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            ),
             "session.user must come from the admitted transport identity"
         );
         assert_eq!(

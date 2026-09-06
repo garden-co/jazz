@@ -1709,10 +1709,12 @@ impl EdgeFateCommitIdentity {
     fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
         let mut versions = versions.to_vec();
         versions.sort();
-        Self {
-            tx: tx.clone(),
-            versions,
-        }
+        let mut tx = tx.clone();
+        // An edge route compares durable commit identity across a local staged
+        // write and redacted carrier retransmissions. Its local policy hint is
+        // deliberately excluded from that identity.
+        tx.permission_subject = None;
+        Self { tx, versions }
     }
 
     fn matches(&self, other: &Self) -> bool {

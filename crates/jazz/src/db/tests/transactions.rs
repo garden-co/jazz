@@ -2400,15 +2400,12 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     // receives or creates the authority's private `grants` support row.
     for client in [&alice_client, &bob_client] {
         client
-            .insert(
-                "docs",
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_settled(MergeableCommit::new("docs", target, 1).cells(
                 BTreeMap::from([("title".to_owned(), Value::String("original".to_owned()))]),
-                InsertOptions {
-                    row_id: Some(target),
-                    identity: WriteIdentity::Session(AuthorSubject::SYSTEM),
-                    ..Default::default()
-                },
-            )
+            ))
             .unwrap();
     }
 
@@ -2424,7 +2421,7 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     let _bob_subscriber =
         server.accept_subscriber_with_claims(bob_server_transport, bob, test_provider_claims(bob));
 
-    // Settle the SYSTEM setup writes before the session cases. The grants
+    // Drain initial transport setup before the session cases. The grants
     // remain authority-only because docs policy narrows ordinary delivery.
     for client in [&alice_client, &bob_client] {
         client.tick().unwrap();

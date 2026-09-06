@@ -22,12 +22,14 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 - **`NodeUuid` / `RowUuid` / `SchemaVersionId` / `MigrationLensId`** —
   wire-stable UUID identities.
-- **`AuthorSubject`** — the interned in-memory form of the canonical portable
-  `[iss,sub]` JSON string. Intern handles are never portable or orderable
-  (ch. 7).
+- **`AuthorSubject`** — session principal or trusted internal capability;
+  admitted account and exact identity are interned together (ch. 7).
+- **`RowAuthor`** — non-null account and exact principal provenance, encoded as
+  a native record. System provenance includes its originating node. Intern
+  handles never enter wire, storage, or public ordering.
 - **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
   never on the wire (ch. 14).
-- **`AuthorSubject::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
+- **`AuthorSubject::SYSTEM`** — the trusted internal capability that bypasses policy (ch. 7), distinct from persisted system authorship (reserved account/issuer plus originating node).
 
 ### Time & order (ch. 2–4)
 

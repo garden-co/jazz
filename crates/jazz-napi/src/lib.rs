@@ -5744,6 +5744,7 @@ mod tests {
         drop(active_request);
     }
     use groove::storage::TestStorage;
+    use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
@@ -5753,7 +5754,8 @@ mod tests {
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{
-        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowAuthor as CoreRowAuthor,
+        RowUuid as CoreRowUuid,
     };
     use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
     use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
@@ -6040,7 +6042,9 @@ mod tests {
 
     #[test]
     fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {
-        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(AccountId(uuid::Uuid::from_bytes([0xa2; 16])));
         let claims = crate::core_claims_from_json(
             author,
             Some(json!({
@@ -6055,7 +6059,11 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&author.to_value()),
+            Some(
+                &CoreRowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            ),
             "session.user must come from the supplied structured author"
         );
         assert_eq!(
@@ -6114,12 +6122,27 @@ mod tests {
 
     #[test]
     fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
-        let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
-            .expect("canonical first-party author");
+        let account = AccountId(uuid::Uuid::from_bytes([0xa3; 16]));
+        let author = CoreAuthorSubject::from_canonical(
+            &serde_json::to_string(&(
+                account.0.to_string(),
+                CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+                "alice",
+            ))
+            .expect("serialize canonical admitted first-party author"),
+        )
+        .expect("parse canonical admitted first-party author");
         let claims = crate::core_claims_from_json(author, Some(json!({ "authMode": "external" })))
             .expect("NAPI claims are scalar provider data");
 
-        assert_eq!(claims.get("user"), Some(&author.to_value()));
+        assert_eq!(
+            claims.get("user"),
+            Some(
+                &CoreRowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            )
+        );
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned())),

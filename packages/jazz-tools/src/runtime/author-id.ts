@@ -180,19 +180,11 @@ export function validateStructuredAuthorValue(value: Value): void {
   if (value.type !== "Row" || value.value.values.length !== 2)
     throw new Error("invalid structured author record");
   const [account, identity] = value.value.values;
-  if (
-    (account?.type !== "Null" && account?.type !== "Uuid") ||
-    identity?.type !== "Row" ||
-    identity.value.values.length !== 2
-  ) {
+  if (account?.type !== "Uuid" || identity?.type !== "Row" || identity.value.values.length !== 2) {
     throw new Error("invalid structured author record");
   }
   const [issuer, subject] = identity.value.values;
   if (issuer?.type !== "Text" || subject?.type !== "Text")
     throw new Error("invalid structured author identity");
-  canonicalAuthorSubject(
-    issuer.value,
-    subject.value,
-    account.type === "Uuid" ? account.value : undefined,
-  );
+  canonicalAuthorSubject(issuer.value, subject.value, account.value);
 }

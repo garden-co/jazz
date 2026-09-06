@@ -3145,6 +3145,165 @@ fn scope_isolated_relay_terminal_write_rejects_denied_handshake_claims() {
     ));
 }
 
+#[test]
+fn scope_relay_upload_rejects_forged_system_origin_before_persistence() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let client = open_db(0xaa, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("forged system provenance", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a candidate before relay admission");
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit { mut tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    tx.made_by = AuthorSubject::system_at(NodeUuid::from_bytes([0x6a; 16]));
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("relay can send a raw forged upload");
+
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("relay provenance must match the admitted session");
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .is_none(),
+        "a rejected relay envelope must not retain forged system attribution"
+    );
+}
+
+/// A scope-isolated relay cannot substitute any independently attributed
+/// principal for its immutable delegated session binding.
+#[test]
+fn scope_relay_upload_rejects_forged_user_origin_before_persistence() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbb; 16]);
+    let client = open_db(0xaa, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("forged user provenance", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a candidate before relay admission");
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit { mut tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    tx.made_by = bob;
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("relay can send a raw forged upload");
+
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("scope relay provenance must match the admitted session");
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .is_none(),
+        "a rejected relay envelope must not retain forged user attribution"
+    );
+}
+
+/// A scope relay may resend an authority-owned unit that is already stored.
+/// Its immutable delegated binding does not become that unit's authority, and
+/// it cannot rewrite the durable system origin while replaying it.
+#[test]
+fn scope_relay_replays_known_system_origin_without_claiming_authority() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let write = server
+        .insert("todos", cells("authority-owned", false, alice))
+        .expect("system authority can create the durable unit");
+    let tx_id = write.mergeable_tx_id();
+    let unit = server
+        .server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("settled authority unit remains replayable");
+    let SyncMessage::CommitUnit { mut tx, versions } = unit else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    assert!(matches!(tx.made_by, AuthorSubject::SystemAt(_)));
+    assert_eq!(tx.permission_subject, Some(AuthorSubject::SYSTEM));
+    // This differs only in a raw untrusted permission hint. The relay must
+    // redact it before duplicate identity comparison, not reject a known unit.
+    tx.permission_subject = Some(alice);
+
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("scope relay can retransmit the known unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("known authority replay is idempotent");
+
+    let SyncMessage::CommitUnit { tx: stored, .. } = server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("known replay does not remove the authority transaction")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    assert!(matches!(stored.made_by, AuthorSubject::SystemAt(_)));
+    assert_ne!(stored.permission_subject, Some(alice));
+}
+
 /// Empty scope-relay claims are an admitted empty snapshot, not an invitation
 /// to use default, prior, or process-global claims when terminal policy proof
 /// runs.
@@ -4538,13 +4697,19 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .iter()
         .find(|unit| unit.tx.tx_id == tx_id)
         .unwrap();
+    let SyncMessage::CommitUnit { mut tx, versions } = canonical.clone() else {
+        unreachable!("commit_unit_for returns a CommitUnit")
+    };
+    assert_eq!(tx.permission_subject, Some(alice));
+    tx.permission_subject = None;
+    let canonical_carrier = SyncMessage::CommitUnit { tx, versions };
     assert_eq!(
         SyncMessage::CommitUnit {
             tx: unit.tx.clone(),
             versions: unit.versions.clone()
         },
-        canonical,
-        "the publication must retain the exact canonical admitted write"
+        canonical_carrier,
+        "the publication retains the exact durable write while omitting its local capability"
     );
     drop(outbox);
     client_upstream
@@ -4587,7 +4752,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
                         SyncMessage::CommitUnit {
                             tx: unit.tx.clone(),
                             versions: unit.versions.clone(),
-                        } == canonical))
+                        } == canonical_carrier))
         });
     assert!(
         uploaded,

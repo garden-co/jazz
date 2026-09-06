@@ -713,6 +713,13 @@ fn aggregate_count_over_empty_query_returns_identity_row() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].test_cells_by_descriptor()["count"], Value::U64(0));
+    assert!(rows[0].provenance().unwrap().is_none());
+    for field in ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"] {
+        assert!(
+            rows[0].record.descriptor().field_index(field).is_none(),
+            "aggregate result must not manufacture {field} metadata"
+        );
+    }
 }
 
 #[test]

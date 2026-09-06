@@ -50,9 +50,7 @@ async fn linked_identities_share_account_ownership_but_not_exact_authorship() {
         .query_results_with_read_tier(
             Query::from("owned").filter(jazz::query::eq(
                 jazz::query::col("$createdBy.account"),
-                jazz::query::lit(jazz::groove::records::Value::Nullable(Some(Box::new(
-                    jazz::groove::records::Value::Uuid(uuid::Uuid::from_u128(1)),
-                )))),
+                jazz::query::lit(jazz::groove::records::Value::Uuid(uuid::Uuid::from_u128(1))),
             )),
             ReadTier::LocalFirst,
         )
@@ -74,4 +72,60 @@ async fn linked_identities_share_account_ownership_but_not_exact_authorship() {
         }
     }
     client.shutdown().await.expect("close account fixture");
+}
+
+/// Anonymous policy readers have no account authority. Explicit anonymous
+/// access still works, but account ownership must never mean null ownership.
+#[tokio::test]
+async fn anonymous_account_claim_does_not_match_system_authorship() {
+    use jazz::ids::AuthorSubject;
+    use jazz::tools::{AuthMode, CmpOp, PolicyExpr, Value};
+
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("owned")
+                .column("title", ColumnType::Text)
+                .policies(common::read_and_allow_all_writes(common::session_eq(
+                    "$createdBy.account",
+                    &["user", "account"],
+                ))),
+        )
+        .table(
+            TableSchemaBuilder::new("exact")
+                .column("title", ColumnType::Text)
+                .policies(common::read_and_allow_all_writes(common::session_eq(
+                    "$createdBy",
+                    &["user"],
+                ))),
+        )
+        .table(
+            TableSchemaBuilder::new("anonymous_readable")
+                .column("title", ColumnType::Text)
+                .policies(common::read_and_allow_all_writes(PolicyExpr::SessionCmp {
+                    path: vec!["authMode".into()],
+                    op: CmpOp::Eq,
+                    value: Value::Text("anonymous".into()),
+                })),
+        )
+        .build();
+    let root = JazzClient::test_client(schema).await;
+    for table in ["owned", "exact", "anonymous_readable"] {
+        root.upsert(
+            table,
+            uuid::Uuid::from_u128(99),
+            jazz::row_input!("title" => "system row"),
+        )
+        .expect("trusted system write");
+    }
+    let anonymous = root.for_session(
+        Session::new(AuthorSubject::ANONYMOUS_ISSUER, "viewer").with_auth_mode(AuthMode::Anonymous),
+    );
+    for (table, expected) in [("owned", 0), ("exact", 0), ("anonymous_readable", 1)] {
+        let rows = anonymous
+            .query_results_with_read_tier(Query::from(table), ReadTier::LocalFirst)
+            .await
+            .expect("anonymous scoped read");
+        assert_eq!(rows.len(), expected, "{table} anonymous visibility");
+    }
+    root.shutdown().await.expect("close anonymous fixture");
 }

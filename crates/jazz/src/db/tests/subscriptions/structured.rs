@@ -177,6 +177,7 @@ fn structured_live_snapshot_keeps_child_edits_across_parent_reordering() {
         .unwrap();
     }
     let query = Query::from("users")
+        .select(["name", "$createdAt"])
         .order_by("name", OrderDirection::Asc)
         .array_subquery(ArraySubquery::new(
             "todosViaOwner",
@@ -443,15 +444,24 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     // `CoveredInput` closure under INV-SYNC-36.
     db.invalidate_groove_runtime_for_test();
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
-    let reset = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        reset,
-        SubscriptionEvent::Delta {
-            reset: true,
-            terminal_operations,
-            ..
-        } if terminal_operations.is_empty()
-    ));
+    let SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected runtime reset");
+    };
+    assert!(terminal_operations.is_empty());
+    let reset_rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
+    let reset_batches = crate::binding_codec::row_batches(&reset_rows)
+        .expect("terminal reset encodes for the native binding");
+    assert!(reset_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        crate::binding_codec::RowDescriptorFieldName::ResultField { name }
+            if name == "$createdAt"
+    )));
     assert_eq!(
         db.active_groove_subscriptions_for_test(),
         1,
@@ -1623,7 +1633,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     )
     .unwrap();
     let query = Query::from("todos")
-        .select(["title"])
+        .select(["title", "$createdAt"])
         .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -1638,6 +1648,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         ]),
         crate::db::InsertOptions {
             row_id: Some(row(0x52)),
+            updated_at_ms: Some(4_321),
             ..Default::default()
         },
     )
@@ -1653,6 +1664,27 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row.row_uuid(), row(0x52));
     assert_eq!(added[0].index, 0);
+    assert!(
+        added[0].row.raw_field("owner").is_some(),
+        "the terminal publication retains its collector-owned nested field"
+    );
+    assert_eq!(
+        added[0].row.raw_field("$createdAt"),
+        Some(Value::U64(4_321))
+    );
+    let binding_rows = [added[0].row.clone()];
+    let batches = crate::binding_codec::row_batches(&binding_rows)
+        .expect("terminal update encodes for the native binding");
+    let (descriptor, _) = binding_rows[0].encoded_record();
+    assert_eq!(
+        descriptor.bind(batches[0].rows[0].raw).get("$createdAt"),
+        Ok(Value::U64(4_321))
+    );
+    assert!(batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        crate::binding_codec::RowDescriptorFieldName::ResultField { name }
+            if name == "$createdAt"
+    )));
     assert!(
         terminal_operations
             .iter()

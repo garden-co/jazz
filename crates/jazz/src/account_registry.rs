@@ -38,6 +38,18 @@ impl Principal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AccountId(pub Uuid);
 
+/// Reserved durable account identity used only for node-attributed system rows.
+///
+/// It is never an assignable registry account or an externally admitted claim.
+pub const SYSTEM_ACCOUNT_ID: AccountId = AccountId(Uuid::nil());
+
+impl AccountId {
+    /// Whether this is the reserved system-attribution account.
+    pub fn is_system(self) -> bool {
+        self == SYSTEM_ACCOUNT_ID
+    }
+}
+
 /// Deterministic founding account, scoped to the application's registry.
 /// `subject` must be the identity derived from a verified local-first key.
 /// This does not authenticate a caller or admit an arbitrary claimed subject.
@@ -83,6 +95,9 @@ pub enum AccountError {
     /// System, read-only anonymous, or malformed principals cannot own accounts.
     #[error("invalid account principal")]
     InvalidPrincipal,
+    /// The durable system-attribution account is not assignable to a user.
+    #[error("reserved account identifier")]
+    ReservedAccount,
     /// Registration/linking cannot move an assigned identity.
     #[error("identity is already assigned")]
     AlreadyAssigned,
@@ -242,6 +257,9 @@ impl AccountRegistry {
         principal: Principal,
         account: AccountId,
     ) -> Result<Assignment, AccountError> {
+        if account.is_system() {
+            return Err(AccountError::ReservedAccount);
+        }
         if self.assignments.contains_key(&principal) {
             return Err(AccountError::AlreadyAssigned);
         }
@@ -467,6 +485,18 @@ mod tests {
             Err(AccountError::Expired)
         );
         assert_eq!(registry.login(&candidate), Err(AccountError::NotAssigned));
+    }
+
+    #[test]
+    fn register_command_rejects_reserved_system_account() {
+        let mut registry = AccountRegistry::default();
+        assert_eq!(
+            registry.apply(&AccountCommand::Register {
+                principal: principal("alice"),
+                account: SYSTEM_ACCOUNT_ID,
+            }),
+            Err(AccountError::ReservedAccount)
+        );
     }
 }
 

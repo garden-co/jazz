@@ -6035,7 +6035,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         type: "Row",
         value: {
           values: [
-            { type: "Null" },
+            { type: "Uuid", value: "00000000-0000-4000-8000-000000000001" },
             {
               type: "Row",
               value: {
@@ -7964,7 +7964,7 @@ it("preserves the producer's explicit position over lazy relation state", () => 
 
 function authorFixtureDescriptor(): DescriptorField[] {
   return [
-    { name: "account", valueType: { tag: 15, inner: { tag: 11 } } },
+    { name: "account", valueType: { tag: 11 } },
     {
       name: "identity",
       valueType: {
@@ -7981,7 +7981,7 @@ function authorFixtureDescriptor(): DescriptorField[] {
 function encodedAuthorFixture(subject = inlineScalar("user-1")): Uint8Array {
   const descriptor = authorFixtureDescriptor();
   return createRecord(descriptor, [
-    encodeNativeNullValue(descriptor[0]!.valueType),
+    uuidBytes("00000000-0000-4000-8000-000000000001"),
     createRecord(descriptor[1]!.valueType.record!, [
       inlineScalar("https://issuer.example"),
       subject,

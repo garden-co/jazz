@@ -80,8 +80,21 @@ Account ownership and exact principal provenance must both survive writes,
 replication, and reopening. Equality must be explicit and consistent across
 policies, joins, indexes, and JS; no partially comparing principal tuple.
 `$createdBy` and `$updatedBy` are structured author values:
-`{ account, identity: { issuer, subject } }`. Normal account contexts supply an
-account ID; internal principals without an account expose a null account.
+`{ account, identity: { issuer, subject } }`. Normal account contexts supply a
+non-null UUID account ID. System writes use the reserved account UUID
+`00000000-0000-0000-0000-000000000000`, issuer `urn:jazz:system`, and the
+originating node UUID as subject. This account cannot be registered, linked,
+or claimed through an external credential. The originating node is preserved
+through replication and reopening; relays never replace it with their own ID.
+Persisted system authorship is provenance, not the internal permission-bypass
+capability. Decoding an author must never create that capability.
+Derived aggregate results have no originating write and omit author metadata;
+they do not manufacture a system author or expose a nullable author record.
+
+Accountless anonymous readers have no admitted account (`session.user.account`
+is null). Policy bindings for `user` and `user.account` are absent until an
+account is admitted, so ownership checks fail closed; explicit anonymous-access policies remain
+available. An accountless ordinary principal cannot author new persisted rows.
 Rust interns the entire author structure, including account and both principal
 fields. Intern handles are process-local implementation details and never enter
 storage or wire encodings. Account ownership policies compare `.account`;

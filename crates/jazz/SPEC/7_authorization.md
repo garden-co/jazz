@@ -45,14 +45,13 @@ Invariant digest:
   MUST resolve its stable physical table lineage back to the logical
   table/schema at the relevant frontier; shared deletion storage MUST NOT widen
   authority across tables.
-- `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
-  authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
-  portably as canonical JSON `[iss,sub]`. `session.user` is the only authorship
-  identity: registered JWT transport/security claims, including `iss` and `sub`,
-  remain inspectable metadata in public `session.claims` and a provider claim
-  named `user` remains available as `session.claims["user"]`.
-  Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
-  the reserved system issuer. Local intern handles MUST never become wire,
+- `INV-RLS-23`: Jazz derives `session.user` and row authorship from the
+  registry-admitted account and exact trusted `(iss, sub)` identity. Admitted
+  authors use `{account: UUID, identity: {issuer, subject}}`; accountless
+  readers cannot author rows. Provider claims remain below `session.claims`
+  and cannot shadow the account or identity. External admission MUST reject
+  the reserved system issuer and account. Neither identity component may be
+  normalized. Whole-structure intern handles are process-local, never wire,
   storage, query, equality, or ordering values.
 - `INV-RLS-25`: External JWT metadata MUST preserve the complete verified JWT
   payload at `session.claims[<name>]`, including registered claims `iss`, `sub`,
@@ -98,22 +97,28 @@ it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write check
 
 #### Authenticated subjects and provenance
 
-Jazz does not define an application user. The authenticated identity and the
-author recorded in `$createdBy` / `$updatedBy` are instead one opaque,
-issuer-scoped subject. External JWT authentication retains the exact validated
-`iss` and `sub`; self-signed Jazz identities use a reserved Jazz issuer and
-their key-derived subject. The portable `AuthorSubject` is the canonical JSON
-encoding of the two-string array `[iss,sub]`, with no whitespace or
-normalization. The same `sub` from two issuers therefore denotes two authors.
+Jazz accounts supply stable ownership without defining application profiles.
+An account can admit multiple exact `(iss, sub)` identities, but each identity
+can only ever belong to one account. External JWT authentication preserves both
+components; local-first identities use the reserved Jazz issuer and key-derived
+subject. Linking adds admission and never rewrites existing authorship.
 
-That canonical string is the logical `session.user` value in transactions,
-provenance, policy claims, storage, and sync. It does not replace the admitted
-provider claims. A provider's `user` claim is `session.claims["user"]` and can
-never shadow or spoof `session.user`. Implementations may intern it in memory, but the
-intern handle is process-local and has no observable meaning. Provenance
-supports equality, inequality, grouping, and equality-index lookup. It is not
-orderable: applications sort authors by joining the subject through their own
-identity/user rows and ordering an application field such as display name.
+`$createdBy` and `$updatedBy` are non-null native author records:
+`{account: UUID, identity: {issuer, subject}}`. Compare `.account` for ownership
+across linked identities; whole-author equality compares all three components.
+The same subject from different issuers remains a different identity. Admitted
+`session.user` policy values use the matching record descriptor. Accountless
+readers retain a null session account and ownership equality fails closed.
+Provider `user` claims remain at `session.claims["user"]`; they cannot shadow
+this admitted identity.
+
+System rows use the reserved nil account UUID, `urn:jazz:system`, and the
+originating node UUID as subject. That provenance survives forwarding and
+reopening, but never grants the internal SYSTEM policy-bypass capability.
+Normal local system writes retain their separate trusted permission subject.
+Whole-structure interns never enter durable or wire encodings. Whole-author
+sorting remains unsupported; applications can order an application profile
+field or a supported explicit scalar field instead.
 
 The Jazz-owned issuers `urn:jazz:system`, `urn:jazz:local-first`,
 `urn:jazz:static-bearer`, and `urn:jazz:anonymous` are reserved. External JWTs
@@ -212,8 +217,9 @@ Before table-policy evaluation, the fate authority rejects a commit whose
 effective permission subject uses the reserved `urn:jazz:anonymous` issuer.
 This structural gate applies to inserts, updates, and deletes received directly
 from an anonymous session or relayed by a serving node. It does not change
-trusted-backend attribution: `made_by` may record anonymous provenance when the
-effective permission subject is the non-anonymous trusted backend.
+trusted-backend authority: persisted `made_by` still requires a non-null account
+author or the reserved system account with its originating node UUID. Anonymous
+reader identities cannot become persisted authors.
 
 For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and

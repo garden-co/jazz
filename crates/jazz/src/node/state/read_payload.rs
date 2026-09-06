@@ -462,7 +462,12 @@ where
             prevalidated_bundles.push(bundle);
         }
         let mut applied_bundles = Vec::with_capacity(prevalidated_bundles.len());
-        for bundle in prevalidated_bundles {
+        for mut bundle in prevalidated_bundles {
+            // View and repair carriers can replay a locally-authorized
+            // transaction, but their transport never selects its durable
+            // policy capability. Retain a local stored hint for restart; do
+            // not import or republish a received one.
+            bundle.tx = transaction_without_permission_subject(&bundle.tx);
             self.ingest_known_transaction(
                 bundle.tx.clone(),
                 bundle.versions.clone(),

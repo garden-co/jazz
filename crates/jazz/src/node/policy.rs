@@ -62,6 +62,18 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Build a typed row-preview for advisory policy evaluation without
+    /// letting durable attribution replace the selected policy capability.
+    fn durable_author_policy_preview(
+        &self,
+        mut commit: MergeableCommit,
+    ) -> Result<(MergeableCommit, AuthorSubject), Error> {
+        let permission_subject = commit.effective_permission_subject();
+        commit.made_by = RowAuthor::from_session(commit.made_by, self.node_uuid)
+            .map_err(|_| Error::UnadmittedWriteAuthor)?
+            .as_author_subject();
+        Ok((commit, permission_subject))
+    }
     /// Reconstruct the exact policy operation represented by each incoming
     /// version record.  This is the sole bridge from committed wire data to
     /// authorization support hydration: callers must not substitute a
@@ -405,14 +417,11 @@ where
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
         let write_schema_version = self.catalogue.current_write_schema.schema;
+        let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(
-            &version,
-            commit.effective_permission_subject(),
-            None,
-        )
-        .await
+        self.write_policy_allows_version_record(&version, permission_subject, None)
+            .await
     }
 
     #[cfg(test)]
@@ -433,14 +442,11 @@ where
         write_schema_version: SchemaVersionId,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
+        let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(
-            &version,
-            commit.effective_permission_subject(),
-            None,
-        )
-        .await
+        self.write_policy_allows_version_record(&version, permission_subject, None)
+            .await
     }
 
     #[cfg(test)]
@@ -450,6 +456,7 @@ where
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
         let write_schema_version = exact_view.version_id();
+        let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = exact_view
             .tables
             .iter()
@@ -458,7 +465,7 @@ where
         let version = VersionRecord::from_commit(&commit, table, write_schema_version)?;
         self.write_policy_allows_version_record_for_view(
             &version,
-            commit.effective_permission_subject(),
+            permission_subject,
             Some(exact_view),
             None,
         )

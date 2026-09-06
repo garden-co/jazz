@@ -3873,7 +3873,10 @@ impl JazzClient {
     }
 
     pub async fn test_client(schema: Schema) -> crate::tools::JazzClient {
-        let context = crate::tools::AppContext::test(schema);
+        let mut context = crate::tools::AppContext::test(schema);
+        // This isolated fixture is a trusted backend. Ordinary accountless
+        // contexts remain anonymous readers and cannot author rows.
+        context.admin_secret = Some("test-admin".to_owned());
         crate::tools::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
@@ -4305,6 +4308,18 @@ mod tests {
         context
     }
 
+    // This represents a registry-resolved assignment at the native client
+    // configuration boundary. Keep ordinary offline contexts accountless so
+    // reader-only tests do not accidentally gain write authority.
+    fn with_synthetic_admitted_account(mut context: AppContext) -> AppContext {
+        context.account_id = Some(crate::account_registry::AccountId(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            context.app_id.to_string().as_bytes(),
+        )));
+        context.jwt_token = Some(make_test_jwt("offline-test-writer", json!({})));
+        context
+    }
+
     fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
@@ -4390,7 +4405,7 @@ mod tests {
 
     #[test]
     fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
-        let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
+        let mut session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
@@ -4398,6 +4413,8 @@ mod tests {
                 "user": "provider-user",
                 "authMode": "external",
             }));
+        session.account_id = Some(crate::account_registry::AccountId(Uuid::from_u128(0x4401)));
+        let author = session.author_subject().expect("admitted test author");
 
         let claims = session_claims_to_core_claims(&session).unwrap();
         assert_eq!(
@@ -4419,8 +4436,8 @@ mod tests {
         assert_eq!(
             claims.get("user"),
             Some(
-                &CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
-                    .unwrap()
+                &crate::ids::RowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
                     .to_value()
             )
         );
@@ -4744,11 +4761,11 @@ mod tests {
     /// alice ──Remote read──► transient subscription ──wait──► authority
     #[tokio::test(flavor = "current_thread")]
     async fn strict_remote_one_shot_uses_transient_subscription_not_ambient_all() {
-        let client = JazzClient::connect(make_offline_context(
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
             AppId::from_name("strict-remote-one-shot-subscription"),
             TempDir::new().expect("tempdir").keep(),
             declared_todo_schema(),
-        ))
+        )))
         .await
         .expect("connect offline client");
         client
@@ -4839,12 +4856,12 @@ mod tests {
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-core-row-rehydrate");
-        let context = make_offline_context_with_storage(
+        let context = with_synthetic_admitted_account(make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
             ClientStorage::Persistent,
-        );
+        ));
 
         let client = JazzClient::connect(context.clone())
             .await
@@ -5537,7 +5554,7 @@ mod tests {
                     replacement,
                 ]));
                 let client = JazzClient::connect_with_native_transport(
-                    make_native_context("responsive-during-retry"),
+                    with_synthetic_admitted_account(make_native_context("responsive-during-retry")),
                     connector.clone(),
                 )
                 .await
@@ -5633,12 +5650,12 @@ mod tests {
     async fn offline_memory_client_does_not_create_core_rocksdb_dir() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-core-memory");
-        let context = make_offline_context_with_storage(
+        let context = with_synthetic_admitted_account(make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
             ClientStorage::Memory,
-        );
+        ));
 
         let client = JazzClient::connect(context)
             .await
@@ -5666,11 +5683,11 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_wait_errors_use_transaction_vocabulary() {
-        let client = JazzClient::connect(make_offline_context(
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
             AppId::from_name("transaction-wait-error-vocabulary"),
             TempDir::new().expect("temp client dir").keep(),
             declared_todo_schema(),
-        ))
+        )))
         .await
         .expect("connect offline client");
         let unknown = TransactionId::from_committed_tx(CoreTxId::new(

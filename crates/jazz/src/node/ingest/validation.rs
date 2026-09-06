@@ -513,7 +513,7 @@ where
             durability,
             view_scoped_cardinality && !preserve_authoritative_cardinality,
             contribution_merge,
-        );
+        )?;
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
         } else {
@@ -991,7 +991,7 @@ where
                 None,
                 DurabilityTier::Local,
                 contribution_merge,
-            ),
+            )?,
         );
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;

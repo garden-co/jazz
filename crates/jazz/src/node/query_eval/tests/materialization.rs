@@ -496,8 +496,10 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     );
 }
 
+/// A historical row translated through a table rename retains its v1 creation
+/// provenance and later deletion-register restoration provenance.
 #[test]
-fn flat_join_correlates_projected_v1_sources_across_table_rename() {
+fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_provenance() {
     let v1 = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -528,16 +530,20 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     ));
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
     let author = row(0xf7);
+    let created_by = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let restored_by = AuthorSubject::for_test_bytes([0xe2; 16]);
     let post = row(0xf8);
     let mismatched_author_row = row(0xf9);
     let mismatched_author_id = row(0xfa);
     let mismatched_post = row(0xfb);
     let author_tx = node
         .commit_mergeable_settled(
-            MergeableCommit::new("users", author, 1).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(author.0)),
-                ("name".to_owned(), Value::String("alice".to_owned())),
-            ])),
+            MergeableCommit::new("users", author, 1)
+                .made_by(created_by)
+                .cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(author.0)),
+                    ("name".to_owned(), Value::String("alice".to_owned())),
+                ])),
         )
         .expect("commit v1 author");
     node.apply_fate_update(
@@ -693,5 +699,52 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
                 if input.source_row == author
         )),
         "the renamed join contributor must cross as a compiler-owned covered input: {program_fact_adds:?}"
+    );
+
+    // The content winner remains the v1 creation witness after a later
+    // deletion-register restore. Historical v2 projection must retain both
+    // fields instead of rebuilding a provenance-free current row.
+    let deleted = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("people", author, 5)
+                .made_by(restored_by)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        )
+        .expect("delete renamed v1 row");
+    node.apply_fate_update(
+        deleted,
+        Fate::Accepted,
+        Some(GlobalTime(5)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept delete");
+    let restored = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("people", author, 6)
+                .made_by(restored_by)
+                .deletion(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("restore renamed v1 row");
+    node.apply_fate_update(
+        restored,
+        Fate::Accepted,
+        Some(GlobalTime(6)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept restore");
+    let historical = node
+        .projected_historical_current_rows("people", v2.id, GlobalTime(6))
+        .expect("project renamed historical row")
+        .into_iter()
+        .find(|row| row.row_uuid() == author)
+        .expect("restored renamed row remains visible");
+    assert_eq!(
+        historical.provenance().expect("decode provenance"),
+        Some(RowProvenance {
+            created_by,
+            created_at: 1,
+            updated_by: restored_by,
+            updated_at: 6,
+        })
     );
 }

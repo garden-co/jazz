@@ -18,6 +18,7 @@ import {
   readNativeRowDescriptor,
   writeNativeRowDescriptor,
   storageColumnValueType,
+  type DescriptorField,
   writeDescriptor,
 } from "./native-row-codec.js";
 import type { ColumnDescriptor, Value } from "../../drivers/types.js";
@@ -45,7 +46,7 @@ describe("native row codec", () => {
       { name: "subject", valueType: { tag: 8 } },
     ];
     const author = [
-      { name: "account", valueType: { tag: 15, inner: { tag: 11 } } },
+      { name: "account", valueType: { tag: 11 } },
       { name: "identity", valueType: { tag: 16, record: identity } },
     ];
     const descriptor = [
@@ -57,10 +58,7 @@ describe("native row codec", () => {
       encodeText("https://issuer.example"),
       encodeText("alice"),
     ]);
-    for (const accountBytes of [
-      new Uint8Array(17),
-      Uint8Array.from([1, ...uuidBytes(accountId)]),
-    ]) {
+    for (const accountBytes of [uuidBytes(accountId)]) {
       const bytes = createRecord(descriptor, [
         uuidBytes(rootId),
         createRecord(author, [accountBytes, identityBytes]),
@@ -70,7 +68,7 @@ describe("native row codec", () => {
         type: "Row",
         value: {
           values: [
-            accountBytes[0] === 0 ? { type: "Null" } : { type: "Uuid", value: accountId },
+            { type: "Uuid", value: accountId },
             {
               type: "Row",
               value: {
@@ -86,6 +84,9 @@ describe("native row codec", () => {
       const value = decoded.values[0];
       expect(value.type === "Row" && value.value.id).toBeUndefined();
     }
+    const nullableAuthor: DescriptorField[] = structuredClone(descriptor);
+    nullableAuthor[1]!.valueType.record![0]!.valueType = { tag: 15, inner: { tag: 11 } };
+    expect(() => assertTerminalRootDescriptorCompatible(nullableAuthor, columns)).toThrow();
     const swapped = structuredClone(descriptor);
     swapped[1]!.valueType.record![1]!.valueType.record!.reverse();
     expect(() => assertTerminalRootDescriptorCompatible(swapped, columns)).toThrow();

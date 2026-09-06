@@ -526,11 +526,11 @@ type ProvenanceMagicColumns = {
   $createdAt: Date;
   $updatedBy: import("./magic-columns.js").RowAuthor;
   $updatedAt: Date;
-  "$createdBy.account": string | null;
+  "$createdBy.account": string;
   "$createdBy.identity": import("./magic-columns.js").RowAuthor["identity"];
   "$createdBy.identity.issuer": string;
   "$createdBy.identity.subject": string;
-  "$updatedBy.account": string | null;
+  "$updatedBy.account": string;
   "$updatedBy.identity": import("./magic-columns.js").RowAuthor["identity"];
   "$updatedBy.identity.issuer": string;
   "$updatedBy.identity.subject": string;

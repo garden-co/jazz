@@ -90,9 +90,13 @@ impl Session {
                 self.issuer.clone(),
             )),
         }?;
-        Ok(self
-            .account_id
-            .map_or(principal, |account| principal.with_account(account)))
+        match self.account_id {
+            Some(account) if account.is_system() => {
+                Err(crate::ids::AuthorSubjectError::ReservedAccount)
+            }
+            Some(account) => Ok(principal.with_account(account)),
+            None => Ok(principal),
+        }
     }
 
     fn is_auth_mode_path(path: &[String]) -> bool {
@@ -291,6 +295,8 @@ impl WriteContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account_registry::SYSTEM_ACCOUNT_ID;
+    use crate::ids::AuthorSubjectError;
     use serde_json::json;
 
     #[test]
@@ -301,6 +307,16 @@ mod tests {
         assert_eq!(session.get_string(&["userId".into()]), None);
         assert!(!session.has_path(&["user_id".into()]));
         assert!(!session.has_path(&["userId".into()]));
+    }
+
+    #[test]
+    fn session_rejects_reserved_system_account_before_author_construction() {
+        let mut session = Session::new("https://issuer.example", "user123");
+        session.account_id = Some(SYSTEM_ACCOUNT_ID);
+        assert_eq!(
+            session.author_subject(),
+            Err(AuthorSubjectError::ReservedAccount)
+        );
     }
 
     #[test]

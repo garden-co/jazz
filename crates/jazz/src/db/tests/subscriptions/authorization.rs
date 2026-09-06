@@ -2017,6 +2017,7 @@ fn served_subscription_rows_for_author_with_claims(
 ) -> Vec<RowUuid> {
     let client_node = match author {
         AuthorSubject::System => 0x5d,
+        AuthorSubject::SystemAt(_) => 0x5e,
         AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0],
     };
     let client = open_db(client_node, author, schema);

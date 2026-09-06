@@ -407,14 +407,14 @@ function conditionToRelPredicate(
     if (
       typeof identity.issuer !== "string" ||
       typeof identity.subject !== "string" ||
-      (author && author.account !== null && typeof author.account !== "string")
+      (author && typeof author.account !== "string")
     ) {
       throw new Error(`Invalid structured author condition for "${column}".`);
     }
     canonicalAuthorSubject(
       identity.issuer,
       identity.subject,
-      author?.account === null ? undefined : (author?.account as string | undefined),
+      author?.account as string | undefined,
     );
     const fields = [
       ...(author ? [{ column: `${column}.account`, op: "eq", value: author.account }] : []),
@@ -430,14 +430,7 @@ function conditionToRelPredicate(
       },
     ];
     const equality: RelPredicateExpr = {
-      And: fields.map((field) => {
-        const predicate = conditionToRelPredicate(field, schema, table, scope);
-        // Make account equality total before negating: SQL NULL != UUID would
-        // otherwise remain unknown rather than selecting a different author.
-        return field.column.endsWith(".account") && field.value !== null
-          ? { And: [{ IsNotNull: { column: relColumn(field.column, scope) } }, predicate] }
-          : predicate;
-      }),
+      And: fields.map((field) => conditionToRelPredicate(field, schema, table, scope)),
     };
     return cond.op === "eq" ? equality : { Not: equality };
   }

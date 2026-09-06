@@ -7,18 +7,18 @@ fn project_preserves_logical_binding_fields() {
     let descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
         ("user_check".to_owned(), records::ValueType::Bool),
-        ("$createdBy".to_owned(), AuthorSubject::value_type()),
+        ("$createdBy".to_owned(), RowAuthor::value_type()),
         ("$createdAt".to_owned(), records::ValueType::U64),
-        ("$updatedBy".to_owned(), AuthorSubject::value_type()),
+        ("$updatedBy".to_owned(), RowAuthor::value_type()),
         ("$updatedAt".to_owned(), records::ValueType::U64),
     ]);
     let raw = descriptor
         .create(&[
             Value::Uuid(row(0x6d).0),
             Value::Bool(true),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(10),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(20),
         ])
         .unwrap();
@@ -51,18 +51,18 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
         .with_identity(records::FieldIdentity::Name(
             "__jazz_aggregate_foo".to_owned(),
         )),
-        records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
+        records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
         records::DescriptorField::new("$createdAt", records::ValueType::U64),
-        records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
+        records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
         records::DescriptorField::new("$updatedAt", records::ValueType::U64),
     ]);
     let raw = descriptor
         .create(&[
             Value::Uuid(row(0x70).0),
             Value::U64(9),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(10),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(20),
         ])
         .unwrap();
@@ -85,9 +85,9 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
     let cells = projected.test_cells_by_descriptor();
     assert_eq!(cells["__jazz_aggregate_foo"], Value::U64(9));
     assert_eq!(projected.provenance().unwrap(), Some(RowProvenance {
-        created_by: AuthorSubject::SYSTEM,
+        created_by: AuthorSubject::system_at(node(1)),
         created_at: 10,
-        updated_by: AuthorSubject::SYSTEM,
+        updated_by: AuthorSubject::system_at(node(1)),
         updated_at: 20,
     }));
 }
@@ -250,9 +250,9 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     ("branch_key".to_owned(), records::ValueType::Bytes),
                     ("row_uuid".to_owned(), records::ValueType::Uuid),
                     ("schema_version".to_owned(), records::ValueType::U64),
-                    ("created_by".to_owned(), AuthorSubject::value_type()),
+                    ("created_by".to_owned(), RowAuthor::value_type()),
                     ("created_at".to_owned(), records::ValueType::U64),
-                    ("updated_by".to_owned(), AuthorSubject::value_type()),
+                    ("updated_by".to_owned(), RowAuthor::value_type()),
                     ("updated_at".to_owned(), records::ValueType::U64),
                     (user_column_field("title"), records::ValueType::String),
                 ]),
@@ -260,9 +260,9 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     Value::Bytes(Vec::new()),
                     Value::Uuid(row_uuid.0),
                     Value::U64(1),
-                    created_by.to_value(),
+                    RowAuthor::from_persisted_subject(created_by).unwrap().to_value(),
                     Value::U64(created_at),
-                    updated_by.to_value(),
+                    RowAuthor::from_persisted_subject(updated_by).unwrap().to_value(),
                     Value::U64(updated_at),
                     Value::String(title.to_owned()),
                 ],
@@ -272,17 +272,17 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                 records::RecordDescriptor::new([
                     ("row_uuid".to_owned(), records::ValueType::Uuid),
                     ("title".to_owned(), records::ValueType::String),
-                    ("$createdBy".to_owned(), AuthorSubject::value_type()),
+                    ("$createdBy".to_owned(), RowAuthor::value_type()),
                     ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), AuthorSubject::value_type()),
+                    ("$updatedBy".to_owned(), RowAuthor::value_type()),
                     ("$updatedAt".to_owned(), records::ValueType::U64),
                 ]),
                 vec![
                     Value::Uuid(row_uuid.0),
                     Value::String(title.to_owned()),
-                    created_by.to_value(),
+                    RowAuthor::from_persisted_subject(created_by).unwrap().to_value(),
                     Value::U64(created_at),
-                    updated_by.to_value(),
+                    RowAuthor::from_persisted_subject(updated_by).unwrap().to_value(),
                     Value::U64(updated_at),
                 ],
             )
@@ -313,32 +313,32 @@ fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() 
         ("branch_key".to_owned(), records::ValueType::Bytes),
         ("row_uuid".to_owned(), records::ValueType::Uuid),
         ("schema_version".to_owned(), records::ValueType::U64),
-        ("created_by".to_owned(), AuthorSubject::value_type()),
+        ("created_by".to_owned(), RowAuthor::value_type()),
         ("created_at".to_owned(), records::ValueType::U64),
-        ("updated_by".to_owned(), AuthorSubject::value_type()),
+        ("updated_by".to_owned(), RowAuthor::value_type()),
         ("updated_at".to_owned(), records::ValueType::U64),
     ];
     let mut physical_values = vec![
         Value::Bytes(Vec::new()),
         Value::Uuid(row_uuid.0),
         Value::U64(1),
-        AuthorSubject::SYSTEM.to_value(),
+        RowAuthor::system_at(node(1)).to_value(),
         Value::U64(10),
-        AuthorSubject::SYSTEM.to_value(),
+        RowAuthor::system_at(node(1)).to_value(),
         Value::U64(20),
     ];
     let mut public_fields = vec![
         ("row_uuid".to_owned(), records::ValueType::Uuid),
-        ("$createdBy".to_owned(), AuthorSubject::value_type()),
+        ("$createdBy".to_owned(), RowAuthor::value_type()),
         ("$createdAt".to_owned(), records::ValueType::U64),
-        ("$updatedBy".to_owned(), AuthorSubject::value_type()),
+        ("$updatedBy".to_owned(), RowAuthor::value_type()),
         ("$updatedAt".to_owned(), records::ValueType::U64),
     ];
     let mut public_values = vec![
         Value::Uuid(row_uuid.0),
-        AuthorSubject::SYSTEM.to_value(),
+        RowAuthor::system_at(node(1)).to_value(),
         Value::U64(10),
-        AuthorSubject::SYSTEM.to_value(),
+        RowAuthor::system_at(node(1)).to_value(),
         Value::U64(20),
     ];
     for idx in 0..CELL_COUNT {
@@ -375,9 +375,9 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
                         .with_identity(records::FieldIdentity::Name(logical.to_owned()))
                 }))
                 .chain([
-                    records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
+                    records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
                     records::DescriptorField::new("$createdAt", records::ValueType::U64),
-                    records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
+                    records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
                     records::DescriptorField::new("$updatedAt", records::ValueType::U64),
                 ]),
         );
@@ -385,9 +385,9 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
             .into_iter()
             .chain(values)
             .chain([
-                AuthorSubject::SYSTEM.to_value(),
+                RowAuthor::system_at(node(1)).to_value(),
                 Value::U64(10),
-                AuthorSubject::SYSTEM.to_value(),
+                RowAuthor::system_at(node(1)).to_value(),
                 Value::U64(20),
             ])
             .collect::<Vec<_>>();
@@ -435,9 +435,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
             user_column_field("user___jazz_aggregate_foo"),
             records::ValueType::U64,
         ).with_identity(records::FieldIdentity::Name("user___jazz_aggregate_foo".to_owned())),
-        records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
+        records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
         records::DescriptorField::new("$createdAt", records::ValueType::U64),
-        records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
+        records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
         records::DescriptorField::new("$updatedAt", records::ValueType::U64),
     ]);
     let raw = descriptor
@@ -445,9 +445,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
             Value::Uuid(row(0x71).0),
             Value::U64(2),
             Value::U64(7),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(10),
-            AuthorSubject::SYSTEM.to_value(),
+            RowAuthor::system_at(node(1)).to_value(),
             Value::U64(20),
         ])
         .unwrap();
@@ -465,9 +465,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
         ])
     );
     assert_eq!(row.provenance().unwrap(), Some(RowProvenance {
-        created_by: AuthorSubject::SYSTEM,
+        created_by: AuthorSubject::system_at(node(1)),
         created_at: 10,
-        updated_by: AuthorSubject::SYSTEM,
+        updated_by: AuthorSubject::system_at(node(1)),
         updated_at: 20,
     }));
 }
@@ -1516,7 +1516,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         );
 
         let register_current_values =
-            register_global_current_values(&deletion, Some(GlobalTime(8)));
+            register_global_current_values(&deletion, Some(GlobalTime(8))).unwrap();
         let register_global_current_table = table.global_current_storage_tables().remove(1);
         register_global_current_table
             .record_schema()
@@ -1526,7 +1526,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
 }
 
 #[test]
-fn mergeable_commits_persist_transaction_and_history_rows() {
+fn system_mergeable_commits_preserve_authority_and_persist_node_attribution() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
     let tx = node
@@ -1539,6 +1539,13 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
         .unwrap();
 
     assert_eq!(tx.time, TxTime::from(10));
+    let expected_row_author = AuthorSubject::system_at(node.node_uuid);
+    let stored = node.query_transaction(tx).unwrap().unwrap();
+    assert_eq!(stored.tx.made_by, expected_row_author);
+    assert_eq!(stored.tx.permission_subject, Some(AuthorSubject::SYSTEM));
+    let version = node.query_versions_for_tx(tx).unwrap().remove(0);
+    assert_eq!(version.created_by(), expected_row_author);
+    assert_eq!(version.updated_by(), expected_row_author);
     assert_eq!(
         node.visible_current_cells("todos", row)
             .unwrap()
@@ -1951,7 +1958,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1980,7 +1987,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(child.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2033,7 +2040,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2061,7 +2068,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(child.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2156,7 +2163,7 @@ fn remote_history_rejects_noncanonical_parent_order_before_parking() {
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorSubject::SYSTEM,
+            made_by: AuthorSubject::system_at(tx_id.node),
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -2270,9 +2277,9 @@ fn known_parent_must_match_exact_physical_table_for_local_and_replicated_version
         schema.version_id(),
         row_uuid,
         vec![parent],
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         12,
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         12,
         &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
         None,
@@ -2284,7 +2291,7 @@ fn known_parent_must_match_exact_physical_table_for_local_and_replicated_version
                 tx_id: TxId::new(TxTime::from(12), node(0x7b)),
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(node(0x7b)),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2332,7 +2339,7 @@ fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
             tx_id: parent,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorSubject::SYSTEM,
+            made_by: AuthorSubject::system_at(parent.node),
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -2391,9 +2398,9 @@ fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
         core.catalogue.current_schema_version_id,
         row_uuid,
         Vec::new(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         40,
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         40,
         &title_cells("wrong physical table"),
         None,
@@ -2405,7 +2412,7 @@ fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
             tx_id: parent,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorSubject::SYSTEM,
+            made_by: AuthorSubject::system_at(parent.node),
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -2443,7 +2450,7 @@ fn unknown_parent_constraint_survives_matching_parent_arrival() {
             tx_id: parent,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorSubject::SYSTEM,
+            made_by: AuthorSubject::system_at(parent.node),
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -2487,7 +2494,7 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(child.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2541,7 +2548,7 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2578,7 +2585,7 @@ fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wro
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 2,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2628,7 +2635,7 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(child.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2660,7 +2667,7 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2687,7 +2694,7 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 2,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(parent.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,

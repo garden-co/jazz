@@ -108,6 +108,14 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let alice_owner_id = canonical_user(&Uuid::new_v4().to_string());
             let writer_user_id = Uuid::new_v4().to_string();
             let writer_reader_id = canonical_user(&writer_user_id);
+            let mut writer_session = Session::new("urn:jazz:test", writer_user_id.clone());
+            // Backend impersonation is explicitly trusted; give its durable
+            // writes one stable synthetic account author without changing the
+            // reader's independently enrolled public session.
+            writer_session.account_id = Some(jazz::account_registry::AccountId(Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                writer_user_id.as_bytes(),
+            )));
 
             let writer = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), &writer_user_id),
@@ -125,7 +133,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;
 
             let (doc_id, _, create_tx) = writer
-                .for_session(Session::new("urn:jazz:test", writer_user_id.clone()))
+                .for_session(writer_session.clone())
                 .insert(
                     "docs",
                     row_input!(
@@ -152,7 +160,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             // that access only through this row's transfer_writer_id, keeping
             // Bob's owner-scoped revocation behavior intact.
             let revoke_tx = writer
-                .for_session(Session::new("urn:jazz:test", writer_user_id))
+                .for_session(writer_session)
                 .update(
                     doc_id,
                     vec![("owner_id".to_owned(), Value::Text(alice_owner_id))],
