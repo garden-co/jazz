@@ -69,7 +69,14 @@ fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
 }
 
 fn owner_policy() -> PolicyExpr {
-    PolicyExpr::eq_session("owner", vec!["user".to_owned()])
+    PolicyExpr::eq_session(
+        "owner",
+        vec![
+            "user".to_owned(),
+            "identity".to_owned(),
+            "subject".to_owned(),
+        ],
+    )
 }
 
 fn install_claims(node: &mut NodeState<MemoryStorage>, author: AuthorSubject) {
@@ -118,7 +125,7 @@ fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Val
         ("email".to_string(), Value::String(email.to_string())),
         (
             "owner".to_string(),
-            Value::String(owner.canonical().to_owned()),
+            Value::String(owner.principal_parts().1),
         ),
     ])
 }

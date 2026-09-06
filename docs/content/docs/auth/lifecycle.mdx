@@ -82,7 +82,7 @@ Restore outside a context:
 
 ```ts
 const secret = RecoveryPhrase.toSecret(recoveredPhrase);
-await client?.shutdown();
+await client?.shutdown({ waitForSync: true });
 const restored = accounts.restoreLocalFirst(secret);
 client = await createJazzClient({ ...config, account: restored });
 ```

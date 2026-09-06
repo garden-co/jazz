@@ -1,26 +1,24 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { JazzProvider } from "jazz-tools/vue";
-
-const appId = "my-app";
-const serverUrl = "http://127.0.0.1:4200";
-const providerJwt = "<provider-jwt>";
-const hasJwt = ref(false);
-
-const config = computed(() => ({
-  appId,
-  serverUrl,
-  ...(hasJwt.value ? { jwtToken: providerJwt } : {}),
-}));
-
-function onSignedIn() {
-  hasJwt.value = true;
+import { createAccountManager, type DbConfig } from "jazz-tools";
+import { JazzProvider, useAccountState } from "jazz-tools/vue";
+const props = defineProps<{
+  accounts: Awaited<ReturnType<typeof createAccountManager>>;
+  getToken: () => Promise<string>;
+  config: Omit<DbConfig, "account">;
+}>();
+const state = useAccountState(props.accounts);
+// Login starts without a context. Before linking, finish the old context's
+// shutdown({ waitForSync: true }), then call accounts.linkJWT outside it.
+function signIn() {
+  void props.accounts.loginJWT({ getToken: props.getToken }).catch(() => {});
 }
 </script>
-
 <template>
-  <JazzProvider :config="config">
-    <button type="button" @click="onSignedIn">Sign in</button>
-    <slot />
-  </JazzProvider>
+  <JazzProvider v-if="state.account" :config="{ ...config, account: state.account }"
+    ><slot
+  /></JazzProvider>
+  <template v-else>
+    <button :disabled="!!state.pending" @click="signIn">Sign in</button>
+    <p v-if="state.error" role="alert">{{ state.error.message }}</p>
+  </template>
 </template>

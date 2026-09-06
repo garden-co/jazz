@@ -29,8 +29,22 @@ fn owned_docs_schema() -> jazz::tools::Schema {
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
                 .with_select(PolicyExpr::or(vec![
-                    PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
-                    PolicyExpr::eq_session("transfer_writer_id", vec!["user".to_owned()]),
+                    PolicyExpr::eq_session(
+                        "owner_id",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ),
+                    PolicyExpr::eq_session(
+                        "transfer_writer_id",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ),
                 ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                 .with_delete(PolicyExpr::True),
@@ -50,11 +64,7 @@ fn user_client_context(
 }
 
 fn canonical_user(user_id: &str) -> String {
-    Session::new("urn:jazz:test", user_id)
-        .author_subject()
-        .expect("test user identity")
-        .canonical()
-        .to_owned()
+    user_id.to_owned()
 }
 
 /// Revocation is forward-looking sync narrowing, not post-delivery redaction.
@@ -106,8 +116,10 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             .expect("connect trusted writer");
             wait_for_edge_query_ready(&writer, "docs", READY_TIMEOUT).await;
 
+            let mut bob_context = user_client_context(&server, schema.clone(), &bob_user_id);
+            support::enroll_test_context(&mut bob_context).await.expect("enroll bob");
             let bob =
-                jazz_testkit::connect(user_client_context(&server, schema.clone(), &bob_user_id))
+                jazz_testkit::connect(bob_context)
                     .await
                     .expect("connect bob");
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;

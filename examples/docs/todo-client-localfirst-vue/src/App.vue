@@ -1,10 +1,9 @@
 <script setup lang="ts">
+import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/vue";
 import TodoList from "./TodoList.vue";
 
-const config = {
-  appId: "<your-app-id>",
-};
+defineProps<{ config: DbConfig }>();
 </script>
 
 <template>

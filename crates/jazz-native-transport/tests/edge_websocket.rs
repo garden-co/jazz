@@ -383,6 +383,7 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
                     data_dir: std::env::temp_dir(),
                     storage: ClientStorage::Memory,
                     storage_factory: None,
+                    account_id: None,
                     jwt_token: None,
                     backend_secret: None,
                     admin_secret: Some("secret".to_owned()),

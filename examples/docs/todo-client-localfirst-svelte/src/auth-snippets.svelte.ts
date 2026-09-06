@@ -1,50 +1,38 @@
-import { LocalFirstAuth } from "jazz-tools/svelte";
+import { createAccountManager, exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
+type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
+
 // #region auth-localfirst-svelte-backup
-export function createRecoveryPhraseBackup(auth: LocalFirstAuth) {
-  return {
-    get isLoading() {
-      return auth.isLoading;
-    },
-    get recoveryPhrase() {
-      return auth.secret ? RecoveryPhrase.fromSecret(auth.secret) : null;
-    },
-  };
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-svelte-backup
 
 // #region auth-localfirst-svelte-restore
-export function createRecoveryPhraseRestore(auth: LocalFirstAuth) {
-  return async (userInput: string) => {
-    const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await auth.login(restoredSecret);
-  };
+// Call after the old context's normal shutdown({ waitForSync: true }).
+// Use the returned handle to create the next context.
+export function restoreFromRecoveryPhrase(accounts: Accounts, userInput: string): AccountHandle {
+  return accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-svelte-restore
 
 // #region auth-localfirst-svelte-passkey-backup
 const passkeyBackup = new BrowserPasskeyBackup({
   appName: "My App",
-  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
-  // which scopes passkeys per preview-deploy URL.
+  // Pin to your canonical production hostname rather than a preview hostname.
   appHostname: "myapp.com",
 });
 
-export function createPasskeyBackup(auth: LocalFirstAuth) {
-  return async (displayName: string) => {
-    if (!auth.secret) throw new Error("No local secret to back up yet");
-    await passkeyBackup.backup(auth.secret, displayName);
-  };
+export async function backupToPasskey(account: AccountHandle, displayName: string): Promise<void> {
+  await passkeyBackup.backup(exportLocalFirstSecret(account), displayName);
 }
 // #endregion auth-localfirst-svelte-passkey-backup
 
 // #region auth-localfirst-svelte-passkey-restore
-export function createPasskeyRestore(auth: LocalFirstAuth) {
-  return async () => {
-    const restoredSecret = await passkeyBackup.restore();
-    await auth.login(restoredSecret);
-  };
+// Restore outside any context, after its ordinary graceful shutdown.
+export async function restoreFromPasskey(accounts: Accounts): Promise<AccountHandle> {
+  return accounts.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-svelte-passkey-restore

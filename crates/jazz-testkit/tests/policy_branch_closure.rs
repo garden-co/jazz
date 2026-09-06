@@ -8,8 +8,7 @@ use jazz::tools::public_schema::{
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, Session,
-    TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
@@ -17,11 +16,7 @@ use support::{TestingClient, wait_for_query};
 const MEMBER_ID: &str = "00000000-0000-4000-8000-0000000000b0";
 
 fn member_identity() -> String {
-    Session::new("urn:jazz:test", MEMBER_ID)
-        .author_subject()
-        .expect("member identity")
-        .canonical()
-        .to_owned()
+    MEMBER_ID.to_owned()
 }
 
 #[derive(Clone, Copy)]
@@ -32,7 +27,14 @@ enum BranchOrder {
 }
 
 fn policy_branch_closure_schema(order: BranchOrder) -> Schema {
-    let plain_branch = PolicyExpr::eq_session("direct_user_id", vec!["user".to_owned()]);
+    let plain_branch = PolicyExpr::eq_session(
+        "direct_user_id",
+        vec![
+            "user".to_owned(),
+            "identity".to_owned(),
+            "subject".to_owned(),
+        ],
+    );
     let gather_branch = gathered_resource_access_policy();
     let third_branch = PolicyExpr::eq_literal("route_key", Value::Text("third".to_owned()));
     let branches = match order {
@@ -90,7 +92,11 @@ fn gathered_resource_access_policy() -> PolicyExpr {
                                 column: "identity_key".to_owned(),
                             },
                             op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec!["user".to_owned()]),
+                            right: RelValueRef::SessionRef(vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ]),
                         },
                     }),
                     step: Box::new(RelExpr::Project {

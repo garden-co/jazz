@@ -130,7 +130,14 @@ fn policy_metrics_schema() -> Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
+                        .with_select(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ],
+                        ))
                         .with_delete(PolicyExpr::True),
                 ),
         )
@@ -1897,12 +1904,18 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             // test helper's trusted-backend shortcut.  A backend secret makes
             // this direct link's actual reader SYSTEM by design.
             admin_context.backend_secret = None;
+            support::enroll_test_context(&mut admin_context)
+                .await
+                .expect("enroll admin identity");
             let admin = jazz_testkit::connect(admin_context)
                 .await
                 .expect("connect admin");
             let mut spy_context =
                 server.make_client_context_for_user(schema.clone(), spy_id.clone());
             spy_context.backend_secret = None;
+            support::enroll_test_context(&mut spy_context)
+                .await
+                .expect("enroll spy identity");
             let spy = jazz_testkit::connect(spy_context)
                 .await
                 .expect("connect spy");

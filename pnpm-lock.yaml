@@ -769,6 +769,9 @@ importers:
 
   examples/cloudflare-worker-runtime-ts:
     dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm

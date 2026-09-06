@@ -1,4 +1,5 @@
 // Public exports
+export type { RowAuthor } from "./magic-columns.js";
 
 // DSL for schema definitions
 export {

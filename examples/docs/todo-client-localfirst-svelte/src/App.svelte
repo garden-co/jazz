@@ -1,11 +1,10 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
+  import type { DbConfig } from "jazz-tools";
   import { JazzSvelteProvider } from 'jazz-tools/svelte';
   import TodoList from './TodoList.svelte';
 
-  const config = {
-    appId: '<your-app-id>',
-  };
+  let { config }: { config: DbConfig } = $props();
 </script>
 
 <JazzSvelteProvider {config}>

@@ -1,20 +1,23 @@
+import {
+  createAccountManager,
+  exportLocalFirstSecret,
+  type AccountHandle,
+  type DbConfig,
+} from "jazz-tools";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { JazzProvider, useAccountState } from "jazz-tools/react";
 
+type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
 function TodoApp() {
   return null;
 }
 
 // #region auth-localfirst-react
-export function LocalFirstAuthApp() {
+// Bootstrap outside React: prepare the manager, then getLoggedIn() ?? createLocalFirst().
+export function LocalFirstAuthApp({ config }: { config: DbConfig }) {
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-      }}
-      auth="local-first"
-    >
+    <JazzProvider config={config}>
       <TodoApp />
     </JazzProvider>
   );
@@ -22,80 +25,67 @@ export function LocalFirstAuthApp() {
 // #endregion auth-localfirst-react
 
 // #region auth-jwt-react
-export function JwtAuthApp() {
+// This screen starts without a context. Login selects an existing account;
+// signup explicitly uses registerJWT. Linking belongs in a separate handoff flow
+// after await oldClient.shutdown({ waitForSync: true }).
+export function JwtAuthApp({
+  accounts,
+  getToken,
+  config,
+}: {
+  accounts: Accounts;
+  getToken: () => Promise<string>;
+  config: Omit<DbConfig, "account">;
+}) {
+  const { account, pending, error } = useAccountState(accounts);
+  if (account)
+    return (
+      <JazzProvider config={{ ...config, account }}>
+        <TodoApp />
+      </JazzProvider>
+    );
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-        serverUrl: "http://127.0.0.1:4200",
-        jwtToken: "<provider-jwt>",
-      }}
-    >
-      <TodoApp />
-    </JazzProvider>
+    <>
+      <button
+        disabled={!!pending}
+        onClick={() => {
+          void accounts.loginJWT({ getToken }).catch(() => {});
+        }}
+      >
+        Sign in
+      </button>
+      {error && <p role="alert">{error.message}</p>}
+    </>
   );
 }
 // #endregion auth-jwt-react
 
 // #region auth-localfirst-react-backup
-export function useRecoveryPhraseBackup(): {
-  isLoading: boolean;
-  recoveryPhrase: string | null;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  return {
-    isLoading,
-    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
-  };
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-react-backup
 
 // #region auth-localfirst-react-restore
-export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void> {
-  const { login } = useLocalFirstAuth();
-
-  return async (userInput: string) => {
-    const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await login(restoredSecret);
-  };
+// Call outside any context after shutdown({ waitForSync: true }); mount with the returned handle.
+export function restoreRecoveryPhrase(accounts: Accounts, userInput: string): AccountHandle {
+  return accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-react-restore
 
 // #region auth-localfirst-react-passkey-backup
-const passkeyBackup = new BrowserPasskeyBackup({
-  appName: "My App",
-  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
-  // which scopes passkeys per preview-deploy URL.
-  appHostname: "myapp.com",
-});
-
-export function usePasskeyBackup(): {
-  isLoading: boolean;
-  backupWithPasskey: (displayName: string) => Promise<void>;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  return {
-    isLoading,
-    backupWithPasskey: async (displayName: string) => {
-      if (!secret) {
-        throw new Error("Local-first secret is not ready yet");
-      }
-
-      await passkeyBackup.backup(secret, displayName);
-    },
-  };
+const passkeyBackup = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
+export async function backupWithPasskey(
+  account: AccountHandle,
+  displayName: string,
+): Promise<void> {
+  await passkeyBackup.backup(exportLocalFirstSecret(account), displayName);
 }
 // #endregion auth-localfirst-react-passkey-backup
 
 // #region auth-localfirst-react-passkey-restore
-export function usePasskeyRestore(): () => Promise<void> {
-  const { login } = useLocalFirstAuth();
-
-  return async () => {
-    const restoredSecret = await passkeyBackup.restore();
-    await login(restoredSecret);
-  };
+// As with phrase recovery, await oldClient.shutdown({ waitForSync: true }) before restoring.
+export async function restoreWithPasskey(accounts: Accounts): Promise<AccountHandle> {
+  return accounts.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-react-passkey-restore

@@ -1,49 +1,23 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { usePasskeyBackup } from "../../src/auth-snippets.js";
+import { describe, expect, it } from "vitest";
+import { createAccountManager } from "jazz-tools";
+import { getRecoveryPhrase, restoreRecoveryPhrase } from "../../src/auth-snippets.js";
+import { APP_ID, TEST_PORT } from "./test-constants.js";
 
-function PasskeyBackupProbe(props: {
-  onRender: (value: ReturnType<typeof usePasskeyBackup>) => void;
-}) {
-  props.onRender(usePasskeyBackup());
-  return null;
-}
-
-describe("usePasskeyBackup", () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
-
-  afterEach(async () => {
-    if (root) {
-      await act(async () => {
-        root!.unmount();
-      });
-    }
-
-    container?.remove();
-    root = null;
-    container = null;
-  });
-
-  it("always returns a callable backup function", async () => {
-    let latest: ReturnType<typeof usePasskeyBackup> | null = null;
-
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root!.render(
-        <PasskeyBackupProbe
-          onRender={(value) => {
-            latest = value;
-          }}
-        />,
-      );
+// Recovery is an account operation; no JazzProvider or live context is needed.
+describe("account recovery snippets", () => {
+  it("restores the same account and identity after logout without a context", async () => {
+    const accounts = await createAccountManager({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
     });
-
-    expect(latest).not.toBeNull();
-    expect(typeof latest!.backupWithPasskey).toBe("function");
+    const original = accounts.createLocalFirst();
+    const phrase = getRecoveryPhrase(original);
+    accounts.logout();
+    expect(accounts.getLoggedIn()).toBeUndefined();
+    const restored = restoreRecoveryPhrase(accounts, phrase);
+    expect(restored.id).toBe(original.id);
+    expect(restored.identity).toEqual(original.identity);
+    expect(accounts.getLoggedIn()).toBe(restored);
+    expect(getRecoveryPhrase(restored)).toBe(phrase);
   });
 });

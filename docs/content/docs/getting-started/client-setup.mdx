@@ -1,16 +1,27 @@
 ---
 title: Client Setup
 description: Set up Jazz in your app — works out of the box with most frameworks, with manual configuration available when needed.
-reviewedAt: "b29b48d1a"
+reviewedAt: "20017a2694"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import { Callout } from "fumadocs-ui/components/callout";
 import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
 
-## Zero-config client setup
+## Prepare an account
 
-Every client needs an `appId`. Local-first auth also needs a device secret, which the framework integrations below load or generate. Without local-first credentials, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
+Every client needs an `appId` and an opaque `AccountHandle`. Prepare the account manager outside the context, then restore the selected account or create a local-first account:
+
+```ts
+import { createAccountManager } from "jazz-tools";
+
+const scope = { appId: "my-app", serverUrl: "https://core.example" };
+const accounts = await createAccountManager(scope);
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+const config = { ...scope, account };
+```
+
+Creating a local-first account works offline once the runtime assets are available. The registry URL identifies its authority; it does not itself open a network connection. Pass `config` to the framework component below. A context's identity stays fixed: finish `shutdown({ waitForSync: true })` before linking or switching accounts, then create the next context. See [Authentication](/docs/auth/authentication).
 
 <Tabs
   groupId="jazz-framework"
@@ -23,7 +34,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
 
-    `auth="local-first"` tells `JazzProvider` to load the app-scoped device secret, or generate one on first run. Descendants can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using that same identity.
+    The provider receives the prepared handle. `useAccountState(accounts)` observes login progress and errors outside the context.
 
   </Tab>
   <Tab value="Vue">
@@ -31,7 +42,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
       ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
     </include>
 
-    `useLocalFirstAuth()` from `jazz-tools/vue` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+    Use `useAccountState(accounts)` to observe the shared account manager in Vue.
 
   </Tab>
   <Tab value="Svelte">
@@ -39,7 +50,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
       ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
     </include>
 
-    `LocalFirstAuth` from `jazz-tools/svelte` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+    Use `accountState(accounts)` for a Svelte store of selection, pending operations, and errors.
 
   </Tab>
   <Tab value="Solid">
@@ -47,7 +58,7 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
       ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
     </include>
 
-    `useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+    Use `createAccountState(accounts)` for a Solid accessor of the shared account state.
 
   </Tab>
   <Tab value="TypeScript">
@@ -57,21 +68,20 @@ Every client needs an `appId`. Local-first auth also needs a device secret, whic
   </Tab>
 </Tabs>
 
-The secret is generated on first load, persisted locally, and reused on every subsequent run — the same device keeps the same Jazz identity.
+The browser account store retains the local signing root and selection. Provider JWTs are refreshed through `getToken` and are never persisted in this store.
 
 <Callout type="info">
-  Using Jazz completely offline? Leave out `serverUrl` and everything above still works — writes
-  stay on the device until a server is reachable.
+  For a local-only context, pass `{ ...config, serverUrl: undefined }`. The handle keeps its registry authority; writes stay locally durable. A later context using the matching server URL can synchronize them.
 </Callout>
 
 <Callout type="warn">
-  The local-first secret **is** the user's identity. If it's lost (e.g. cleared `localStorage`), the
-  identity is gone and any data owned by that user becomes inaccessible. Plan for recovery with
-  [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret).
+  The local-first root is that identity's signing credential. If it is lost, the account needs
+  another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
+  restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret).
 </Callout>
 
 <Accordions type="single">
-<Accordion title="Zero config not working?">
+<Accordion title="Runtime assets not loading?">
 
 Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Runtime source overrides](#runtime-source-overrides) below.
 
@@ -82,17 +92,13 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 <CreateJazzClientReference />
 
-Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
+Provide external credentials to `accounts.registerJWT`, `accounts.loginJWT`, or `accounts.linkJWT` through `getToken`. Contexts receive only the resulting handle; raw JWTs, cookie-session mirrors, and signing roots are not public context configuration.
 
 ### Storage driver
 
-Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. Memory storage is also usable locally, but its data disappears when the context closes.
 
-When you supply `driver: { type: "persistent", dbName }`, that name is one physical local
-database. Jazz permanently binds it to the first app/environment/account scope that opens it, so a
-different signed-in account is rejected rather than seeing or concurrently opening the old cache.
-Use a distinct name per intended cache, or explicitly wipe the old local storage during an account
-handoff.
+When you supply `driver: { type: "persistent", dbName }`, the name is a logical base. Jazz derives the physical root from registry, app, environment, and account. Linked identities share that account's durable root while opening distinct live authorization sessions. A root whose recorded scope does not match is rejected.
 
 #### Browser storage eviction
 
@@ -118,7 +124,7 @@ Check `navigator.storage.persisted()` on subsequent loads to see whether the gra
 
 ## Dev plugins
 
-Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars so `createJazzClient({ appId, serverUrl })` picks them up without any manual wiring.
+Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars for the account-manager bootstrap. Prepare a handle using those values, then pass `{ appId, serverUrl, account }` to the client.
 
 <Tabs
   groupId="jazz-framework"
@@ -158,14 +164,14 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     ```ts title="vite.config.ts"
     import { defineConfig } from "vite";
     import { svelte } from "@sveltejs/vite-plugin-svelte";
-    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
 
     export default defineConfig({
-      plugins: [svelte(), jazzSvelteKit()],
+      plugins: [svelte(), jazzPlugin()],
     });
     ```
 
-    Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`. Use `jazzSvelteKit` for both Vite+Svelte and SvelteKit projects.
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`, matching this guide's Vite app bootstrap.
 
   </Tab>
   <Tab value="Solid (Vite)">
@@ -278,7 +284,7 @@ Jazz resolves these in this order:
 
 ### Browser asset overrides
 
-The config is the same across frameworks. Plain TypeScript uses `createDb(...)` directly.
+The prepared config is the same across frameworks. Plain TypeScript passes it directly to `createDb`. Prepare the account manager with the same runtime asset overrides.
 
 <Tabs
   groupId="jazz-framework"
@@ -333,12 +339,16 @@ Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser d
 If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
 
 ```ts title="worker.ts"
-const db = await createDb({
-  appId: "my-app",
-  runtimeSources: {
-    wasmSource: wasmBytes,
-  },
-});
+import { createDb, type AccountHandle } from "jazz-tools";
+
+// The request's account manager prepared this handle before context creation.
+export function openRequestDb(account: AccountHandle, wasmBytes: Uint8Array) {
+  return createDb({
+    appId: "my-app",
+    account,
+    runtimeSources: { wasmSource: wasmBytes },
+  });
+}
 ```
 
-See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz2/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.

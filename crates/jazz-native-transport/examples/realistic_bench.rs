@@ -362,6 +362,7 @@ async fn connect_client(
         storage_factory: Some(std::sync::Arc::new(
             jazz_storage_rocksdb::RocksDbStorageFactory,
         )),
+        account_id: None,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

@@ -16,7 +16,8 @@ export function App({ config, fallback, children }: AppProps = {}) {
   const [error, setError] = React.useState<Error>();
   React.useEffect(() => {
     let cancelled = false;
-    setResolved(undefined);
+    // Keep the active provider while preparing. Equivalent inline configs
+    // retain the provider registry key and must not tear down its context.
     setError(undefined);
     prepareAccountConfig(config).then(
       (value) => {
