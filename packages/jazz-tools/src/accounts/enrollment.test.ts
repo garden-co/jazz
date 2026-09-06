@@ -5,6 +5,12 @@ import {
   onAccountInvalidated,
 } from "./enrollment.js";
 
+import {
+  admitAccountConfig,
+  assertAccountConfig,
+  copyAccountConfigAdmission,
+} from "./config-capability.js";
+
 const registry = "https://core.example/apps/test/accounts";
 const identity = { issuer: "https://issuer.example", subject: "alice" };
 const id = "00000000-0000-4000-8000-000000000001";
@@ -24,6 +30,25 @@ function setup(
 }
 
 describe("opaque account credentials", () => {
+  it("binds normalized context admission to both account and registry", () => {
+    const handle = setup().createLocalFirst();
+    const config = { accountId: id, accountRegistryAuthority: registry };
+    admitAccountConfig(config, handle);
+    const normalized = { ...config };
+    expect(() => assertAccountConfig(normalized)).toThrow();
+    copyAccountConfigAdmission(config, normalized);
+    expect(() => assertAccountConfig(normalized)).not.toThrow();
+    expect(() =>
+      copyAccountConfigAdmission(config, {
+        ...config,
+        accountRegistryAuthority: "https://other.example",
+      }),
+    ).toThrow();
+    normalized.accountRegistryAuthority = "https://other.example";
+    expect(() => assertAccountConfig(normalized)).toThrow();
+    expect(() => admitAccountConfig(normalized, handle)).toThrow();
+  });
+
   it("rejects forged handles and handles from another registry", async () => {
     const manager = setup();
     const handle = manager.createLocalFirst();

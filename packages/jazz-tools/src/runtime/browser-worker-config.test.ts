@@ -158,11 +158,19 @@ describe("account storage and principal runtime isolation", () => {
     const alice = {
       appId: "account-test",
       accountId: "00000000-0000-4000-8000-000000000001",
+      accountRegistryAuthority: "https://core.example/apps/account-test/accounts",
       jwtToken: jwtToken("alice"),
     };
     const linked = { ...alice, jwtToken: jwtToken("alice-linked") };
     const other = { ...alice, accountId: "00000000-0000-4000-8000-000000000002" };
+    const otherRegistry = {
+      ...alice,
+      accountRegistryAuthority: "https://other-core.example/apps/account-test/accounts",
+    };
     const name = createBrowserPhysicalDatabaseName(alice, "test");
+    expect(createBrowserPhysicalDatabaseName(otherRegistry, "test")).not.toBe(name);
+    expect(createBrowserStorageOwner(otherRegistry)).not.toBe(createBrowserStorageOwner(alice));
+    expect(createBrowserAuthSessionKey(otherRegistry)).not.toBe(createBrowserAuthSessionKey(alice));
     expect(createBrowserPhysicalDatabaseName(linked, "test")).toBe(name);
     expect(createBrowserStorageOwner(linked)).toBe(createBrowserStorageOwner(alice));
     expect(createBrowserPhysicalDatabaseName(other, "test")).not.toBe(name);
