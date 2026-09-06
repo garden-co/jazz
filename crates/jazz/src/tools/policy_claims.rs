@@ -40,7 +40,12 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     let Value::Record(record) = &value else {
         unreachable!()
     };
-    let account = record.get("account").expect("author account field");
+    let account = match record.get("account").expect("author account field") {
+        // A present scalar claim is the UUID itself. The surrounding author
+        // record remains nullable, but an ownership column need not be.
+        Value::Nullable(Some(account)) => *account,
+        account => account,
+    };
     let identity = record.get("identity").expect("author identity field");
     let Value::Record(principal) = &identity else {
         unreachable!()

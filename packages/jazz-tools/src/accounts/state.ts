@@ -22,6 +22,7 @@ export interface AccountSnapshot {
 /** @internal Enrollment boundary implemented by first-party account adapters. */
 export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
+  restoreLocalFirst?(secret: string): AccountHandle;
   logout?(): void;
   registerJWT(auth: Auth): Promise<AccountHandle>;
   loginJWT(auth: Auth): Promise<AccountHandle>;
@@ -78,6 +79,16 @@ export class AccountManager<Auth> {
 
   createLocalFirst(): AccountHandle {
     const account = this.enrollment.createLocalFirst();
+    this.generation++;
+    this.publish({ account, pending: undefined, error: undefined });
+    return account;
+  }
+
+  /** Restore a local signing root outside any context, after its ordinary shutdown. */
+  restoreLocalFirst(secret: string): AccountHandle {
+    if (!this.enrollment.restoreLocalFirst)
+      throw new Error("Local account recovery is unavailable");
+    const account = this.enrollment.restoreLocalFirst(secret);
     this.generation++;
     this.publish({ account, pending: undefined, error: undefined });
     return account;

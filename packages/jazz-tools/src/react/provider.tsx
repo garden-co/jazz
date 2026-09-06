@@ -44,7 +44,6 @@ function DevToolsAutoAttach() {
 type JazzProviderCommonProps = {
   fallback?: ReactNode;
   children: ReactNode;
-  onJWTExpired?: () => Promise<string | null | undefined>;
   /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
 };
@@ -59,7 +58,6 @@ function ConfiguredJazzProvider({
   config,
   fallback,
   children,
-  onJWTExpired,
   autoAttachDevTools,
 }: ConfiguredJazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
@@ -74,12 +72,7 @@ function ConfiguredJazzProvider({
       : config;
 
   return (
-    <CoreJazzProvider
-      config={effectiveConfig}
-      fallback={fallback}
-      createJazzClient={createClient}
-      onJWTExpired={onJWTExpired}
-    >
+    <CoreJazzProvider config={effectiveConfig} fallback={fallback} createJazzClient={createClient}>
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>

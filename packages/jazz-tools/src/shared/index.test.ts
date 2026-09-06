@@ -88,7 +88,6 @@ describe("jazz-tools/shared", () => {
   it("a binding built only on the public surface tracks a live query and reconciles in place", async () => {
     const appId = `shared-surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const db = await createDb(await localAccountConfig(appId));
-    await db.disconnect();
     const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
     // Schema + query via the real builder API (no JSON-shaped literals).

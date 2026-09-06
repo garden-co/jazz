@@ -1,3 +1,10 @@
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
+import {
+  AccountAuthError,
+  requestAccountRegistry,
+  readAccountAssignment,
+} from "./registry-client.js";
+export { AccountAuthError } from "./registry-client.js";
 import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session.js";
 import { isPortableAuthorComponent } from "../runtime/author-id.js";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "./state.js";
@@ -8,21 +15,20 @@ export type JWTAuth = string | { getToken(): Promise<string> };
 interface HandleCredentials {
   registry: string;
   auth: JWTAuth;
+  localFirstSecret?: string;
   invalidated: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
 
-export class AccountAuthError extends Error {
-  constructor(readonly code: string) {
-    super(code);
-    this.name = "AccountAuthError";
-  }
-}
-
 /** @internal Native key derivation stays in Rust; hosts prepare it before use. */
 export interface LocalFirstAccountFactory {
-  create(): { accountId: string; identity: AccountIdentity; auth: JWTAuth };
-  restore?(secret: string): { accountId: string; identity: AccountIdentity; auth: JWTAuth };
+  create(): { accountId: string; identity: AccountIdentity; auth: JWTAuth; secret?: string };
+  restore?(secret: string): {
+    accountId: string;
+    identity: AccountIdentity;
+    auth: JWTAuth;
+    secret?: string;
+  };
 }
 
 function identityFromToken(token: string): AccountIdentity {
@@ -43,7 +49,21 @@ function sameIdentity(a: AccountIdentity, b: AccountIdentity): boolean {
   return a.issuer === b.issuer && a.subject === b.subject;
 }
 async function tokenFor(auth: JWTAuth): Promise<string> {
-  return typeof auth === "string" ? auth : auth.getToken();
+  if (typeof auth === "string") return auth;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => auth.getToken()),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new AccountAuthError("credential_refresh_timeout")),
+          30_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 class EnrolledAccount {
   readonly identity: AccountIdentity;
@@ -61,10 +81,20 @@ function mintHandle(
   id: string,
   identity: AccountIdentity,
   auth: JWTAuth,
+  localFirstSecret?: string,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
-  credentials.set(handle, { registry, auth, invalidated: new Set() });
+  credentials.set(handle, { registry, auth, localFirstSecret, invalidated: new Set() });
   return handle;
+}
+
+/** Export a local signing root for passphrase/passkey backup. Never store it in UI snapshots. */
+export function exportLocalFirstSecret(handle: AccountHandle): string {
+  const material = credentials.get(handle);
+  if (!material || handle.identity.issuer !== "urn:jazz:local-first" || !material.localFirstSecret)
+    throw new AccountAuthError("local_first_recovery_unavailable");
+  parseAuthSecret(material.localFirstSecret);
+  return material.localFirstSecret;
 }
 
 /** @internal Context creation validates the opaque handle and refresh identity. */
@@ -115,33 +145,10 @@ export function createAccountManagerWithRuntime(options: {
     issued.add(handle);
     return handle;
   };
-  const request = async (path: string, token: string, body?: unknown): Promise<unknown> => {
-    const response = await (options.fetch ?? globalThis.fetch)(`${registry}/${path}`, {
-      method: "POST",
-      credentials: "omit",
-      redirect: "error",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const code = await response.text();
-      throw new AccountAuthError(/^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed");
-    }
-    return response.json();
-  };
-  const readHandle = (value: unknown, auth: JWTAuth, expected: AccountIdentity): AccountHandle => {
-    if (!value || typeof value !== "object") throw new AccountAuthError("invalid_account_response");
-    const result = value as { account?: unknown; identity?: AccountIdentity };
-    if (
-      typeof result.account !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result.account) ||
-      !result.identity ||
-      !sameIdentity(result.identity, expected)
-    ) {
-      throw new AccountAuthError("invalid_account_response");
-    }
-    return retain(mintHandle(registry, result.account, expected, auth));
-  };
+  const request = (path: string, token: string, body?: unknown) =>
+    requestAccountRegistry(registry, path, token, body, options.fetch);
+  const readHandle = (value: unknown, auth: JWTAuth, expected: AccountIdentity): AccountHandle =>
+    retain(mintHandle(registry, readAccountAssignment(value, expected), expected, auth));
   const enroll = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
     const started = epoch;
     const token = await tokenFor(auth);
@@ -153,6 +160,8 @@ export function createAccountManagerWithRuntime(options: {
     assertCurrent(started);
     return readHandle(response, auth, identity);
   };
+  if (options.restoredLocalFirstSecret !== undefined)
+    parseAuthSecret(options.restoredLocalFirstSecret);
   const restored =
     options.restoredLocalFirstSecret === undefined
       ? undefined
@@ -181,7 +190,15 @@ export function createAccountManagerWithRuntime(options: {
       },
       createLocalFirst() {
         const local = options.localFirst.create();
-        return retain(mintHandle(registry, local.accountId, local.identity, local.auth));
+        return retain(
+          mintHandle(registry, local.accountId, local.identity, local.auth, local.secret),
+        );
+      },
+      restoreLocalFirst(secret) {
+        parseAuthSecret(secret);
+        const local = options.localFirst.restore?.(secret);
+        if (!local) throw new AccountAuthError("local_first_restore_unavailable");
+        return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
       registerJWT: (auth) => enroll("register", auth),
       loginJWT: (auth) => enroll("login", auth),
@@ -212,7 +229,15 @@ export function createAccountManagerWithRuntime(options: {
       },
     },
     restored
-      ? retain(mintHandle(registry, restored.accountId, restored.identity, restored.auth))
+      ? retain(
+          mintHandle(
+            registry,
+            restored.accountId,
+            restored.identity,
+            restored.auth,
+            options.restoredLocalFirstSecret,
+          ),
+        )
       : undefined,
   );
 }

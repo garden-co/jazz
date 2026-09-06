@@ -26,17 +26,11 @@ export type JazzProviderProps = {
   config: DbConfig;
   fallback?: ReactNode;
   children: ReactNode;
-  onJWTExpired?: () => Promise<string | null | undefined>;
 };
 
-export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
+export function JazzProvider({ config, fallback, children }: JazzProviderProps) {
   return (
-    <CoreJazzProvider
-      config={config}
-      fallback={fallback}
-      createJazzClient={createClient}
-      onJWTExpired={onJWTExpired}
-    >
+    <CoreJazzProvider config={config} fallback={fallback} createJazzClient={createClient}>
       {children}
     </CoreJazzProvider>
   );

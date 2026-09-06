@@ -30,7 +30,7 @@ export type {
   AccountSnapshot,
   AccountManager,
 } from "../accounts/state.js";
-export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";
+export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "../accounts/enrollment.js";
 export type { AccountStore } from "../accounts/persistence.js";
 
 export { createAccountState } from "./create-account-state.js";

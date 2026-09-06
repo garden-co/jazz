@@ -6,7 +6,7 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import type { RowRefValue } from "../permissions/index.js";
-import { canonicalAuthorSubject } from "./author-id.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
@@ -16,12 +16,12 @@ const reproApp = s.defineApp({
     route_key: s.string(),
     corporation_id: s.string(),
     kind: s.string(),
-    identity_key: s.string().optional(),
+    identity_key: s.uuid().optional(),
     system_owned: s.boolean(),
     archived: s.boolean(),
   }),
   user_team_edges: s.table({
-    user_id: s.string(),
+    user_id: s.uuid(),
     team: s.ref("teams"),
     administrator: s.boolean(),
   }),
@@ -45,7 +45,7 @@ const doubleRefReproApp = s.defineApp({
   team_entry: s.table({
     team_id: s.ref("teams"),
     target_id: s.ref("teams"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     administrator: s.boolean(),
   }),
   dropdowns: s.table({
@@ -63,7 +63,7 @@ const relatedWriteApp = s.defineApp({
   playlists: s.table({ name: s.string() }),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
-    subject: s.string(),
+    subject: s.uuid(),
     role: s.enum("listener", "editor"),
     status: s.enum("pending", "accepted", "revoked"),
   }),
@@ -81,14 +81,14 @@ const relatedWritePermissions = s.definePermissions(
         { $createdBy: session.user },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.user,
+          subject: session.user.account,
           status: "accepted",
         }),
       ]);
     const hasEditorInvitation = (playlistId: RowRefValue) =>
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user,
+        subject: session.user.account,
         role: "editor",
         status: "accepted",
       });
@@ -106,7 +106,7 @@ const relatedWritePermissions = s.definePermissions(
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
 
 const REPRO_ISSUER = "https://issuer.example";
-const reproUser = (subject: string) => canonicalAuthorSubject(REPRO_ISSUER, subject);
+const reproUser = (subject: string) => localFirstAccountId("permission-repro", subject);
 
 function seedScenario(context: JazzContext): void {
   const db = context.db(reproApp);
@@ -318,6 +318,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         {
           issuer: REPRO_ISSUER,
           user_id: "reader",
+          account_id: reproUser("reader"),
           claims: {},
           authMode: "external",
         },
@@ -327,6 +328,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         {
           issuer: REPRO_ISSUER,
           user_id: "editor",
+          account_id: reproUser("editor"),
           claims: {},
           authMode: "external",
         },
@@ -376,7 +378,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         return [
           policy.teams.allowRead.where((team) =>
             anyOf([
-              { identity_key: session.user },
+              { identity_key: session.user.account },
               policy.team_access_edges.exists.where({
                 target_team: team.id,
                 ...readableNonAdminTeamGrant,
@@ -424,7 +426,8 @@ describe("runtime permission repros for recursive gather and qualified predicate
 
     const bobDb = context.forSession(
       {
-        user_id: reproUser("bob"),
+        user_id: "bob",
+        account_id: reproUser("bob"),
         claims: {
           team_ids: [bobTeam.id],
           admin_team_ids: [],
@@ -446,7 +449,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const context = await createReproContext(({ policy, session, allOf }) => {
       const reachableTeams = policy.teams.gather({
         start: {
-          "user_team_edges.user_id": session.user,
+          "user_team_edges.user_id": session.user.account,
         },
         step: ({ current }) =>
           policy.team_team_edges
@@ -463,7 +466,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "base-direct" },
             policy.user_team_edges.exists.where({
-              user_id: session.user,
+              user_id: session.user.account,
               team: team.id,
             }),
           ]),
@@ -472,7 +475,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "relation-direct" },
             policy.exists(
-              policy.user_team_edges.where({ user_id: session.user }).hopTo("team").where({
+              policy.user_team_edges.where({ user_id: session.user.account }).hopTo("team").where({
                 id: team.id,
               }),
             ),
@@ -480,7 +483,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         ),
         policy.teams.allowRead.where({
           route_key: "qualified-predicate",
-          "user_team_edges.user_id": session.user,
+          "user_team_edges.user_id": session.user.account,
         }),
         policy.teams.allowRead.where((team) =>
           allOf([
@@ -512,6 +515,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const aliceDb = context.forSession(
       {
         user_id: "alice",
+        account_id: reproUser("alice"),
         claims: {},
         issuer: "https://issuer.example",
         authMode: "external",
@@ -537,7 +541,9 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const dataRoot = await mkdtemp(join(tmpdir(), "jazz-double-ref-permissions-repro-"));
     const dataPath = join(dataRoot, "runtime.db");
     const permissions = definePermissions(doubleRefReproApp, ({ policy, session }) => {
-      const directTeams = policy.team_entry.where({ user_id: session.user }).hopTo("target");
+      const directTeams = policy.team_entry
+        .where({ user_id: session.user.account })
+        .hopTo("target");
       const reachableTeams = policy.teams.gather({
         start: directTeams,
         step: ({ current }) =>
@@ -625,6 +631,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const userDb = context.forSession(
       {
         user_id: userTeam.id,
+        account_id: reproUser(userTeam.id),
         claims: {},
         issuer: "https://issuer.example",
         authMode: "external",
@@ -657,7 +664,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         return [
           policy.teams.allowRead.where((team) =>
             anyOf([
-              { identity_key: session.user },
+              { identity_key: session.user.account },
               policy.team_access_edges.exists.where({
                 target_team: team.id,
                 ...readableNonAdminTeamGrant,
@@ -756,6 +763,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const sessions = {
       alice: {
         user_id: "alice",
+        account_id: reproUser("alice"),
         claims: {
           team_ids: [aliceTeam.id, opsTeam.id, regionalTeam.id, internTeam.id],
           admin_team_ids: [],
@@ -765,6 +773,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       },
       bob: {
         user_id: "bob",
+        account_id: reproUser("bob"),
         claims: {
           team_ids: [bobTeam.id],
           admin_team_ids: [],
@@ -774,6 +783,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       },
       intern: {
         user_id: "intern",
+        account_id: reproUser("intern"),
         claims: {
           team_ids: [internTeam.id, regionalTeam.id, aliceTeam.id, opsTeam.id],
           admin_team_ids: [],

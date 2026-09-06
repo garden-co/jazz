@@ -45,4 +45,4 @@ export type {
   AccountManager,
 } from "../accounts/state.js";
 export type { AccountStore } from "../accounts/persistence.js";
-export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";
+export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "../accounts/enrollment.js";

@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
-import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
@@ -20,14 +19,16 @@ const testSchema = {
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
-    ownerId: s.string().optional(),
+    ownerId: s.uuid().optional(),
   }),
 };
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema);
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
-  policy.todos.allowInsert.where({ ownerId: session.user });
+  policy.todos.allowRead.where(
+    anyOf([{ ownerId: session.user.account }, { ownerId: { isNull: true } }]),
+  );
+  policy.todos.allowInsert.where({ ownerId: session.user.account });
 });
 
 afterEach(async () => {
@@ -350,19 +351,21 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
-          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
+          ownerId: "00000000-0000-4000-8000-000000000001",
         });
       });
 
       const alice = policyTestApp.as({
         issuer: "https://policy-test.example",
         user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
         claims: {},
         authMode: "external",
       });
       const bob = policyTestApp.as({
         issuer: "https://policy-test.example",
         user_id: "bob",
+        account_id: "00000000-0000-4000-8000-000000000002",
         claims: {},
         authMode: "external",
       });
@@ -411,12 +414,14 @@ describe("createPolicyTestApp", () => {
       const alice = policyTestApp.as({
         issuer: "https://policy-test.example",
         user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
         claims: {},
         authMode: "external",
       });
       const bob = policyTestApp.as({
         issuer: "https://policy-test.example",
         user_id: "bob",
+        account_id: "00000000-0000-4000-8000-000000000002",
         claims: {},
         authMode: "external",
       });
@@ -425,7 +430,7 @@ describe("createPolicyTestApp", () => {
         db.insert(testApp.todos, {
           title: "Alice can insert her own todo",
           done: false,
-          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
+          ownerId: "00000000-0000-4000-8000-000000000001",
         });
       });
 
@@ -433,7 +438,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
-          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
+          ownerId: "00000000-0000-4000-8000-000000000001",
         });
       });
 

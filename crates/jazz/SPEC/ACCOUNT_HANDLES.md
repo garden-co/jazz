@@ -213,3 +213,20 @@ In-memory policy equality and its digest still include the complete canonical
 binding. Structured author records contribute their native descriptor and
 payload to that comparison encoding; process-local intern IDs never enter it.
 This introduces no generic record-valued durable key or migration-lens default.
+
+## Trusted backend impersonation
+
+Public `forRequest` verifies the original bearer and resolves its active account
+through the core registry before creating a policy session. External JWT claims
+cannot choose an account, and resolving a request never registers an external
+identity. Local-first founding remains the explicit key-bound exception.
+
+A configured backend secret is independently privileged server authority.
+`forSession` and `withAttributionForSession` may deliberately choose an exact
+principal, account, and claims without public registry admission. This is trusted
+impersonation: the resulting session still evaluates row policies as that chosen
+author and never gains unrestricted backend policy trust. Transport credential
+class and policy trust are separate dimensions. Impersonated sessions retain
+session relay eligibility and per-principal connection caps, but public registry
+liveness checks apply only to public credentials. Missing or incorrect backend
+secrets cannot enter the impersonation path.

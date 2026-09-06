@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { prepareAccountManager } from "./persistence.js";
-import { accountToken } from "./enrollment.js";
+import { generateAuthSecret } from "../runtime/auth-secret-store.js";
+import { accountToken, exportLocalFirstSecret } from "./enrollment.js";
 
 const registry = "https://core.example/apps/test/accounts";
 // Controlled crypto boundary: these tests prove storage ordering and recovery;
@@ -86,4 +87,41 @@ it("retains roots created by independent managers with stale inventories", async
   first.logout();
   await vi.waitFor(() => expect(JSON.parse(value!).selected).toBeNull());
   expect(JSON.parse(value!).roots).toEqual(afterSecond.roots);
+});
+
+it("restores a retained local root without exposing it in account state", async () => {
+  let value: string | null = null;
+  const manager = await prepareAccountManager({
+    appId: "test",
+    registry,
+    mintToken,
+    store: {
+      async read() {
+        return value;
+      },
+      async update(transform) {
+        value = transform(value);
+      },
+    },
+  });
+  const old = manager.createLocalFirst();
+  const oldSecret = exportLocalFirstSecret(old);
+  const replacement = generateAuthSecret();
+  const restored = manager.restoreLocalFirst(replacement);
+  expect(restored).not.toBe(old);
+  expect(manager.getLoggedIn()).toBe(restored);
+  expect(exportLocalFirstSecret(restored)).toBe(replacement);
+  expect(exportLocalFirstSecret(old)).toBe(oldSecret);
+  expect(JSON.stringify(manager.getSnapshot())).not.toContain(replacement);
+  await accountToken(restored, registry);
+  expect(JSON.parse(value!).roots).toEqual([oldSecret, replacement]);
+  expect(() => manager.restoreLocalFirst("malformed recovery root")).toThrow();
+  expect(manager.getLoggedIn()).toBe(restored);
+  expect(() => exportLocalFirstSecret({ ...restored } as never)).toThrow(/recovery_unavailable/);
+  manager.logout();
+  expect(() => exportLocalFirstSecret(old)).toThrow(/recovery_unavailable/);
+  expect(() => exportLocalFirstSecret(restored)).toThrow(/recovery_unavailable/);
+  const recovered = manager.restoreLocalFirst(replacement);
+  await accountToken(recovered, registry);
+  expect(exportLocalFirstSecret(recovered)).toBe(replacement);
 });

@@ -20,7 +20,6 @@ describe("vue/create-jazz-client integration", () => {
 
     try {
       client = await createJazzClient(await localAccountConfig(makeAppId("mutation-query")));
-      await client.db.disconnect();
 
       const { value: inserted } = await client.db.insert(todosTable, {
         title: "buy milk",
@@ -45,7 +44,6 @@ describe("vue/create-jazz-client integration", () => {
 
     try {
       client = await createJazzClient(await localAccountConfig(makeAppId("shutdown")));
-      await client.db.disconnect();
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
       await client.db.all(allTodosQuery, { tier: "local" });
 

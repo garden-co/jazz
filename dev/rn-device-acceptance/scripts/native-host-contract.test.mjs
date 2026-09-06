@@ -642,7 +642,10 @@ test("both platform session wrappers delegate one authenticated socket owner to 
     assert.match(wrapper, /shared Rust socket worker/);
     assert.doesNotMatch(wrapper, /WebSocketTransport|NativeWebSocketConnector/);
   }
-  assert.match(relay, /NativeRelaySocketWorker::start\(/);
+  // Account handoff prepares replacement resources before stopping the old
+  // worker, then activates the same Rust-owned worker after publication.
+  assert.match(relay, /NativeRelaySocketWorker::prepare_with_connector\(/);
+  assert.match(relay, /worker\._worker\.activate\(\)/);
   assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
   assert.match(relay, /private_socket_sessions\.remove/);
 });
@@ -720,7 +723,7 @@ test("each native JSI runtime owns an independent foreground lease", () => {
   // fails if JNI silently drops it and returns to one host-global lease.
   assert.match(androidBridge, /ForegroundRuntimeKey = std::pair<jazz_native_relay_host \*, jlong>/);
   assert.match(androidBridge, /nativeForegroundBindingsInstaller\([\s\S]*jlong runtime_token\)/);
-  assert.match(androidBridge, /foregroundInstallation\(relay_host, runtime_token, callInvoker\)/);
+  assert.match(androidBridge, /foregroundInstallation\(relay_host, runtime_token, callInvoker, storageRoot\)/);
   assert.match(androidBridge, /foreground_installations\.find\(\{relay_host, runtime_token\}\)/);
   assert.doesNotMatch(
     androidBridge,
