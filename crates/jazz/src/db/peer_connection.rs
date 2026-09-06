@@ -2111,6 +2111,7 @@ where
                                     request_id,
                                     action,
                                     session_claim_binding: pending_session_claim_binding,
+                                    delegated_session,
                                 } => {
                                     // An old or unauthenticated upstream must never receive a
                                     // downgraded preflight.  Resolve conservatively instead.
@@ -2193,7 +2194,7 @@ where
                                         let claims_still_bound = claims_still_bound
                                             .unwrap_or_default()
                                             == session_claim_binding.1;
-                                        if !claims_still_bound {
+                                        if delegated_session.is_none() && !claims_still_bound {
                                             if let Some(request) =
                                                 scope_lease_manager.requests.remove(request_id)
                                             {
@@ -2224,6 +2225,7 @@ where
                                                 request.action == *action
                                                     && request.session_claim_binding
                                                         == session_claim_binding
+                                                    && request.delegated_session == *delegated_session
                                             })
                                             .map(|(wire_request_id, request)| {
                                                 (*wire_request_id, request.intent_sent)
@@ -2239,6 +2241,7 @@ where
                                                     SyncMessage::AuthorizationScopeIntent {
                                                         request_id: wire_request_id,
                                                         action: request.action.clone(),
+                                                        delegated_session: delegated_session.clone(),
                                                     },
                                                 ) {
                                                     if handle_transport_backpressure(
@@ -2258,6 +2261,7 @@ where
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
                                                     session_claim_binding,
+                                                    delegated_session: delegated_session.clone(),
                                                     waiters: BTreeSet::from([*request_id]),
                                                     intent_sent: false,
                                                     key: None,
@@ -2271,6 +2275,7 @@ where
                                                 SyncMessage::AuthorizationScopeIntent {
                                                     request_id: *request_id,
                                                     action: action.clone(),
+                                                    delegated_session: delegated_session.clone(),
                                                 },
                                             ) {
                                                 if handle_transport_backpressure(
@@ -2822,12 +2827,13 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                let Some((session_claim_binding, key_mismatch, needs_acquire)) = scope_lease_manager
+                                let Some((session_claim_binding, delegated_session, key_mismatch, needs_acquire)) = scope_lease_manager
                                     .requests
                                     .get(&request_id)
                                     .map(|prior| {
                                         (
                                             prior.session_claim_binding.clone(),
+                                            prior.delegated_session.is_some(),
                                             prior.key.as_ref().is_some_and(|known| known != &key)
                                                 || prior
                                                     .clause_count
@@ -2850,7 +2856,7 @@ where
                                     })
                                     .unwrap_or_default()
                                     == session_claim_binding.1;
-                                if !claims_still_bound {
+                                if !delegated_session && !claims_still_bound {
                                     if let Some(request) =
                                         scope_lease_manager.requests.remove(&request_id)
                                     {
@@ -2937,6 +2943,7 @@ where
                                     .requests
                                     .get(&request_id)
                                     .is_none_or(|request| {
+                                        request.delegated_session.is_some() ||
                                         self.node
                                             .borrow()
                                             .session_claims_with_revisions()
@@ -2948,7 +2955,12 @@ where
                                             .unwrap_or_default()
                                             == request.session_claim_binding.1
                                     });
-                                if !claims_still_bound {
+                                if scope_lease_manager
+                                    .requests
+                                    .get(&request_id)
+                                    .is_none_or(|request| request.delegated_session.is_none())
+                                    && !claims_still_bound
+                                {
                                     if let Some(request) =
                                         scope_lease_manager.requests.remove(&request_id)
                                     {
@@ -3072,7 +3084,7 @@ where
                                         })
                                         .unwrap_or_default()
                                         == request.session_claim_binding.1;
-                                    if !claims_still_bound {
+                                    if request.delegated_session.is_none() && !claims_still_bound {
                                         let waiter_ids = request.waiters.clone();
                                         scope_lease_manager.requests.remove(&request_id);
                                         for waiter_id in waiter_ids {
@@ -3096,6 +3108,7 @@ where
                                         PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
                                     let action = request.action.clone();
                                     let session_claim_binding = request.session_claim_binding.clone();
+                                    let delegated_session = request.delegated_session.clone();
                                     let waiters = request.waiters.clone();
                                     scope_lease_manager.requests.remove(&request_id);
                                     scope_lease_manager.requests.insert(
@@ -3103,6 +3116,7 @@ where
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
                                             session_claim_binding: session_claim_binding.clone(),
+                                            delegated_session: delegated_session.clone(),
                                             waiters,
                                             intent_sent: false,
                                             key: None,
@@ -3117,6 +3131,7 @@ where
                                             request_id: retry_id,
                                             action,
                                             session_claim_binding: Some(session_claim_binding),
+                                            delegated_session,
                                         },
                                     );
                                     drop_peer_request(&self.node);
@@ -3704,7 +3719,11 @@ where
                             drop_peer_request(&self.node);
                             continue;
                         }
-                        SyncMessage::AuthorizationScopeIntent { request_id, action } => {
+                        SyncMessage::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                            delegated_session,
+                        } => {
                             let admitted = self.transport.connection_session_context().is_some_and(
                                 |context| {
                                     context.negotiated_features
@@ -3716,16 +3735,21 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let Some((scope_identity, scope_claims)) = admitted_request_policy_binding(
+                                *ingest_context,
+                                peer,
+                                session_claim_binding.clone(),
+                                delegated_session,
+                            ) else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
                             serve_authorization_scope_intent(
                                 &self.node,
                                 peer,
                                 &mut self.pending_control_responses,
-                                ingest_context.identity,
-                                session_claim_binding
-                                    .as_ref()
-                                    .expect("subscriber claims")
-                                    .1
-                                    .clone(),
+                                scope_identity,
+                                scope_claims,
                                 connection_epoch,
                                 request_id,
                                 action,

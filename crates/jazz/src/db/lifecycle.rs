@@ -1028,6 +1028,19 @@ where
         self.node.request_permission_advice(action)
     }
 
+    /// Request advice under one immutable session snapshot selected by an
+    /// already-authenticated backend host. This does not grant delegation to
+    /// ordinary client, admin, or authority links; upstream admission decides
+    /// whether the snapshot is usable.
+    pub fn request_permission_advice_with_delegated_session(
+        &self,
+        action: PermissionAdviceAction,
+        session: crate::protocol::DelegatedSessionBinding,
+    ) -> PermissionAdviceFuture {
+        self.node
+            .request_permission_advice_with_delegated_session(action, session)
+    }
+
     /// Resolve outstanding permission preflights as `Unknown` and suppress
     /// requests that have not reached the transport yet.
     pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {

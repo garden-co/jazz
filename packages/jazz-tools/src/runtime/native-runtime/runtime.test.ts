@@ -1657,7 +1657,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     vi.useRealTimers();
   });
 
-  it("does not return connection-authority advice for a scoped backend request", async () => {
+  it("delegates each scoped backend advice request with its immutable session binding", async () => {
     const authoritative = vi.fn(() => "allowed" as const);
     const backend = fakeDb({
       requestInsertPermissionAdviceEncoded: authoritative,
@@ -1690,21 +1690,26 @@ describe("NativeRuntimeAdapter server transport", () => {
         runtime.requestUpdatePermissionAdvice("todos", id, {}, session),
         runtime.requestDeletePermissionAdvice("todos", id, session),
       ]),
-    ).resolves.toEqual(["unknown", "unknown", "unknown", "unknown"]);
-    expect(authoritative).not.toHaveBeenCalled();
+    ).resolves.toEqual(["allowed", "allowed", "allowed", "allowed"]);
+    expect(authoritative).toHaveBeenCalledTimes(4);
+    const delegatedIdentity = expect.any(Uint8Array);
+    for (const call of authoritative.mock.calls) {
+      expect(call.at(-2)).toEqual(delegatedIdentity);
+      expect(call.at(-1)).toEqual(expect.objectContaining({ authMode: "external" }));
+    }
     const forgedSystem = { ...session, issuer: SYSTEM_SESSION_ISSUER, user_id: SYSTEM_AUTHOR_ID };
     await expect(runtime.requestReadPermissionAdvice("todos", id, forgedSystem)).resolves.toBe(
       "unknown",
     );
-    expect(authoritative).not.toHaveBeenCalled();
+    expect(authoritative).toHaveBeenCalledTimes(4);
     const trustedSystem = markTrustedReservedSession({ ...forgedSystem });
     await expect(runtime.requestReadPermissionAdvice("todos", id, trustedSystem)).resolves.toBe(
       "allowed",
     );
-    expect(authoritative).toHaveBeenCalledTimes(1);
+    expect(authoritative).toHaveBeenCalledTimes(5);
     // The unscoped connection operation still has its ordinary advice path.
     await expect(runtime.requestReadPermissionAdvice("todos", id)).resolves.toBe("allowed");
-    expect(authoritative).toHaveBeenCalledTimes(2);
+    expect(authoritative).toHaveBeenCalledTimes(6);
   });
 
   it("fails closed for malformed direct and pollable native permission advice", async () => {

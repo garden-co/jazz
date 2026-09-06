@@ -351,14 +351,28 @@ type NativeDb = {
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
-  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
+  requestReadPermissionAdvice?(
+    table: string,
+    rowId: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativePermissionAdviceResult;
   requestUpdatePermissionAdviceEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
-  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
+  requestDeletePermissionAdvice?(
+    table: string,
+    rowId: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativePermissionAdviceResult;
   mergeableTx(openTransactionId: OpenTransactionId): Tx;
   mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
   exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
@@ -1851,16 +1865,28 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  /** Backend-only conversion of a public session into the immutable native
+   * binding carried by one advice request. */
+  private delegatedPermissionAdviceSession(session?: Session): RuntimeSession | null {
+    if (!this.trustedBackend || !session || !this.isScopedPermissionAdvice(session)) return null;
+    return readSession(JSON.stringify(session));
+  }
+
   requestInsertPermissionAdvice(
     table: string,
     values: InsertValues,
     session?: Session,
   ): Promise<PermissionAdvice> {
-    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestInsertPermissionAdviceEncoded;
     if (!request) return Promise.resolve("unknown");
     const cells = encodeCellsForRow(this.table(table), values, table);
-    return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, cells, delegated?.identity, delegated?.claims),
+    );
   }
 
   requestReadPermissionAdvice(
@@ -1868,11 +1894,14 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice> {
-    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestReadPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId)),
+      request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
   }
 
@@ -1882,12 +1911,22 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
     session?: Session,
   ): Promise<PermissionAdvice> {
-    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestUpdatePermissionAdviceEncoded;
     if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId), patch),
+      request.call(
+        this.db,
+        table,
+        parseUuid(objectId),
+        patch,
+        delegated?.identity,
+        delegated?.claims,
+      ),
     );
   }
 
@@ -1896,11 +1935,14 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice> {
-    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestDeletePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId)),
+      request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
   }
 

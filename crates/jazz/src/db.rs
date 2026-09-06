@@ -2105,6 +2105,10 @@ enum PendingUpstreamCommand {
         /// A fresh request binds its claims when its selected authority admits
         /// it; a reconnect must preserve the original immutable binding.
         session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        /// A backend-selected snapshot which must cross the upstream boundary.
+        /// This remains separate from the locally captured lease binding: direct
+        /// sessions authenticate at transport admission and never self-delegate.
+        delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     },
 }
 
@@ -2243,6 +2247,8 @@ struct AuthorizationScopeLeaseRequest {
     /// operation is allocated. Receipts are evaluated on an Upstream link,
     /// which has no subscriber-side ambient claims to consult.
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Present only for a host-admitted backend or scope-isolated relay request.
+    delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     /// Every local caller sharing this authority hydration.  The first id is
     /// the wire correlation id; later ids never cause another support view.
     waiters: BTreeSet<PermissionAdviceRequestId>,

@@ -1649,6 +1649,33 @@ where
                 request_id,
                 action,
                 session_claim_binding: None,
+                delegated_session: None,
+            },
+        );
+        self.schedule_tick(TickUrgency::Immediate);
+        PermissionAdviceFuture {
+            waiters: Rc::clone(&self.permission_advice_waiters),
+            request_id,
+            receiver,
+        }
+    }
+
+    pub(super) fn request_permission_advice_with_delegated_session(
+        &self,
+        action: PermissionAdviceAction,
+        session: crate::protocol::DelegatedSessionBinding,
+    ) -> PermissionAdviceFuture {
+        let request_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+        let (sender, receiver) = oneshot::channel();
+        self.permission_advice_waiters
+            .borrow_mut()
+            .insert(request_id, sender);
+        self.upstream_subscriptions.borrow_mut().push(
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                request_id,
+                action,
+                session_claim_binding: Some((session.identity, session.claims.clone())),
+                delegated_session: Some(session),
             },
         );
         self.schedule_tick(TickUrgency::Immediate);
@@ -2645,11 +2672,13 @@ where
                                     })
                                     .cloned()
                                     .unwrap_or_default();
-                                if current_claims == *claims {
+                                if request.delegated_session.is_some() || current_claims == *claims
+                                {
                                     reconnect_permission_advice.push((
                                         *request_id,
                                         request.action.clone(),
                                         Some(request.session_claim_binding.clone()),
+                                        request.delegated_session.clone(),
                                     ));
                                 } else {
                                     // A successor can only prove its currently
@@ -2665,28 +2694,32 @@ where
                             request_id,
                             action,
                             session_claim_binding,
+                            delegated_session,
                         } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            if session_claim_binding
-                                .as_ref()
-                                .is_none_or(|(identity, claims)| {
-                                    current_session_claims
-                                        .iter()
-                                        .find_map(|(current_identity, current_claims, _)| {
-                                            (current_identity == identity).then_some(current_claims)
-                                        })
-                                        .cloned()
-                                        .unwrap_or_default()
-                                        == *claims
-                                })
+                            if delegated_session.is_some()
+                                || session_claim_binding.as_ref().is_none_or(
+                                    |(identity, claims)| {
+                                        current_session_claims
+                                            .iter()
+                                            .find_map(|(current_identity, current_claims, _)| {
+                                                (current_identity == identity)
+                                                    .then_some(current_claims)
+                                            })
+                                            .cloned()
+                                            .unwrap_or_default()
+                                            == *claims
+                                    },
+                                )
                             {
                                 reconnect_permission_advice.push((
                                     *request_id,
                                     action.clone(),
                                     session_claim_binding.clone(),
+                                    delegated_session.clone(),
                                 ));
                             } else {
                                 terminal_permission_advice.push(*request_id);
@@ -2776,11 +2809,12 @@ where
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 reconnect_permission_advice.into_iter().map(
-                    |(request_id, action, session_claim_binding)| {
+                    |(request_id, action, session_claim_binding, delegated_session)| {
                         PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
                             session_claim_binding,
+                            delegated_session,
                         }
                     },
                 ),

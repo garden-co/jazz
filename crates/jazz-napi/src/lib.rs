@@ -83,6 +83,7 @@ use jazz::ids::{
 };
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
+    DelegatedSessionBinding as CoreDelegatedSessionBinding,
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
     ReadViewSpec as CoreReadViewSpec,
 };
@@ -1785,15 +1786,29 @@ impl NapiDb {
     fn request_permission_advice(
         &self,
         action: CorePermissionAdviceAction,
+        delegated_session: Option<CoreDelegatedSessionBinding>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        if delegated_session.is_some() {
+            self.require_trusted_backend()?;
+        }
         let advice = {
             let db = self.inner.borrow();
             let db = db
                 .as_ref()
                 .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
             match db {
-                NapiDbInnerStorage::Memory(db) => db.request_permission_advice(action),
-                NapiDbInnerStorage::Persistent(db) => db.request_permission_advice(action),
+                NapiDbInnerStorage::Memory(db) => delegated_session.map_or_else(
+                    || db.request_permission_advice(action.clone()),
+                    |session| {
+                        db.request_permission_advice_with_delegated_session(action.clone(), session)
+                    },
+                ),
+                NapiDbInnerStorage::Persistent(db) => delegated_session.map_or_else(
+                    || db.request_permission_advice(action.clone()),
+                    |session| {
+                        db.request_permission_advice_with_delegated_session(action.clone(), session)
+                    },
+                ),
             }
         };
         native_permission_advice_or_pending(Box::pin(async move {
@@ -1806,11 +1821,17 @@ impl NapiDb {
         &self,
         table: String,
         cells: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Insert {
-            table,
-            cells: decode_core_cells(&cells)?,
-        })
+        let delegated_session = core_delegated_session_from_napi(author, claims)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Insert {
+                table,
+                cells: decode_core_cells(&cells)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestReadPermissionAdvice")]
@@ -1818,11 +1839,17 @@ impl NapiDb {
         &self,
         table: String,
         row_id: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Read {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
-        })
+        let delegated_session = core_delegated_session_from_napi(author, claims)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Read {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestUpdatePermissionAdviceEncoded")]
@@ -1831,12 +1858,18 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Update {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
-            patch: decode_core_cells(&patch)?,
-        })
+        let delegated_session = core_delegated_session_from_napi(author, claims)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Update {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+                patch: decode_core_cells(&patch)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestDeletePermissionAdvice")]
@@ -1844,11 +1877,17 @@ impl NapiDb {
         &self,
         table: String,
         row_id: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Delete {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
-        })
+        let delegated_session = core_delegated_session_from_napi(author, claims)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Delete {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+            },
+            delegated_session,
+        )
     }
 
     fn require_trusted_backend(&self) -> napi::Result<()> {
@@ -4252,6 +4291,21 @@ fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
         .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
     CoreAuthorSubject::from_untrusted_canonical(canonical)
         .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+fn core_delegated_session_from_napi(
+    author: Option<Uint8Array>,
+    claims: Option<JsonValue>,
+) -> napi::Result<Option<CoreDelegatedSessionBinding>> {
+    author
+        .map(|author| {
+            let identity = core_author_id_from_bytes(&author)?;
+            Ok(CoreDelegatedSessionBinding {
+                claims: core_claims_from_json(identity, claims)?,
+                identity,
+            })
+        })
+        .transpose()
 }
 
 fn core_write_memory(

@@ -200,6 +200,9 @@ pub enum SyncMessage {
         request_id: PermissionAdviceRequestId,
         /// Candidate operation; all support scope details are authority-derived.
         action: PermissionAdviceAction,
+        /// Immutable session snapshot delegated by a host-admitted backend or
+        /// scope-isolated relay. Ordinary links must leave this absent.
+        delegated_session: Option<DelegatedSessionBinding>,
     },
     /// One authority-selected support clause for an authorization intent.
     /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
