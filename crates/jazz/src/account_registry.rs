@@ -20,9 +20,32 @@ pub struct Principal {
     pub subject: String,
 }
 
+impl Principal {
+    fn validate(&self, allow_local_first: bool) -> Result<(), AccountError> {
+        if allow_local_first && self.issuer == crate::tools::identity::LOCAL_FIRST_ISSUER {
+            if uuid::Uuid::parse_str(&self.subject).is_ok() {
+                return Ok(());
+            }
+            return Err(AccountError::InvalidPrincipal);
+        }
+        crate::ids::AuthorSubject::authenticated(&self.issuer, &self.subject)
+            .map(|_| ())
+            .map_err(|_| AccountError::InvalidPrincipal)
+    }
+}
+
 /// Stable account identity within one application registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccountId(pub Uuid);
+
+/// Deterministic founding account, scoped to the application's registry.
+/// `subject` must be the identity derived from a verified local-first key.
+/// This does not authenticate a caller or admit an arbitrary claimed subject.
+pub fn local_first_account_id(app: Uuid, subject: &str) -> AccountId {
+    let mut name = b"jazz-account-founder-v1\0".to_vec();
+    name.extend_from_slice(subject.as_bytes());
+    AccountId(Uuid::new_v5(&app, &name))
+}
 
 /// Permanent assignment with independently revocable admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +60,7 @@ pub struct Assignment {
     pub generation: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 struct LinkIntent {
     account: AccountId,
     approver: Principal,
@@ -48,7 +71,7 @@ struct LinkIntent {
 }
 
 /// Registry decisions are applied serially by one application authority.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct AccountRegistry {
     assignments: BTreeMap<Principal, Assignment>,
     intents: BTreeMap<Uuid, LinkIntent>,
@@ -57,6 +80,9 @@ pub struct AccountRegistry {
 /// Stable protocol failures, with no credential material.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AccountError {
+    /// System, read-only anonymous, or malformed principals cannot own accounts.
+    #[error("invalid account principal")]
+    InvalidPrincipal,
     /// Registration/linking cannot move an assigned identity.
     #[error("identity is already assigned")]
     AlreadyAssigned,
@@ -79,8 +105,15 @@ pub enum AccountError {
 
 /// Authenticated registry operation. The server supplies the principal and time;
 /// neither is trusted from the request body.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum AccountCommand {
+    /// Register a verified local-first founding identity deterministically.
+    FoundLocalFirst {
+        /// Verified local-first principal derived from its signing key.
+        principal: Principal,
+        /// Application namespace selected by the serving authority.
+        app: Uuid,
+    },
     /// Create an external account explicitly.
     Register {
         /// Verified registering principal.
@@ -136,6 +169,24 @@ impl AccountRegistry {
         command: &AccountCommand,
     ) -> Result<AccountCommandResult, AccountError> {
         match command {
+            AccountCommand::FoundLocalFirst { principal, app } => {
+                principal.validate(true)?;
+                if principal.issuer != crate::tools::identity::LOCAL_FIRST_ISSUER {
+                    return Err(AccountError::InvalidPrincipal);
+                }
+                let account = local_first_account_id(*app, &principal.subject);
+                if let Some(existing) = self.assignments.get(principal) {
+                    if existing.account != account {
+                        return Err(AccountError::AlreadyAssigned);
+                    }
+                    return self
+                        .login(principal)
+                        .cloned()
+                        .map(AccountCommandResult::Assignment);
+                }
+                self.register_inner(principal.clone(), account)
+                    .map(AccountCommandResult::Assignment)
+            }
             AccountCommand::Register { principal, account } => self
                 .register(principal.clone(), *account)
                 .map(AccountCommandResult::Assignment),
@@ -182,6 +233,15 @@ impl AccountRegistry {
         principal: Principal,
         account: AccountId,
     ) -> Result<Assignment, AccountError> {
+        principal.validate(false)?;
+        self.register_inner(principal, account)
+    }
+
+    fn register_inner(
+        &mut self,
+        principal: Principal,
+        account: AccountId,
+    ) -> Result<Assignment, AccountError> {
         if self.assignments.contains_key(&principal) {
             return Err(AccountError::AlreadyAssigned);
         }
@@ -211,6 +271,7 @@ impl AccountRegistry {
         now: u64,
         expires_at: u64,
     ) -> Result<(), AccountError> {
+        candidate.validate(false)?;
         let assignment = self.login(approver)?;
         if !assignment.manage_identities {
             return Err(AccountError::NotAuthorized);
@@ -406,5 +467,33 @@ mod tests {
             Err(AccountError::Expired)
         );
         assert_eq!(registry.login(&candidate), Err(AccountError::NotAssigned));
+    }
+}
+
+#[cfg(test)]
+mod founding_tests {
+    use super::*;
+    #[test]
+    fn founding_identity_matches_portable_handle_fixture_and_cannot_reregister() {
+        let app = crate::tools::AppId::from_name("account-fixture");
+        let principal = Principal {
+            issuer: crate::tools::identity::LOCAL_FIRST_ISSUER.into(),
+            subject: "00000000-0000-4000-8000-000000000001".into(),
+        };
+        assert_eq!(
+            local_first_account_id(*app.uuid(), &principal.subject)
+                .0
+                .to_string(),
+            "30f0ec9a-0a5a-5940-b329-274194a6e24b"
+        );
+        let mut registry = AccountRegistry::default();
+        let command = AccountCommand::FoundLocalFirst {
+            principal: principal.clone(),
+            app: *app.uuid(),
+        };
+        let first = registry.apply(&command).unwrap();
+        assert_eq!(registry.apply(&command).unwrap(), first);
+        registry.revoke(&principal, &principal).unwrap();
+        assert_eq!(registry.apply(&command), Err(AccountError::NotAuthorized));
     }
 }

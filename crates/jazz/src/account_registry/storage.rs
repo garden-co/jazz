@@ -64,8 +64,20 @@ impl<S: OrderedKvStorage> StoredAccountRegistry<S> {
     }
 
     /// Resolve current admission from the authoritative ordered state.
-    pub fn login(&self, principal: &Principal) -> Result<Assignment, RegistryError> {
+    pub async fn login(&mut self, principal: &Principal) -> Result<Assignment, RegistryError> {
         self.ensure_available()?;
+        // Fence cached admission even if a second owner only performs reads.
+        // The successful absence read is this decision's linearization point.
+        self.poisoned = true;
+        let advanced = self
+            .storage
+            .get(CF.into(), command_key(self.revision))
+            .await
+            .map_err(unavailable)?;
+        if advanced.is_some() {
+            return Err(unavailable("account authority advanced elsewhere"));
+        }
+        self.poisoned = false;
         Ok(self.state.login(principal)?.clone())
     }
 
@@ -154,7 +166,7 @@ mod tests {
                 Err(RegistryError::Unavailable(_))
             ));
             assert!(matches!(
-                stale.login(&alice),
+                stale.login(&alice).await,
                 Err(RegistryError::Unavailable(_))
             ));
             first
@@ -166,12 +178,52 @@ mod tests {
                 .unwrap();
             let mut reopened = StoredAccountRegistry::open(storage).await.unwrap();
             assert!(matches!(
-                reopened.login(&alice),
+                reopened.login(&alice).await,
                 Err(RegistryError::Decision(AccountError::NotAuthorized))
             ));
             assert!(matches!(
                 reopened.execute(&register).await,
                 Err(RegistryError::Decision(AccountError::AlreadyAssigned))
+            ));
+        });
+    }
+}
+
+#[cfg(test)]
+mod stale_admission_tests {
+    use super::*;
+    use crate::{account_registry::AccountId, groove::storage::MemoryStorage};
+    use uuid::Uuid;
+
+    // Unlike the conflicting-write test, this stale owner never mutates.
+    #[test]
+    fn read_only_stale_owner_cannot_admit_a_revoked_identity() {
+        crate::db::block_on(async {
+            let storage = MemoryStorage::new(&[CF]).unwrap();
+            let mut writer = StoredAccountRegistry::open(storage.clone()).await.unwrap();
+            let alice = Principal {
+                issuer: "https://issuer.example".into(),
+                subject: "alice".into(),
+            };
+            writer
+                .execute(&AccountCommand::Register {
+                    principal: alice.clone(),
+                    account: AccountId(Uuid::from_u128(1)),
+                })
+                .await
+                .unwrap();
+            let mut stale = StoredAccountRegistry::open(storage).await.unwrap();
+            assert!(stale.login(&alice).await.is_ok());
+            writer
+                .execute(&AccountCommand::Revoke {
+                    approver: alice.clone(),
+                    target: alice.clone(),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                stale.login(&alice).await,
+                Err(RegistryError::Unavailable(_))
             ));
         });
     }

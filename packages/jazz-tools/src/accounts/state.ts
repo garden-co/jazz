@@ -22,6 +22,7 @@ export interface AccountSnapshot {
 /** @internal Enrollment boundary implemented by first-party account adapters. */
 export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
+  logout?(): void;
   registerJWT(auth: Auth): Promise<AccountHandle>;
   loginJWT(auth: Auth): Promise<AccountHandle>;
   linkJWT(account: AccountHandle, auth: Auth): Promise<AccountHandle>;
@@ -75,8 +76,8 @@ export class AccountManager<Auth> {
   }
 
   linkJWT(auth: Auth): Promise<AccountHandle> {
+    const account = this.snapshot.account;
     return this.run("linkJWT", () => {
-      const account = this.snapshot.account;
       if (!account) throw new Error("Linking requires a logged-in account");
       return this.enrollment.linkJWT(account, auth);
     });
@@ -84,6 +85,7 @@ export class AccountManager<Auth> {
 
   logout(): void {
     this.generation++;
+    this.enrollment.logout?.();
     this.publish({ account: undefined, pending: undefined, error: undefined });
   }
 
@@ -94,6 +96,7 @@ export class AccountManager<Auth> {
     const generation = ++this.generation;
     this.publish({ ...this.snapshot, pending: operation, error: undefined });
     try {
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
       const account = await enroll();
       if (generation !== this.generation) throw new AccountOperationSuperseded();
       this.publish({ account, pending: undefined, error: undefined });

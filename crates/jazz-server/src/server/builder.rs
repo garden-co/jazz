@@ -222,7 +222,29 @@ impl ServerBuilder {
             topology != ServerTopology::Edge || core_server_shell.is_some();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
+        let accounts = if topology == ServerTopology::Core {
+            let durable = match &self.storage_backend {
+                StorageBackend::InMemory => None,
+                StorageBackend::Persistent { path } => Some((
+                    self.storage_factory
+                        .clone()
+                        .ok_or("account registry requires storage factory")?,
+                    path.join("accounts.rocksdb"),
+                )),
+                #[cfg(feature = "sqlite")]
+                StorageBackend::Sqlite { .. } => {
+                    return Err("server account registry does not support sqlite".into());
+                }
+            };
+            Some(crate::server::accounts::AccountRegistryOwner::open(
+                durable,
+            )?)
+        } else {
+            None
+        };
+
         let state = Arc::new(ServerState {
+            accounts,
             catalogue_store,
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
