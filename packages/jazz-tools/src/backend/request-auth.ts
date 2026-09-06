@@ -1,3 +1,4 @@
+import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import {
   compactVerify,
   decodeProtectedHeader,
@@ -21,6 +22,8 @@ import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
 export interface BackendRequestAuthConfig {
   appId: string;
+  /** Canonical core registry required by public request-derived contexts. */
+  accountRegistry?: string;
   jwksUrl?: string;
   jwtPublicKey?: BackendJwtPublicKey;
   jwtIssuer?: string;
@@ -441,6 +444,19 @@ export async function resolveRequestSession(
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
+  const admit = async (session: Session): Promise<Session> => {
+    if (!config.accountRegistry) return session; // standalone signature-verification helper
+    const assignment = await requestAccountRegistry(
+      config.accountRegistry,
+      session.issuer === LOCAL_FIRST_JWT_ISSUER ? "found-local-first" : "login",
+      token,
+    );
+    session.account_id = readAccountAssignment(assignment, {
+      issuer: session.issuer,
+      subject: session.user_id,
+    });
+    return session;
+  };
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
     if (!allowLocalFirstAuth) {
@@ -457,11 +473,11 @@ export async function resolveRequestSession(
     if (session.user_id !== verifiedUserId) {
       throw new Error("Invalid local-first identity proof");
     }
-    return session;
+    return admit(session);
   }
 
   const session = requireJwtSession(payload);
   rejectReservedExternalJwtIssuer(session);
   await verifyExternalJwt(token, payload, config);
-  return session;
+  return admit(session);
 }

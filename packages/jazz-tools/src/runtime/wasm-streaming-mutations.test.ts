@@ -1,3 +1,4 @@
+import { translateQuery } from "./query-adapter.js";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import type { TxId, WriteReceipt } from "./client.js";
@@ -338,9 +339,12 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
-  it("selects and filters public provenance authors as canonical text", async () => {
+  it("selects and filters public provenance authors as structured records", async () => {
     const appId = "wasm-public-provenance";
-    const author = JSON.stringify(["urn:jazz:test", `${appId}:test:default:author`]);
+    const author = {
+      account: null,
+      identity: { issuer: "urn:jazz:test", subject: `${appId}:test:default:author` },
+    };
     const runtime = await createWasmRuntime(app.wasmSchema, { appId });
     const inserted = runtime.insert("todos", {
       title: { type: "Text", value: "created by canonical author" },
@@ -350,22 +354,13 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
 
     await expect(
       runtime.query(
-        JSON.stringify({
-          table: "todos",
-          select_columns: ["title", "$createdBy", "$updatedBy"],
-          relation_ir: {
-            Filter: {
-              input: { TableScan: { table: "todos" } },
-              predicate: {
-                Cmp: {
-                  left: { column: "$createdBy" },
-                  op: "Eq",
-                  right: { Literal: { type: "Text", value: author } },
-                },
-              },
-            },
-          },
-        }),
+        translateQuery(
+          app.todos
+            .select("title", "$createdBy", "$updatedBy")
+            .where({ $createdBy: author })
+            ._build(),
+          app.wasmSchema,
+        ),
         null,
         "local",
       ),
@@ -375,8 +370,40 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         id: inserted.id,
         values: [
           { type: "Text", value: "created by canonical author" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Null" },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Null" },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
         ],
       },
     ]);

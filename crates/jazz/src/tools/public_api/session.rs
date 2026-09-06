@@ -58,7 +58,8 @@ pub fn unverified_jwt_scope_subject(jwt: &str) -> Option<(String, String)> {
 /// expressions to check row access permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    /// Registry-admitted account. Provider claims never populate this field.
+    /// Registry-admitted account for public sessions. Explicit trusted backend
+    /// impersonation may supply an account; provider claims never populate it.
     #[serde(default, alias = "accountId", skip_serializing_if = "Option::is_none")]
     pub account_id: Option<crate::account_registry::AccountId>,
     /// Validated JWT issuer (`iss`).

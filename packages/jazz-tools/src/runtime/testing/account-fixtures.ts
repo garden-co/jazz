@@ -5,6 +5,7 @@ import type { AccountDbConfig } from "../../accounts/context.js";
 export async function localAccountConfig(
   appId: string,
   serverUrl?: string,
+  secret?: string,
 ): Promise<AccountDbConfig> {
   let stored: string | null = null;
   const accounts = await createAccountManager({
@@ -22,7 +23,7 @@ export async function localAccountConfig(
   return {
     appId,
     ...(serverUrl ? { serverUrl } : {}),
-    account: accounts.createLocalFirst(),
+    account: secret ? accounts.restoreLocalFirst(secret) : accounts.createLocalFirst(),
     driver: { type: "memory" },
   };
 }

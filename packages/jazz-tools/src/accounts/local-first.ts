@@ -56,6 +56,7 @@ export function localFirstFactory(options: {
       return options.mintToken(secret, options.appId);
     };
     return {
+      secret,
       accountId: localFirstAccountId(options.appId, payload.sub),
       identity: { issuer: payload.iss, subject: payload.sub },
       auth: { getToken },

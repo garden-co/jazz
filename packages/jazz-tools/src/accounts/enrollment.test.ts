@@ -1,6 +1,8 @@
+import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   accountToken,
+  exportLocalFirstSecret,
   createAccountManagerWithRuntime,
   onAccountInvalidated,
 } from "./enrollment.js";
@@ -28,6 +30,30 @@ function setup(
     localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
   });
 }
+
+it("retains the supplied recovery root independently of a factory echo", () => {
+  const secret = generateAuthSecret();
+  const unrelated = generateAuthSecret();
+  const local = {
+    accountId: id,
+    identity: { issuer: "urn:jazz:local-first", subject: "local" },
+    auth: "unused",
+    secret: unrelated,
+  };
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    localFirst: { create: () => local, restore: () => local },
+    restoredLocalFirstSecret: secret,
+  });
+  expect(exportLocalFirstSecret(manager.getLoggedIn()!)).toBe(secret);
+  expect(exportLocalFirstSecret(manager.restoreLocalFirst(secret))).toBe(secret);
+});
+
+it("does not export provider credentials as a local recovery root", async () => {
+  const manager = setup();
+  const account = await manager.registerJWT(token());
+  expect(() => exportLocalFirstSecret(account)).toThrow(/recovery_unavailable/);
+});
 
 describe("opaque account credentials", () => {
   it("binds normalized context admission to both account and registry", () => {
@@ -101,6 +127,36 @@ describe("opaque account credentials", () => {
     finish(new Response(JSON.stringify({ account: id, identity })));
     await expect(pending).rejects.toMatchObject({ code: "account_logged_out" });
     expect(manager.getLoggedIn()).toBeUndefined();
+  });
+
+  it("bounds a hung credential callback and permits a later retry", async () => {
+    vi.useFakeTimers();
+    try {
+      let late!: (token: string) => void;
+      const getToken = vi
+        .fn()
+        .mockResolvedValueOnce(token())
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              late = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(token());
+      const manager = setup();
+      const handle = await manager.loginJWT({ getToken });
+      const timedOut = expect(accountToken(handle, registry)).rejects.toMatchObject({
+        code: "credential_refresh_timeout",
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await timedOut;
+      // Completion of the abandoned attempt cannot replace this fresh result.
+      late(token("someone-else"));
+      await expect(accountToken(handle, registry)).resolves.toBe(token());
+      expect(manager.getLoggedIn()).toBe(handle);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects a refreshed token with a different identity", async () => {

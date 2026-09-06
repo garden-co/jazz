@@ -125,7 +125,7 @@ export async function createServer(
         return;
       }
       res.locals.requestDb = db;
-      res.locals.userId = session.user;
+      res.locals.userId = session.user.account;
       next();
     } catch {
       res.status(401).json({ error: "Unauthorized" });

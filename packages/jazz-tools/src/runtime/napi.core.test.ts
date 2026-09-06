@@ -1,3 +1,5 @@
+import { schema as s } from "../index.js";
+import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -104,7 +106,7 @@ it("accepts only canonical authors through the NAPI open-config codec", async ()
         true,
       ),
     ),
-  ).toThrow(/canonical UTF-8 JSON/i);
+  ).toThrow(/canonical UTF-8 author identity/i);
 });
 
 it("ships a zstd-capable NAPI receiver and rejects an uncompiled negotiated feature before admission", async () => {
@@ -435,10 +437,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     db.close?.();
   });
 
-  it("selects and filters public provenance authors as canonical text", async () => {
+  it("selects and filters public provenance authors as structured records", async () => {
     const { NapiDb } = await loadNapiModule();
     const authorSeed = "jazz-napi-public-provenance:author";
-    const author = JSON.stringify(["urn:jazz:test", authorSeed]);
+    const author = { account: null, identity: { issuer: "urn:jazz:test", subject: authorSeed } };
+    const provenanceApp = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
@@ -456,22 +459,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     await expect(
       runtime.query(
-        JSON.stringify({
-          table: "todos",
-          select_columns: ["title", "$createdBy", "$updatedBy"],
-          relation_ir: {
-            Filter: {
-              input: { TableScan: { table: "todos" } },
-              predicate: {
-                Cmp: {
-                  left: { column: "$createdBy" },
-                  op: "Eq",
-                  right: { Literal: { type: "Text", value: author } },
-                },
-              },
-            },
-          },
-        }),
+        translateQuery(
+          provenanceApp.todos
+            .select("title", "$createdBy", "$updatedBy")
+            .where({ $createdBy: author })
+            ._build(),
+          TEST_SCHEMA,
+        ),
         null,
         "local",
       ),
@@ -481,8 +475,40 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         id: inserted.id,
         values: [
           { type: "Text", value: "created by canonical author" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Null" },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Null" },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
         ],
       },
     ]);

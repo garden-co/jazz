@@ -44,6 +44,7 @@ export type {
   ColumnBuilderValue,
   ColumnTransform,
   StringColumn,
+  UuidColumn,
   BooleanColumn,
   IntColumn,
   TimestampColumn,
@@ -159,5 +160,5 @@ export type {
   AccountSnapshot,
   AccountManager,
 } from "./accounts/state.js";
-export { AccountAuthError, type JWTAuth } from "./accounts/enrollment.js";
+export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "./accounts/enrollment.js";
 export type { AccountStore } from "./accounts/persistence.js";

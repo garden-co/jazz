@@ -221,7 +221,7 @@ fn ws_link_admission(
     match admission.requested_link {
         RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
         RequestedWebSocketLink::ScopeIsolatedClientRelay
-            if admission.credential == WebSocketCredential::Session
+            if admission.trust == CommitUnitTrust::Session
                 && negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
         {
             // This epoch was minted by the server for this accepted socket.
@@ -338,7 +338,9 @@ async fn ws_admission(
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
-    {
+    // A backend-authenticated impersonation remains policy-scoped, but its
+    // authority is the backend credential, not a public account bearer.
+    if !has_authenticated_backend_session {
         let account = peer_identity
             .account_id()
             .ok_or("public sessions require an enrolled account identity")?;
@@ -360,7 +362,11 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
-        credential: WebSocketCredential::Session,
+        credential: if has_authenticated_backend_session {
+            WebSocketCredential::Backend
+        } else {
+            WebSocketCredential::Session
+        },
         requested_link,
     })
 }
@@ -611,7 +617,7 @@ async fn handle_ws_connection(
             return;
         }
     };
-    // This cap is deliberately scoped to externally authenticated sessions,
+    // This cap follows policy-scoped sessions, including trusted backend impersonation,
     // after credential verification.  It must not key off `SYSTEM` (or any
     // other claimed subject): trusted edge/bootstrap links share SYSTEM and a
     // single edge may transiently hold several such connections while
@@ -622,7 +628,7 @@ async fn handle_ws_connection(
             app_id: state.app_id,
             identity: admission.identity,
         },
-        admission.credential == WebSocketCredential::Session,
+        admission.trust == CommitUnitTrust::Session,
     );
 
     let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
@@ -1271,9 +1277,11 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(
-                r#"["https://issuer.example","verified-subject"]"#.to_owned()
-            ))
+            Some(
+                &AuthorSubject::from_canonical(r#"["https://issuer.example","verified-subject"]"#)
+                    .expect("structured author")
+                    .to_value()
+            )
         );
         assert_eq!(
             claims.get("\0claims:user"),
@@ -1495,10 +1503,14 @@ mod tests {
                 PublicTableSchema::builder("docs")
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Text)
-                    .policies(
-                        public_table_policies()
-                            .with_select(PolicyExpr::eq_session("owner", vec!["user".to_owned()])),
-                    ),
+                    .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                        "owner",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ))),
             )
             .build();
         jazz::schema::JazzSchema::new(&source)
@@ -1555,7 +1567,8 @@ mod tests {
         )
         .await
         .expect("authenticated session scope request");
-        assert_eq!(scoped_session.credential, WebSocketCredential::Session);
+        assert_eq!(scoped_session.credential, WebSocketCredential::Backend);
+        assert_eq!(scoped_session.trust, CommitUnitTrust::Session);
         assert_eq!(
             scoped_session.requested_link,
             RequestedWebSocketLink::ScopeIsolatedClientRelay,
@@ -1811,10 +1824,7 @@ mod tests {
             admission.claims.get("authMode"),
             Some(&CoreValue::String("external".to_owned()))
         );
-        assert_eq!(
-            admission.claims.get("user"),
-            Some(&CoreValue::String(identity.canonical().to_owned()))
-        );
+        assert_eq!(admission.claims.get("user"), Some(&identity.to_value()));
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
@@ -2769,7 +2779,7 @@ mod tests {
         }
 
         fn insert_private_doc(&self, title: &str, owner: AuthorSubject) -> jazz::ids::RowUuid {
-            let owner = owner.canonical().to_owned();
+            let (_, owner) = issuer_and_subject(owner);
             jazz::db::block_on(self.db.insert(
                 "docs",
                 RowCells::from([
@@ -3126,82 +3136,35 @@ mod tests {
             "the receiving client must materialize the row through the websocket route"
         );
     }
-    #[tokio::test(flavor = "current_thread")]
-    async fn anonymous_self_signed_session_is_read_only_over_raw_websocket_wire() {
-        let state = make_ws_convergence_test_state().await;
+    // Admission precedes context creation, so this exercises the raw public wire.
+    #[tokio::test]
+    async fn accountless_anonymous_proof_cannot_open_public_websocket() {
+        let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let schema = ws_public_schema_convert();
-
-        let authenticated_identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let authenticated = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
-        let mut authenticated_ws =
-            open_negotiated_ws_session(addr, &state, authenticated_identity).await;
-
-        let (anonymous_identity, anonymous_prelude) =
-            ws_anonymous_prelude(state.app_id, [0xb2; 32]);
-        let anonymous =
-            TestClient::new_with_identity(schema, 0xb2, 0xb200, anonymous_identity).await;
-        let mut anonymous_ws =
-            open_negotiated_ws_with_prelude(addr, &state, anonymous_prelude).await;
-        let (anonymous_todos, anonymous_todos_attachment) =
-            settle_ws_todos_query(&anonymous, &mut anonymous_ws).await;
-
-        let permitted = authenticated.write_todo("permitted");
-        let permitted_row = permitted.row_uuid();
-        let permitted_state =
-            settle_ws_write(&authenticated, &mut authenticated_ws, &permitted).await;
-        assert_eq!(permitted_state.fate, Fate::Accepted);
-        assert_eq!(permitted_state.durability, DurabilityTier::Global);
-
-        let expected_titles = vec!["permitted".to_owned()];
-        let start = tokio::time::Instant::now();
-        let mut anonymous_titles = Vec::new();
-        while start.elapsed() < WS_SETTLE_DEADLINE {
-            let _ = pump_core_websocket_transport_once(&anonymous, &mut anonymous_ws).await;
-            anonymous_titles = anonymous.edge_todo_titles(&anonymous_todos).await;
-            if anonymous_titles == expected_titles {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            anonymous_titles, expected_titles,
-            "anonymous sessions must retain public read access"
-        );
-
-        let denied_insert = anonymous.write_todo("must be denied");
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_insert)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous inserts before permissive policy"
-        );
-
-        let denied_update = anonymous.update_todo(permitted_row, "must remain unchanged");
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_update)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous updates before permissive policy"
-        );
-
-        let denied_delete = anonymous.delete_todo(permitted_row);
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_delete)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous deletes before permissive policy"
-        );
-
-        assert_eq!(
-            anonymous.edge_todo_titles(&anonymous_todos).await,
-            expected_titles,
-            "rejected anonymous writes must not alter the public settled view"
-        );
-        anonymous.detach_query(anonymous_todos_attachment);
+        let (_, prelude) = ws_anonymous_prelude(state.app_id, [0xb3; 32]);
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect");
+        ws.send(WsMessage::Binary(prelude.into()))
+            .await
+            .expect("send proof");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("admission resolves")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected admission error")
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                ..
+            })
+        ));
     }
 
     // Internal route-boundary guard: WebSocket message boundaries are not

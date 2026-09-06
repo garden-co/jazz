@@ -1,3 +1,4 @@
+import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
@@ -399,8 +400,14 @@ export class JazzContext {
   }
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
+    if (!this.config.serverUrl) {
+      throw new Error(
+        "forRequest requires a configured core serverUrl for account admission; use forSession only for explicitly trusted backend sessions",
+      );
+    }
     return await resolveRequestSession(request, {
       appId: this.config.appId,
+      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
       jwksUrl: this.config.jwksUrl,
       jwtPublicKey: this.config.jwtPublicKey,
       jwtIssuer: this.config.jwtIssuer,
@@ -410,11 +417,12 @@ export class JazzContext {
   }
 
   /**
-   * Build a requester-scoped `Db` from an authenticated request.
+   * Verify the original bearer and resolve its active core account before
+   * building a requester-scoped `Db`. External login never registers an identity.
    */
   async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const { client, schema } = this.getClientAndSchema(source);
     const session = await this.resolveRequestSession(request);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, schema, session, undefined, true);
   }
@@ -444,7 +452,8 @@ export class JazzContext {
   }
 
   /**
-   * Build a session-scoped `Db` for server-side impersonation flows.
+   * Build a session-scoped `Db` for explicitly trusted server-side impersonation.
+   * This bypasses public account admission; the backend owns every supplied claim.
    */
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);

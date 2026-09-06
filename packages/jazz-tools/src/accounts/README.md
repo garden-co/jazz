@@ -29,6 +29,16 @@ async function signIn(getToken: () => Promise<string>) {
 `registerJWT` explicitly creates an account for an unassigned external identity.
 `loginJWT` requires an existing active assignment. Merely obtaining or decoding a
 JWT does neither. Refresh callbacks must keep the exact issuer and subject.
+Supply `getToken` on the account operation; the shared account context refreshes
+credentials on expiry across every framework. There is no provider-level
+`onJWTExpired` callback. A callback that takes longer than 30 seconds fails the
+attempt; a later refresh may retry, and a late result cannot replace credentials.
+
+For passphrase/passkey backup, explicitly call `exportLocalFirstSecret(handle)`.
+Restore with `accounts.restoreLocalFirst(secret)` outside a context after normal
+graceful shutdown. Export requires a live local-first handle; external handles
+and logged-out handles cannot expose a recovery root. Secrets never appear in
+`useAccountState` snapshots.
 
 The handle retains its registry authority independently of context transport.
 Omit `serverUrl` when opening a local-only context; supplying it enables the
