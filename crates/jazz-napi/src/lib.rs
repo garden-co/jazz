@@ -5988,8 +5988,8 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(author.canonical().to_owned())),
-            "session.user must come from the supplied canonical author"
+            Some(&author.to_value()),
+            "session.user must come from the supplied structured author"
         );
         assert_eq!(
             claims.get("authMode"),
@@ -6052,10 +6052,7 @@ mod tests {
         let claims = crate::core_claims_from_json(author, Some(json!({ "authMode": "external" })))
             .expect("NAPI claims are scalar provider data");
 
-        assert_eq!(
-            claims.get("user"),
-            Some(&CoreValue::String(author.canonical().to_owned()))
-        );
+        assert_eq!(claims.get("user"), Some(&author.to_value()));
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned())),

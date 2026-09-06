@@ -303,8 +303,7 @@ impl AuthorSubject {
     /// canonical issuer-and-subject string.
     #[doc(hidden)]
     pub fn test_uuid(&self) -> uuid::Uuid {
-        let (issuer, subject): (String, String) =
-            serde_json::from_str(self.canonical()).expect("authenticated fixture subject");
+        let (issuer, subject) = self.principal_parts();
         assert_eq!(issuer, "urn:jazz:test", "not a UUID-backed test subject");
         uuid::Uuid::parse_str(&subject).expect("test subject is a UUID")
     }
@@ -673,6 +672,16 @@ mod tests {
         ] {
             assert_eq!(AuthorSubject::from_value(value.to_value()).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn fixture_uuid_survives_account_assignment() {
+        let subject = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
+        let account =
+            crate::account_registry::AccountId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+        let principal = AuthorSubject::for_test_uuid(subject);
+        assert_eq!(principal.test_uuid(), subject);
+        assert_eq!(principal.with_account(account).test_uuid(), subject);
     }
 
     #[test]

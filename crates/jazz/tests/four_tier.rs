@@ -26,12 +26,14 @@ fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
 
+// All user actors below share the synthetic test issuer. Text ownership
+// addresses its subject explicitly; session.user is the complete author record.
 fn schema() -> JazzSchema {
     // These topology tests are about identity-scoped delivery.  Keep their
     // fixture writes intentionally public; declaring SELECT alone now closes
     // the remaining operation clauses.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["user"]))
+        .with_select(session_eq("owner", &["user", "identity", "subject"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -65,7 +67,7 @@ fn public_write_schema() -> JazzSchema {
 }
 
 fn read_write_policy_schema() -> JazzSchema {
-    let owner = session_eq("owner", &["user"]);
+    let owner = session_eq("owner", &["user", "identity", "subject"]);
     let policies = TablePolicies::new()
         .with_select(owner.clone())
         .with_insert(owner.clone())
@@ -86,7 +88,10 @@ fn read_write_policy_schema() -> JazzSchema {
 fn access_write_policy_schema() -> JazzSchema {
     let canvas = exists(
         "canvasInvites",
-        vec![outer_eq("canvas", "id"), session_eq("userID", &["user"])],
+        vec![
+            outer_eq("canvas", "id"),
+            session_eq("userID", &["user", "identity", "subject"]),
+        ],
     );
     let policies = TablePolicies::new()
         .with_select(canvas.clone())
@@ -135,10 +140,7 @@ fn reopen_node(
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::String(owner.principal_parts().1)),
     ])
 }
 
@@ -160,7 +162,7 @@ fn permission_scope_key(
     let mut values = BTreeMap::new();
     values.insert(
         "__jazz_claim_user".to_owned(),
-        Value::String(writer.canonical().to_owned()),
+        Value::String(writer.principal_parts().1),
     );
     let shape = Query::from(table)
         .filter(eq(col("owner"), param("__jazz_claim_user")))
@@ -189,10 +191,7 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
 fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        (
-            "userID".to_owned(),
-            Value::String(user.canonical().to_owned()),
-        ),
+        ("userID".to_owned(), Value::String(user.principal_parts().1)),
     ])
 }
 

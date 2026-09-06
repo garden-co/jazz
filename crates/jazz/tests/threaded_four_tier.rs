@@ -96,12 +96,14 @@ fn row(idx: u8) -> RowUuid {
     RowUuid::from_bytes([idx; 16])
 }
 
+// All user actors below share the synthetic test issuer. Text ownership
+// addresses its subject explicitly; session.user is the complete author record.
 fn schema() -> JazzSchema {
     // The concurrent topology itself is under test, not write authorization.
     // Make every fixture mutation explicit now that one declared policy closes
     // omitted operations.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["user"]))
+        .with_select(session_eq("owner", &["user", "identity", "subject"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -135,10 +137,7 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::String(owner.principal_parts().1)),
     ])
 }
 
@@ -569,7 +568,7 @@ fn threaded_four_tier_converges_with_fifo_links() {
     let ui_policy_rows = &ui_result.receipt.subscription_rows;
     assert!(!ui_policy_rows.is_empty());
     assert!(ui_policy_rows.values().all(|cells| {
-        cells.get("owner") == Some(&Value::String(ui_author.canonical().to_owned()))
+        cells.get("owner") == Some(&Value::String(ui_author.principal_parts().1))
     }));
 
     for tx_id in ui_result.tx_ids {

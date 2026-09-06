@@ -374,14 +374,16 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
-    let client = connect_native(make_context(
+    let mut context = make_context(
         app_id,
         server.base_url(),
         client_dir.path().to_path_buf(),
         make_jwt(user_id),
-    ))
-    .await
-    .expect("connect client");
+    );
+    jazz_testkit::enroll_test_context(&mut context)
+        .await
+        .expect("enroll the restart fixture before public admission");
+    let client = connect_native(context).await.expect("connect client");
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     let (_, _, transaction_id) = client

@@ -45,11 +45,11 @@ type BenchDb = Db<MemoryStorage>;
 type RocksBenchDb = Db<RocksDbStorage>;
 
 fn author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
+    schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
 }
 
 fn reader_author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
+    schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
 }
 const R3_REOPEN_SEED: u64 = 31;
 
@@ -161,7 +161,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user".to_owned()]),
+        RelValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
     );
 
     schema_fixture::compile(
