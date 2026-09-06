@@ -2,8 +2,8 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, act } from "@testing-library/react";
 import { JazzProvider } from "./provider.js";
-import { makeFakeClient } from "./test-utils.js";
-import type { DbConfig } from "../runtime/db.js";
+import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
+import type { AccountDbConfig } from "../accounts/context.js";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -40,7 +40,7 @@ describe("JazzProvider — stable config deps", () => {
     // release timers scheduled by an unnecessary cleanup.
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
-    function Wrapper({ config }: { config: DbConfig }) {
+    function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
         <JazzProvider config={config} createJazzClient={createJazzClient} fallback={null}>
           <div data-testid="child" />
@@ -48,7 +48,11 @@ describe("JazzProvider — stable config deps", () => {
       );
     }
 
-    const initialConfig: DbConfig = { appId: "app-1", serverUrl: "https://jazz.example.com" };
+    const initialConfig: AccountDbConfig = {
+      appId: "app-1",
+      serverUrl: "https://jazz.example.com",
+      account: makeFakeAccount(),
+    };
 
     let rerender!: (ui: React.ReactElement) => void;
 
@@ -64,7 +68,11 @@ describe("JazzProvider — stable config deps", () => {
     setTimeoutSpy.mockClear();
 
     // Re-render with a freshly constructed config object: same shape, new reference.
-    const freshConfig: DbConfig = { serverUrl: "https://jazz.example.com", appId: "app-1" };
+    const freshConfig: AccountDbConfig = {
+      serverUrl: "https://jazz.example.com",
+      appId: "app-1",
+      account: initialConfig.account,
+    };
     expect(freshConfig).not.toBe(initialConfig); // guard: references differ
 
     await act(async () => {
@@ -91,7 +99,11 @@ describe("JazzProvider — stable config deps", () => {
     firstClient.shutdown = vi.fn().mockResolvedValue(undefined);
     const firstFactory = vi.fn().mockResolvedValue(firstClient);
     const secondFactory = vi.fn().mockResolvedValue(secondClient);
-    const config: DbConfig = { appId: "app-1", serverUrl: "https://jazz.example.com" };
+    const config: AccountDbConfig = {
+      appId: "app-1",
+      serverUrl: "https://jazz.example.com",
+      account: makeFakeAccount(),
+    };
 
     function Wrapper({ factory }: { factory: typeof firstFactory }) {
       return (
@@ -128,7 +140,7 @@ describe("JazzProvider — stable config deps", () => {
       .mockResolvedValueOnce(anonymous)
       .mockResolvedValueOnce(authenticated);
 
-    function Wrapper({ config }: { config: DbConfig }) {
+    function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
         <JazzProvider config={config} createJazzClient={createJazzClient} fallback={null}>
           <div data-testid="child" />
@@ -141,7 +153,7 @@ describe("JazzProvider — stable config deps", () => {
         config={{
           appId: "app-1",
           serverUrl: "https://jazz.example.com",
-          secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          account: makeFakeAccount(),
         }}
       />,
     );
@@ -149,7 +161,11 @@ describe("JazzProvider — stable config deps", () => {
 
     result.rerender(
       <Wrapper
-        config={{ appId: "app-1", serverUrl: "https://jazz.example.com", jwtToken: "jwt" }}
+        config={{
+          appId: "app-1",
+          serverUrl: "https://jazz.example.com",
+          account: makeFakeAccount(),
+        }}
       />,
     );
     await act(async () => {
