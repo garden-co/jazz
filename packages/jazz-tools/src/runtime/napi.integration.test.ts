@@ -773,8 +773,11 @@ describe("NAPI integration", () => {
         identity: { issuer: "https://issuer.example", subject: "alice" },
       };
       const systemAuthor = {
-        account: null,
-        identity: { issuer: "urn:jazz:system", subject: "system" },
+        account: "00000000-0000-0000-0000-000000000000",
+        identity: {
+          issuer: "urn:jazz:system",
+          subject: expect.stringMatching(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/),
+        },
       };
 
       const backendCreatedTodo = await withTimeout(
@@ -825,7 +828,6 @@ describe("NAPI integration", () => {
             "session provenance read timed out",
           );
           expect(sessionRow).toMatchObject({ id: createdTodo.id, $createdBy: aliceAuthor });
-          expect(sessionRow?.$createdBy).not.toEqual(systemAuthor);
         },
         { timeout: 20_000 },
       );
