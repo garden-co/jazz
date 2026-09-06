@@ -4413,12 +4413,11 @@ mod tests {
         );
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(
-                CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
+            Some(
+                &CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
                     .unwrap()
-                    .canonical()
-                    .to_owned()
-            ))
+                    .to_value()
+            )
         );
     }
 

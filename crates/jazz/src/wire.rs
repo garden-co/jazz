@@ -237,11 +237,14 @@ pub struct WireSession {
 impl std::fmt::Debug for WireSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let fingerprint = blake3::hash(self.session_id.as_bytes()).to_hex();
+        let identity_fingerprint = self.identity.map(|identity| {
+            blake3::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
+        });
         f.debug_struct("WireSession")
             .field("session_id_len", &self.session_id.len())
             .field("session_id_fingerprint", &&fingerprint[..12])
             .field("epoch", &self.epoch)
-            .field("identity", &self.identity)
+            .field("identity_fingerprint", &identity_fingerprint)
             .finish()
     }
 }

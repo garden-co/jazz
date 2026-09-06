@@ -471,7 +471,7 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
     accept_global(
         &mut core,
         MergeableCommit::new("group_access_edges", excluded_seed, 4).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::String(user(0xb2).canonical().to_owned())),
+            ("user_id".to_owned(), Value::String(user(0xb2).principal_parts().1)),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -555,7 +555,7 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
         MergeableCommit::new("group_access_edges", bob_seed, 4).cells(BTreeMap::from([
             (
                 "user_id".to_owned(),
-                Value::String(bob.canonical().to_owned()),
+                Value::String(bob.principal_parts().1),
             ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
@@ -1383,7 +1383,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
                 "parent",
                 [],
             )
-            .seeded_by("group_access_edges", "user_id", "user", "group_id")
+            .seeded_by("group_access_edges", "user_id", "user.identity.subject", "group_id")
             .validate(schema)
             .unwrap(),
     );
@@ -1580,11 +1580,11 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
                 ("name".to_owned(), Value::String(name.to_owned())),
                 (
                     "identity_key".to_owned(),
-                    Value::String(identity.canonical().to_owned()),
+                    Value::String(identity.principal_parts().1),
                 ),
                 (
                     "identity_key_text".to_owned(),
-                    Value::String(identity.canonical().to_owned()),
+                    Value::String(identity.principal_parts().1),
                 ),
             ])),
         );
@@ -1596,7 +1596,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     accept_global(
         core,
         MergeableCommit::new("group_access_edges", row(0x42), 3).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::String(alice.canonical().to_owned())),
+            ("user_id".to_owned(), Value::String(alice.principal_parts().1)),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -1931,7 +1931,7 @@ fn grant_edge_access(
         BTreeMap::from([
             (
                 "user_id".to_owned(),
-                Value::String(user(0xa1).canonical().to_owned()),
+                Value::String(user(0xa1).principal_parts().1),
             ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),

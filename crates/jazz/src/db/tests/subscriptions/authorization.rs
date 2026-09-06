@@ -374,14 +374,14 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
 }
 
 #[test]
-fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
+fn local_propagating_subscription_matches_subject_claim_for_created_by() {
     let schema = created_by_read_schema_for_claim("user_id");
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
     let claims = BTreeMap::from([(
         "user_id".to_owned(),
-        Value::String(alice.test_uuid().to_string()),
+        Value::String(alice.principal_parts().1),
     )]);
     client.set_test_provider_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();

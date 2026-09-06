@@ -1,4 +1,5 @@
 import type { ShutdownOptions } from "./db.js";
+import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 /**
  * Framework-agnostic, refcounted client registry. Callers resolving to the same
  * `key` share one client, so a page with several providers for one identity runs
@@ -25,6 +26,7 @@ interface Entry {
   closing: Promise<void> | null;
   /** True only after creation produced a client and its shutdown was invoked. */
   shutdownStarted: boolean;
+  gracefulClosing?: boolean;
   /**
    * The immediately preceding closing entry. On a rejected handoff, walk this
    * chain to retain the first shutdown that actually started. Keeping the
@@ -54,6 +56,11 @@ export function acquireClient<T extends RegisteredClient>(
 ): Promise<T> {
   let entry = registry.get(key);
   const previousClosing = entry?.closing;
+  if (entry?.gracefulClosing && previousClosing) {
+    // Keep this entry until the sync barrier decides whether it is reusable.
+    // A racing acquire must not evict an owner whose synchronization failed.
+    return previousClosing.then(() => acquireClient(key, create, holder));
+  }
   if (entry && previousClosing) {
     const previous = entry;
     let teardownSucceeded = false;
@@ -131,16 +138,22 @@ export function releaseClient(
   if (!entry) return Promise.resolve();
 
   if (options?.waitForSync) {
+    if (entry.closing) return entry.closing;
+    if (!entry.holders.has(holder)) return Promise.resolve();
     if (entry.holders.size > 1) {
       return Promise.reject(
         new Error("Release other holders before gracefully shutting down a shared Jazz client"),
       );
     }
-    if (entry.closing) return entry.closing;
     if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
     entry.releaseTimer = null;
     entry.holders.delete(holder);
-    const closing = entry.promise.then((client) => client.shutdown(options));
+    entry.gracefulClosing = true;
+    const closing = entry.promise.then((client) => {
+      entry.shutdownStarted = true;
+      entry.shutdownBarrier = null;
+      return client.shutdown(options);
+    });
     entry.closing = closing;
     return closing.then(
       () => {
@@ -149,9 +162,16 @@ export function releaseClient(
         entry.pendingRelease = null;
       },
       (error) => {
-        // A failed sync barrier never began teardown; preserve the usable owner.
-        entry.closing = null;
-        entry.holders.add(holder);
+        if (error instanceof GracefulShutdownSyncError) {
+          // Only the sync phase guarantees that the old context is still usable.
+          entry.closing = null;
+          entry.gracefulClosing = false;
+          entry.shutdownStarted = false;
+          entry.holders.add(holder);
+          entry.pendingRelease?.resolve();
+          entry.pendingRelease = null;
+        }
+        // Any later failure retains the closing barrier: storage may still be open.
         throw error;
       },
     );

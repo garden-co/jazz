@@ -1114,10 +1114,14 @@ pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
             PublicTableSchemaBuilder::new("todos")
                 .column("title", PublicColumnType::Text)
                 .column("done", PublicColumnType::Boolean)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(public_session_eq("$createdBy", &session_path)),
-                ),
+                .policies(PublicTablePolicies::new().with_select(public_session_eq(
+                    if claim_name == "user" {
+                        "$createdBy"
+                    } else {
+                        "$createdBy.identity.subject"
+                    },
+                    &session_path,
+                ))),
         ),
     )
 }

@@ -14,10 +14,7 @@ fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_user() {
         values.get("sub"),
         Some(&Value::String("spoofed".to_owned()))
     );
-    assert_eq!(
-        values.get("user"),
-        Some(&Value::String(author.canonical().to_owned()))
-    );
+    assert_eq!(values.get("user"), Some(&author.to_value()));
 }
 
 #[test]

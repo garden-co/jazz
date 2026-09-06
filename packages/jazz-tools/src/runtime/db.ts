@@ -1,4 +1,5 @@
 import type { AccountHandle } from "../accounts/state.js";
+import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
@@ -2974,7 +2975,7 @@ export class Db {
         await Promise.race([this.connection.waitForPendingWrites(), cancelled]);
       } catch (error) {
         this.isShuttingDown = false;
-        throw error;
+        throw new GracefulShutdownSyncError(error);
       } finally {
         this.cancelSyncShutdown = undefined;
       }

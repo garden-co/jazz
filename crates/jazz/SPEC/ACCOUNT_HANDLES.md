@@ -125,6 +125,14 @@ subscription tick must recheck admission; idle sessions observe registry changes
 and close. Trusted backend/admin service connections use their separate
 authority and are not public account sessions.
 
+Edges authenticate the original JWT before resolving admission against the core.
+A service-authenticated registry lookup is read-only: it cannot register, found,
+link, or revoke an identity. Local-first founding forwarded by an edge requires
+the founder's original bearer proof. Edges recheck admission for each operation
+and delivery, fail closed if the core is unavailable, and poll idle sessions
+once per second until a registry watch protocol replaces that polling. Public
+account mutation forwarding never substitutes an edge service credential.
+
 ## Context lifecycle and linking
 
 Enrollment has no dependency on an open database or a framework. `linkJWT`

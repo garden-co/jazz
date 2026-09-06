@@ -2351,8 +2351,8 @@ mod tests {
                         .iter()
                         .find(|column| column.name == name)
                         .map(|column| &column.column_type),
-                    Some(&GrooveColumnType::String),
-                    "{name} must remain logical text in {}",
+                    Some(&crate::ids::AuthorSubject::value_type()),
+                    "{name} must use the structured author record in {}",
                     table.name
                 );
             }
