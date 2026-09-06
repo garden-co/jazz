@@ -120,8 +120,8 @@ function isPolicyClaimValue(value: unknown): boolean {
 }
 
 /**
- * Project verified JWT metadata into Groove's deliberately non-recursive
- * policy corpus. This is kept separate from `PublicSession.claims`: registered
+ * Project decoded JWT metadata into Groove's deliberately non-recursive
+ * local advisory policy corpus. The server independently verifies its JWT. This is kept separate from `PublicSession.claims`: registered
  * transport/security fields are verified identity, not provider policy data;
  * objects are handler metadata, not policy values.
  */

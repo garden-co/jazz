@@ -130,7 +130,14 @@ type NativeConnectionStatus = {
 
 type ForegroundResponse =
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
-  | { type: "nativeSessionMetadata"; accountId: string | null; issuer: string; userId: string }
+  | {
+      type: "nativeSessionMetadata";
+      node: Uint8Array;
+      registryAuthority: string;
+      accountId: string | null;
+      issuer: string;
+      userId: string;
+    }
   | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
@@ -170,6 +177,10 @@ export type NativeForegroundModule = {
 };
 
 export type NativeForegroundFactory = {
+  beginAccountSession?(requestJson: string): Uint8Array;
+  attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
+  releaseAccountSession?(capability: Uint8Array): void;
+  refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
   readonly abiVersion: number;
   openAttached(capability: Uint8Array): NativeForegroundRuntime;
 };
@@ -381,7 +392,13 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
-  nativeSessionMetadata(): { accountId: string | null; issuer: string; userId: string } {
+  nativeSessionMetadata(): {
+    node: Uint8Array;
+    registryAuthority: string;
+    accountId: string | null;
+    issuer: string;
+    userId: string;
+  } {
     const response = this.execute({ type: "nativeSessionMetadata" });
     if (response.type !== "nativeSessionMetadata")
       return unexpected("nativeSessionMetadata", response.type);

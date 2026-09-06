@@ -581,6 +581,51 @@ class ForegroundFactory final : public HostObject {
     if (property == "abiVersion") {
       return Value(jazz_native_relay_abi_version());
     }
+    if (property == "beginAccountSession" || property == "attachAccountSchema" ||
+        property == "releaseAccountSession" || property == "refreshAccountSession") {
+      const auto arity = (property == "attachAccountSchema" || property == "refreshAccountSession") ? 2 : 1;
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forUtf8(runtime, property), arity,
+          [lease = lease_, property, arity](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != static_cast<size_t>(arity)) throw JSError(runtime, "Invalid native account arguments");
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            jazz_native_relay_bytes output{nullptr, 0};
+            jazz_native_relay_status status;
+            if (property == "beginAccountSession") {
+              if (!args[0].isString()) throw JSError(runtime, "Native account setup requires logical metadata");
+              const auto request = args[0].asString(runtime).utf8(runtime);
+              const auto &root = lease->storageRoot();
+              status = jazz_native_relay_host_lease_begin_account_session_json(
+                  lease->nativeLease(), reinterpret_cast<const uint8_t *>(request.data()), request.size(),
+                  reinterpret_cast<const uint8_t *>(root.data()), root.size(), &output);
+            } else {
+              const auto capability = copyAdmittedCapability(runtime, args[0]);
+              if (property == "releaseAccountSession") {
+                status = jazz_native_relay_host_lease_release_account_session(
+                    lease->nativeLease(), capability.data(), capability.size());
+                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "releaseAccountSession");
+                return Value::undefined();
+              }
+              if (property == "refreshAccountSession") {
+                if (!args[1].isString()) throw JSError(runtime, "Native account refresh requires session JSON");
+                const auto request = args[1].asString(runtime).utf8(runtime);
+                status = jazz_native_relay_host_lease_refresh_account_session(
+                    lease->nativeLease(), capability.data(), capability.size(),
+                    reinterpret_cast<const uint8_t *>(request.data()), request.size());
+                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "refreshAccountSession");
+                return Value::undefined();
+              }
+              if (!args[1].isString()) throw JSError(runtime, "Native account schema must be canonical JSON");
+              const auto schema = args[1].asString(runtime).utf8(runtime);
+              status = jazz_native_relay_host_lease_attach_account_schema_json(
+                  lease->nativeLease(), capability.data(), capability.size(),
+                  reinterpret_cast<const uint8_t *>(schema.data()), schema.size(), &output);
+            }
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, property.c_str());
+            return foregroundResponse(runtime, &output);
+          });
+    }
     if (property == "accountSecret") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "accountSecret"), 0,
@@ -657,7 +702,11 @@ class ForegroundFactory final : public HostObject {
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(4);
+    names.reserve(8);
+    names.emplace_back(PropNameID::forAscii(runtime, "beginAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "attachAccountSchema"));
+    names.emplace_back(PropNameID::forAscii(runtime, "releaseAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "refreshAccountSession"));
     names.emplace_back(PropNameID::forAscii(runtime, "accountSecret"));
     names.emplace_back(PropNameID::forAscii(runtime, "mintLocalFirstToken"));
     names.emplace_back(PropNameID::forAscii(runtime, "abiVersion"));

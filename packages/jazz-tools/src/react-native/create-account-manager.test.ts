@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAccountManager } from "./index.js";
+import { createAccountManager, createDb } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 
@@ -64,5 +64,47 @@ describe("React Native account preparation", () => {
         store: store(),
       }),
     ).rejects.toThrow("native build with account crypto support");
+  });
+
+  it("prepares a handle-bound local context and releases an unused setup on normal shutdown", async () => {
+    const subject = "00000000-0000-4000-8000-000000000001";
+    const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: subject }))}.signature`;
+    const capability = new Uint8Array(32).fill(9);
+    const native = {
+      abiVersion: 1,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => jwt),
+      beginAccountSession: vi.fn((_request: string) => capability),
+      attachAccountSchema: vi.fn(),
+      releaseAccountSession: vi.fn(),
+      refreshAccountSession: vi.fn(),
+      openAttached: vi.fn(),
+    };
+    mocks.install.mockReturnValue(native);
+    const config = { appId: "native-context", serverUrl: "https://core.example", store: store() };
+    const manager = await createAccountManager(config);
+    const account = manager.createLocalFirst();
+    const db = await createDb({ appId: config.appId, account });
+    expect(JSON.parse(native.beginAccountSession.mock.calls[0]![0])).toEqual({
+      registry: accountRegistryUrl(config.serverUrl, config.appId),
+      app_id: config.appId,
+      env: "dev",
+      account_id: account.id,
+      issuer: "urn:jazz:local-first",
+      subject,
+      jwt,
+      server_url: null,
+      claims: {},
+    });
+    expect(native.openAttached).not.toHaveBeenCalled();
+    await db.refreshAccountAuth(account);
+    expect(native.refreshAccountSession).toHaveBeenCalledExactlyOnceWith(
+      capability,
+      JSON.stringify({ jwt, claims: {} }),
+    );
+    await db.shutdown();
+    await db.shutdown();
+    expect(native.releaseAccountSession).toHaveBeenCalledExactlyOnceWith(capability);
+    expect(manager.getLoggedIn()).toBe(account);
   });
 });

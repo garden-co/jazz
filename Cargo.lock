@@ -2244,6 +2244,7 @@ dependencies = [
  "jazz-testkit",
  "libc",
  "postcard",
+ "reqwest",
  "serde",
  "serde_json",
  "stacker",

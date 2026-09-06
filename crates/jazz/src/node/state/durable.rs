@@ -707,7 +707,7 @@ where
             return Ok(());
         };
         let digest = policy.directory_digest();
-        let claims = crate::protocol::policy_binding_directory_claims_value(policy.claims())
+        let claims = policy.directory_value()
             .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
         let store = self
             .database
@@ -719,18 +719,12 @@ where
                     "policy binding directory subject must be string",
                 ));
             };
-            let existing_claims = existing.get_idx(1)?;
-            let existing_claims =
-                crate::protocol::policy_binding_directory_claims_from_value(existing_claims)
-                    .map_err(|_| {
-                        Error::InvalidStoredValue("policy binding directory claims are invalid")
-                    })?;
-            let existing = crate::protocol::PolicyBindingKey::from_canonical_parts(
+            let existing = crate::protocol::PolicyBindingKey::from_directory_value(
                 AuthorSubject::from_canonical(&subject).map_err(|_| {
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
-                existing_claims,
-            );
+                existing.get_idx(1)?,
+            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
             if existing != *policy {
                 return Err(Error::InvalidStoredValue(
                     "policy binding digest aliases a distinct exact policy identity",
@@ -850,18 +844,12 @@ where
                     "policy binding directory subject must be string",
                 ));
             };
-            let claims = crate::protocol::policy_binding_directory_claims_from_value(
-                entry.value.get_idx(1)?,
-            )
-            .map_err(|_| {
-                Error::InvalidStoredValue("policy binding directory claims are invalid")
-            })?;
-            let policy = crate::protocol::PolicyBindingKey::from_canonical_parts(
+            let policy = crate::protocol::PolicyBindingKey::from_directory_value(
                 AuthorSubject::from_canonical(&subject).map_err(|_| {
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
-                claims,
-            );
+                entry.value.get_idx(1)?,
+            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
             if policy.directory_digest() != digest
                 || policies
                     .insert(digest, policy.clone())

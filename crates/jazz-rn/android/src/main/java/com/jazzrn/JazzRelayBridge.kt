@@ -58,11 +58,11 @@ internal object JazzRelayBridge {
    * lease; it never receives trusted scope configuration from JavaScript.
    */
   @Synchronized
-  fun foregroundBindingsInstaller(runtimeToken: Long): BindingsInstallerHolder {
+  fun foregroundBindingsInstaller(context: Context, runtimeToken: Long): BindingsInstallerHolder {
     check(activeRuntimeTokens.contains(runtimeToken)) {
       "Jazz native foreground runtime is unavailable for this bridge"
     }
-    return nativeForegroundBindingsInstaller(ensureHost(), runtimeToken)
+    return nativeForegroundBindingsInstaller(ensureHost(), runtimeToken, nativeRelayStorageRoot(context).canonicalPath.toByteArray(Charsets.UTF_8))
   }
 
   /**
@@ -146,6 +146,7 @@ internal object JazzRelayBridge {
   @JvmStatic private external fun nativeForegroundBindingsInstaller(
     host: Long,
     runtimeToken: Long,
+    storageRoot: ByteArray,
   ): BindingsInstallerHolder
   @JvmStatic private external fun nativeInvalidateForegroundRuntime(host: Long, runtimeToken: Long)
 }

@@ -13,6 +13,18 @@ interface TestBinding {
   __testRnHostAdmit(host: NativeHandle, config: string): Uint8Array;
   __testRnHostOpenAttached(host: NativeHandle, capability: Uint8Array): NativeHandle;
   __testRnHostClose(host: NativeHandle): boolean;
+  __testRnHostBeginAccountSession(host: NativeHandle, config: string, root: string): Uint8Array;
+  __testRnHostAttachAccountSchema(
+    host: NativeHandle,
+    capability: Uint8Array,
+    schema: string,
+  ): Uint8Array;
+  __testRnHostRefreshAccountSession(
+    host: NativeHandle,
+    capability: Uint8Array,
+    token: string,
+  ): void;
+  __testRnHostReleaseAccountSession(host: NativeHandle, capability: Uint8Array): void;
   __testRnHostBeginPrivateSession(host: NativeHandle, config: string): Uint8Array;
   __testRnHostAttachCanonicalSchema(
     host: NativeHandle,
@@ -41,10 +53,22 @@ const probe = binding.__testRnHostNew();
 const abiVersion = binding.__testRnHostAbiVersion(probe);
 binding.__testRnHostClose(probe);
 
-export function createPlatformHost() {
+export function createPlatformHost(storageRoot?: string) {
   const nativeHost = binding.__testRnHostNew();
   return {
     abiVersion,
+    beginAccountSession: (config: string) => {
+      if (!storageRoot) throw new Error("RN fixture requires a platform storage root");
+      return new Uint8Array(
+        binding.__testRnHostBeginAccountSession(nativeHost, config, storageRoot),
+      );
+    },
+    attachAccountSchema: (capability: Uint8Array, schema: string) =>
+      new Uint8Array(binding.__testRnHostAttachAccountSchema(nativeHost, capability, schema)),
+    refreshAccountSession: (capability: Uint8Array, token: string) =>
+      binding.__testRnHostRefreshAccountSession(nativeHost, capability, token),
+    releaseAccountSession: (capability: Uint8Array) =>
+      binding.__testRnHostReleaseAccountSession(nativeHost, capability),
     // NAPI bytes originate in Node's realm; JSI constructs Uint8Array in the
     // calling runtime. Preserve that contract when the renderer uses jsdom.
     admit: (config: string) => new Uint8Array(binding.__testRnHostAdmit(nativeHost, config)),
@@ -71,7 +95,14 @@ export function createPlatformHost() {
 export function installPlatformHost(host: ReturnType<typeof createPlatformHost>) {
   Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV1", {
     configurable: true,
-    value: { abiVersion: host.abiVersion, openAttached: host.openAttached },
+    value: {
+      abiVersion: host.abiVersion,
+      openAttached: host.openAttached,
+      beginAccountSession: host.beginAccountSession,
+      attachAccountSchema: host.attachAccountSchema,
+      refreshAccountSession: host.refreshAccountSession,
+      releaseAccountSession: host.releaseAccountSession,
+    },
   });
 }
 export default { getAbiVersion: () => abiVersion };
