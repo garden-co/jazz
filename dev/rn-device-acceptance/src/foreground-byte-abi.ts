@@ -18,6 +18,19 @@ export type ForegroundByteCodec = {
   decode(bytes: Uint8Array): NativeForegroundResponse;
 };
 
+type PostCommitWakeTiming = {
+  readonly timeoutMs: number;
+  now(): number;
+  yieldTurn(): Promise<void>;
+  onWake?(details: { elapsedMs: number; turns: number }): void;
+};
+
+const DEVICE_POST_COMMIT_WAKE_TIMING: PostCommitWakeTiming = {
+  timeoutMs: 5_000,
+  now: () => performance.now(),
+  yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+};
+
 /**
  * Exercise the installed JSI HostObject through the first v1 byte vocabulary.
  * This is intentionally not a React-Native-shaped database API: it proves the
@@ -178,6 +191,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
   codec: ForegroundByteCodec,
   rowId: Uint8Array,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+  wakeTiming: PostCommitWakeTiming = DEVICE_POST_COMMIT_WAKE_TIMING,
 ): Promise<void> {
   if (rowId.byteLength !== 16) throw new Error("subscription fixture row id must be 16 bytes");
   markFailure("same-runtime-open-failed");
@@ -255,7 +269,10 @@ export async function proveSameJsiRuntimeWriteSubscription(
 
     markFailure("same-runtime-delta-failed");
     markFailure("same-runtime-postcommit-wake-failed");
-    for (let attempt = 0; attempt < 96; attempt += 1) {
+    const wakeStartedAt = wakeTiming.now();
+    const wakeDeadline = wakeStartedAt + wakeTiming.timeoutMs;
+    let wakeTurns = 0;
+    do {
       // Both aliases get fair ordinary relay turns.  This is the same polling
       // progression used by the first native subscription slice, not a test
       // side channel into the persistent SQLite store.
@@ -264,8 +281,11 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // SQLite/IVM completion reaches this runtime through React Native's
       // CallInvoker. A synchronous drain loop starves that callback even
       // though both aliases are ticked fairly.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await wakeTiming.yieldTurn();
+      wakeTurns += 1;
+      if (wakeTiming.now() >= wakeDeadline) break;
       if (!openedB.consumeWake()) continue;
+      wakeTiming.onWake?.({ elapsedMs: wakeTiming.now() - wakeStartedAt, turns: wakeTurns });
       markFailure("same-runtime-delta-drain-failed");
       const events = await drainSubscription(
         b,
@@ -310,9 +330,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
             ? "same-runtime-delta-reset-row-id-failed"
             : "same-runtime-delta-incremental-row-id-failed",
       );
-    }
+    } while (wakeTiming.now() < wakeDeadline);
     throw new Error(
-      "foreground B did not observe foreground A's committed row after bounded ticks",
+      `foreground B did not observe foreground A's committed row after ${wakeTurns} turns and ${Math.round(wakeTiming.now() - wakeStartedAt)}ms without a post-commit native wake`,
     );
   } finally {
     a.close();
