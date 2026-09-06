@@ -64,3 +64,24 @@ describe("account selection", () => {
     expect(manager.getLoggedIn()).toBe(local);
   });
 });
+
+it("does not start remote linking when a pending-state subscriber logs out", async () => {
+  let calls = 0;
+  const local = handle("local");
+  const manager = new AccountManager({
+    createLocalFirst: () => local,
+    registerJWT: async () => local,
+    loginJWT: async () => local,
+    linkJWT: async () => {
+      calls++;
+      return local;
+    },
+  });
+  manager.createLocalFirst();
+  manager.subscribe(() => {
+    if (manager.getSnapshot().pending === "linkJWT") manager.logout();
+  });
+  await expect(manager.linkJWT("token")).rejects.toBeInstanceOf(AccountOperationSuperseded);
+  expect(calls).toBe(0);
+  expect(manager.getLoggedIn()).toBeUndefined();
+});

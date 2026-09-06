@@ -7,6 +7,7 @@ use crate::middleware::auth::JwtVerifier;
 use jazz::serving::StorageConfig;
 use jazz::tools::AppId;
 
+mod accounts;
 mod builder;
 mod catalogue;
 mod catalogue_entry;
@@ -107,6 +108,7 @@ pub enum EdgeUpstreamHealth {
 
 /// Server state shared across request handlers.
 pub struct ServerState {
+    pub(crate) accounts: Option<accounts::AccountRegistryOwner>,
     /// Direct, storage-backed admin catalogue store.
     pub(crate) catalogue_store: StoredCatalogue,
     pub(crate) catalogue: ServerCatalogue,
@@ -524,6 +526,12 @@ impl ServerState {
             tracing::error!(%error, "shutdown server shell storage failed");
             failed = true;
         }
+        if let Some(accounts) = &self.accounts
+            && let Err(error) = accounts.close()
+        {
+            tracing::error!(%error, "shutdown account registry close failed");
+            failed = true;
+        }
         if let Err(error) = self.catalogue.close(&self.catalogue_store) {
             tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
@@ -674,6 +682,9 @@ mod tests {
                 std::collections::HashSet::new(),
             )
             .expect("build shutdown test catalogue"),
+            accounts: Some(
+                accounts::AccountRegistryOwner::open(None).expect("account test registry"),
+            ),
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),

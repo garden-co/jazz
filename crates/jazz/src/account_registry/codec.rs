@@ -8,6 +8,11 @@ const MAX_COMPONENT: usize = 16 * 1024;
 pub(super) fn encode(command: &AccountCommand) -> Result<Vec<u8>, String> {
     let mut out = MAGIC.to_vec();
     match command {
+        AccountCommand::FoundLocalFirst { principal, app } => {
+            out.push(4);
+            put_principal(&mut out, principal)?;
+            out.extend_from_slice(app.as_bytes());
+        }
         AccountCommand::Register { principal, account } => {
             out.push(0);
             put_principal(&mut out, principal)?;
@@ -86,6 +91,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<AccountCommand, String> {
             approver: reader.principal()?,
             target: reader.principal()?,
         },
+        4 => AccountCommand::FoundLocalFirst {
+            principal: reader.principal()?,
+            app: reader.uuid()?,
+        },
         _ => return Err("unknown account command tag".into()),
     };
     if !reader.0.is_empty() {
@@ -130,5 +139,37 @@ impl<'a> Reader<'a> {
             issuer: self.string()?,
             subject: self.string()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pin actual durable bytes, not a serde round trip of an implementation type.
+    #[test]
+    fn v1_registration_bytes_and_rejections_are_pinned() {
+        let command = AccountCommand::Register {
+            principal: Principal {
+                issuer: "i".into(),
+                subject: "s".into(),
+            },
+            account: AccountId(Uuid::from_u128(1)),
+        };
+        let golden = b"JACC\x01\x00\x00\x00\x00\x01i\x00\x00\x00\x01s\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01";
+        assert_eq!(encode(&command).unwrap(), golden);
+        assert_eq!(encode(&decode(golden).unwrap()).unwrap(), golden);
+        for length in 0..golden.len() {
+            assert!(decode(&golden[..length]).is_err());
+        }
+        let mut trailing = golden.to_vec();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        let mut unknown = golden.to_vec();
+        unknown[5] = 5;
+        assert!(decode(&unknown).is_err());
+        let mut version = golden.to_vec();
+        version[4] = 2;
+        assert!(decode(&version).is_err());
     }
 }

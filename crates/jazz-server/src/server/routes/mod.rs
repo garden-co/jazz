@@ -8,6 +8,7 @@
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
+mod accounts;
 mod http;
 mod utils;
 mod websocket;
@@ -103,7 +104,16 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         )
         .layer(DefaultBodyLimit::max(MAX_ADMIN_REQUEST_BODY_BYTES));
+    let account_routes = Router::new()
+        .route("/register", post(accounts::register))
+        .route("/found-local-first", post(accounts::found_local_first))
+        .route("/revoke", post(accounts::revoke))
+        .route("/login", post(accounts::login))
+        .route("/links/request", post(accounts::request_link))
+        .route("/links/accept", post(accounts::accept_link))
+        .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
+        .nest("/accounts", account_routes)
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
