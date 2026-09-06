@@ -25,7 +25,6 @@ export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
   type ActiveQuerySubscriptionTrace,
-  type DbConfig,
   type DbSubscriptionCallbacks,
   type LogoutOptions,
   Transaction,
@@ -45,6 +44,7 @@ export {
   type DeleteOptions,
   type TableProxy,
 } from "./db.js";
+export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
   fetchStoredPermissions,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { getDbSubscriptionSource } from "../runtime/db.js";
 import { createDb } from "../runtime/default-create-db.js";
+import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 // The public surface under test. The vanilla binding below imports Jazz from
 // here and nowhere else — if any symbol it needs were missing, this file would
@@ -86,7 +87,7 @@ async function waitFor(
 describe("jazz-tools/shared", () => {
   it("a binding built only on the public surface tracks a live query and reconciles in place", async () => {
     const appId = `shared-surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const db = await createDb({ appId });
+    const db = await createDb(await localAccountConfig(appId));
     const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
     // Schema + query via the real builder API (no JSON-shaped literals).

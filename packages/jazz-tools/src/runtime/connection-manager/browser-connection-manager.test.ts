@@ -19,6 +19,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     const connection: BrowserWorkerConnection = {
       ready: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       updateAuth: vi.fn(async () => undefined),
       disconnect: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
@@ -96,6 +97,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(() => firstReady.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
     } as unknown as BrowserWorkerConnection;
@@ -103,6 +105,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(() => secondReady.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
     } as unknown as BrowserWorkerConnection;
@@ -203,6 +206,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       disconnect: vi.fn(() => disconnectGate.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
     } as unknown as BrowserWorkerConnection;
     const manager = new BrowserConnectionManager({
       config: { serverUrl: "https://example.test" },
@@ -258,12 +262,14 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
     } as unknown as BrowserWorkerConnection;
     const second = {
       ready: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
     } as unknown as BrowserWorkerConnection;
     const callbacks: Array<{ onFailure(error: unknown): void }> = [];
