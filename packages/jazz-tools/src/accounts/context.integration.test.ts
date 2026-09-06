@@ -12,6 +12,36 @@ describe("account context authority", () => {
       expect(await db.all(app.notes)).toEqual([
         expect.objectContaining({ id: row.id, text: "offline" }),
       ]);
+      expect(await db.one(app.notes.select("$createdBy").where({ id: row.id }))).toMatchObject({
+        $createdBy: { account: config.account.id, identity: config.account.identity },
+      });
+      const author = { account: config.account.id, identity: config.account.identity };
+      expect(await db.all(app.notes.where({ $createdBy: author }))).toHaveLength(1);
+      expect(await db.all(app.notes.where({ "$createdBy.account": author.account }))).toHaveLength(
+        1,
+      );
+      expect(
+        await db.all(app.notes.where({ "$createdBy.identity": author.identity })),
+      ).toHaveLength(1);
+      expect(await db.all(app.notes.where({ $createdBy: { ne: author } }))).toEqual([]);
+      expect(
+        await db.all(app.notes.where({ $createdBy: { ne: { ...author, account: null } } })),
+      ).toHaveLength(1);
+      expect(
+        await db.all(
+          app.notes.where({
+            $createdBy: { ...author, identity: { ...author.identity, subject: "someone-else" } },
+          }),
+        ),
+      ).toEqual([]);
+      expect(
+        await db.all(
+          app.union([
+            app.notes.where({ $createdBy: author }),
+            app.notes.where({ $createdBy: { ...author, account: null } }),
+          ]),
+        ),
+      ).toHaveLength(1);
       await expect(createDb({ ...config, appId: "another-app" })).rejects.toMatchObject({
         code: "account_application_mismatch",
       });

@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../testing/account-fixtures.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -150,7 +151,7 @@ describe("Node foreground node leases", () => {
     roots.push(root);
     const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
     try {
-      const db = await createDb({ appId: "memory-lease-test", driver: { type: "memory" } });
+      const db = await createDb(await localAccountConfig("memory-lease-test"));
       db.insert(memoryApp.notes, { title: "first write" });
       await db.shutdown();
       await expect(readdir(join(root, ".jazz"))).rejects.toMatchObject({ code: "ENOENT" });

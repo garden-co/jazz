@@ -1,3 +1,4 @@
+import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
 import type {
@@ -5943,7 +5944,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("passes canonical text provenance authors through public text subscription frames", () => {
+  it("passes structured provenance authors through public subscription frames", () => {
     const schema = {
       notes: {
         columns: [
@@ -5954,7 +5955,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -5979,31 +5980,35 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(change.row.values).toEqual([
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
-      { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
+      {
+        type: "Row",
+        value: {
+          values: [
+            { type: "Null" },
+            {
+              type: "Row",
+              value: {
+                values: [
+                  { type: "Text", value: "https://issuer.example" },
+                  { type: "Text", value: "user-1" },
+                ],
+              },
+            },
+          ],
+        },
+      },
       { type: "Timestamp", value: 123 },
     ]);
   });
 
   it.each([
+    { name: "missing record", provenanceBytes: new Uint8Array() },
+    { name: "truncated record", provenanceBytes: encodedAuthorFixture().subarray(0, 4) },
     {
-      name: "arbitrary text",
-      provenanceBytes: inlineScalar("not-json"),
+      name: "malformed UTF-8 subject",
+      provenanceBytes: encodedAuthorFixture(Uint8Array.of(2, 255)),
     },
-    {
-      name: "double stored-scalar wrapper",
-      provenanceBytes: Uint8Array.from([
-        2,
-        ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
-      ]),
-    },
-    {
-      name: "noncanonical JSON whitespace",
-      provenanceBytes: inlineScalar(`[ "https://issuer.example", "user-1" ]`),
-    },
-    {
-      name: "ASCII-blank component",
-      provenanceBytes: inlineScalar(JSON.stringify(["https://issuer.example", " "])),
-    },
+    { name: "ASCII-blank component", provenanceBytes: encodedAuthorFixture(inlineScalar(" ")) },
   ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
     const schema = {
       notes: {
@@ -6015,7 +6020,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -6035,7 +6040,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
-    ).toThrow(/canonical author subject/);
+    ).toThrow(/record|offset|UTF-8|portable|nonempty/i);
   });
 
   it("keeps ordinary text decoding strict while validating provenance specially", () => {
@@ -6049,7 +6054,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -7906,6 +7911,33 @@ it("preserves the producer's explicit position over lazy relation state", () => 
   ]);
 });
 
+function authorFixtureDescriptor(): DescriptorField[] {
+  return [
+    { name: "account", valueType: { tag: 15, inner: { tag: 11 } } },
+    {
+      name: "identity",
+      valueType: {
+        tag: 16,
+        record: [
+          { name: "issuer", valueType: { tag: 8 } },
+          { name: "subject", valueType: { tag: 8 } },
+        ],
+      },
+    },
+  ];
+}
+
+function encodedAuthorFixture(subject = inlineScalar("user-1")): Uint8Array {
+  const descriptor = authorFixtureDescriptor();
+  return createRecord(descriptor, [
+    encodeNativeNullValue(descriptor[0]!.valueType),
+    createRecord(descriptor[1]!.valueType.record!, [
+      inlineScalar("https://issuer.example"),
+      subject,
+    ]),
+  ]);
+}
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
@@ -7918,7 +7950,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     { name: "row_uuid", valueType: { tag: 11 } },
     { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
-    { name: "$createdBy", valueType: { tag: 8 } },
+    { name: "$createdBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -7936,7 +7968,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(row.titleBytes ?? inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          row.provenanceBytes ?? inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+          row.provenanceBytes ?? encodedAuthorFixture(),
           u64Bytes(123),
         ]),
       );
@@ -7965,9 +7997,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
     { name: "user_name", valueType: { tag: 15, inner: { tag: 8 } } },
     { name: "user_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
     { name: "user_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
-    { name: "$createdBy", valueType: { tag: 8 } },
+    { name: "$createdBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$createdAt", valueType: { tag: 3 } },
-    { name: "$updatedBy", valueType: { tag: 8 } },
+    { name: "$updatedBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$updatedAt", valueType: { tag: 3 } },
   ];
   const added = delta.added ?? [];
@@ -7995,7 +8027,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
 function writeTeamGatherBatches(
   writer: PostcardWriter,
   rows: Array<{ rowId: Uint8Array; name: string | null }>,
-  descriptor: Array<{ name: string; valueType: { tag: number; inner?: { tag: number } } }>,
+  descriptor: DescriptorField[],
 ): void {
   writer.vec(
     (batch) => {
@@ -8020,9 +8052,9 @@ function writeTeamGatherBatches(
               : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
-            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+            encodedAuthorFixture(),
             u64Bytes(123),
-            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+            encodedAuthorFixture(),
             u64Bytes(123),
           ]),
         );

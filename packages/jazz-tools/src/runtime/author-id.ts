@@ -1,3 +1,4 @@
+import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -171,5 +172,27 @@ export function authorBytesForSession(
 ): Uint8Array {
   return new TextEncoder().encode(
     canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+  );
+}
+
+/** @internal Validate full structured provenance on native result boundaries. */
+export function validateStructuredAuthorValue(value: Value): void {
+  if (value.type !== "Row" || value.value.values.length !== 2)
+    throw new Error("invalid structured author record");
+  const [account, identity] = value.value.values;
+  if (
+    (account?.type !== "Null" && account?.type !== "Uuid") ||
+    identity?.type !== "Row" ||
+    identity.value.values.length !== 2
+  ) {
+    throw new Error("invalid structured author record");
+  }
+  const [issuer, subject] = identity.value.values;
+  if (issuer?.type !== "Text" || subject?.type !== "Text")
+    throw new Error("invalid structured author identity");
+  canonicalAuthorSubject(
+    issuer.value,
+    subject.value,
+    account.type === "Uuid" ? account.value : undefined,
   );
 }

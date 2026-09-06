@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
@@ -40,7 +41,7 @@ describe("branch API", () => {
 
   it("uses scalar selectors for a single string branch column", async () => {
     db = await createDb({
-      appId: "branch-api-string-shorthand",
+      ...(await localAccountConfig("branch-api-string-shorthand")),
       driver: { type: "memory" },
     });
 
@@ -74,7 +75,7 @@ describe("branch API", () => {
 
   it("rejects updates that try to change a branch column", async () => {
     db = await createDb({
-      appId: "branch-api-immutable-column",
+      ...(await localAccountConfig("branch-api-immutable-column")),
       driver: { type: "memory" },
     });
 
@@ -102,7 +103,7 @@ describe("branch API", () => {
 
   it("uses referenced row IDs as scalar branch selectors", async () => {
     db = await createDb({
-      appId: "branch-api-reference-shorthand",
+      ...(await localAccountConfig("branch-api-reference-shorthand")),
       driver: { type: "memory" },
     });
 

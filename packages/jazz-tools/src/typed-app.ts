@@ -14,6 +14,7 @@ import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
   PROVENANCE_MAGIC_COLUMNS,
+  magicColumnType,
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
@@ -366,18 +367,21 @@ export type TableWhereInput<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in ProvenanceMagicColumn]?:
-      | string
-      | Date
-      | number
-      | {
-          eq?: string | Date | number;
-          ne?: string | Date | number;
-          gt?: Date | number;
-          gte?: Date | number;
-          lt?: Date | number;
-          lte?: Date | number;
-        };
+    [TColumn in ProvenanceMagicColumn]?: ProvenanceMagicColumns[TColumn] extends Date
+      ?
+          | Date
+          | number
+          | {
+              eq?: Date | number;
+              ne?: Date | number;
+              gt?: Date | number;
+              gte?: Date | number;
+              lt?: Date | number;
+              lte?: Date | number;
+            }
+      :
+          | ProvenanceMagicColumns[TColumn]
+          | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
   }
 >;
 
@@ -1295,7 +1299,19 @@ export class TypedTableQueryBuilder<
     const built: BuiltCondition[] = [];
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
-      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const magicType = magicColumnType(key);
+      const recordLiteral =
+        magicType?.type === "Row" &&
+        typeof value === "object" &&
+        value !== null &&
+        magicType.columns.some((column) => Object.hasOwn(value, column.name));
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        !(value instanceof Date) &&
+        !recordLiteral
+      ) {
         for (const [op, opValue] of Object.entries(value)) {
           if (opValue !== undefined) {
             built.push({ column: key, op, value: opValue });

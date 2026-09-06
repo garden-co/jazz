@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
@@ -30,7 +31,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
 
   beforeEach(async () => {
     db = await createDb({
-      appId: "test-app",
+      ...(await localAccountConfig("test-app")),
       driver: { type: "persistent" },
     });
   });

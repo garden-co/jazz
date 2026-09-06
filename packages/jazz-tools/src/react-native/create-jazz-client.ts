@@ -3,9 +3,8 @@ import { getDbSubscriptionSource, type Db, type ShutdownOptions } from "../runti
 import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
-import type { DbConfig } from "./create-db.js";
-import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
-import { ReactNativeRuntimeSource } from "./runtime-source.js";
+import { createDb, type DbConfig } from "./create-db.js";
+import type { AccountDbConfig } from "../accounts/context.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 
 export interface JazzClient {
@@ -23,7 +22,7 @@ export interface JazzClient {
 export type JazzClientConfig = AccountDbConfig & Pick<DbConfig, "nativeRelay" | "sqliteStorage">;
 
 async function createJazzClientInternal(config: JazzClientConfig): Promise<JazzClient> {
-  const db = await createAccountDbWithRuntimeSource(config, new ReactNativeRuntimeSource());
+  const db = await createDb(config);
   let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },

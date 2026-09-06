@@ -6,10 +6,10 @@ import type {
   WasmRow,
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn } from "../../magic-columns.js";
-import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
+import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 
-const textDecoder = new TextDecoder();
+const textDecoder = new TextDecoder("utf-8", { fatal: true });
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type ValueType = {
@@ -856,6 +856,9 @@ function decodeTerminalColumnBytes(
         ? { type: "Null" }
         : decodeTerminalColumnBytes(nested, payload, descriptor[fieldIndex]?.valueType);
     });
+    if (column.name === "$createdBy" || column.name === "$updatedBy") {
+      validateStructuredAuthorValue({ type: "Row", value: { values } });
+    }
     const key = offset ? decodeRecordValue(descriptor, bytes, 0) : undefined;
     return {
       type: "Row",
@@ -866,18 +869,7 @@ function decodeTerminalColumnBytes(
       },
     };
   }
-  if (
-    isProvenanceMagicColumn(column.name) &&
-    column.column_type.type === "Text" &&
-    nonNullableValueType(valueType)?.tag === 8
-  ) {
-    return { type: "Text", value: decodeProvenanceText(bytes) };
-  }
   return decodeTerminalBytes(column.column_type, bytes, column.name);
-}
-
-function decodeProvenanceText(bytes: Uint8Array): string {
-  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {

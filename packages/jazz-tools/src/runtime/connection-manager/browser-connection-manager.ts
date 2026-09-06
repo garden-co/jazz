@@ -1,3 +1,4 @@
+import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { DurabilityTier } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
@@ -60,6 +61,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     // the old receipt before the new generation can begin serving reads.
     this.host.clearAuthenticatedInspectorLocalReads();
     const workerConfig = { ...this.host.config };
+    copyAccountConfigAdmission(this.host.config, workerConfig);
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
       config: workerConfig,

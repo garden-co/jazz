@@ -23,13 +23,17 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 
-type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
+type RuntimeSerializedSession = Pick<
+  Session,
+  "account_id" | "issuer" | "user_id" | "claims" | "authMode"
+> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
 };
 
 function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
   const token = trustedReservedSessionToken(session);
   return {
+    account_id: session.account_id,
     issuer: session.issuer,
     user_id: session.user_id,
     claims: session.claims,

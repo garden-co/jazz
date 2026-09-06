@@ -182,7 +182,15 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
     expect(() => decodeCommandInRust(Uint8Array.of(18, 1, 0, 2))).toThrow();
   });
   test("permission advice command and result ordinals are frozen", () => {
-    for (const [index, [, command]] of cases.slice(0, 4).entries()) {
+    for (const [index, [, command]] of cases
+      .filter(
+        ([, command]) =>
+          typeof command === "object" &&
+          command !== null &&
+          "type" in command &&
+          command.type === "permissionAdvice",
+      )
+      .entries()) {
       expect([
         ...encodeNativeForegroundCommand(command as NativeForegroundCommand).subarray(0, 2),
       ]).toEqual([38, index]);

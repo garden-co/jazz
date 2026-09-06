@@ -1,3 +1,4 @@
+import { localAccountConfig } from "./testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { type Db } from "./db.js";
@@ -35,7 +36,7 @@ describe("createDb in-memory driver", () => {
 
   it("opens a native Db with the current ordinary-column schema layout", async () => {
     db = await createDb({
-      appId: "in-memory-current-column-layout-test",
+      ...(await localAccountConfig("in-memory-current-column-layout-test")),
       driver: { type: "memory" },
     });
 
@@ -46,7 +47,7 @@ describe("createDb in-memory driver", () => {
 
   it("can read and write data without connecting to a server", async () => {
     db = await createDb({
-      appId: "in-memory-db-test",
+      ...(await localAccountConfig("in-memory-db-test")),
       driver: { type: "memory" },
     });
 
@@ -70,10 +71,8 @@ describe("createDb in-memory driver", () => {
 
   it("executes typed partial selects and page-relative diffs end to end", async () => {
     db = await createDb({
-      appId: "in-memory-large-value-dsl-test",
+      ...(await localAccountConfig("in-memory-large-value-dsl-test")),
       driver: { type: "memory" },
-      jwtToken:
-        "header.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwic3ViIjoibGFyZ2UtdmFsdWUtdGVzdC11c2VyIn0.signature",
     });
 
     const payloadOffset = 70_000;
@@ -162,7 +161,7 @@ describe("createDb in-memory driver", () => {
 
   it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {
     db = await createDb({
-      appId: "in-memory-large-value-json-upsert-shape-test",
+      ...(await localAccountConfig("in-memory-large-value-json-upsert-shape-test")),
       driver: { type: "memory" },
     });
 

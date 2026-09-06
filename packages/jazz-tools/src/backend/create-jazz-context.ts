@@ -430,7 +430,7 @@ export class JazzContext {
       client,
       schema,
       undefined,
-      canonicalAuthorSubject(session.issuer, session.user_id),
+      canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
       true,
     );
   }

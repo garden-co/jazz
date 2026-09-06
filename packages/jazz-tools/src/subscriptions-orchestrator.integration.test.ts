@@ -1,3 +1,4 @@
+import { localAccountConfig } from "./runtime/testing/account-fixtures.js";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "./drivers/types.js";
 import { createDb } from "./runtime/default-create-db.js";
@@ -71,7 +72,7 @@ async function withRealManager<T>(
   run: (input: { appId: string; db: Db; manager: SubscriptionsOrchestrator }) => Promise<T>,
 ): Promise<T> {
   const appId = `orchestrator-int-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const db = await createDb({ appId });
+  const db = await createDb(await localAccountConfig(appId));
   const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
   try {

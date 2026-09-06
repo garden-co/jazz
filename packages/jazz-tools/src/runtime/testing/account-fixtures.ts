@@ -2,12 +2,14 @@ import { createAccountManager } from "../../accounts/create-account-manager.js";
 import type { AccountDbConfig } from "../../accounts/context.js";
 
 /** A real offline account and runtime, with isolated ephemeral test storage. */
-export async function localAccountConfig(appId: string): Promise<AccountDbConfig> {
-  const serverUrl = "http://127.0.0.1:1";
+export async function localAccountConfig(
+  appId: string,
+  serverUrl?: string,
+): Promise<AccountDbConfig> {
   let stored: string | null = null;
   const accounts = await createAccountManager({
     appId,
-    serverUrl,
+    serverUrl: serverUrl ?? "http://127.0.0.1:1",
     store: {
       async read() {
         return stored;
@@ -17,5 +19,10 @@ export async function localAccountConfig(appId: string): Promise<AccountDbConfig
       },
     },
   });
-  return { appId, serverUrl, account: accounts.createLocalFirst(), driver: { type: "memory" } };
+  return {
+    appId,
+    ...(serverUrl ? { serverUrl } : {}),
+    account: accounts.createLocalFirst(),
+    driver: { type: "memory" },
+  };
 }
