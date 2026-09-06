@@ -4241,6 +4241,10 @@ struct SubscriptionState {
     snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
+    /// A replacement graph opened cold. Keep the last complete facade only
+    /// until the replacement has its first local terminal batch, then publish
+    /// one complete reset from that retained baseline.
+    cold_runtime_replacement: bool,
     sender: UnboundedSender<SubscriptionEvent>,
 }
 

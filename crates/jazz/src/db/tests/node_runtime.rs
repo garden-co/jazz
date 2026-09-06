@@ -3056,3 +3056,189 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
     }
     panic!("client configured with a cadence must receive the initial snapshot");
 }
+
+/// Internal because only controlled storage can hold a new maintained graph
+/// between replacement installation and its first local terminal batch. The
+/// public contract is the stream: a runtime rebuild must not publish that
+/// incomplete graph as an empty reset.
+#[test]
+fn cold_runtime_replacement_defers_empty_facade_until_local_snapshot_arrives() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&column_family_refs);
+    let eviction_handle = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd1; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd1))),
+    }))
+    .expect("open controlled cold-replacement fixture");
+    let old = row(0xd1);
+    db.insert(
+        "todos",
+        cells("old", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(old),
+            ..Default::default()
+        },
+    )
+    .expect("persist old row");
+    db.tick().expect("settle old row");
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(false))));
+    let prepared = db.prepare_query(&query).expect("prepare todos query");
+    let mut subscription =
+        block_on(db.subscribe(&prepared, ReadOpts::default())).expect("open local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [old]
+    );
+
+    // Stage a successor directly in the node so ordinary write publication
+    // cannot refresh the old terminal before the replacement boundary.
+    let new = row(0xd2);
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", old, db.next_now_ms())
+                .made_by(author)
+                .permission_subject(author)
+                .cells(cells("old", true, author)),
+        )
+        .expect("stage old-row removal");
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", new, db.next_now_ms())
+                .made_by(author)
+                .permission_subject(author)
+                .cells(cells("new", false, author)),
+        )
+        .expect("stage new-row addition");
+
+    db.invalidate_groove_runtime_for_test();
+    eviction_handle.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    assert_eq!(
+        db.refresh_subscriptions()
+            .expect("open cold replacement without publishing it"),
+        0
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the incomplete cold terminal must retain the last delivered facade"
+    );
+
+    control.resume();
+    let mut reset = None;
+    for _ in 0..8 {
+        db.refresh_subscriptions()
+            .expect("drain resumed replacement terminal");
+        if let Some(event) = subscription.try_next_event() {
+            reset = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = reset
+    else {
+        panic!("expected one complete reset after the local replacement snapshot");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [new]
+    );
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        [old]
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the first local batch replaces the retained facade exactly once"
+    );
+
+    // The successor can also be genuinely empty. It must publish that deletion
+    // only after its local terminal batch, rather than leaking a transient
+    // empty facade before the replacement has initialized.
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", new, db.next_now_ms())
+                .made_by(author)
+                .permission_subject(author)
+                .cells(cells("new", true, author)),
+        )
+        .expect("stage empty successor");
+    db.invalidate_groove_runtime_for_test();
+    eviction_handle.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    assert_eq!(
+        db.refresh_subscriptions()
+            .expect("open cold empty replacement without publishing it"),
+        0
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "a cold empty successor must keep the last complete facade"
+    );
+
+    control.resume();
+    let mut empty_reset = None;
+    for _ in 0..8 {
+        db.refresh_subscriptions()
+            .expect("drain resumed empty replacement terminal");
+        if let Some(event) = subscription.try_next_event() {
+            empty_reset = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = empty_reset
+    else {
+        panic!("expected one empty reset after the local replacement snapshot");
+    };
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        [new]
+    );
+
+    let mut fresh = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("open a subscription after the empty replacement settled");
+    let SubscriptionEvent::Delta { added, .. } = block_on(fresh.next_raw()).unwrap() else {
+        panic!("expected opening delta after empty replacement");
+    };
+    assert!(
+        added.is_empty(),
+        "a subscription opened after the replacement must not inherit the retained facade"
+    );
+}

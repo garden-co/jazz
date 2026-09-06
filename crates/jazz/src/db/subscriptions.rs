@@ -928,6 +928,7 @@ where
             snapshot_index,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
+            cold_runtime_replacement: false,
             sender,
         }));
         state

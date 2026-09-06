@@ -3263,6 +3263,7 @@ where
                     )
                     .await?
             };
+            let replacement_is_cold = !maintained.initial_snapshot_received();
             if state.borrow().closed.get() {
                 node.lock()
                     .await
@@ -3293,6 +3294,20 @@ where
                 state_ref
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
+                state_ref.cold_runtime_replacement = replacement_is_cold;
+                if replacement_is_cold {
+                    // Own the replacement before yielding its cold initial batch;
+                    // otherwise the next owner turn would retire and reopen it.
+                    state_ref.groove_runtime_token = groove_runtime_token;
+                }
+            }
+            if replacement_is_cold {
+                // Opening a new maintained graph is intentionally nonblocking:
+                // an empty cold materialization is pending local IVM work, not
+                // a replacement result. The first terminal batch below emits
+                // one reset from the previously published facade.
+                retained.push(Rc::downgrade(&state));
+                continue;
             }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
@@ -3484,6 +3499,7 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
+        let cold_runtime_replacement_pending = state.borrow().cold_runtime_replacement;
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
             let (shape, binding) = {
@@ -3725,6 +3741,90 @@ where
                 }
                 if let Some(key) = authoritative_reset_result.as_ref() {
                     consumed_authoritative_resets.insert(key.clone());
+                }
+                if cold_runtime_replacement_pending {
+                    let replacement_ready = refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::initial_snapshot_received);
+                    if !replacement_ready {
+                        retained.push(Rc::downgrade(&state));
+                        continue;
+                    }
+                    let previous = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
+                    let previous_snapshot_index = refresh.snapshot_index.clone();
+                    let maintained = refresh
+                        .maintained
+                        .take()
+                        .expect("cold runtime replacement kept its maintained subscription");
+                    let materialized = node
+                        .lock()
+                        .await
+                        .materialize_local_maintained_relation_snapshot_with_occurrences(
+                            &maintained,
+                        )
+                        .await;
+                    refresh.maintained = Some(maintained);
+                    let materialized = materialized?;
+                    let replacement = materialized.snapshot;
+                    refresh.snapshot = relation_snapshot_with_delta_slack(&replacement);
+                    refresh.snapshot_index = relation_snapshot_index_with_root_occurrences(
+                        &refresh.snapshot,
+                        &materialized.root_occurrence_ids,
+                    )?;
+                    refresh.snapshot_index.terminal_records = refresh
+                        .maintained
+                        .as_ref()
+                        .expect("cold runtime replacement restored maintained subscription")
+                        .decoded_terminal_records()?;
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
+                    refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                    refresh.settled = settled;
+                    state.borrow_mut().cold_runtime_replacement = false;
+                    let mut event = subscription_delta_event_with_reset(
+                        snapshot_tier,
+                        settled,
+                        &previous,
+                        &replacement,
+                        true,
+                        terminal_rows,
+                    );
+                    if let SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    } = &mut event
+                    {
+                        *added = subscription_outputs_with_occurrence_sidecar(
+                            &replacement,
+                            &materialized.root_occurrence_ids,
+                        )?;
+                        updated.clear();
+                        *removed = reset_removed_roots(
+                            &previous,
+                            &previous_snapshot_index,
+                            &materialized.root_occurrence_ids,
+                        );
+                    }
+                    retained.push(Rc::downgrade(&state));
+                    if refresh.sender.unbounded_send(event).is_ok() {
+                        changed += 1;
+                    }
+                    continue;
                 }
                 if let Some(update) = maintained_update {
                     match update {
