@@ -28,25 +28,38 @@ function compiledFingerprint(path, symbol) {
   return match[1];
 }
 
+function activeNapiManifest(root) {
+  const pointer = readFileSync(join(root, "crates/jazz-napi/native-binding.pointer.cjs"), "utf8");
+  const generation = /generation-[A-Za-z0-9.-]+/.exec(pointer)?.[0];
+  if (!generation) throw new Error("NAPI build has no active generation pointer");
+  return join(
+    root,
+    "crates/jazz-napi/.native-artifacts",
+    generation,
+    ".jazz-artifact-manifest.json",
+  );
+}
+
 async function wasmFingerprint(root) {
   const pkg = join(root, "crates/jazz-wasm/pkg");
   const bindings = await import(pathToFileURL(join(pkg, "jazz_wasm.js")).href);
   bindings.initSync({ module: readFileSync(join(pkg, "jazz_wasm_bg.wasm")) });
   const actual = bindings.nativeArtifactFingerprint();
-  if (!/^[a-f0-9]{64}$/.test(actual)) throw new Error("WASM module lacks a native artifact fingerprint");
+  if (!/^[a-f0-9]{64}$/.test(actual))
+    throw new Error("WASM module lacks a native artifact fingerprint");
   return actual;
 }
 
-export async function verifyStarterE2EArtifacts(root = repositoryRoot) {
+export async function verifyStarterE2EArtifacts(
+  root = repositoryRoot,
+  loadWasmFingerprint = wasmFingerprint,
+) {
   const expected = {
     wasm: manifestFingerprint(
       join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"),
       "wasm",
     ),
-    napi: manifestFingerprint(
-      join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.manifest.json"),
-      "napi",
-    ),
+    napi: manifestFingerprint(activeNapiManifest(root), "napi"),
   };
   const compiled = {
     wasm: compiledFingerprint(
@@ -64,7 +77,7 @@ export async function verifyStarterE2EArtifacts(root = repositoryRoot) {
         `starter E2E ${kind.toUpperCase()} package hand-off mismatch: jazz-tools expects ${compiled[kind]}, native artifact is ${expected[kind]}. Re-stage native fingerprints and rebuild jazz-tools.`,
       );
   }
-  const actualWasm = await wasmFingerprint(root);
+  const actualWasm = await loadWasmFingerprint(root);
   if (actualWasm !== expected.wasm)
     throw new Error(
       `starter E2E WASM package hand-off mismatch: manifest expects ${expected.wasm}, module returns ${actualWasm}.`,

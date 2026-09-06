@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { verifyStarterE2EArtifacts } from "./verify-starter-e2e-artifacts.mjs";
-
-const repositoryRoot = resolve(import.meta.dirname, "../..");
 
 function writeFingerprint(path, symbol, fingerprint) {
   writeFileSync(path, `export const ${symbol} = ${JSON.stringify(fingerprint)};\n`);
@@ -19,16 +17,24 @@ function fixture() {
   mkdirSync(wasmDir, { recursive: true });
   mkdirSync(runtimeDir, { recursive: true });
   mkdirSync(napiDir, { recursive: true });
-  for (const file of ["jazz_wasm.js", "jazz_wasm_bg.wasm"])
-    cpSync(join(repositoryRoot, "crates/jazz-wasm/pkg", file), join(wasmDir, file));
-  const fingerprint = "51c31773364d88405c4ac753e5ed7bfaf7b0a2eca40d9a0ac7b2c79be31bf0e9";
+  return { root, runtimeDir, wasmDir, napiDir };
+}
+
+function writeFixtureReceipts({ wasmDir, napiDir, runtimeDir }) {
+  const fingerprint = "a".repeat(64);
   writeFileSync(
     join(wasmDir, ".jazz-artifact-manifest.json"),
     JSON.stringify({ kind: "wasm", profile: "release", nativeArtifactFingerprint: fingerprint }),
   );
+  const generation = join(napiDir, ".native-artifacts/generation-test");
+  mkdirSync(generation, { recursive: true });
   writeFileSync(
-    join(napiDir, "jazz-napi.linux-x64-gnu.manifest.json"),
+    join(generation, ".jazz-artifact-manifest.json"),
     JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+  );
+  writeFileSync(
+    join(napiDir, "native-binding.pointer.cjs"),
+    'module.exports = require("./.native-artifacts/generation-test/index.js");\n',
   );
   writeFingerprint(
     join(runtimeDir, "native-artifact-fingerprint-wasm.js"),
@@ -40,16 +46,20 @@ function fixture() {
     "EXPECTED_NAPI_ARTIFACT_FINGERPRINT",
     fingerprint,
   );
-  return { root, runtimeDir };
 }
 
 test("starter E2E artifact hand-off executes packaged WASM and rejects a stale Jazz Tools expectation", async () => {
-  const { root, runtimeDir } = fixture();
-  await verifyStarterE2EArtifacts(root);
+  const fixtureState = fixture();
+  writeFixtureReceipts(fixtureState);
+  const { root, runtimeDir } = fixtureState;
+  await verifyStarterE2EArtifacts(root, async () => "a".repeat(64));
   writeFingerprint(
     join(runtimeDir, "native-artifact-fingerprint-wasm.js"),
     "EXPECTED_WASM_ARTIFACT_FINGERPRINT",
     "b".repeat(64),
   );
-  await assert.rejects(() => verifyStarterE2EArtifacts(root), /WASM package hand-off mismatch/);
+  await assert.rejects(
+    () => verifyStarterE2EArtifacts(root, async () => "a".repeat(64)),
+    /WASM package hand-off mismatch/,
+  );
 });
