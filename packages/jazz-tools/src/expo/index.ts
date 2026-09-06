@@ -9,3 +9,4 @@ export {
   type ExpoAuthSecretStoreOptions,
   type ExpoSecureStoreLike,
 } from "./auth-secret-store.js";
+export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";

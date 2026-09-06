@@ -1,4 +1,5 @@
 #include "foreground-runtime.h"
+#include "account-store-lock.h"
 
 #include <algorithm>
 #include <array>
@@ -626,6 +627,27 @@ class ForegroundFactory final : public HostObject {
             return foregroundResponse(runtime, &output);
           });
     }
+    if (property == "withAccountStoreLock") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "withAccountStoreLock"), 1,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != 1 || !args[0].isObject() || !args[0].asObject(runtime).isFunction(runtime)) {
+              throw JSError(runtime, "Jazz account store update requires a synchronous callback");
+            }
+            if (!lease->active()) throw JSError(runtime, "Jazz native runtime is closed");
+            try {
+              AccountStoreLock lock(lease->storageRoot());
+              if (!lease->active()) throw JSError(runtime, "Jazz native runtime is closed");
+              const auto result = args[0].asObject(runtime).asFunction(runtime).call(runtime);
+              if (!result.isUndefined()) {
+                throw JSError(runtime, "Jazz account store callback must return undefined synchronously");
+              }
+              return Value::undefined();
+            } catch (const std::exception &error) {
+              throw JSError(runtime, error.what());
+            }
+          });
+    }
     if (property == "accountSecret") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "accountSecret"), 0,
@@ -707,6 +729,7 @@ class ForegroundFactory final : public HostObject {
     names.emplace_back(PropNameID::forAscii(runtime, "attachAccountSchema"));
     names.emplace_back(PropNameID::forAscii(runtime, "releaseAccountSession"));
     names.emplace_back(PropNameID::forAscii(runtime, "refreshAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "withAccountStoreLock"));
     names.emplace_back(PropNameID::forAscii(runtime, "accountSecret"));
     names.emplace_back(PropNameID::forAscii(runtime, "mintLocalFirstToken"));
     names.emplace_back(PropNameID::forAscii(runtime, "abiVersion"));

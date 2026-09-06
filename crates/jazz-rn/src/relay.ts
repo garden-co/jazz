@@ -36,6 +36,8 @@ export type NativeForegroundRuntimeFactory = {
   attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
   releaseAccountSession?(capability: Uint8Array): void;
   refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
+  /** @internal Synchronous OS-protected account preference transaction. */
+  withAccountStoreLock?(callback: () => void): void;
   accountSecret?(): Uint8Array;
   mintLocalFirstToken?(
     seed: Uint8Array,
@@ -288,6 +290,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
     attachAccountSchema: installed.attachAccountSchema?.bind(installed),
     releaseAccountSession: installed.releaseAccountSession?.bind(installed),
     refreshAccountSession: installed.refreshAccountSession?.bind(installed),
+    withAccountStoreLock: installed.withAccountStoreLock?.bind(installed),
     accountSecret:
       typeof installed.accountSecret === "function"
         ? installed.accountSecret.bind(installed)

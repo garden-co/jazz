@@ -1,6 +1,6 @@
 import * as React from "react";
-import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/react-native";
+import { createAccountManager } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -28,19 +28,15 @@ const defaultAppId = "00000000-0000-0000-0000-000000000002";
 declare const process: { env: Record<string, string | undefined> };
 const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
-
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? envAppId ?? defaultAppId;
-
-  return {
+const appId = envAppId ?? defaultAppId;
+const serverUrl = envServerUrl ?? defaultServerUrl;
+let prepared: Promise<JazzClientConfig> | undefined;
+function prepareConfig() {
+  return (prepared ??= createAccountManager({ appId, serverUrl }).then((accounts) => ({
     appId,
-    env: overrides.env ?? "dev",
-    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    secret,
-    adminSecret: overrides.adminSecret ?? envAdminSecret,
-    ...overrides,
-  };
+    serverUrl,
+    account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+  })));
 }
 
 const styles = StyleSheet.create({
@@ -81,17 +77,32 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: Partial<DbConfig>;
+  config?: JazzClientConfig;
   fallback?: React.ReactNode;
 };
 
 // #region context-setup-expo
 export default function App({ config, fallback }: AppProps = {}) {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
-  const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
+  const [resolved, setResolved] = React.useState<JazzClientConfig | undefined>(config);
+  const [error, setError] = React.useState<Error>();
+  React.useEffect(() => {
+    let active = true;
+    void (config ? Promise.resolve(config) : prepareConfig()).then(
+      (next) => {
+        if (active) setResolved(next);
+      },
+      (cause) => {
+        if (active) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [config]);
+  if (error) return <Text accessibilityRole="alert">{error.message}</Text>;
+  if (!resolved) return fallback ?? defaultFallback;
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
+    <JazzProvider config={resolved} fallback={fallback ?? defaultFallback}>
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
