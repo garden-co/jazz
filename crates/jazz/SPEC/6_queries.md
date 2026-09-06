@@ -246,9 +246,10 @@ or type-mismatched params (`INV-QUERY-3`).
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
-composition (ch. 7). `author` is the reserved logical identity claim and
-resolves to the authenticated `AuthorSubject` JSON string `[iss,sub]`; provider
-claims such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
+composition (ch. 7). `session.user` is the reserved structured admitted
+account/identity claim. Its non-null account author descriptor matches row
+provenance; accountless readers have no ownership authority. Provider claims
+such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 
@@ -860,10 +861,12 @@ current query execution must reject `$can*` predicates/projections rather than
 materializing them as row fields. Dry-run policy APIs return a concrete
 allow/deny result or an explicit indeterminate result when the probe lacks
 required input, such as a row id for a row-id-sensitive insert policy.
-The author columns have logical type `String`/`Text` and support equality,
-inequality, grouping, and equality-index lookup. Ordering by `$createdBy` or
-`$updatedBy` is rejected: the portable `[iss,sub]` encoding has no public sort
-semantics.
+The author columns have native record type
+`{account: UUID, identity: {issuer: String, subject: String}}`. Whole-author
+equality compares all fields and inequality negates that conjunction; explicit
+`.account` predicates compare UUID ownership. A row author's account is never
+nullable, including system authors. Ordering by a whole `$createdBy` or
+`$updatedBy` record is rejected; intern handles have no public sort semantics.
 
 ### 6.7 Conformance test plan
 

@@ -121,7 +121,9 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         .start()
         .await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
-    let session = Session::new("urn:jazz:test", super::ALICE_ID);
+    let account = jazz::account_registry::AccountId(uuid::Uuid::from_u128(0xa11ce));
+    let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+    session.account_id = Some(account);
     let transaction = backend
         .for_session(session.clone())
         .begin_transaction()
@@ -143,7 +145,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         .expect("transaction reads retain the explicit session author");
     assert_eq!(
         staged_rows[0].1,
-        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        vec![
+            "session transaction".into(),
+            structured_author(super::ALICE_ID, Some(account)),
+            structured_author(super::ALICE_ID, Some(account)),
+        ],
         "staged provenance must not use the backend SYSTEM author"
     );
     let transaction_id = transaction.commit().expect("commit session transaction");
@@ -158,7 +164,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
     .await;
     assert_eq!(
         rows[0].1,
-        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        vec![
+            "session transaction".into(),
+            structured_author(super::ALICE_ID, Some(account)),
+            structured_author(super::ALICE_ID, Some(account)),
+        ],
         "backend SYSTEM identity must not replace the explicit session author"
     );
 

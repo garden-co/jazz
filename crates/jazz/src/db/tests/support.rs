@@ -191,6 +191,7 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
 pub(super) fn test_provider_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     match author {
         AuthorSubject::System => BTreeMap::new(),
+        AuthorSubject::SystemAt(_) => BTreeMap::new(),
         AuthorSubject::Authenticated(_) => BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
             Value::Uuid(author.test_uuid()),

@@ -36,7 +36,13 @@ pub fn canonical_policy_binding_claims(
 /// Reserved structured author bindings, derived only from admitted identity.
 /// Flat keys address explicit public paths; provider keys have another namespace.
 pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
-    let value = author.to_value();
+    // Admitted account authors use the exact non-null row descriptor, so
+    // whole-author policy equality has the same type as row provenance.
+    // Accountless reader sessions remain a separate nullable representation.
+    let row_author = crate::ids::RowAuthor::from_persisted_subject(author).ok();
+    let value = row_author
+        .map(|author| author.to_value())
+        .unwrap_or_else(|| author.to_value());
     let Value::Record(record) = &value else {
         unreachable!()
     };
@@ -52,13 +58,19 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     };
     let issuer = principal.get("issuer").expect("author issuer field");
     let subject = principal.get("subject").expect("author subject field");
-    BTreeMap::from([
-        ("user".into(), value),
-        ("user.account".into(), account),
+    let mut claims = BTreeMap::from([
         ("user.identity".into(), identity),
         ("user.identity.issuer".into(), issuer),
         ("user.identity.subject".into(), subject),
-    ])
+    ]);
+    // Accountless readers are not row authors. Missing ownership claims lower
+    // to deny; binding a nullable record/value to a non-null author would
+    // instead reject the query with a parameter-type error.
+    if row_author.is_some() {
+        claims.insert("user".into(), value);
+        claims.insert("user.account".into(), account);
+    }
+    claims
 }
 
 fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
@@ -167,7 +179,9 @@ mod tests {
 
     #[test]
     fn canonical_binding_keeps_provider_aliases_namespaced_and_derives_reserved_fields() {
-        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_u128(1)));
         let claims = canonical_policy_binding_claims(
             &author,
             BTreeMap::from([
@@ -185,7 +199,14 @@ mod tests {
             ]),
         );
 
-        assert_eq!(claims.get("user"), Some(&author.to_value()));
+        assert_eq!(
+            claims.get("user"),
+            Some(
+                &crate::ids::RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value()
+            ),
+        );
         assert_eq!(
             claims.get("authMode"),
             Some(&Value::String("external".to_owned()))

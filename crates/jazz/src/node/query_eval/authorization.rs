@@ -1795,8 +1795,9 @@ mod authorization_scope_compiler_tests {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([0x51; 16]), schema, storage).unwrap();
-        let identity =
-            AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+        let identity = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_u128(1)));
         let user_id = uuid::Uuid::from_bytes([0x52; 16]);
         node.set_test_provider_claims(
             identity,
@@ -1836,7 +1837,11 @@ mod authorization_scope_compiler_tests {
         );
         assert_eq!(
             permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("user"),
-            Some(&identity.to_value())
+            Some(
+                &crate::ids::RowAuthor::from_persisted_subject(identity)
+                    .unwrap()
+                    .to_value()
+            )
         );
     }
 
@@ -2032,12 +2037,12 @@ mod authorization_scope_compiler_tests {
         })
         .unwrap();
 
-        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1).cells(
-            BTreeMap::from([(
+        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1)
+            .made_by(AuthorSubject::system_at(NodeUuid::from_bytes([0x42; 16])))
+            .cells(BTreeMap::from([(
                 "owner".to_owned(),
                 Value::Uuid(uuid::Uuid::from_bytes([0x43; 16])),
-            )]),
-        );
+            )]));
         let version =
             VersionRecord::from_commit(&commit, &base.tables[0], base.version_id()).unwrap();
         let actions = node.authorization_actions_for_versions(&[version]).unwrap();

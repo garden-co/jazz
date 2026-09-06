@@ -8,10 +8,10 @@ evidence.
 The V1 refresh was produced with:
 
 ```sh
-JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/account-policy-mask-v1-rocksdb.tar.gz \
-JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/account-policy-mask-v1.sqlite \
-JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/account-policy-mask-v1.pack \
-dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
+JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/work/lane-3/target/account-author39-rocks.tar.gz \
+JAZZ_NATIVE_CORPUS_SQLITE_OUT=/work/lane-3/target/account-author39.sqlite \
+JAZZ_NATIVE_CORPUS_PACK_OUT=/work/lane-3/target/account-author39.pack \
+dev/t node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
 ```
 
 The logical pack has 35 entries. Its complete store inventory is:
@@ -37,25 +37,26 @@ The logical pack has 35 entries. Its complete store inventory is:
 | `jazz_storage_consistency_markers`        |       1 |
 | `jazz_transactions`                       |       4 |
 
-This refresh changes eleven logical entry payloads in seven stores:
-`jazz_deletion_history` (one), `jazz_physical_1_ahead_current` (one),
-`jazz_physical_1_history` (one),
-`jazz_physical_1_register_global_current` (one),
-`jazz_physical_2_global_current` (one), `jazz_physical_2_history` (two),
-and `jazz_transactions` (four). The policy-directory follow-up additionally changes its one logical entry to
-a native record containing the derived-claim presence mask and typed provider
-claim nodes. Relative to the preceding account-author corpus, exactly this one
-of 35 entries changes; all row and transaction entries remain identical.
-Relative to the pre-account corpus, the other twenty-three entries are unchanged.
+Relative to the preceding account-author corpus, this refresh changes eleven
+logical entry payloads in seven stores: `jazz_deletion_history` (one),
+`jazz_physical_1_ahead_current` (one), `jazz_physical_1_history` (one),
+`jazz_physical_1_register_global_current` (one), `jazz_physical_2_global_current`
+(one), `jazz_physical_2_history` (two), and `jazz_transactions` (four).
+The other twenty-four entries, including the policy directory, are unchanged.
 
-These changes replace canonical author strings with native structured author
-records in row metadata and transaction provenance. An author contains an
-optional account UUID and an identity record with issuer and subject strings.
-The whole record is interned only in memory; no interner identifier is stored.
-The producer exercises system authors, whose account is null. Account-bearing
-authors are additionally covered by the account-author and native row codec
-tests. The account registry journal has its own storage root and codec; it is
-not part of this row-storage corpus.
+Row metadata and transaction provenance now use the non-null native author
+record `{ account: UUID, identity: { issuer: String, subject: String } }`.
+Previously the account slot was nullable and SYSTEM authors used null. The
+producer now exercises SYSTEM authors with the reserved nil account UUID,
+`urn:jazz:system` issuer, and the canonical originating node UUID as subject.
+This durable attribution never decodes to the internal SYSTEM permission
+capability. The separately typed local transaction permission subject remains
+available for restart finalization; it is not row authorship.
+
+The whole author record is interned only in memory; no interner identifier is
+stored. Account-bearing ordinary authors are additionally covered by the
+account-author and native row codec tests. The account registry journal has its
+own storage root and codec; it is not part of this row-storage corpus.
 
 This is a pre-release V1 format refresh, not a migration of the previous
 pre-release positive corpus. Historical `epoch-1-*` archives remain unchanged
@@ -71,7 +72,7 @@ Producer digests:
 
 | Artifact                          | SHA-256                                                            |
 | --------------------------------- | ------------------------------------------------------------------ |
-| logical pack                      | `a058545376e972ae6cb814c8f0793c4c7f2aea1e8ec4001a6787ca8dfb5d4d48` |
-| SQLite payload                    | `7d98bc08207333381342304ccdb52c4191529402fd238035bf427a28a3d1e522` |
-| deterministic gzip SQLite archive | `d3f8d44f208c4a5bcdc0d0761418e3ec810eb8e0967d297e869d288ec527b86b` |
-| RocksDB archive                   | `9584c8b147b0d3a48c4bef2aabc501180d1e8a6caa6e9b6c41dc17c2e31d3701` |
+| logical pack                      | `da7d6e9e39c33433c8b163fd8b767658fcb0a653044579b7a986482686271c4f` |
+| SQLite payload                    | `20e7f266e895183cb8251a2543b389464800110f849b8a5572a80e139a9b567d` |
+| deterministic gzip SQLite archive | `4bd6ef06288d01b2d89cc53402b6cff3e470d25341d4e9dbcfe9fddd54b8bf7e` |
+| RocksDB archive                   | `130c0d93e12d81fa7528511ca1b4994c8981f2dbd6d67c89e8bfdc5c98bcad06` |

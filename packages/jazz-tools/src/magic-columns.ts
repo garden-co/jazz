@@ -2,9 +2,14 @@ import type { ColumnType } from "./drivers/types.js";
 
 export const RESERVED_MAGIC_COLUMN_PREFIX = "$";
 
+/** Reserved provenance account; never an account that a user can register or link. */
+export const SYSTEM_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000";
+/** Reserved provenance issuer for trusted system writes. */
+export const SYSTEM_ISSUER = "urn:jazz:system";
+
 /** Stable account ownership together with the exact identity used to write. */
 export type RowAuthor = Readonly<{
-  account: string | null;
+  account: string;
   identity: Readonly<{ issuer: string; subject: string }>;
 }>;
 
@@ -12,7 +17,7 @@ export function authorColumnType(): ColumnType {
   return {
     type: "Row",
     columns: [
-      { name: "account", column_type: { type: "Uuid" }, nullable: true },
+      { name: "account", column_type: { type: "Uuid" }, nullable: false },
       {
         name: "identity",
         nullable: false,

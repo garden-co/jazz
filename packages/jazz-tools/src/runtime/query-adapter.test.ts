@@ -38,16 +38,11 @@ describe("translateQuery", () => {
     const flatEq = JSON.parse(translateQuery(eq._build(), app.wasmSchema)).conditions[0];
     const flatNe = JSON.parse(translateQuery(ne._build(), app.wasmSchema)).conditions[0];
     expect(flatEq.And[0]).toEqual({
-      And: [
-        { IsNotNull: { column: { column: "$createdBy.account" } } },
-        {
-          Cmp: {
-            left: { column: "$createdBy.account" },
-            op: "Eq",
-            right: { Literal: { type: "Uuid", value: author.account } },
-          },
-        },
-      ],
+      Cmp: {
+        left: { column: "$createdBy.account" },
+        op: "Eq",
+        right: { Literal: { type: "Uuid", value: author.account } },
+      },
     });
     expect(flatNe).toEqual({ Not: flatEq });
     const relation = JSON.parse(
@@ -60,13 +55,14 @@ describe("translateQuery", () => {
       "$createdBy.identity.subject",
     ])
       expect(text).toContain(path);
-    expect(text).toContain('"IsNotNull"');
+    expect(text).not.toContain('"IsNotNull"');
     expect(text).toContain('"Not"');
   });
 
   it.each([
     {},
     { account: null },
+    { account: null, identity: { issuer: "issuer", subject: "subject" } },
     { account: "not-a-uuid", identity: { issuer: "issuer", subject: "subject" } },
     { account: null, identity: { issuer: "issuer", subject: " " } },
     { account: null, identity: { issuer: "issuer", subject: "\ud800" } },

@@ -33,7 +33,8 @@ use thiserror::Error;
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
+    SchemaVersionId,
 };
 use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
@@ -1823,11 +1824,9 @@ impl CurrentRow {
         };
         let record = self.record.borrowed();
         Ok(Some(match column {
-            "$createdBy" | "$updatedBy" => {
-                let author = AuthorSubject::from_value(record.get_idx(index)?)
-                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
-                author.to_value()
-            }
+            "$createdBy" | "$updatedBy" => RowAuthor::from_value(record.get_idx(index)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
             _ => unreachable!("provenance_field_index accepts only provenance columns"),
         }))
@@ -1850,11 +1849,13 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: AuthorSubject::from_value(borrowed.get_idx(created_by_idx)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+            created_by: RowAuthor::from_value(borrowed.get_idx(created_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
             created_at: borrowed.get_u64(created_at_idx)?,
-            updated_by: AuthorSubject::from_value(borrowed.get_idx(updated_by_idx)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+            updated_by: RowAuthor::from_value(borrowed.get_idx(updated_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
             updated_at: borrowed.get_u64(updated_at_idx)?,
         }))
     }
@@ -1895,15 +1896,6 @@ impl CurrentRow {
             )
             .with_identity(records::FieldIdentity::Name(public_name))
         }));
-        descriptor_fields.extend([
-            records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
-            records::DescriptorField::new("$createdAt", records::ValueType::U64),
-            records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
-            records::DescriptorField::new("$updatedAt", records::ValueType::U64),
-            records::DescriptorField::new("tx_time", records::ValueType::U64),
-            records::DescriptorField::new("tx_node_id", records::ValueType::U64),
-        ]);
-        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
         let row_uuid_field = self
             .record
@@ -1948,10 +1940,26 @@ impl CurrentRow {
             binding_fields.push(binding);
             binding_field_names.push(Some(public_name));
         }
+        // Derived rows (for example aggregates) have no originating write.
+        // Preserve that absence instead of inventing system provenance.
         if let Some(provenance) = self.provenance()? {
-            values.push(provenance.created_by.to_value());
+            descriptor_fields.extend([
+                records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+                records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+                records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+            ]);
+            values.push(
+                RowAuthor::from_persisted_subject(provenance.created_by)
+                    .map_err(|_| Error::UnadmittedWriteAuthor)?
+                    .to_value(),
+            );
             values.push(Value::U64(provenance.created_at));
-            values.push(provenance.updated_by.to_value());
+            values.push(
+                RowAuthor::from_persisted_subject(provenance.updated_by)
+                    .map_err(|_| Error::UnadmittedWriteAuthor)?
+                    .to_value(),
+            );
             values.push(Value::U64(provenance.updated_at));
             binding_fields.extend(
                 ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
@@ -1967,23 +1975,18 @@ impl CurrentRow {
                     }),
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
-        } else {
-            values.push(AuthorSubject::SYSTEM.to_value());
-            values.push(Value::U64(0));
-            values.push(AuthorSubject::SYSTEM.to_value());
-            values.push(Value::U64(0));
-            binding_fields.extend([CurrentRowBindingRole::LogicalField; 4]);
-            binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
+            descriptor_fields.extend([
+                records::DescriptorField::new("tx_time", records::ValueType::U64),
+                records::DescriptorField::new("tx_node_id", records::ValueType::U64),
+            ]);
             values.push(Value::U64(time.0));
             values.push(Value::U64(node.0));
-        } else {
-            values.push(Value::U64(0));
-            values.push(Value::U64(0));
+            binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
+            binding_field_names.extend(std::iter::repeat_n(None, 2));
         }
-        binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
-        binding_field_names.extend(std::iter::repeat_n(None, 2));
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let raw = descriptor.create(&values)?;
         let mut projected = Self::new_with_explicit_binding_fields_and_names(
             table.name.clone(),
@@ -2928,6 +2931,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// A session without a registry-admitted account attempted durable authorship.
+    #[error("durable writes require an admitted account author")]
+    UnadmittedWriteAuthor,
     /// Exact branch selector is missing, malformed, or inconsistent with row cells.
     #[error("invalid branch key: {0}")]
     InvalidBranchKey(String),

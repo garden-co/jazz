@@ -17,7 +17,36 @@ const author = {
 };
 ```
 
-This illustrates `session.user`; session objects are read-only. Account ownership compares `session.user.account`. Exact authorship compares the entire structure, including issuer and subject. Internal backend/system principals can have a null account.
+This illustrates `session.user`; session objects are read-only. Account ownership compares `session.user.account`. Exact authorship compares the entire structure, including issuer and subject.
+
+## System-authored rows
+
+System writes use the same author structure, with a reserved account and issuer:
+
+```ts
+const systemAuthor = {
+  account: "00000000-0000-0000-0000-000000000000",
+  identity: {
+    issuer: "urn:jazz:system",
+    subject: "00000000-0000-4000-8000-000000000042", // originating node UUID
+  },
+};
+```
+
+`SYSTEM_ACCOUNT_ID` and `SYSTEM_ISSUER` are also exported from `jazz-tools`.
+
+The subject records where the write originated and survives replication and
+reload. Comparing accounts groups all system authors; comparing the complete
+structure distinguishes their originating nodes. Neither the reserved account
+nor issuer can be registered or linked to an external identity. This metadata
+does not grant permission to bypass policies.
+
+Row authors always have a non-null UUID account. Anonymous readers have a null
+session account. Their account-ownership policy bindings are absent, so ownership
+checks fail closed.
+Use an explicit anonymous-access policy when that access is intended.
+
+## Observe the current session
 
 | Binding              | Read the current session                                            |
 | -------------------- | ------------------------------------------------------------------- |

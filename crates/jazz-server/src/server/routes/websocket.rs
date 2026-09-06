@@ -1137,7 +1137,7 @@ mod tests {
         SeededRowIdSource, WireTransportAdapter, WriteHandle, WriteState,
     };
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-    use jazz::ids::NodeUuid;
+    use jazz::ids::{NodeUuid, RowAuthor};
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
@@ -1160,13 +1160,14 @@ mod tests {
     const WS_STORM_SIZE: usize = 24;
 
     fn session_for(identity: AuthorSubject) -> Session {
-        let (issuer, subject): (String, String) =
-            serde_json::from_str(identity.canonical()).expect("authenticated test subject");
-        Session::new(issuer, subject)
+        let (issuer, subject) = identity.principal_parts();
+        let mut session = Session::new(issuer, subject);
+        session.account_id = identity.account_id();
+        session
     }
 
     fn issuer_and_subject(identity: AuthorSubject) -> (String, String) {
-        serde_json::from_str(identity.canonical()).expect("authenticated test subject")
+        identity.principal_parts()
     }
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
     const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
@@ -1261,7 +1262,7 @@ mod tests {
 
     #[test]
     fn websocket_session_claims_use_canonical_and_collision_proof_namespaces() {
-        let session = Session::new("https://issuer.example", "verified-subject").with_claims(
+        let mut session = Session::new("https://issuer.example", "verified-subject").with_claims(
             serde_json::json!({
                 "user": "provider-spoof",
                 "role": "writer",
@@ -1273,14 +1274,20 @@ mod tests {
                 "score": 7
             }),
         );
+        let account = jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0x91; 16]));
+        session.account_id = Some(account);
         let claims = session_claims(session).expect("admit websocket claims");
 
         assert_eq!(
             claims.get("user"),
             Some(
-                &AuthorSubject::from_canonical(r#"["https://issuer.example","verified-subject"]"#)
-                    .expect("structured author")
-                    .to_value()
+                &RowAuthor::from_persisted_subject(
+                    AuthorSubject::authenticated("https://issuer.example", "verified-subject")
+                        .expect("authenticated author")
+                        .with_account(account),
+                )
+                .expect("admitted row author")
+                .to_value()
             )
         );
         assert_eq!(
@@ -1554,6 +1561,7 @@ mod tests {
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     backend_secret: Some("backend-secret".to_owned()),
                     backend_session: Some(serde_json::json!({
+                        "account_id": identity.account_id(),
                         "issuer": issuer,
                         "user_id": user_id,
                         "claims": {},
@@ -1738,6 +1746,7 @@ mod tests {
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
+                    "account_id": authenticated.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {},
@@ -1773,6 +1782,7 @@ mod tests {
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
+                    "account_id": identity.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {
@@ -1824,7 +1834,14 @@ mod tests {
             admission.claims.get("authMode"),
             Some(&CoreValue::String("external".to_owned()))
         );
-        assert_eq!(admission.claims.get("user"), Some(&identity.to_value()));
+        assert_eq!(
+            admission.claims.get("user"),
+            Some(
+                &RowAuthor::from_persisted_subject(identity)
+                    .expect("admitted row author")
+                    .to_value()
+            )
+        );
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
@@ -2053,6 +2070,7 @@ mod tests {
             "auth": {
                 "backend_secret": "backend-secret",
                 "backend_session": {
+                    "account_id": identity.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {},

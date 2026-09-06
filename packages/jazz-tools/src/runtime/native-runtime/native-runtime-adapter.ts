@@ -3712,16 +3712,16 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.terminalOperations,
         subscription.outputColumns?.rootColumns,
       );
-      if (
-        subscriptionRowsRequireBufferedPublication(
-          subscription.rows,
-          this.schema,
-          subscription.outputColumns,
-        )
-      ) {
+      const unresolvedPlaceholder = unresolvedSubscriptionPlaceholder(
+        subscription.rows,
+        this.schema,
+        subscription.outputColumns,
+      );
+      if (unresolvedPlaceholder) {
         if (chunk.settled === true) {
           throw new Error(
-            "settled relation subscription chunk retained unresolved placeholder rows",
+            "settled relation subscription chunk retained unresolved placeholder rows " +
+              `(${unresolvedPlaceholder.table}.${unresolvedPlaceholder.column} on ${unresolvedPlaceholder.id})`,
           );
         }
         this.deferSubscriptionRows(
@@ -5003,7 +5003,7 @@ function outputColumnsForTable(
         ? ({
             name: columnName,
             column_type: magicType,
-            nullable: columnName === "$createdBy.account" || columnName === "$updatedBy.account",
+            nullable: false,
           } satisfies ColumnDescriptor)
         : undefined;
     })
@@ -7161,24 +7161,28 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
   return values;
 }
 
-function subscriptionRowsRequireBufferedPublication(
+function unresolvedSubscriptionPlaceholder(
   rows: RowState[],
   schema: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null,
-): boolean {
-  return rows.some((row) => {
+): { table: string; id: string; column: string } | undefined {
+  for (const row of rows) {
     const columns =
       outputColumns && row.table === outputColumns.rootTable
         ? outputColumns.rootColumns
         : schema[row.table]?.columns;
-    if (!columns) return false;
-    return valuesForNativeFrame(row, logicalStorageColumns(columns)).some(
-      (value, index) =>
-        value.type === "Null" &&
-        logicalStorageColumns(columns)[index]?.nullable === false &&
-        logicalStorageColumns(columns)[index]?.column_type.type !== "Array",
+    if (!columns) continue;
+    const logicalColumns = logicalStorageColumns(columns);
+    const values = valuesForNativeFrame(row, logicalColumns);
+    const missing = logicalColumns.find(
+      (column, index) =>
+        values[index]?.type === "Null" &&
+        column.nullable === false &&
+        column.column_type.type !== "Array",
     );
-  });
+    if (missing) return { table: row.table, id: row.id, column: missing.name };
+  }
+  return undefined;
 }
 
 function ordinaryResultKey(id: string): Uint8Array {

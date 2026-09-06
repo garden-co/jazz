@@ -184,6 +184,10 @@ where
         if request.rows.is_empty() {
             return Ok(None);
         }
+        // Contribution calculation previews generated rows before the common
+        // commit constructor runs. Preserve the original capability for policy
+        // evaluation; the preview below receives a temporary durable author.
+        let permission_subject = request.permission_subject.unwrap_or(request.made_by);
         let schema_version = self.catalogue.current_write_schema.schema;
         let schema = self
             .catalogue
@@ -252,7 +256,7 @@ where
                 request.source.clone(),
                 None,
             );
-            let source_identity = request.permission_subject.unwrap_or(request.made_by);
+            let source_identity = permission_subject;
             let mut source_is_readable = self
                 .query_relation_snapshot_for_serving_in_read_view(
                     &source_shape,
@@ -825,17 +829,15 @@ where
         if commits.is_empty() {
             return Ok(None);
         }
-        if let Some(subject) = request.permission_subject {
-            for commit in &mut commits {
-                commit.permission_subject = Some(subject);
-            }
+        for commit in &mut commits {
+            commit.permission_subject = Some(permission_subject);
         }
         for commit in &commits {
-            if !self.dry_run_mergeable_write_allows_in_schema(
-                schema_version,
-                commit.clone(),
-            )
-            .await?
+            // Advisory policy construction shares the local commit boundary's
+            // durable RowAuthor projection while preserving this capability.
+            if !self
+                .dry_run_mergeable_write_allows_in_schema(schema_version, commit.clone())
+                .await?
             {
                 return Err(Error::InvalidMergeableCommit(
                     "calculated merge target write is unauthorized",

@@ -1121,7 +1121,7 @@ pub(super) fn operand_column_type(
     if let Some(field) = provenance_field(column) {
         return Ok(Some(match field {
             ProvenanceField::CreatedAt | ProvenanceField::UpdatedAt => ColumnType::U64,
-            ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => AuthorSubject::value_type(),
+            ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => RowAuthor::value_type(),
         }));
     }
     let table = match table_schema(schema, &source.table) {

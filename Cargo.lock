@@ -2100,6 +2100,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tungstenite",
+ "uuid",
 ]
 
 [[package]]

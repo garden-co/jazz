@@ -17,7 +17,8 @@ use groove::records::{
 };
 
 use crate::ids::{
-    AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaLineagePublicationId,
+    SchemaVersionId,
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -1061,7 +1062,7 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            AuthorSubject::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+            RowAuthor::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
                 .map_err(|_| malformed())?;
         }
         borrowed
@@ -1163,9 +1164,13 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
-            created_by.to_value(),
+            RowAuthor::from_persisted_subject(created_by)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             Value::U64(created_at_ms),
-            updated_by.to_value(),
+            RowAuthor::from_persisted_subject(updated_by)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
@@ -1273,13 +1278,14 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        AuthorSubject::from_value(
+        RowAuthor::from_value(
             self.record
                 .borrowed()
                 .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
+        .as_author_subject()
     }
 
     /// Original creation timestamp for this logical row in Unix milliseconds.
@@ -1292,13 +1298,14 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        AuthorSubject::from_value(
+        RowAuthor::from_value(
             self.record
                 .borrowed()
                 .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")
+        .as_author_subject()
     }
 
     /// Update timestamp for this row version in Unix milliseconds.
@@ -1379,9 +1386,9 @@ groove::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => created_by: AuthorSubject,
+        2 => created_by: RowAuthor,
         3 => created_at: u64,
-        4 => updated_by: AuthorSubject,
+        4 => updated_by: RowAuthor,
         5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
@@ -6328,9 +6335,13 @@ mod tests {
             .create(&[
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(high), tx_id_value(low)]),
-                author.to_value(),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(7),
-                author.to_value(),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
@@ -6420,9 +6431,13 @@ mod tests {
             vec![
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(low), tx_id_value(high)]),
-                author.to_value(),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(7),
-                author.to_value(),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
@@ -6448,7 +6463,7 @@ mod tests {
         let mut noncanonical_author = base_values();
         // Structurally valid native bytes still need principal validation.
         // An empty issuer cannot become a valid author by arriving in a row.
-        let ValueType::Record(author_descriptor) = AuthorSubject::value_type() else {
+        let ValueType::Record(author_descriptor) = RowAuthor::value_type() else {
             unreachable!()
         };
         let ValueType::Record(principal_descriptor) = &author_descriptor.fields()[1].value_type
@@ -6466,7 +6481,7 @@ mod tests {
         ));
         noncanonical_author[2] = Value::Record(OwnedRecord::new(
             author_descriptor
-                .create(&[Value::Nullable(None), principal])
+                .create(&[Value::Uuid(uuid::Uuid::from_bytes([0x66; 16])), principal])
                 .unwrap(),
             author_descriptor.as_ref().clone(),
         ));
@@ -7115,9 +7130,9 @@ mod tests {
             schema_id(1),
             RowUuid::from_bytes([1; 16]),
             Vec::new(),
-            AuthorSubject::SYSTEM,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
             1,
-            AuthorSubject::SYSTEM,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
             1,
             &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
             None,

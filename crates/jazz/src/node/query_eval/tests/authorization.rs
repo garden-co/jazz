@@ -5,7 +5,9 @@ use crate::node::query_eval::authorization::permission_scope_claim_values;
 
 #[test]
 fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_user() {
-    let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+    let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
+        .unwrap()
+        .with_account(crate::account_registry::AccountId(uuid::Uuid::from_u128(1)));
     let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
 
     let values = permission_scope_claim_values(author, Some(&claims));
@@ -14,7 +16,14 @@ fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_user() {
         values.get("sub"),
         Some(&Value::String("spoofed".to_owned()))
     );
-    assert_eq!(values.get("user"), Some(&author.to_value()));
+    assert_eq!(
+        values.get("user"),
+        Some(
+            &crate::ids::RowAuthor::from_persisted_subject(author)
+                .unwrap()
+                .to_value()
+        )
+    );
 }
 
 #[test]

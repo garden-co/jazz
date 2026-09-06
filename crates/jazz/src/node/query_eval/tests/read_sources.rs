@@ -25,10 +25,17 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
             .contains(&SourceMetadataRequirement::VersionWitnesses),
         "the policy request itself must remain provenance-only"
     );
-    let candidate = current_row_from_cells(
+    let candidate = current_row_from_cells_with_explicit_provenance(
         table,
         row(0x21),
         &BTreeMap::from([("title".to_owned(), Value::String("inline".to_owned()))]),
+        RowProvenance {
+            created_by: author(1),
+            created_at: 1,
+            updated_by: author(1),
+            updated_at: 1,
+        },
+        None,
     )
     .unwrap();
     assert_eq!(

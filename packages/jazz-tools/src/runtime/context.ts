@@ -93,7 +93,11 @@ export interface Session {
  * Intern handles are process-local Rust details and are never exposed here.
  */
 export interface PublicSession {
-  readonly user: import("../magic-columns.js").RowAuthor;
+  /** Anonymous/internal readers may have no admitted account; row authors always do. */
+  readonly user: Readonly<{
+    account: string | null;
+    identity: import("../magic-columns.js").RowAuthor["identity"];
+  }>;
   readonly claims: Readonly<Record<string, unknown>>;
   readonly authMode: AuthMode;
 }

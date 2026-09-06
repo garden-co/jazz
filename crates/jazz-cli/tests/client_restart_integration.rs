@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
+use jazz::account_registry::AccountId;
 use jazz::tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     SchemaBuilder, TableSchema, Value,
@@ -487,8 +488,8 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
         storage_factory: None,
-        account_id: None,
-        jwt_token: None,
+        account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
+        jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
         admin_secret: None,
     };

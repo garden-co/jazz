@@ -2266,6 +2266,43 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
     assert_eq!(row.raw_field("user_done"), None);
 }
 
+/// The native descriptor is only observable at the binding boundary, so this
+/// exercises a public subscription and then checks its encoded carrier.
+#[test]
+fn subscription_opening_retains_selected_created_at_in_native_carrier() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7b);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("subscription provenance", false),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(4_321),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let query = db
+        .table("todos")
+        .select(["title", "$createdAt"])
+        .filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening subscription delta");
+    };
+    let rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
+    let batches = row_batches(&rows).expect("opening rows encode for the native binding");
+    assert!(batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name } if name == "$createdAt"
+    )));
+    block_on(subscription.close()).unwrap();
+}
+
 #[test]
 fn db_at_reads_historical_cut_and_partial_requires_server() {
     let schema = schema();

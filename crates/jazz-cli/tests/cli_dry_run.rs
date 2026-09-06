@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
+use jazz::account_registry::AccountId;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, WireTransportAdapter,
     block_on,
@@ -33,6 +34,15 @@ use tungstenite::{WebSocket, connect};
 mod support;
 
 use support::cargo_binary;
+
+const LOOPBACK_ADMITTED_ACCOUNT: &str = "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c";
+
+fn loopback_admitted_account() -> AccountId {
+    AccountId(
+        uuid::Uuid::parse_str(LOOPBACK_ADMITTED_ACCOUNT)
+            .expect("parse loopback admitted test account"),
+    )
+}
 
 fn jazz_server_command() -> Command {
     let mut command = Command::new(cargo_binary("jazz-server"));
@@ -187,16 +197,21 @@ fn empty_schema() -> JazzSchema {
 }
 
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
+    let account = loopback_admitted_account();
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
         // The loopback server authenticates this handshake using the configured
         // static bearer, so the local runtime must use the exact same reserved
         // issuer-and-subject identity as the authority.
         author: AuthorSubject::from_canonical(
-            &serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, subject))
-                .expect("serialize canonical static-bearer test identity"),
+            &serde_json::to_string(&(
+                account.0.to_string(),
+                jazz::serving::auth_admission::STATIC_BEARER_ISSUER,
+                subject,
+            ))
+            .expect("serialize canonical admitted static-bearer test identity"),
         )
-        .expect("parse canonical static-bearer test identity"),
+        .expect("parse canonical admitted static-bearer test identity"),
     }
 }
 
@@ -370,6 +385,8 @@ impl RunningServer {
                 "--in-memory",
                 "--auth-static-bearer",
                 "test-admin-secret",
+                "--loopback-admitted-account",
+                LOOPBACK_ADMITTED_ACCOUNT,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

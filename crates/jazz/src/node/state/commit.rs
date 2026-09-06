@@ -317,6 +317,18 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
+        // Authorization is evaluated as the session/capability selected before
+        // durable attribution is normalized. In particular, `SystemAt` is
+        // never allowed to replace the in-process `System` capability.
+        let permission_subject = commits[0].1.effective_permission_subject();
+        // This is the one local-write boundary shared by every mergeable
+        // authoring path. Persist a node-attributed system identity and reject
+        // an unadmitted session rather than granting it synthetic ownership.
+        for (_, commit) in &mut commits {
+            commit.made_by = RowAuthor::from_session(commit.made_by, self.node_uuid)
+                .map_err(|_| Error::UnadmittedWriteAuthor)?
+                .as_author_subject();
+        }
         // This is the lowest common local commit construction boundary: direct
         // inserts, facade update/upsert, open transactions, and batched paths
         // all pass here before durable/outbox publication. Fill only exact
@@ -388,7 +400,6 @@ where
         };
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
-        let permission_subject = commits[0].1.effective_permission_subject();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -396,7 +407,7 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            permission_subject: commits[0].1.permission_subject,
+            permission_subject: Some(permission_subject),
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
@@ -437,7 +448,7 @@ where
                 None,
                 self.authored_commit_durability,
                 contribution_merge,
-            ),
+            )?,
         );
         let mut stored_versions = Vec::new();
         let mut authored_content_rows = BTreeSet::new();

@@ -226,7 +226,7 @@ fn contribution_merge_provenance_survives_reopen() {
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(tx_id.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -592,7 +592,7 @@ fn operation_transaction(tx_id: TxId, provenance: ContributionMergeProvenance) -
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 1,
-        made_by: AuthorSubject::SYSTEM,
+        made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -609,9 +609,9 @@ fn operation_version(schema: &JazzSchema, column: &str, value: Value) -> Version
         schema.version_id(),
         row(0x60),
         Vec::new(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         1,
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         1,
         &BTreeMap::from([(column.to_owned(), value)]),
         None,
@@ -796,7 +796,7 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorSubject::SYSTEM,
+            made_by: AuthorSubject::system_at(tx_id.node),
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -1072,7 +1072,7 @@ fn reopen_with_noncanonical_contribution_provenance(
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(tx_id.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1105,7 +1105,8 @@ fn reopen_with_noncanonical_contribution_provenance(
                 stored.durability,
                 core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                     .unwrap(),
-            ),
+            )
+            .unwrap(),
         );
         let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
         let persisted = crate::db::block_on(applied.persist());
@@ -1134,7 +1135,7 @@ fn reopen_with_corrupt_contribution_coordinate(
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(tx_id.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1163,7 +1164,8 @@ fn reopen_with_corrupt_contribution_coordinate(
                 stored.global_time,
                 stored.durability,
                 contribution_merge,
-            ),
+            )
+            .unwrap(),
         );
         let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
         let persisted = crate::db::block_on(applied.persist());
@@ -1462,7 +1464,8 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
                 stored.durability,
                 node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                     .unwrap(),
-            ),
+            )
+            .unwrap(),
         );
         node.write_global_current_update(&mut batch, &version, GlobalTime(1))
             .unwrap();
@@ -1691,7 +1694,8 @@ where
             stored.durability,
             node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                 .unwrap(),
-        ),
+        )
+        .unwrap(),
     );
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
@@ -1850,7 +1854,8 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 DurabilityTier::Edge,
                 node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                     .unwrap(),
-            ),
+            )
+            .unwrap(),
         );
         let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
 let persisted = crate::db::block_on(applied.persist());
@@ -2172,6 +2177,30 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
     );
     assert_eq!(
         reopened
+            .pending_transaction_ids_for_author(AuthorSubject::SYSTEM)
+            .unwrap(),
+        vec![tx_id],
+        "author-wide pending barriers must match durable SystemAt provenance"
+    );
+    assert_eq!(
+        reopened
+            .synchronizing_transaction_ids_for_author(AuthorSubject::SYSTEM)
+            .unwrap(),
+        vec![tx_id],
+        "author-wide synchronization barriers must retain pending system writes"
+    );
+    assert_eq!(
+        reopened.query_transaction(tx_id).unwrap().unwrap().tx.permission_subject,
+        Some(AuthorSubject::SYSTEM),
+        "reopen must recover the locally authorized system capability separately from durable node attribution"
+    );
+    reopened.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    assert!(matches!(
+        reopened.transaction_state_settled(tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+    assert_eq!(
+        reopened
             .current_rows("todos", DurabilityTier::Local)
             .unwrap()
             .into_iter()
@@ -2454,7 +2483,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 tx_id: foreign,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(foreign.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -2584,7 +2613,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     assert!(history.iter().any(|entry| {
         entry.tx_id() == exclusive
             && entry.kind() == TxKind::Exclusive
-            && entry.made_by() == AuthorSubject::SYSTEM
+            && entry.made_by() == AuthorSubject::system_at(node(9))
             && entry.cell(&schema().tables[0], "title") == Some(v("exclusive"))
             && entry.parents().len() == 1
     }));

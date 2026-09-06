@@ -3879,9 +3879,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             current_row_column_field(column, value_type)
         }))
         .chain([
-            records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
+            records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
             records::DescriptorField::new("$createdAt", ValueType::U64),
-            records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
+            records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
             records::DescriptorField::new("$updatedAt", ValueType::U64),
             records::DescriptorField::new("tx_time", ValueType::U64),
             records::DescriptorField::new("tx_node_id", ValueType::U64),
@@ -3913,9 +3913,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
                 "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
-            records::DescriptorField::new("created_by", AuthorSubject::value_type()),
+            records::DescriptorField::new("created_by", RowAuthor::value_type()),
             records::DescriptorField::new("created_at", ValueType::U64),
-            records::DescriptorField::new("updated_by", AuthorSubject::value_type()),
+            records::DescriptorField::new("updated_by", RowAuthor::value_type()),
             records::DescriptorField::new("updated_at", ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
@@ -4567,35 +4567,24 @@ fn inline_current_record(
     for column in &table.columns {
         values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
     }
-    if let Some(provenance) = row.provenance()? {
-        values.push(provenance.created_by.to_value());
-        values.push(Value::U64(provenance.created_at));
-        values.push(provenance.updated_by.to_value());
-        values.push(Value::U64(provenance.updated_at));
-    } else {
-        values.push(AuthorSubject::SYSTEM.to_value());
-        values.push(Value::U64(0));
-        values.push(AuthorSubject::SYSTEM.to_value());
-        values.push(Value::U64(0));
-    }
+    let provenance = row.provenance()?.ok_or(Error::InvalidStoredValue(
+        "physical current source row is missing provenance",
+    ))?;
+    values.push(row_author_value(provenance.created_by)?);
+    values.push(Value::U64(provenance.created_at));
+    values.push(row_author_value(provenance.updated_by)?);
+    values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
-    let provenance = row.provenance()?;
     append_author_projection_values(
         &mut values,
         descriptor,
-        provenance
-            .as_ref()
-            .map(|p| p.created_by)
-            .unwrap_or(AuthorSubject::SYSTEM),
-        provenance
-            .as_ref()
-            .map(|p| p.updated_by)
-            .unwrap_or(AuthorSubject::SYSTEM),
-    );
+        provenance.created_by,
+        provenance.updated_by,
+    )?;
     Ok(descriptor.create(&values)?)
 }
 
@@ -4847,16 +4836,13 @@ fn inline_current_record_with_source_metadata_and_deletion(
             values.push(Value::Nullable(value.map(Box::new)));
         }
     }
-    let provenance = row.provenance()?.unwrap_or(RowProvenance {
-        created_by: AuthorSubject::SYSTEM,
-        created_at: 0,
-        updated_by: AuthorSubject::SYSTEM,
-        updated_at: 0,
-    });
+    let provenance = row.provenance()?.ok_or(Error::InvalidStoredValue(
+        "physical current source row is missing provenance",
+    ))?;
     values.extend([
-        provenance.created_by.to_value(),
+        row_author_value(provenance.created_by)?,
         Value::U64(provenance.created_at),
-        provenance.updated_by.to_value(),
+        row_author_value(provenance.updated_by)?,
         Value::U64(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
@@ -4868,7 +4854,7 @@ fn inline_current_record_with_source_metadata_and_deletion(
         descriptor,
         provenance.created_by,
         provenance.updated_by,
-    );
+    )?;
     if descriptor.field_index("table").is_some() {
         values.extend([
             Value::String(table.name.clone()),
@@ -4876,9 +4862,9 @@ fn inline_current_record_with_source_metadata_and_deletion(
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
             Value::Nullable(None),
-            provenance.created_by.to_value(),
+            row_author_value(provenance.created_by)?,
             Value::U64(provenance.created_at),
-            provenance.updated_by.to_value(),
+            row_author_value(provenance.updated_by)?,
             Value::U64(provenance.updated_at),
         ]);
     }
@@ -5057,9 +5043,9 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), AuthorSubject::value_type()),
+                ("$createdBy".to_owned(), RowAuthor::value_type()),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), AuthorSubject::value_type()),
+                ("$updatedBy".to_owned(), RowAuthor::value_type()),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),
@@ -5355,12 +5341,18 @@ mod tests {
     }
 }
 
+fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
+    Ok(RowAuthor::from_persisted_subject(author)
+        .map_err(|_| Error::UnadmittedWriteAuthor)?
+        .to_value())
+}
+
 fn append_author_projection_values(
     values: &mut Vec<Value>,
     descriptor: &RecordDescriptor,
     created_by: AuthorSubject,
     updated_by: AuthorSubject,
-) {
+) -> Result<(), Error> {
     for field in descriptor.fields() {
         let Some(name) = field.name.as_deref() else {
             continue;
@@ -5373,7 +5365,7 @@ fn append_author_projection_values(
         } else {
             updated_by
         };
-        let mut value = author.to_value();
+        let mut value = row_author_value(author)?;
         for member in path {
             let Value::Record(record) = value else {
                 unreachable!("validated author record")
@@ -5382,4 +5374,5 @@ fn append_author_projection_values(
         }
         values.push(value);
     }
+    Ok(())
 }

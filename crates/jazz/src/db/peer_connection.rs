@@ -346,6 +346,18 @@ where
                 if ingest_context.edge_authority
                     && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
             {
+                // Edge admission persists and republishes this unit without
+                // passing through the Core ingest path below. A direct session
+                // therefore needs the same capability scrub here; terminal
+                // policy still receives its separately admitted binding.
+                let tx = if ingest_context.trust == CommitUnitTrust::Session {
+                    Transaction {
+                        permission_subject: None,
+                        ..tx
+                    }
+                } else {
+                    tx
+                };
                 if tx.kind != TxKind::Mergeable {
                     node.lock()
                         .await
@@ -504,6 +516,39 @@ where
                     }
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
+                // A direct Session keeps the established authorization-fate
+                // path for an ordinary user-attribution mismatch. It must,
+                // however, reject a forged durable SYSTEM origin before
+                // persistence. A scope-isolated relay has one immutable
+                // delegated binding, so every attributed upload is bound to
+                // that identity; multiplexed authority forwarding is not.
+                let must_bind_provenance = match ingest_context.trust {
+                    CommitUnitTrust::Session => matches!(tx.made_by, AuthorSubject::SystemAt(_)),
+                    CommitUnitTrust::Relay => peer.admits_relay_binding(&session_claim_binding),
+                    CommitUnitTrust::TrustedBackend
+                    | CommitUnitTrust::TrustedAuthority
+                    | CommitUnitTrust::TrustedAdmin => false,
+                };
+                if must_bind_provenance
+                    && !admitted_provenance_matches(permission_subject, tx.made_by)
+                {
+                    // A relay may replay a unit the authority already stored
+                    // under a different durable origin. It cannot introduce
+                    // that origin: accept only an exact known payload after
+                    // redacting the untrusted permission hint, including its
+                    // canonical version set.
+                    let known_replay = node
+                        .lock()
+                        .await
+                        .known_untrusted_commit_unit_matches(&tx, &versions)
+                        .await?;
+                    if !known_replay {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            "commit provenance does not match the admitted session",
+                        ));
+                    }
+                }
                 let admitted_write_authorization = {
                     let mut node = node.lock().await;
                     peer.prove_terminal_commit_authorization(
@@ -534,6 +579,15 @@ where
                 .await?),
         }
     })
+}
+
+/// An internal system capability may forward a node-specific durable origin;
+/// every externally admitted identity must match its provenance exactly.
+fn admitted_provenance_matches(admitted: AuthorSubject, made_by: AuthorSubject) -> bool {
+    match admitted {
+        AuthorSubject::System => matches!(made_by, AuthorSubject::SystemAt(_)),
+        _ => made_by == admitted,
+    }
 }
 
 /// A live link between this `Db` and one peer, owned by the `Db`.
