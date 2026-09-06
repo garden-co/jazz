@@ -157,6 +157,7 @@ export declare class NapiDb {
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
+  waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 
