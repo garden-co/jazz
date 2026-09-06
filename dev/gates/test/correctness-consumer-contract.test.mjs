@@ -102,10 +102,16 @@ test("sealed consumers select content-addressed artifact paths rather than workt
 
   const worker = read("packages/jazz-tools/scripts/bundle-broker-worker.mjs");
   assert.match(worker, /JAZZ_CORRECTNESS_WASM_PACKAGE/);
+  assert.match(worker, /JAZZ_CORRECTNESS_ARTIFACT_RUN/);
   assert.ok(
     worker.indexOf("const sealedWasmPackage") <
-      worker.indexOf("const snapshot = sealedWasmPackage"),
-    "sealed worker bundling must not consult a mutable WASM pointer",
+      worker.indexOf("if (correctnessArtifactRun && !sealedWasmPackage)"),
+    "worker bundling must reject an explicit correctness run without its sealed WASM package",
+  );
+  assert.doesNotMatch(
+    worker,
+    /readCorrectnessArtifactSnapshot/,
+    "ordinary worker bundling must not pair workspace glue with an ignored correctness snapshot",
   );
 
   for (const config of [
