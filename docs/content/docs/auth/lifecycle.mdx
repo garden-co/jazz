@@ -1,132 +1,100 @@
 ---
 title: Lifecycle
-description: "Client auth lifecycle: local-first identity storage, sign-in and sign-out, storage reset, and upgrading to external auth."
-reviewedAt: "b29b48d1a"
+description: "Account selection, graceful context handoff, logout, and local recovery."
+reviewedAt: "f14d92bf11"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
+The account manager owns selection and credentials. A context owns queries, writes, and its runtime. Changing account selection does not change the identity of an existing context.
 
-Jazz clients have two pieces of local state that are easy to confuse:
-
-- **Identity secret**&hairsp;—&hairsp;the local-first auth secret. In browser apps this is usually stored
-  by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
-  secure storage.
-- **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
-  in IndexedDB. React Native/Expo persistence is available only through the narrow capability-gated
-  native foreground alpha; its explicit memory path is
-  unverified scaffolding rather than a device-supported runtime. Supported memory drivers keep data
-  only for the life of the process.
-
-Clearing one does not automatically clear the other. That separation is intentional: a development
-storage reset should not silently destroy a user's identity, and signing out of an auth provider
-should not necessarily delete offline data.
-
-## Local-first identity storage
-
-Local-first auth derives the user's Jazz identity from a 32-byte secret. The same secret always
-produces the same Jazz user ID, so preserving the secret preserves identity across app restarts.
+## Starting a context
 
 ```ts
-const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
+import { createAccountManager, createJazzClient } from "jazz-tools/client";
 
-const db = await createDb({
-  appId: "my-app",
-  secret,
+const config = { appId: "my-app", serverUrl: "https://core.example" };
+const accounts = await createAccountManager(config);
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
+  ...config,
+  account,
 });
 ```
 
-`useLocalFirstAuth()` wraps this storage for React, Expo, Vue, and Solid apps. Its `signOut()` method
-clears the stored secret, which means the next login without a restored secret creates a different
-Jazz identity. Svelte provides the equivalent `LocalFirstAuth` class.
+Browser managers retain local-first signing roots and selected-root metadata in browser storage. They never persist external provider JWTs. Other hosts supply an atomic `AccountStore`. Each server-rendering request must own its own manager rather than sharing credentials in a module singleton.
 
-<Callout type="warn">
-  The local-first secret is the user's identity. If it is lost, rows owned only by that identity may
-  become inaccessible unless the user restores the same secret from a recovery passphrase, passkey
-  backup, or linked external account. The secret should be protected carefully: anyone with the
-  secret can authenticate as the user.
-</Callout>
+The account's registry authority is independent of active transport. Omit `serverUrl` from context creation to stay local-only. When supplied, it must match the handle's configured authority.
 
-Use [Local-first auth](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) to add
-recovery before shipping flows that clear or replace a local-first secret.
+## Linking after graceful shutdown
 
-## Switching users
+Stop submitting application work and release any other holders of the shared client. The handoff must have exclusive ownership of its context. Wait for ordinary graceful shutdown, then link:
 
-Recreate the
-client with a new auth config whenever the active principal changes:
-
-```tsx
-<JazzProvider key={sessionKey} config={config}>
-  <App />
-</JazzProvider>
+```ts
+async function linkProvider(getToken: () => Promise<string>) {
+  // If the sync barrier fails, the existing context remains usable.
+  await client?.shutdown({ waitForSync: true });
+  client = undefined;
+  try {
+    await accounts.linkJWT({ getToken });
+  } finally {
+    // Linking failure preserves selection, but concurrent logout clears it.
+    const selected = accounts.getLoggedIn();
+    if (selected) client = await createJazzClient({ ...config, account: selected });
+    // Otherwise the app renders its signed-out state.
+  }
+}
 ```
 
-For the same external user, `db.updateAuthToken(freshJwt)` is fine for refreshing an expiring
-bearer token. Do not use `db.updateAuthToken(null)` to sign out or switch users on a live `Db`. For cookie-based auth, `db.updateCookieSession(nextSession)` updates the mirrored
-session for the same user while the HttpOnly cookie remains the transport credential.
+The account manager does not track contexts or flush writes itself. `waitForSync` is a general shutdown option. A teardown failure after the sync barrier does not promise a usable old context. Ordinary shutdown without it remains usable offline and preserves local durability; it does not promise that remote synchronization finished.
+
+Linked identities share the same account's durable storage root. Different acting identities cannot own that root concurrently: the old context closes before the new one opens. Earlier rows retain their original issuer and subject, while account ownership remains unchanged.
+
+To log into a different account, use the same close / account operation / new context sequence with `loginJWT`. Register a new account explicitly with `registerJWT`.
 
 ## Logout
 
-Use `db.logout()` when you are done with a `Db` instance during logout or switching users. It
-shuts down subscriptions, workers, and cached runtime clients. Your auth provider is still
-responsible for clearing its own token or cookie, and your app should recreate `Db` or
-`JazzProvider` with the next auth config.
+Close the context before clearing selection:
 
 ```ts
-await db.logout();
+await client?.shutdown({ waitForSync: true });
+accounts.logout();
+await signOutFromYourProvider();
 ```
 
-In browser persistent mode, pass `wipeData: true` to also clear the local IndexedDB database namespace
-before shutdown:
+Logout invalidates all handles issued by that manager and fences pending operations so a late response cannot log the user back in. If a remote link completed just before cancellation, a later explicit login can discover the assignment.
+
+Local-first signing roots remain retained for recovery. Logout does not erase the account's local database or revoke an identity at the core. Your provider owns its own cookies and login session.
+
+## Recovery phrases and passkeys
+
+Export a local-first root explicitly for backup:
 
 ```ts
-await db.logout({ wipeData: true });
+import { exportLocalFirstSecret } from "jazz-tools";
+import { RecoveryPhrase } from "jazz-tools/passphrase";
+
+const secret = exportLocalFirstSecret(accounts.getLoggedIn()!);
+const phrase = RecoveryPhrase.fromSecret(secret);
 ```
 
-`wipeData` clears the local database for this browser storage namespace. It does not clear
-local-first auth secrets from `localStorage`, Expo secure storage, or your external provider's
-cookies/tokens.
+Use the same secret with `BrowserPasskeyBackup` from `jazz-tools/passkey-backup` for a passkey backup. Treat a recovery phrase as a credential: possessing it allows acting as that local-first identity.
+
+Restore outside a context:
+
+```ts
+const secret = RecoveryPhrase.toSecret(recoveredPhrase);
+await client?.shutdown();
+const restored = accounts.restoreLocalFirst(secret);
+client = await createJazzClient({ ...config, account: restored });
+```
+
+Export requires a live local-first handle. External and logged-out handles cannot export a signing root. Secrets never appear in account-state snapshots.
+
+## Framework state
+
+React and Vue provide `useAccountState(accounts)`, Solid provides `createAccountState(accounts)`, and Svelte provides `accountState(accounts)`. Each observes the same `{ account, pending, error }` snapshot.
+
+A pending login or link preserves the current handle. Show errors beside the account controls; do not replace a working context merely because an account request started. The app owns the handoff shown above, and can render a loading state between the old context closing and the replacement opening.
 
 ## Storage reset
 
-For development tools that only need to clear browser database storage without treating it as
-logout, call:
-
-```ts
-await db.deleteClientStorage();
-```
-
-This API is only available for browser persistent storage. It asks the SharedWorker to clear the
-namespace's IndexedDB database and coordinates across tabs, but intentionally leaves local-first
-auth secrets alone.
-
-Need a console-only reset while debugging? See [How do I reset browser storage?](/docs/faq#reset-browser-storage).
-
-## Upgrading to external auth
-
-Users can start with local-first auth and later sign up with an external provider while keeping the
-same Jazz identity. The upgrade flow is:
-
-1. Start the app with a local-first `secret`.
-2. Before sign-up, call `db.getLocalFirstIdentityProof(...)` to prove ownership of that identity.
-3. Verify that proof on your server.
-4. Create or link the external account so its future JWTs use the same Jazz user ID as `sub`.
-5. Recreate `Db` or `JazzProvider` with `jwtToken` or `cookieSession` for the linked external account.
-
-After the external account is linked, keep the local-first secret backed up until you are confident
-the external provider can recover the same Jazz user ID. See
-[Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full
-proof-token flow.
-
-## Related APIs
-
-| API                               | Use it for                                                                         |
-| --------------------------------- | ---------------------------------------------------------------------------------- |
-| `BrowserAuthSecretStore`          | Browser local-first secret storage                                                 |
-| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                                             |
-| `useLocalFirstAuth()`             | React, Expo, Vue, and Solid helper for loading, replacing, and clearing the secret |
-| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret              |
-| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                     |
-| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                   |
-| `db.logout()`                     | Shutting down a client during logout or principal switch                           |
-| `db.logout({ wipeData: true })`   | Logout plus browser IndexedDB database wipe                                        |
-| `db.deleteClientStorage()`        | Development-only browser IndexedDB storage reset                                   |
+Account credentials and database contents are separate. `db.deleteClientStorage()` clears supported browser database storage without erasing the account's retained signing roots. Use it for development resets, not account registration or linking.

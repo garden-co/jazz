@@ -22,7 +22,7 @@ export function createSolidJazzClient(config: Accessor<DbConfig>): PendingSolidJ
     get authState() {
       return stateStore.authState;
     },
-    shutdown: () => internal.client?.shutdown() ?? Promise.resolve(),
+    shutdown: (options) => internal.client?.shutdown(options) ?? Promise.resolve(),
 
     get loading() {
       return internal.loading;
@@ -57,7 +57,7 @@ export type PendingSolidJazzClient = {
   readonly db: Db | undefined;
   readonly session: PublicSession | null;
   readonly authState: AuthState | null;
-  shutdown(): Promise<void>;
+  shutdown: import("../web/create-jazz-client.js").JazzClient["shutdown"];
   readonly loading: boolean;
   readonly error: unknown;
   readonly state: unknown;

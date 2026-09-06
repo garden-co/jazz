@@ -7,3 +7,11 @@ export class GracefulShutdownSyncError extends Error {
     this.name = "GracefulShutdownSyncError";
   }
 }
+
+/** @internal Other holders prevented teardown from starting; the client remains open. */
+export class SharedClientShutdownError extends Error {
+  constructor() {
+    super("Release other holders before gracefully shutting down a shared Jazz client");
+    this.name = "SharedClientShutdownError";
+  }
+}

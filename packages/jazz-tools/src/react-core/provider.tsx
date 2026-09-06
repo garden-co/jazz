@@ -24,7 +24,7 @@ type CoreJazzDb = {
 type CoreJazzClient = {
   db: CoreJazzDb;
   session?: PublicSession | null;
-  shutdown: () => Promise<void>;
+  shutdown(options?: import("../runtime/db.js").ShutdownOptions): Promise<void>;
 };
 
 export type CreateJazzClient<TClient extends CoreJazzClient = CoreJazzClient> = (

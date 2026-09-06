@@ -723,7 +723,10 @@ test("each native JSI runtime owns an independent foreground lease", () => {
   // fails if JNI silently drops it and returns to one host-global lease.
   assert.match(androidBridge, /ForegroundRuntimeKey = std::pair<jazz_native_relay_host \*, jlong>/);
   assert.match(androidBridge, /nativeForegroundBindingsInstaller\([\s\S]*jlong runtime_token\)/);
-  assert.match(androidBridge, /foregroundInstallation\(relay_host, runtime_token, callInvoker, storageRoot\)/);
+  assert.match(
+    androidBridge,
+    /foregroundInstallation\(relay_host, runtime_token, callInvoker, storageRoot\)/,
+  );
   assert.match(androidBridge, /foreground_installations\.find\(\{relay_host, runtime_token\}\)/);
   assert.doesNotMatch(
     androidBridge,

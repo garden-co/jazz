@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { createRoot } from "solid-js";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
@@ -41,12 +42,11 @@ describe("solid/create-jazz-client integration", () => {
     let client: SolidJazzClient | null = null;
     let dispose: () => void = () => {};
 
+    const config = await localAccountConfig(makeAppId("mutation-query"));
     try {
       const result = createRoot((rootDispose) => {
         dispose = rootDispose;
-        return createSolidJazzClient(() => ({
-          appId: makeAppId("mutation-query"),
-        }));
+        return createSolidJazzClient(() => config);
       });
       client = await waitForReady(result);
       expect(() => getSubscriptionStore(client!)).not.toThrow();
@@ -79,12 +79,11 @@ describe("solid/create-jazz-client integration", () => {
     let dispose: () => void = () => {};
     const externalId = "550e8400-e29b-41d4-a716-446655440000";
 
+    const config = await localAccountConfig(makeAppId("external-id"));
     try {
       const result = createRoot((rootDispose) => {
         dispose = rootDispose;
-        return createSolidJazzClient(() => ({
-          appId: makeAppId("external-id"),
-        }));
+        return createSolidJazzClient(() => config);
       });
       client = await waitForReady(result);
 
@@ -113,10 +112,11 @@ describe("solid/create-jazz-client integration", () => {
     let client: SolidJazzClient | null = null;
     let dispose: () => void = () => {};
 
+    const config = await localAccountConfig(makeAppId("shutdown"));
     try {
       const result = createRoot((rootDispose) => {
         dispose = rootDispose;
-        return createSolidJazzClient(() => ({ appId: makeAppId("shutdown") }));
+        return createSolidJazzClient(() => config);
       });
       client = await waitForReady(result);
 

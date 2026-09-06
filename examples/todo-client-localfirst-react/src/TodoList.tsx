@@ -15,7 +15,7 @@ export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const trimmedFilterTitle = filterTitle.trim();
-  let todosQuery = app.todos;
+  let todosQuery = app.todos.where({});
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
   }
@@ -28,7 +28,7 @@ export function TodoList() {
   const { data: todos = [] } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const sessionUserId = session?.user.account ?? null;
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
