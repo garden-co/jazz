@@ -1,3 +1,4 @@
+import { runtimeRandomBytes } from "./runtime-entropy.js";
 /**
  * JazzClient - High-level TypeScript client for Jazz.
  *
@@ -312,7 +313,7 @@ export type TxId = string & { readonly [txIdBrand]: true };
 
 /** Generate a coordination-free UUIDv7 identity for a new mutable transaction. */
 export function createOpenTransactionId(): OpenTransactionId {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const bytes = runtimeRandomBytes(16);
   const timestamp = Date.now();
   bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
   bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;

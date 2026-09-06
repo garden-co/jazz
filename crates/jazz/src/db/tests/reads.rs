@@ -2907,6 +2907,19 @@ fn request_claims_survive_subscription_runtime_rebuild() {
         added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![a]
     );
+    let scoped_b = prepared
+        .clone()
+        .with_identity_claims(alice, claims("team-b"));
+    let mut subscription_b =
+        block_on(db.subscribe_for_identity(&scoped_b, opts.clone(), alice)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription_b.next_event()).unwrap()
+    else {
+        panic!("expected team-B initial rows")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![b]
+    );
     db.node
         .node
         .borrow_mut()
@@ -2947,5 +2960,97 @@ fn request_claims_survive_subscription_runtime_rebuild() {
         vec![b],
         "request scope restores ambient claims"
     );
+    while let Some(event) = subscription_b.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                added
+                    .iter()
+                    .all(|row| row.row_uuid() != a && row.row_uuid() != new_a),
+                "team-B request must not reuse team-A's prepared plan"
+            );
+        }
+    }
+    block_on(subscription_b.close()).unwrap();
     block_on(subscription.close()).unwrap();
+}
+
+/// Exercise the public Rust prepared-handle API: a missing provider claim
+/// removes one OR branch, but must not poison a later request by the same author.
+#[test]
+fn prepared_request_claim_presence_keeps_policy_branches_isolated() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("rooms")
+                .column("owner", PublicColumnType::Uuid)
+                .column("joinCode", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(vec![
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["user".into(), "account".into()],
+                        ),
+                        PublicPolicyExpr::eq_session(
+                            "joinCode",
+                            vec!["claims".into(), "invite".into()],
+                        ),
+                    ])),
+                ),
+        ),
+    );
+    let db = open_db(0x6c, AuthorSubject::SYSTEM, &schema);
+    let room = block_on(
+        db.insert(
+            "rooms",
+            [
+                ("owner".into(), Value::Uuid(row(0x6e).0)),
+                ("joinCode".into(), Value::String("invite-a".into())),
+            ]
+            .into(),
+            Default::default(),
+        ),
+    )
+    .unwrap()
+    .row_uuid();
+    let author = AuthorSubject::for_test_bytes([0x6d; 16])
+        .with_account(crate::account_registry::AccountId(row(0x6d).0));
+    let prepared = block_on(db.prepare_query_async(&db.table("rooms"))).unwrap();
+    let absent = prepared
+        .clone()
+        .with_identity_claims(author, BTreeMap::new());
+    let present = prepared.with_identity_claims(
+        author,
+        [(
+            crate::query::provider_claim_key("invite"),
+            Value::String("invite-a".into()),
+        )]
+        .into(),
+    );
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..Default::default()
+    };
+    assert!(
+        block_on(db.all_for_identity(&absent, opts.clone(), author))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        row_ids(&block_on(db.all_for_identity(&present, opts.clone(), author)).unwrap()),
+        vec![room]
+    );
+    let mut denied = block_on(db.subscribe_for_identity(&absent, opts.clone(), author)).unwrap();
+    let mut admitted = block_on(db.subscribe_for_identity(&present, opts, author)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(denied.next_event()).unwrap() else {
+        panic!("initial denied event")
+    };
+    assert!(added.is_empty());
+    let SubscriptionEvent::Delta { added, .. } = block_on(admitted.next_event()).unwrap() else {
+        panic!("initial admitted event")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![room]
+    );
+    block_on(denied.close()).unwrap();
+    block_on(admitted.close()).unwrap();
 }

@@ -116,6 +116,14 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     configured(): boolean;
     disconnect(): void | Promise<void>;
     reconnect(): void | Promise<void>;
+    /**
+     * Native hosts that share one transport between several Db facades own
+     * explicit-offline state at the host, rather than on an individual facade.
+     */
+    isExplicitlyOffline?(): boolean;
+    waitForTransportTransition?(): Promise<void>;
+    waitForReconnect?(signal?: AbortSignal): Promise<void>;
+    onExplicitOfflineChange?(listener: (offline: boolean) => void, signal: AbortSignal): void;
   };
 
   /** Admission-bound native sources reject updates before any public state changes. */

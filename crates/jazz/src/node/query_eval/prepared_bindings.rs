@@ -17,13 +17,15 @@ pub(super) fn query_binding_value_signature(binding: &Binding) -> String {
 pub(super) fn policy_plan_cache_signature(
     binding: &Binding,
     identity: AuthorSubject,
-    claims_revision: u64,
+    claims_scope: &str,
 ) -> String {
     // Authorization lowering still embeds the permission subject in source
     // plans. Claim values are routed at bind time, but plans from different
     // subjects are not interchangeable until that subject is parameterized.
+    // Immutable request claims do not advance the ambient session revision;
+    // callers must distinguish their active scope as well.
     format!(
-        "{}|subject={identity:?}|claims={claims_revision}",
+        "{}|subject={identity:?}|claims={claims_scope}",
         query_binding_value_signature(binding)
     )
 }

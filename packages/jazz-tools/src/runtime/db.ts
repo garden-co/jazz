@@ -1,3 +1,4 @@
+import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
@@ -3116,12 +3117,10 @@ export class Db {
 /**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
- * Uses `globalThis.crypto.getRandomValues`, which is available in all
- * supported environments (browser, Node ≥15, React Native, edge workers).
+ * Uses Web Crypto or the installed native host's OS entropy.
  */
 function generateEphemeralSeedBase64Url(): string {
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
+  const bytes = runtimeRandomBytes(32);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

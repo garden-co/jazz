@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { mergePermissionsIntoWasmSchema } from "../../src/schema-permissions.js";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
@@ -14,8 +15,8 @@ it("rejects caller credentials and requires an enrolled account handle", async (
         cookieSession: { issuer: "https://other.example", user_id: "other", claims: {} },
       }),
     ).rejects.toThrow("account_handle_required");
-    // @ts-expect-error A native capability is not a public account handle.
     await expect(
+      // @ts-expect-error A native capability is not a public account handle.
       fixture.createDb({
         appId: fixture.config.appId,
         nativeRelay: { capability: fixture.capability },
@@ -146,4 +147,52 @@ it("caller config mutation cannot replace the handle behind an existing context"
       .toEqual(["belongs to first admission"]);
     expect(await other.all(app.notes, { tier: "local" })).toEqual([]);
   });
+});
+
+it("retains external provider claims when borrowing an admitted native account", async () => {
+  const scopedApp = schema.defineApp({
+    notes: schema.table({ title: schema.string(), role: schema.string() }),
+  });
+  const permissions = schema.definePermissions(scopedApp, ({ policy, session }) => {
+    policy.notes.allowRead.where({ role: session.claims["role"] });
+  });
+  await withNativeRelayFixture(
+    { wasmSchema: mergePermissionsIntoWasmSchema(scopedApp.wasmSchema, permissions) },
+    async (fixture) => {
+      const db = await fixture.createDb({
+        ...fixture.config,
+        nativeRelay: { capability: fixture.capability },
+      });
+      const role = db.getAuthState().session?.claims.role;
+      expect(role).toBe("member");
+      if (typeof role !== "string") throw new Error("provider role missing");
+      // Local-first reads expose local knowledge. The app can use the retained
+      // claim to construct its own view; only the authority enforces policies.
+      const visible = scopedApp.notes.where({ role });
+      const written = await db
+        .insert(scopedApp.notes, { title: "member note", role: "member" })
+        .wait({ tier: "local" });
+      await db
+        .insert(scopedApp.notes, { title: "admin note", role: "admin" })
+        .wait({ tier: "local" });
+      expect(await db.all(visible)).toMatchObject([{ id: written.id, title: "member note" }]);
+      const snapshots: unknown[][] = [];
+      const stop = db.subscribe(visible, (rows) => snapshots.push(rows));
+      try {
+        await expect
+          .poll(() => snapshots.at(-1))
+          .toMatchObject([{ id: written.id, title: "member note" }]);
+      } finally {
+        stop();
+      }
+    },
+    {
+      session: {
+        issuer: "https://auth.example",
+        user_id: "member",
+        claims: { role: "member" },
+        authMode: "external",
+      },
+    },
+  );
 });

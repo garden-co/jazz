@@ -56,6 +56,7 @@ where
             opts,
             self.identity.author,
             QueryAuthorizationMode::ClientLocal,
+            true,
         )
         .await
     }
@@ -72,8 +73,28 @@ where
             opts,
             author,
             QueryAuthorizationMode::TrustedServing,
+            false,
         )
         .await
+    }
+
+    /// Subscribe from a trusted backend client on behalf of an admitted author.
+    /// Local reads enforce policy against the backend's shared cache. Remote
+    /// reads consume the upstream's exact policy-scoped input closure, without
+    /// overlaying the backend's unscoped pending writes.
+    pub async fn subscribe_client_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorSubject,
+    ) -> Result<SubscriptionStream, Error> {
+        let mode = if effective_read_tier(&opts) >= DurabilityTier::Edge {
+            QueryAuthorizationMode::ClientLocal
+        } else {
+            QueryAuthorizationMode::TrustedServing
+        };
+        self.open_subscription(prepared, opts, author, mode, false)
+            .await
     }
 
     /// Subscribe to an output-changing relation query.
@@ -123,6 +144,7 @@ where
             &prepared.binding,
             upstream_opts,
             self.identity.author,
+            prepared.request_policy_binding(self.identity.author)?,
             effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
     }
@@ -162,18 +184,22 @@ where
             opts.read_view.clone(),
             opts.propagation == Propagation::Full,
         );
-        let (shape, binding, _) =
-            super::block_on(self.node.node.borrow_mut().prepare_query_binding_for_link(
-                &prepared.shape,
-                &prepared.binding,
-                upstream_opts.tier,
-                author,
-            ))?;
+        let mut owner = self.node.node.borrow_mut();
+        let mut node = prepared.scoped_node(&mut owner, author)?;
+        let (shape, binding, _) = super::block_on(node.prepare_query_binding_for_link(
+            &prepared.shape,
+            &prepared.binding,
+            upstream_opts.tier,
+            author,
+        ))?;
+        drop(node);
+        drop(owner);
         self.attach_or_refresh_query_coverage(
             &shape,
             &binding,
             upstream_opts,
             author,
+            prepared.request_policy_binding(author)?,
             effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
     }
@@ -206,6 +232,7 @@ where
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
         identity: AuthorSubject,
+        policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
         let node = self.node.node.borrow();
@@ -215,6 +242,7 @@ where
             binding,
             upstream_opts,
             identity,
+            policy_binding,
             requires_current_authority_receipt,
         )
     }
@@ -268,6 +296,7 @@ where
             &binding,
             upstream_opts,
             author.unwrap_or(self.identity.author),
+            prepared.request_policy_binding(author.unwrap_or(self.identity.author))?,
             effective_read_tier(&opts) >= DurabilityTier::Edge,
         )
     }
@@ -279,6 +308,7 @@ where
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
         identity: AuthorSubject,
+        policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         requires_current_authority_receipt: bool,
     ) -> Result<QueryAttachment, Error> {
         let requires_delivery_receipt = requires_current_authority_receipt
@@ -288,14 +318,12 @@ where
             binding.binding_id(),
             upstream_opts.read_view_key(),
         );
-        // Opening a new upstream coverage has no scoped receipt yet.  It must
-        // not inherit a generation from an arbitrary policy that happens to
-        // share this physical binding view.  The explicit unscoped key is the
-        // only compatibility baseline; a scoped stream records its own exact
-        // generation once it is registered below.
-        let required_after =
-            node.applied_authority_result_generation(&AuthorityResultKey::unscoped(binding_view));
-        let coverage = coverage_key(shape, binding, upstream_opts.clone());
+        let coverage = request_coverage_key(shape, binding, upstream_opts.clone(), &policy_binding);
+        let authority_key = match coverage.policy_binding.clone() {
+            Some(binding) => AuthorityResultKey::policy_scoped(binding_view, binding),
+            None => AuthorityResultKey::unscoped(binding_view),
+        };
+        let required_after = node.applied_authority_result_generation(&authority_key);
         // All live usages pin one stream. One-shot freshness is a newer
         // receipt on that stream, not another stream with the same inputs.
         if self
@@ -322,7 +350,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts.clone(),
                 identity,
-                policy_binding: None,
+                policy_binding: policy_binding.clone(),
             };
             self.register_query_coverage(coverage.clone(), pending_subscription.clone());
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
@@ -348,6 +376,7 @@ where
             binding,
             upstream_opts.clone(),
             identity,
+            policy_binding.clone(),
         )?;
         *self
             .node
@@ -363,7 +392,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts,
                 identity,
-                policy_binding: None,
+                policy_binding: policy_binding.clone(),
             },
         );
         Ok(QueryAttachment {
@@ -398,6 +427,7 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorSubject,
+        policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<SubscriptionKey, Error> {
         let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
         self.node
@@ -410,13 +440,13 @@ where
                     binding: binding.clone(),
                     opts: opts.clone(),
                     identity,
-                    policy_binding: None,
+                    policy_binding: policy_binding.clone(),
                 },
             ));
-        self.node
-            .latest_coverage_subscriptions
-            .borrow_mut()
-            .insert(coverage_key(shape, binding, opts), subscription);
+        self.node.latest_coverage_subscriptions.borrow_mut().insert(
+            request_coverage_key(shape, binding, opts, &policy_binding),
+            subscription,
+        );
         self.node.schedule_tick(TickUrgency::Immediate);
         Ok(subscription)
     }
@@ -608,13 +638,15 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
+        allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
         let requested_read_tier = effective_read_tier(&opts);
         let read_tier = requested_read_tier;
-        let pending_overlay = authorization_mode == QueryAuthorizationMode::ClientLocal
+        let pending_overlay = allow_pending_overlay
+            && authorization_mode == QueryAuthorizationMode::ClientLocal
             && requested_read_tier >= DurabilityTier::Edge
             && opts.local_updates == LocalUpdates::Immediate;
         let mut owner = self.node.node.lock().await;
@@ -976,7 +1008,7 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author, authorization_mode)
+        self.open_subscription(&prepared, opts, author, authorization_mode, true)
             .await
     }
 
@@ -1002,7 +1034,8 @@ where
         .await?;
         drop(node);
         drop(owner);
-        let coverage = coverage_key(shape, binding, opts.clone());
+        let policy_binding = prepared.request_policy_binding(identity)?;
+        let coverage = request_coverage_key(shape, binding, opts.clone(), &policy_binding);
         if self
             .node
             .upstream_coverage_refcounts
@@ -1036,8 +1069,13 @@ where
                 });
             }
         }
-        let subscription =
-            self.attach_query_shape_binding_with_opts(shape, binding, opts, identity)?;
+        let subscription = self.attach_query_shape_binding_with_opts(
+            shape,
+            binding,
+            opts,
+            identity,
+            policy_binding,
+        )?;
         *self
             .node
             .upstream_coverage_refcounts

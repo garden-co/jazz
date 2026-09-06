@@ -5257,3 +5257,155 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
 
     assert_ne!(first_id, reopened_id);
 }
+
+// Internal: the public API intentionally cannot forge raw SessionClaims or
+// host-admitted transport trust. Pin both retained evaluator bindings here;
+// real concurrent claim-gated reads are covered by napi.for-request.test.ts.
+#[test]
+fn delegated_subscription_binding_survives_backend_raw_claim_refresh() {
+    let schema = owner_read_schema();
+    let delegated_identity = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let delegated_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
+    )]);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    relay_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: delegated_identity,
+                claims: delegated_claims.clone(),
+            }),
+        }))
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let coverage = {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("the core connection serves the trusted relay")
+        };
+        state.served[&subscription].clone()
+    };
+    let later_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb2; 16]).test_uuid()),
+    )]);
+    relay_transport
+        .send(SyncMessage::SessionClaims {
+            identity: delegated_identity,
+            claims: later_claims.clone(),
+        })
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .session_claims_for(delegated_identity),
+        later_claims,
+        "the trusted backend compatibility update must actually be admitted"
+    );
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("the core connection remains a subscriber link")
+    };
+    let group = &state.coverage_groups[&coverage];
+    assert_eq!(
+        group.policy_binding_origin,
+        CoveragePolicyBindingOrigin::Delegated
+    );
+    assert_eq!(
+        group.policy_binding,
+        (delegated_identity, delegated_claims.clone())
+    );
+    assert_eq!(
+        state.peer.subscription_policy_binding(subscription),
+        Some((delegated_identity, delegated_claims)),
+        "refreshing the backend author claims must not retarget a delegated usage site"
+    );
+}
+
+// Internal: only host admission can select connection trust. Raw wire claims
+// must not grant request delegation to a session, authority, or admin link.
+#[test]
+fn delegated_request_binding_requires_backend_client_link() {
+    for trust in [
+        CommitUnitTrust::Session,
+        CommitUnitTrust::TrustedAuthority,
+        CommitUnitTrust::TrustedAdmin,
+    ] {
+        let schema = owner_read_schema();
+        let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        };
+        let (mut client, transport) = duplex();
+        let subscriber = server.accept_subscriber_with_trust(
+            transport,
+            AuthorSubject::for_test_bytes([0xb4; 16]),
+            trust,
+        );
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .unwrap();
+        client
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::SYSTEM,
+                    claims: BTreeMap::new(),
+                }),
+            }))
+            .unwrap();
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+        }
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert!(
+            state.served.is_empty(),
+            "{trust:?} must not admit delegated queries"
+        );
+    }
+}

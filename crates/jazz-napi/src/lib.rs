@@ -2859,6 +2859,49 @@ impl NapiDb {
         }
     }
 
+    #[napi(js_name = "prepareRelationQueryAsync")]
+    pub fn prepare_relation_query_async(
+        &self,
+        query: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> napi::Result<PendingNativePreparation> {
+        let admission = author
+            .map(|author| {
+                let author = core_author_id_from_bytes(&author)?;
+                Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?))
+            })
+            .transpose()?;
+        let query = core_relation_query_from_bytes(&query)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! prepare {
+            ($db:expr) => {{
+                let db = Rc::clone($db);
+                Ok(PendingNativePreparation {
+                    wake: RefCell::new(None),
+                    future: RefCell::new(Some(Box::pin(async move {
+                        let inner = db
+                            .prepare_relation_query_async(&query)
+                            .await
+                            .map_err(napi_error)?;
+                        let inner = match admission {
+                            Some((author, claims)) => inner.with_identity_claims(author, claims),
+                            None => inner,
+                        };
+                        Ok(PreparedQuery { inner })
+                    }))),
+                })
+            }};
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => prepare!(db),
+            NapiDbInnerStorage::Persistent(db) => prepare!(db),
+        }
+    }
+
     /// Execute an ordinary prepared read. The optional transaction id selects
     /// that transaction's snapshot and staged overlay; an explicit author
     /// selects trusted-serving authorization. Backend authority is inferred
@@ -2919,6 +2962,9 @@ impl NapiDb {
         }
     }
 
+    /// Compatibility state for explicitly serialized low-level callers. This
+    /// map is shared per author; concurrent delegated requests must instead
+    /// capture claims with prepareQueryAsync/prepareRelationQueryAsync.
     #[napi(js_name = "setIdentityClaims")]
     pub fn set_identity_claims(
         &self,
@@ -3187,11 +3233,22 @@ impl NapiDb {
         author: Option<Uint8Array>,
     ) -> napi::Result<PendingNativeSubscription> {
         let opts = core_read_opts_from_json(opts)?;
+        let trusted_client = self.trusted_backend;
         let author = match author {
             Some(author) => Some(core_author_id_from_bytes(&author)?),
             None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
             None => None,
         };
+        if trusted_client
+            && author.is_some_and(|author| {
+                author != CoreAuthorSubject::SYSTEM
+                    && query.inner.request_identity() != Some(author)
+            })
+        {
+            return Err(napi::Error::from_reason(
+                "trusted client subscription requires immutable request claims",
+            ));
+        }
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3204,6 +3261,9 @@ impl NapiDb {
                     wake: RefCell::new(None),
                     future: RefCell::new(Some(Box::pin(async move {
                         let stream = match author {
+                            Some(author) if trusted_client => {
+                                db.subscribe_client_for_identity(&query, opts, author).await
+                            }
                             Some(author) => db.subscribe_for_identity(&query, opts, author).await,
                             None => db.subscribe(&query, opts).await,
                         }
@@ -3282,7 +3342,7 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(
+                stream: core_block_on(db.subscribe_client_for_identity(
                     &query.inner,
                     opts,
                     CoreAuthorSubject::SYSTEM,
@@ -3293,7 +3353,7 @@ impl NapiDb {
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
-                stream: core_block_on(db.subscribe_for_identity(
+                stream: core_block_on(db.subscribe_client_for_identity(
                     &query.inner,
                     opts,
                     CoreAuthorSubject::SYSTEM,
@@ -3740,16 +3800,20 @@ impl NapiDb {
         // The JS WebSocket carrier has no authenticated endpoint context for
         // scoped receipt/view frames. Keep this upstream transport aligned
         // with its authority-unbound Hello until such a context is plumbed.
-        let transport = Box::new(CoreWireTransportAdapter::new(
-            NapiWireTransport {
-                queues: queues.clone(),
-            },
-            jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
-            None,
-        ));
+        let transport = Box::new(
+            CoreWireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                NapiWireTransport {
+                    queues: queues.clone(),
+                },
+                jazz::wire::WIRE_PROTOCOL_VERSION,
+                jazz::wire::current_wire_features()
+                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                None,
+                None,
+                self.trusted_backend,
+            ),
+        );
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
@@ -3824,15 +3888,18 @@ impl NapiDb {
             link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features,
         };
-        let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
-            NapiWireTransport {
-                queues: queues.clone(),
-            },
-            protocol_version,
-            features,
-            None,
-            Some(session_context),
-        ));
+        let transport = Box::new(
+            CoreWireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                NapiWireTransport {
+                    queues: queues.clone(),
+                },
+                protocol_version,
+                features,
+                None,
+                Some(session_context),
+                self.trusted_backend,
+            ),
+        );
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),

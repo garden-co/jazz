@@ -3024,6 +3024,19 @@ fn coverage_key(
     }
 }
 
+fn request_coverage_key(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+    policy_binding: &Option<(AuthorSubject, BTreeMap<String, Value>)>,
+) -> CoverageKey {
+    let mut key = coverage_key(shape, binding, opts);
+    key.policy_binding = policy_binding.as_ref().map(|(identity, claims)| {
+        crate::protocol::PolicyBindingKey::from_canonical_parts(*identity, claims.clone())
+    });
+    key
+}
+
 fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
     trust.is_trusted() || permissions_ready
 }
@@ -3053,12 +3066,10 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
         && (peer.rejects_raw_session_claims()
-            // A trusted backend is the one non-relay transport allowed to
-            // assert a session snapshot. It needs that snapshot to submit a
-            // user-attributed write whose policy reads session claims. The
-            // authenticated server admission selected its trust level; this
-            // must not turn an ordinary client or a subjectless relay into a
-            // claim issuer.
+            // Host-admitted trusted links may maintain the compatibility
+            // claims map (including backend user-attributed writes). This
+            // legacy map authority is distinct from request delegation below:
+            // only a backend ClientLink can assert an arbitrary query scope.
             || (!ingest.trust.is_trusted()
                 && !delegated_session_capability(ingest, peer.role()))))
 }
@@ -3072,8 +3083,8 @@ fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: Peer
 }
 
 /// Select the immutable session snapshot permitted for one request. Direct
-/// links use their host-admitted session; only a scope-isolated relay with an
-/// exact server-issued binding can carry a delegated snapshot. A generic
+/// links use their host-admitted session. A trusted backend may assert a
+/// request snapshot; a scope-isolated relay needs an exact server-issued binding. A generic
 /// multiplexed relay has no per-binding capability yet, so it must forward
 /// rather than select a user policy subject. Keeping Subscribe and repair on
 /// this one admission rule prevents one path from accidentally treating a
@@ -3094,6 +3105,12 @@ fn admitted_request_policy_binding(
         Some(delegated) if delegated_session_capability(ingest, peer.role()) => {
             let binding = (delegated.identity, delegated.claims);
             peer.admits_relay_binding(&binding).then_some(binding)
+        }
+        Some(delegated)
+            if ingest.trust == CommitUnitTrust::TrustedBackend
+                && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+        {
+            Some((delegated.identity, delegated.claims))
         }
         Some(_) => None,
     }
@@ -4640,14 +4657,17 @@ impl PreparedQuery {
         claims: BTreeMap<String, Value>,
     ) -> Self {
         self.request_identity_claims = Some((author, claims));
+        // Plans prepared before admission may embed SYSTEM or another scope.
+        // Resolve them again under this immutable request's authorization.
+        self.local_plan = None;
+        self.global_plan = None;
         self
     }
 
-    fn scoped_node<'a, S: OrderedKvStorage>(
+    fn request_policy_binding(
         &self,
-        node: &'a mut NodeState<S>,
         author: AuthorSubject,
-    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+    ) -> Result<Option<(AuthorSubject, BTreeMap<String, Value>)>, Error> {
         if self
             .request_identity_claims
             .as_ref()
@@ -4658,6 +4678,15 @@ impl PreparedQuery {
                 "prepared request identity does not match read identity",
             ));
         }
+        Ok(self.request_identity_claims.clone())
+    }
+
+    fn scoped_node<'a, S: OrderedKvStorage>(
+        &self,
+        node: &'a mut NodeState<S>,
+        author: AuthorSubject,
+    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+        self.request_policy_binding(author)?;
         Ok(node.scoped_optional_session_claims(
             author,
             self.request_identity_claims

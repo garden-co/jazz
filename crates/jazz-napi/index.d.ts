@@ -98,6 +98,7 @@ export declare class NapiDb {
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   prepareQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
+  prepareRelationQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
   /**
    * Execute an ordinary prepared read. The optional transaction id selects
    * that transaction's snapshot and staged overlay; an explicit author
@@ -105,6 +106,11 @@ export declare class NapiDb {
    * only from an explicit backend open.
    */
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Compatibility state for explicitly serialized low-level callers. This
+   * map is shared per author; concurrent delegated requests must instead
+   * capture claims with prepareQueryAsync/prepareRelationQueryAsync.
+   */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
    * Materialize a prepared relation snapshot, optionally through an open

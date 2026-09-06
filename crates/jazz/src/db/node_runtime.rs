@@ -1899,7 +1899,12 @@ where
                         state.read_view.clone(),
                         state.remote_propagate_upstream,
                     );
-                    let coverage = coverage_key(shape, binding, opts.clone());
+                    let coverage = request_coverage_key(
+                        shape,
+                        binding,
+                        opts.clone(),
+                        &state.request_identity_claims,
+                    );
                     let subscription = self
                         .upstream_subscription_owners
                         .borrow()
@@ -1926,7 +1931,7 @@ where
                                 binding: binding.clone(),
                                 opts,
                                 identity: state.author,
-                                policy_binding: None,
+                                policy_binding: state.request_identity_claims.clone(),
                             },
                         ));
                     }

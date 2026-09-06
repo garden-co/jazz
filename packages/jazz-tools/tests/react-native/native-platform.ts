@@ -1,10 +1,12 @@
 // Platform substitution only: database operations and command codecs remain
 // the real RN implementation. No React Native/JSI behavior is claimed here.
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import type { NativeForegroundRuntime } from "../../src/react-native/native-foreground-db.js";
 
 type NativeHandle = object; // NAPI External with Rust Drop, never a pointer number.
 interface TestBinding {
+  mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string;
   __testRnDecodeForegroundCommand(command: Uint8Array): string;
   __testRnForegroundResponseCorpus(): string;
   nativeArtifactFingerprint(): string;
@@ -57,6 +59,10 @@ export function createPlatformHost(storageRoot?: string) {
   const nativeHost = binding.__testRnHostNew();
   return {
     abiVersion,
+    // Platform entropy is substituted; signing still uses the shared Rust JWT implementation.
+    accountSecret: () => new Uint8Array(randomBytes(32)),
+    mintLocalFirstToken: (secret: Uint8Array, audience: string, ttlSeconds: number) =>
+      binding.mintLocalFirstToken(Buffer.from(secret).toString("base64url"), audience, ttlSeconds),
     beginAccountSession: (config: string) => {
       if (!storageRoot) throw new Error("RN fixture requires a platform storage root");
       return new Uint8Array(
@@ -97,6 +103,8 @@ export function installPlatformHost(host: ReturnType<typeof createPlatformHost>)
     configurable: true,
     value: {
       abiVersion: host.abiVersion,
+      accountSecret: host.accountSecret,
+      mintLocalFirstToken: host.mintLocalFirstToken,
       openAttached: host.openAttached,
       beginAccountSession: host.beginAccountSession,
       attachAccountSchema: host.attachAccountSchema,
