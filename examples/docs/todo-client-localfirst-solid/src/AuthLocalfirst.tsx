@@ -1,17 +1,12 @@
-import { Show, type ParentProps } from "solid-js";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/solid";
+import { type ParentProps } from "solid-js";
+import type { DbConfig } from "jazz-tools";
+import { JazzProvider } from "jazz-tools/solid";
 
-export function AuthLocalfirst(props: ParentProps) {
-  const auth = useLocalFirstAuth();
+// Prepare a handle outside this context with createAccountManager.
+export function AuthLocalfirst(props: ParentProps<{ config: DbConfig }>) {
   return (
-    <Show when={!auth.isLoading && auth.secret}>
-      {(secret) => {
-        return (
-          <JazzProvider config={{ appId: "my-app", secret: secret() }}>
-            {props.children}
-          </JazzProvider>
-        );
-      }}
-    </Show>
+    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+      {props.children}
+    </JazzProvider>
   );
 }

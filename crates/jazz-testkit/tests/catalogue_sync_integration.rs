@@ -1039,13 +1039,14 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
 /// use the durable catalogue immediately; it must not depend on a fresh
 /// bootstrap exchange with the unavailable upstream.
 #[tokio::test]
-async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client() {
+async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_registry_is_offline() {
     tokio::task::LocalSet::new()
-        .run_until(persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl())
+        .run_until(persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_registry_is_offline_impl())
         .await
 }
 
-async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl() {
+async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_registry_is_offline_impl()
+ {
     let app_id = JazzServer::default_app_id();
     let schema = schema_v1();
     let edge_data_dir = TempDir::new().expect("create persistent edge data directory");
@@ -1069,6 +1070,16 @@ async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_imp
         .ready_on("users", Duration::from_secs(30))
         .connect_after_retry_later(Duration::from_secs(30))
         .await;
+    // Enrollment happens while the ordering authority is reachable. Reopening
+    // an edge must not treat its cached catalogue as cached account authority.
+    let mut returning_context = TestingClient::builder()
+        .with_server(&edge_before_shutdown)
+        .with_schema(schema.clone())
+        .with_user_id(test_user_id("dynamic-edge-first-after-restart"))
+        .build_context();
+    support::enroll_test_context(&mut returning_context)
+        .await
+        .expect("enroll before core outage");
     warmup.shutdown().await.expect("shutdown warmup client");
     edge_before_shutdown.shutdown().await;
     core.shutdown().await;
@@ -1081,13 +1092,33 @@ async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_imp
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
         .await;
-    let first_client = TestingClient::builder()
-        .with_server(&edge_after_restart)
-        .with_schema(schema)
-        .with_user_id(test_user_id("dynamic-edge-first-after-restart"))
-        .ready_on("users", Duration::from_secs(30))
-        .connect()
-        .await;
+    returning_context.server_url = edge_after_restart.base_url();
+    let public_error = match jazz_testkit::connect(returning_context).await {
+        Err(error) => error,
+        Ok(_) => panic!("an offline registry cannot admit a public account from stale state"),
+    };
+    assert!(
+        public_error
+            .to_string()
+            .contains("account registry unavailable"),
+        "unexpected admission failure: {public_error}"
+    );
+
+    // Cached catalogue readiness is independent of fresh public-account
+    // admission. A trusted service connection can still inspect that catalogue.
+    let mut service_context =
+        edge_after_restart.make_client_context_for_user(schema, "catalogue-service");
+    service_context.jwt_token = None;
+    let first_client = jazz_testkit::connect(service_context)
+        .await
+        .expect("connect trusted catalogue reader");
+    // Local evaluation proves the cached catalogue was installed. A fresh
+    // EdgeServer query would require upstream coverage while core is offline.
+    let rows = first_client
+        .query_with_read_tier(Query::from("users"), jazz::tools::ReadTier::LocalFirst)
+        .await
+        .expect("query persisted catalogue locally");
+    assert!(rows.is_empty());
 
     first_client
         .shutdown()
@@ -1394,6 +1425,9 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
         server.make_client_context_for_user(schema.clone(), test_user_id("reader-dynamic"));
     reader_context.backend_secret = None;
     reader_context.admin_secret = None;
+    support::enroll_test_context(&mut reader_context)
+        .await
+        .expect("enroll reader");
     let reader = jazz_testkit::connect(reader_context)
         .await
         .expect("connect reader");

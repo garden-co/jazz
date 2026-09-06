@@ -1,29 +1,14 @@
-<script lang="ts" module>
-  import { type Component } from "svelte";
-
-  // We don't bother writing a real dummy component here. This block sits outside
-  // the docs #region below, so it's never shown to readers — it exists purely to
-  // give `<YourApp />` a type so the snippet passes the type-check.
-  const YourApp: Component = null as any;
-</script>
-
 <!-- #region context-setup-svelte-runtime-sources -->
 <script lang="ts">
+  import type { Snippet } from "svelte";
+  import type { AccountHandle } from "jazz-tools";
   import { JazzSvelteProvider } from "jazz-tools/svelte";
-
-  const config = {
-    appId: "my-app",
-    serverUrl: "https://my-jazz-server.example.com",
-    runtimeSources: {
-      baseUrl: "/assets/jazz/",
-      wasmVersion: "2026-08-25", // Change this for every deployed asset build.
-    },
-  };
+  // Prepare the handle with these same runtimeSources.
+  let { account, children }: { account: AccountHandle; children: Snippet } = $props();
+  const config = $derived({
+    appId: "my-app", serverUrl: "https://my-jazz-server.example.com", account,
+    runtimeSources: { baseUrl: "/assets/jazz/", wasmVersion: "2026-08-25" },
+  });
 </script>
-
-<JazzSvelteProvider {config}>
-  {#snippet children()}
-    <YourApp />
-  {/snippet}
-</JazzSvelteProvider>
+<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
 <!-- #endregion context-setup-svelte-runtime-sources -->

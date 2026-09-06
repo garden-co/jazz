@@ -1,4 +1,5 @@
 import { createDb, type DbConfig, type Db } from "jazz-tools";
+import { prepareAccountConfig } from "./account.js";
 import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, type Todo } from "../schema.js";
 
@@ -56,11 +57,13 @@ export async function startApp(
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
   // #region context-setup-ts-client
-  const db = await createDb({
-    appId: readEnvAppId() ?? "todo-client-example",
-    env: "dev",
-    ...config,
-  });
+  const db = await createDb(
+    await prepareAccountConfig({
+      appId: readEnvAppId() ?? "todo-client-example",
+      env: "dev",
+      ...config,
+    }),
+  );
   // #endregion context-setup-ts-client
 
   // Build DOM

@@ -465,6 +465,7 @@ impl JazzServer {
             data_dir,
             storage: jazz::tools::ClientStorage::Memory,
             storage_factory: None,
+            account_id: None,
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,

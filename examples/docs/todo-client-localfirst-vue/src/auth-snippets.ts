@@ -1,51 +1,38 @@
-import { computed } from "vue";
-import { useLocalFirstAuth } from "jazz-tools/vue";
+import { createAccountManager, exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
+type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
+
 // #region auth-localfirst-vue-backup
-export function useRecoveryPhraseBackup() {
-  const { secret, isLoading } = useLocalFirstAuth();
-  const recoveryPhrase = computed(() =>
-    secret.value ? RecoveryPhrase.fromSecret(secret.value) : null,
-  );
-  return { isLoading, recoveryPhrase };
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-vue-backup
 
 // #region auth-localfirst-vue-restore
-export function useRecoveryPhraseRestore() {
-  const { login } = useLocalFirstAuth();
-  return async (userInput: string) => {
-    const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await login(restoredSecret);
-  };
+// Call after the old context's normal shutdown({ waitForSync: true }).
+// Use the returned handle to create the next context.
+export function restoreFromRecoveryPhrase(accounts: Accounts, userInput: string): AccountHandle {
+  return accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-vue-restore
 
 // #region auth-localfirst-vue-passkey-backup
 const passkeyBackup = new BrowserPasskeyBackup({
   appName: "My App",
-  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
-  // which scopes passkeys per preview-deploy URL.
+  // Pin to your canonical production hostname rather than a preview hostname.
   appHostname: "myapp.com",
 });
 
-export function usePasskeyBackup() {
-  const { secret } = useLocalFirstAuth();
-  return async (displayName: string) => {
-    if (!secret.value) throw new Error("No local secret to back up yet");
-    await passkeyBackup.backup(secret.value, displayName);
-  };
+export async function backupToPasskey(account: AccountHandle, displayName: string): Promise<void> {
+  await passkeyBackup.backup(exportLocalFirstSecret(account), displayName);
 }
 // #endregion auth-localfirst-vue-passkey-backup
 
 // #region auth-localfirst-vue-passkey-restore
-export function usePasskeyRestore() {
-  const { login } = useLocalFirstAuth();
-  return async () => {
-    const restoredSecret = await passkeyBackup.restore();
-    await login(restoredSecret);
-  };
+// Restore outside any context, after its ordinary graceful shutdown.
+export async function restoreFromPasskey(accounts: Accounts): Promise<AccountHandle> {
+  return accounts.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-vue-passkey-restore

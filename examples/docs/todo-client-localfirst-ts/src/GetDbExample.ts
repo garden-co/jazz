@@ -1,8 +1,10 @@
 // #region writing-get-db-ts
-import { createDb } from "jazz-tools";
+import { createAccountManager, createDb } from "jazz-tools";
 
-const db = await createDb({
-  appId: "my-app",
-  env: "dev",
-});
+const config = { appId: "my-app", serverUrl: "https://core.example", env: "dev" };
+const accounts = await createAccountManager(config);
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+const db = await createDb({ ...config, account });
 // #endregion writing-get-db-ts
+
+void db;

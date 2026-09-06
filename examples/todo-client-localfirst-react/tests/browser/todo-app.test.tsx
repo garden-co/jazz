@@ -129,6 +129,43 @@ describe("React Todo App E2E", () => {
     }
   });
 
+  it("keeps the mounted context when an equivalent inline config is rerendered", async () => {
+    const account = await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
+    const el = await mountApp({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+      account,
+    });
+    const mounted = mounts.find((item) => item.container === el)!;
+    const input = el.querySelector<HTMLInputElement>(
+      'input[placeholder="What needs to be done?"]',
+    )!;
+    await act(async () => typeInto(input, "unsubmitted draft"));
+    await act(async () => {
+      mounted.root.render(
+        <App
+          config={{
+            appId: APP_ID,
+            serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+            driver: { type: "persistent", dbName: mounted.storageNamespace! },
+            account,
+          }}
+        />,
+      );
+    });
+    await waitFor(
+      () => el.querySelector("#todo-list") !== null,
+      5000,
+      "rerendered app remains ready",
+    );
+    expect(el.querySelector('input[placeholder="What needs to be done?"]')).toBe(input);
+    expect(input.value).toBe("unsubmitted draft");
+  });
+
   // -------------------------------------------------------------------------
   // 1. App renders with empty list
   // -------------------------------------------------------------------------

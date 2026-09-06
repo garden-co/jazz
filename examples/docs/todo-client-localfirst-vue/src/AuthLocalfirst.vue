@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/vue";
-
-const { secret, isLoading } = useLocalFirstAuth();
-
-const config = computed(() =>
-  !isLoading.value && secret.value ? { appId: "my-app", secret: secret.value } : null,
-);
+import type { DbConfig } from "jazz-tools";
+import { JazzProvider } from "jazz-tools/vue";
+// Prepare a handle outside this context with createAccountManager.
+defineProps<{ config: DbConfig }>();
 </script>
-
 <template>
-  <JazzProvider v-if="config" :config="config">
-    <slot />
-  </JazzProvider>
+  <JazzProvider :config="config"><slot /></JazzProvider>
 </template>

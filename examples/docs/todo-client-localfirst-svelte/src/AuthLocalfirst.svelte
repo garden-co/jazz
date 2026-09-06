@@ -1,25 +1,10 @@
 <!-- #region auth-localfirst-svelte -->
 <script lang="ts">
-  import {
-    LocalFirstAuth,
-    JazzSvelteProvider,
-  } from 'jazz-tools/svelte';
-  import type { Snippet } from 'svelte';
-
-  let { children }: { children: Snippet } = $props();
-
-  const auth = new LocalFirstAuth();
-
-  let config = $derived(
-    !auth.isLoading && auth.secret
-      ? { appId: 'my-app', secret: auth.secret }
-      : null,
-  );
+  import type { Snippet } from "svelte";
+  import type { DbConfig } from "jazz-tools";
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // Prepare a handle outside this context with createAccountManager.
+  let { config, children }: { config: DbConfig; children: Snippet } = $props();
 </script>
-
-{#if config}
-  <JazzSvelteProvider {config}>
-    {@render children()}
-  </JazzSvelteProvider>
-{/if}
+<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
 <!-- #endregion auth-localfirst-svelte -->

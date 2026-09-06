@@ -5,7 +5,7 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, SchemaBuilder,
-    Session, TablePolicies, TableSchema, Value,
+    TablePolicies, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -19,12 +19,10 @@ fn test_user_id(subject: &str) -> String {
     uuid.to_string()
 }
 
+// These fixtures intentionally grant access to an exact subject under the fixed
+// test issuer; inherited-policy behavior is independent of account linking.
 fn test_author_id(subject: &str) -> String {
-    Session::new("urn:jazz:test", test_user_id(subject))
-        .author_subject()
-        .expect("test user identity")
-        .canonical()
-        .to_owned()
+    test_user_id(subject)
 }
 
 fn inherited_update_schema() -> jazz::tools::Schema {
@@ -38,10 +36,31 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                         .with_select(PolicyExpr::True)
                         .with_insert(PolicyExpr::True)
                         .with_update(
-                            Some(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
-                            PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                            Some(PolicyExpr::eq_session(
+                                "owner_id",
+                                vec![
+                                    "user".to_owned(),
+                                    "identity".to_owned(),
+                                    "subject".to_owned(),
+                                ],
+                            )),
+                            PolicyExpr::eq_session(
+                                "owner_id",
+                                vec![
+                                    "user".to_owned(),
+                                    "identity".to_owned(),
+                                    "subject".to_owned(),
+                                ],
+                            ),
                         )
-                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
+                        .with_delete(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ],
+                        )),
                 ),
         )
         .table(
@@ -55,15 +74,36 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                         .with_insert(PolicyExpr::True)
                         .with_update(
                             Some(PolicyExpr::or(vec![
-                                PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                                PolicyExpr::eq_session(
+                                    "owner_id",
+                                    vec![
+                                        "user".to_owned(),
+                                        "identity".to_owned(),
+                                        "subject".to_owned(),
+                                    ],
+                                ),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ])),
                             PolicyExpr::or(vec![
-                                PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                                PolicyExpr::eq_session(
+                                    "owner_id",
+                                    vec![
+                                        "user".to_owned(),
+                                        "identity".to_owned(),
+                                        "subject".to_owned(),
+                                    ],
+                                ),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ]),
                         )
-                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
+                        .with_delete(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ],
+                        )),
                 ),
         )
         .table(
@@ -92,7 +132,14 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
+                        .with_select(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ],
+                        ))
                         .with_insert(PolicyExpr::True)
                         .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                         .with_delete(PolicyExpr::True),
@@ -106,7 +153,14 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::or(vec![
-                            PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                            PolicyExpr::eq_session(
+                                "owner_id",
+                                vec![
+                                    "user".to_owned(),
+                                    "identity".to_owned(),
+                                    "subject".to_owned(),
+                                ],
+                            ),
                             PolicyExpr::inherits(Operation::Select, "organization_id"),
                         ]))
                         .with_insert(PolicyExpr::True)
@@ -153,7 +207,14 @@ fn reverse_inherited_select_schema() -> jazz::tools::Schema {
                 .column("owner_id", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
+                        .with_select(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec![
+                                "user".to_owned(),
+                                "identity".to_owned(),
+                                "subject".to_owned(),
+                            ],
+                        ))
                         .with_insert(PolicyExpr::True),
                 ),
         )
@@ -234,9 +295,11 @@ async fn connect_ready_user(
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {
-    let client = jazz_testkit::connect(user_context(server, schema, user_id))
+    let mut context = user_context(server, schema, user_id);
+    support::enroll_test_context(&mut context)
         .await
-        .expect("connect user");
+        .expect("enroll test identity");
+    let client = jazz_testkit::connect(context).await.expect("connect user");
     wait_for_edge_query_ready(&client, ready_table, Duration::from_secs(30)).await;
     client
 }
@@ -268,7 +331,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "documents").await;
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "documents").await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (folder_id, _, folder_tx) = alice_session
                 .insert(
                     "folders",
@@ -354,7 +417,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
             let bob_user_id = test_user_id("bob");
             let alice = connect_ready_user(&server, schema.clone(), &alice_user_id, "files").await;
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "files").await;
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
 
             let (organization_id, _, organization_tx) = alice_session
                 .insert("organizations", row_input!("owner_id" => alice_owner_id))
@@ -433,7 +496,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
             let alice =
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "documents").await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -513,7 +576,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "shared_documents")
                     .await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (bob_folder_id, _, bob_folder_tx) = alice_session
                 .insert(
                     "folders",
@@ -590,7 +653,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "shared_documents")
                     .await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -699,11 +762,14 @@ async fn inherited_update_policy_allows_update_through_parent() {
             let alice_user_id = test_user_id("alice");
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
+            support::enroll_test_context(&mut context)
+                .await
+                .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -810,11 +876,14 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
             let alice_user_id = test_user_id("alice");
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
+            support::enroll_test_context(&mut context)
+                .await
+                .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -906,11 +975,14 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
             let alice_user_id = test_user_id("alice");
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
+            support::enroll_test_context(&mut context)
+                .await
+                .expect("enroll alice");
 
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
+            let alice_session = alice.clone();
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",

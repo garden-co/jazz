@@ -135,6 +135,7 @@ mod tests {
                             data_dir: dir.path().to_owned(),
                             storage: ClientStorage::Memory,
                             storage_factory: None,
+                            account_id: None,
                             jwt_token: Some(TestJwtIssuer::jwt_for_user(&format!(
                                 "rn-device-private-{scope}"
                             ))),

@@ -73,6 +73,10 @@ pub struct AppContext {
     pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
+    /// Registry-resolved account metadata for this low-level native client.
+    /// Never read from JWT claims. The server independently checks the bearer
+    /// against this assignment; a copied account ID grants no authority.
+    pub account_id: Option<crate::account_registry::AccountId>,
     /// JWT token for frontend authentication.
     /// Sent as `Authorization: Bearer <token>`.
     pub jwt_token: Option<String>,
@@ -95,6 +99,7 @@ impl AppContext {
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
             storage_factory: None,
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,

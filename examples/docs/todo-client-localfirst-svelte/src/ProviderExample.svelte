@@ -1,25 +1,10 @@
-<script lang="ts" module>
-  import { type Component } from "svelte";
-
-  // Just a placeholder to make the TS compiler happy.
-  const YourApp: Component = null as any;
-</script>
-
 <!-- #region provider-svelte -->
 <script lang="ts">
-  import { JazzSvelteProvider, type JazzContext } from "jazz-tools/svelte";
-
-  const config = {
-    appId: "my-app",
-  };
+  import type { Snippet } from "svelte";
+  import type { DbConfig } from "jazz-tools";
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // Prepare a handle outside this context with createAccountManager.
+  let { config, children }: { config: DbConfig; children: Snippet } = $props();
 </script>
-
-<JazzSvelteProvider {config}>
-  {#snippet children({ db }: { db: NonNullable<JazzContext["db"]> })}
-    <YourApp />
-  {/snippet}
-  {#snippet fallback()}
-    <p>Loading...</p>
-  {/snippet}
-</JazzSvelteProvider>
+<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
 <!-- #endregion provider-svelte -->

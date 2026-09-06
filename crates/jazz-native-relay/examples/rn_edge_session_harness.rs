@@ -81,6 +81,7 @@ async fn run() {
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         storage_factory: None,
+        account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
         backend_secret: None,
         admin_secret: Some(core.admin_secret().to_owned()),
@@ -176,6 +177,7 @@ async fn run() {
         data_dir: writer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         storage_factory: None,
+        account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user(
             "rn-device-core-recovery-writer",
         )),

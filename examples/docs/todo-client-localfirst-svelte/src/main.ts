@@ -1,4 +1,7 @@
 import { mount } from "svelte";
 import App from "./App.svelte";
 
-mount(App, { target: document.getElementById("app")! });
+import { prepareAccountConfig } from "./account.js";
+
+const config = await prepareAccountConfig();
+mount(App, { props: { config }, target: document.getElementById("app")! });
