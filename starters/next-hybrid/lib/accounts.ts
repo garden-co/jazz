@@ -10,7 +10,14 @@ export function accounts() {
   const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
   if (!appId || !serverUrl)
     throw new Error("NEXT_PUBLIC_JAZZ_APP_ID and NEXT_PUBLIC_JAZZ_SERVER_URL must be set");
-  return (prepared ??= createAccountManager({ appId, serverUrl }));
+  if (!prepared) {
+    const attempt = createAccountManager({ appId, serverUrl });
+    prepared = attempt;
+    void attempt.catch(() => {
+      if (prepared === attempt) prepared = undefined;
+    });
+  }
+  return prepared;
 }
 
 export async function getToken(): Promise<string> {

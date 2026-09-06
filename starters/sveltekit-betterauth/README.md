@@ -45,10 +45,10 @@ src/
     auth.ts                       ← Better Auth server config
     auth-client.ts                ← Better Auth Svelte client
   routes/
-    +layout.svelte                ← plain root layout
+    +layout.svelte                ← app-owned Jazz client lifecycle
     +page.svelte                  ← public sign-in / sign-up form (redirects signed-in users to /dashboard)
     (authenticated)/
-      +layout.svelte              ← one-shot JWT fetch + JazzSvelteProvider
+      +layout.svelte              ← route grouping only
       dashboard/
         +page.svelte              ← greeting, sign-out, <TodoWidget />
 ```
@@ -62,14 +62,16 @@ signed-in users, and `/dashboard/*` back to `/` for signed-out users.
 This uses `getSessionCookie`, a cheap cookie-presence check, not a full
 DB read.
 
-`src/routes/(authenticated)/+layout.svelte` fetches a Better Auth JWT
-once on mount and passes it to `<JazzSvelteProvider>` as part of its
-configuration. Because the hook guarantees a session on
-`/dashboard/*`, the provider is only mounted when the user is
-authenticated — there's no anonymous fallback path to reason about. The
-same layout installs a `db.onAuthChanged` listener that re-mints the JWT
-whenever Better Auth reports it as expired, so long-lived sessions won't
-silently drop to unauthenticated.
+`src/lib/JazzClientProvider.svelte` prepares an `AccountManager` and owns one
+Jazz client for its selected opaque account handle. Its credential callback
+re-mints Better Auth JWTs through `authClient.$fetch("/token")` whenever Jazz
+needs them, rather than treating a one-shot JWT as identity.
+
+Reloads and ordinary sign-ins use `loginJWT`; `registerJWT` is reserved for an
+explicit sign-up or recovery retry. Provider session changes and form actions
+are serialized and freshness-fenced. Before logout or account replacement the
+old client shuts down with `waitForSync: true`; failed account actions reopen
+the selected handle and leave a retryable setup error visible.
 
 ## Extending the schema
 

@@ -1,7 +1,10 @@
 <script lang="ts">
   import "../app.css";
+  import JazzClientProvider from "$lib/JazzClientProvider.svelte";
 
   let { children } = $props();
 </script>
 
-{@render children?.()}
+<JazzClientProvider>
+  {#snippet children()}{@render children?.()}{/snippet}
+</JazzClientProvider>

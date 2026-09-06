@@ -2,17 +2,20 @@
 
 import { useState, useActionState } from "react";
 import { authClient } from "@/lib/auth-client";
+import { beginSignupIntent, clearSignupIntent } from "@/components/jazz-provider";
 
 async function authAction(_prev: string | null, formData: FormData): Promise<string | null> {
   const email = formData.get("email") as string;
   const password = formData.get("password") as string;
   const name = formData.get("name") as string | null;
 
+  if (name) beginSignupIntent(email);
   const { error } = await (name
     ? authClient.signUp.email({ name, email, password })
     : authClient.signIn.email({ email, password }));
 
   if (error) {
+    if (name) clearSignupIntent();
     return error.message ?? (name ? "Sign-up failed" : "Sign-in failed");
   }
 

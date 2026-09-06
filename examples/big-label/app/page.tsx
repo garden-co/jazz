@@ -1,58 +1,56 @@
 "use client";
 
 import * as React from "react";
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import {
+  createAccountManager,
+  createJazzClient,
+  JazzClientProvider,
+  type AccountManager,
+  type JazzClient,
+  type JWTAuth,
+} from "jazz-tools/react";
 import { Operations } from "../src/App";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
+import { JazzLifecycle } from "../src/lib/jazz-lifecycle";
 
-function useBetterAuthJwt(sessionId: string | undefined) {
-  const [jwt, setJwt] = React.useState<string | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+const signupMarker = "big-label-register-external-account";
 
-  React.useEffect(() => {
-    let cancelled = false;
-    setJwt(null);
-    setError(null);
-    if (!sessionId) return;
-    void getJwtFromBetterAuth().then((token) => {
-      if (cancelled) return;
-      if (token) setJwt(token);
-      else setError("Better Auth did not issue a Jazz token.");
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
+type SignupIntent = { email: string; identityId?: string };
+type ManagerSlot = {
+  sessionId: string;
+  identityId: string;
+  manager?: AccountManager<JWTAuth>;
+  error?: Error;
+};
 
-  return { jwt, error };
+function beginSignupIntent(email: string) {
+  sessionStorage.setItem(signupMarker, JSON.stringify({ email } satisfies SignupIntent));
 }
 
-function usePersonalLabel(sessionId: string | undefined) {
-  const [attempt, retry] = React.useReducer((value) => value + 1, 0);
-  const [state, setState] = React.useState<"idle" | "loading" | "ready" | "error">("idle");
+function clearSignupIntent() {
+  sessionStorage.removeItem(signupMarker);
+}
 
-  React.useEffect(() => {
-    let cancelled = false;
-    if (!sessionId) {
-      setState("idle");
-      return;
-    }
-    setState("loading");
-    void fetch("/api/bootstrap", { method: "POST" })
-      .then((response) => {
-        if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
-        if (!cancelled) setState("ready");
-      })
-      .catch(() => {
-        if (!cancelled) setState("error");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [attempt, sessionId]);
+function claimsSignupIntent(email: string, identityId: string) {
+  const encoded = sessionStorage.getItem(signupMarker);
+  if (!encoded) return false;
+  try {
+    const intent = JSON.parse(encoded) as SignupIntent;
+    if (intent.email !== email) return false;
+    if (intent.identityId && intent.identityId !== identityId) return false;
+    if (!intent.identityId)
+      sessionStorage.setItem(signupMarker, JSON.stringify({ ...intent, identityId }));
+    return true;
+  } catch {
+    clearSignupIntent();
+    return false;
+  }
+}
 
-  return { state, retry };
+function toError(cause: unknown) {
+  return cause instanceof Error ? cause : new Error(String(cause));
 }
 
 function SignIn() {
@@ -60,18 +58,20 @@ function SignIn() {
   const [password, setPassword] = React.useState("big-label-demo");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
-
   async function authenticate(mode: "sign-in" | "sign-up") {
     setPending(true);
     setError(null);
+    if (mode === "sign-up") beginSignupIntent(email);
     const result =
       mode === "sign-in"
         ? await authClient.signIn.email({ email, password })
         : await authClient.signUp.email({ email, password, name: email });
     setPending(false);
-    if (result.error) setError(result.error.message ?? "Authentication failed");
+    if (result.error) {
+      if (mode === "sign-up") clearSignupIntent();
+      setError(result.error.message ?? "Authentication failed");
+    }
   }
-
   return (
     <main className="auth-shell">
       <h1>BigLabel</h1>
@@ -101,42 +101,141 @@ function SignIn() {
   );
 }
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-
 export default function Page() {
   const { data, isPending } = authClient.useSession();
+  const [slot, setSlot] = React.useState<ManagerSlot | null>(null);
+  const [retry, setRetry] = React.useState(0);
   const sessionId = data?.session.id;
-  const auth = useBetterAuthJwt(sessionId);
-  const bootstrap = usePersonalLabel(sessionId);
+  const identityId = data?.user.id;
 
-  const config = React.useMemo<DbConfig>(
-    () => ({ appId, env: "dev", serverUrl, jwtToken: auth.jwt! }),
-    [auth.jwt],
-  );
+  React.useEffect(() => {
+    if (!sessionId || !identityId) {
+      setSlot(null);
+      return;
+    }
+    let cancelled = false;
+    setSlot({ sessionId, identityId });
+    void createAccountManager({ appId, serverUrl, env: "big-label" })
+      .then((manager) => {
+        if (!cancelled) setSlot({ sessionId, identityId, manager });
+      })
+      .catch((cause) => {
+        if (!cancelled) setSlot({ sessionId, identityId, error: toError(cause) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [identityId, retry, sessionId]);
 
   if (isPending) return <main className="auth-shell">Loading your session…</main>;
-  if (!sessionId) return <SignIn />;
-  if (auth.error) return <main className="auth-shell">{auth.error}</main>;
-  if (bootstrap.state === "error") {
+  if (!sessionId || !identityId || !data) return <SignIn />;
+  // Never let session B render session A's manager or client while effects
+  // prepare the replacement manager.
+  if (slot?.sessionId !== sessionId || slot.identityId !== identityId)
+    return <main className="auth-shell">Preparing your personal label…</main>;
+  if (slot.error)
     return (
-      <main className="auth-shell">
-        <p>BigLabel could not provision your personal label.</p>
-        <button onClick={bootstrap.retry}>Retry</button>
+      <main className="auth-shell" role="alert">
+        {slot.error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
       </main>
     );
-  }
-  if (!auth.jwt || bootstrap.state !== "ready") {
-    return <main className="auth-shell">Preparing your personal label…</main>;
-  }
-
+  if (!slot.manager) return <main className="auth-shell">Preparing your personal label…</main>;
   return (
-    <JazzProvider
-      config={config}
-      onJWTExpired={getJwtFromBetterAuth}
-      fallback={<main className="auth-shell">Connecting to BigLabel…</main>}
-    >
-      <Operations onSignOut={() => void authClient.signOut()} />
-    </JazzProvider>
+    <AccountApp
+      key={sessionId}
+      accounts={slot.manager}
+      email={data.user.email}
+      identityId={identityId}
+    />
   );
+}
+
+function AccountApp({
+  accounts,
+  email,
+  identityId,
+}: {
+  accounts: AccountManager<JWTAuth>;
+  email: string;
+  identityId: string;
+}) {
+  const [client, setClient] = React.useState<JazzClient>();
+  const [ready, setReady] = React.useState(false);
+  const [error, setError] = React.useState<Error>();
+  const [retry, setRetry] = React.useState(0);
+  const active = React.useRef(true);
+  const lifecycleRef = React.useRef<JazzLifecycle | undefined>(undefined);
+  if (!lifecycleRef.current)
+    lifecycleRef.current = new JazzLifecycle(
+      accounts,
+      (account) => createJazzClient({ appId, serverUrl, account }),
+      setClient,
+    );
+  const lifecycle = lifecycleRef.current;
+
+  const enrollAndBootstrap = React.useCallback(async () => {
+    const registering = claimsSignupIntent(email, identityId);
+    setError(undefined);
+    setReady(false);
+    await lifecycle.transition(
+      (manager) =>
+        registering
+          ? manager.registerJWT({ getToken: requireJazzToken })
+          : manager.loginJWT({ getToken: requireJazzToken }),
+      () => active.current,
+    );
+    if (registering) clearSignupIntent();
+    const token = await requireJazzToken();
+    const response = await fetch("/api/bootstrap", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
+    if (active.current) setReady(true);
+  }, [email, identityId, lifecycle]);
+
+  React.useEffect(() => {
+    active.current = true;
+    void enrollAndBootstrap().catch((cause) => {
+      if (active.current) setError(toError(cause));
+    });
+    return () => {
+      active.current = false;
+      void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
+    };
+  }, [enrollAndBootstrap, lifecycle, retry]);
+
+  const signOut = React.useCallback(async () => {
+    try {
+      await lifecycle.transition(async (manager) => {
+        // Keep the account selected until Better Auth succeeds. If it rejects,
+        // the lifecycle reopens the selected client and this error stays here.
+        await authClient.signOut();
+        manager.logout();
+      });
+    } catch (cause) {
+      const next = toError(cause);
+      if (active.current) setError(next);
+      throw next;
+    }
+  }, [lifecycle]);
+
+  if (error)
+    return (
+      <main className="auth-shell" role="alert">
+        {error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
+      </main>
+    );
+  if (!client || !ready) return <main className="auth-shell">Preparing your personal label…</main>;
+  return (
+    <JazzClientProvider client={client}>
+      <Operations onSignOut={() => void signOut().catch(() => {})} />
+    </JazzClientProvider>
+  );
+}
+
+async function requireJazzToken() {
+  const token = await getJwtFromBetterAuth();
+  if (!token) throw new Error("Better Auth did not issue a Jazz token.");
+  return token;
 }

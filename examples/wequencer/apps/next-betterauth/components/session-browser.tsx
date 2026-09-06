@@ -8,12 +8,14 @@ import { SequencerSession } from "@/components/sequencer-session";
 const TRACK_COLORS = ["#ff7a59", "#f5c451", "#5dd6c0", "#7998ff"];
 const INSTRUMENTS = ["Kick", "Snare", "Closed hat", "Bass"];
 
-export function SessionBrowser({ issuer }: { issuer: string }) {
+export function SessionBrowser() {
   const db = useDb();
   const session = useSession();
-  const author = session?.user;
+  const author = session?.user.account;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
-  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
+  const { data: profiles = [] } = useAll(
+    app.profiles.where({ author: author ?? "00000000-0000-0000-0000-000000000000" }),
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   function createSession() {
@@ -55,16 +57,9 @@ export function SessionBrowser({ issuer }: { issuer: string }) {
   const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0];
   const profileId = profiles[0]?.id;
   if (author && selected && profileId)
-    return (
-      <SequencerSession
-        sessionId={selected.id}
-        author={author}
-        issuer={issuer}
-        profileId={profileId}
-      />
-    );
+    return <SequencerSession sessionId={selected.id} author={author} profileId={profileId} />;
 
-  if (!author) return <p className="loading-state">Opening your Jazz session…</p>;
+  if (!author) return <p className="loading-state">Opening your Jazz account…</p>;
 
   return (
     <section className="session-empty">

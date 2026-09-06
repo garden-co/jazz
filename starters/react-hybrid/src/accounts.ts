@@ -8,7 +8,14 @@ let prepared: Promise<Awaited<ReturnType<typeof createAccountManager>>> | undefi
 export function accounts() {
   if (!appId || !serverUrl)
     throw new Error("VITE_JAZZ_APP_ID and VITE_JAZZ_SERVER_URL must be set");
-  return (prepared ??= createAccountManager({ appId, serverUrl }));
+  if (!prepared) {
+    const attempt = createAccountManager({ appId, serverUrl });
+    prepared = attempt;
+    void attempt.catch(() => {
+      if (prepared === attempt) prepared = undefined;
+    });
+  }
+  return prepared;
 }
 
 export async function getToken(): Promise<string> {

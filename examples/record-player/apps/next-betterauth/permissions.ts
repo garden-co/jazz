@@ -11,34 +11,34 @@ const recordPlayerPermissions = s.definePermissions(
     // everyone can browse them. A production catalog would ordinarily replace
     // these two insert rules with a label/artist membership relation.
     policy.albums.allowRead.where({});
-    policy.albums.allowInsert.where({ $createdBy: session.user });
+    policy.albums.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.tracks.allowRead.where({});
-    policy.tracks.allowInsert.where({ $createdBy: session.user });
+    policy.tracks.allowInsert.where({ "$createdBy.account": session.user.account });
     const canReadPlaylist = (playlistId: RowRefValue) =>
       anyOf([
-        { $createdBy: session.user },
+        { "$createdBy.account": session.user.account },
         policy.invitations.exists.where({
           playlist_id: playlistId,
           // This column carries Jazz's issuer-scoped canonical session user, not a
           // provider-local Better Auth user id. It stays stable across tokens
           // and avoids conflating external account storage with row authorship.
-          subject: session.user,
+          subject: session.user.account,
           status: "accepted",
         }),
       ]);
     const hasEditorInvitation = (playlistId: RowRefValue) =>
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user,
+        subject: session.user.account,
         role: "editor",
         status: "accepted",
       });
     const canEditPlaylist = (playlistId: RowRefValue) =>
-      anyOf([{ $createdBy: session.user }, hasEditorInvitation(playlistId)]);
+      anyOf([{ "$createdBy.account": session.user.account }, hasEditorInvitation(playlistId)]);
 
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
-    policy.playlists.allowUpdate.where({ $createdBy: session.user });
+    policy.playlists.allowUpdate.where({ "$createdBy.account": session.user.account });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
     policy.playlist_entries.allowInsert.where((entry) =>
       anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
@@ -47,12 +47,18 @@ const recordPlayerPermissions = s.definePermissions(
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
-        { subject: session.user },
-        policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+        { subject: session.user.account },
+        policy.playlists.exists.where({
+          id: invite.playlist_id,
+          "$createdBy.account": session.user.account,
+        }),
       ]),
     );
     policy.invitations.allowInsert.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+      policy.playlists.exists.where({
+        id: invite.playlist_id,
+        "$createdBy.account": session.user.account,
+      }),
     );
     // Recipients may perform the one-way pending → accepted transition; every
     // other invitation change (including revoke) remains owner-controlled.
@@ -63,13 +69,19 @@ const recordPlayerPermissions = s.definePermissions(
     policy.invitations.allowUpdate
       .whereOld((invite) =>
         anyOf([
-          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
-          { subject: session.user, status: "pending" },
+          policy.playlists.exists.where({
+            id: invite.playlist_id,
+            "$createdBy.account": session.user.account,
+          }),
+          { subject: session.user.account, status: "pending" },
         ]),
       )
       .whereNew((invite) =>
         anyOf([
-          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          policy.playlists.exists.where({
+            id: invite.playlist_id,
+            "$createdBy.account": session.user.account,
+          }),
           allOf([
             policy.invitations.exists.where({
               id: invite.id,
@@ -78,19 +90,22 @@ const recordPlayerPermissions = s.definePermissions(
               role: invite.role,
               status: "pending",
             }),
-            { subject: session.user, status: "accepted" },
+            { subject: session.user.account, status: "accepted" },
           ]),
         ]),
       );
     policy.invitations.allowDelete.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+      policy.playlists.exists.where({
+        id: invite.playlist_id,
+        "$createdBy.account": session.user.account,
+      }),
     );
-    policy.playback_positions.allowRead.where({ $createdBy: session.user });
+    policy.playback_positions.allowRead.where({ "$createdBy.account": session.user.account });
     policy.playback_positions.allowInsert.always();
     policy.playback_positions.allowUpdate
-      .whereOld({ $createdBy: session.user })
-      .whereNew({ $createdBy: session.user });
-    policy.playback_positions.allowDelete.where({ $createdBy: session.user });
+      .whereOld({ "$createdBy.account": session.user.account })
+      .whereNew({ "$createdBy.account": session.user.account });
+    policy.playback_positions.allowDelete.where({ "$createdBy.account": session.user.account });
   },
 );
 

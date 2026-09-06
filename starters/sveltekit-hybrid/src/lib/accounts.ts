@@ -9,7 +9,14 @@ export function accounts() {
   const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
   if (!appId || !serverUrl)
     throw new Error("PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set");
-  return (prepared ??= createAccountManager({ appId, serverUrl }));
+  if (!prepared) {
+    const attempt = createAccountManager({ appId, serverUrl });
+    prepared = attempt;
+    void attempt.catch(() => {
+      if (prepared === attempt) prepared = undefined;
+    });
+  }
+  return prepared;
 }
 
 export async function credential() {

@@ -4,9 +4,9 @@ import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 const schema = {
   ...betterAuthSchema,
   profiles: s.table({
-    // App-owned identity is the canonical Jazz author, not a provider's raw
-    // user id. The provider's own tables remain private to the backend.
-    author: s.string(),
+    // Stable Jazz account ownership. Provider identities stay inside Better
+    // Auth and are only used while enrolling this account.
+    author: s.uuid(),
     displayName: s.string(),
   }),
   sessions: s.table({
@@ -17,7 +17,7 @@ const schema = {
   session_members: s
     .table({
       session_id: s.ref("sessions"),
-      member_author: s.string(),
+      member_author: s.uuid(),
       role: s.enum("owner", "editor", "viewer"),
     })
     .indexOnly(["session_id", "member_author"]),

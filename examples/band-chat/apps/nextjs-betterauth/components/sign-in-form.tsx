@@ -7,10 +7,23 @@ async function authenticate(_previous: string | null, formData: FormData): Promi
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
   const name = formData.get("name");
-  const result = name
-    ? await authClient.signUp.email({ name: String(name), email, password })
-    : await authClient.signIn.email({ email, password });
-  if (result.error) return result.error.message ?? "Authentication failed";
+  const registering = !!name;
+  // Persist this before Better Auth publishes the new session. The dashboard
+  // provider may render before this form is unmounted.
+  window.sessionStorage.setItem("band-chat-register-jwt", registering ? "1" : "0");
+  let result;
+  try {
+    result = registering
+      ? await authClient.signUp.email({ name: String(name), email, password })
+      : await authClient.signIn.email({ email, password });
+  } catch (cause) {
+    window.sessionStorage.removeItem("band-chat-register-jwt");
+    return cause instanceof Error ? cause.message : "Authentication failed";
+  }
+  if (result.error) {
+    window.sessionStorage.removeItem("band-chat-register-jwt");
+    return result.error.message ?? "Authentication failed";
+  }
   window.location.assign("/dashboard");
   return null;
 }

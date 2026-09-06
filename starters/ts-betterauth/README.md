@@ -58,15 +58,18 @@ Two processes run in development:
 1. **Hono** on port 3001, serving `/api/auth/*` (sign-up, sign-in, token, JWKS).
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
-`src/main.ts` waits for BetterAuth's `useSession` atom to resolve before
-deciding what to mount. If there's no session, the shell renders the sign-in
-form. Once the user signs in, `authClient.$fetch("/token")` is called to fetch a JWT,
-which is passed to `createDb({ jwtToken })`. The Jazz dev server verifies that
-JWT against the JWKS endpoint at `/api/auth/jwks`.
+`src/accounts.ts` prepares an `AccountManager`, including its encrypted local
+storage. `src/jazz-lifecycle.ts` owns exactly one `Db`, opened with the
+manager's opaque account handle. It obtains a fresh Better Auth JWT through
+`authClient.$fetch("/token")` whenever Jazz needs one; the JWT is never stored
+as the account identity.
 
-When the BetterAuth session changes (sign-out, expiry, etc.) the boot loop
-tears down the existing `Db` and rebuilds — same logical flow as the React
-provider, expressed as plain subscription callbacks.
+The initial session and ordinary sign-ins call `loginJWT`; only the explicit
+sign-up/recovery action calls `registerJWT`. Session changes are serialized
+with form actions. Before a sign-out or account change, the old context shuts
+down with `waitForSync: true`; a failed close leaves it usable, and a failed
+account operation reopens the manager's selected handle so the recovery button
+can be retried safely.
 
 ## Extending the schema
 

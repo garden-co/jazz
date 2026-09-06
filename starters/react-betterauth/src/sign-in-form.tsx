@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
+import { useJazzLifecycle } from "./main";
 
 export function SignInForm() {
+  const lifecycle = useJazzLifecycle();
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -15,19 +17,20 @@ export function SignInForm() {
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-    const result =
-      mode === "signup"
-        ? await authClient.signUp.email({
-            name: (form.elements.namedItem("name") as HTMLInputElement).value,
-            email,
-            password,
-          })
-        : await authClient.signIn.email({ email, password });
-
-    setIsPending(false);
-
-    if (result.error) {
-      setError(result.error.message ?? (mode === "signup" ? "Sign-up failed" : "Sign-in failed"));
+    try {
+      await lifecycle.authenticate(mode === "signup", () =>
+        mode === "signup"
+          ? authClient.signUp.email({
+              name: (form.elements.namedItem("name") as HTMLInputElement).value,
+              email,
+              password,
+            })
+          : authClient.signIn.email({ email, password }),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Account setup failed");
+    } finally {
+      setIsPending(false);
     }
   }
 
