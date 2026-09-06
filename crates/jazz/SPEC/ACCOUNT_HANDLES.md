@@ -88,6 +88,15 @@ or claimed through an external credential. The originating node is preserved
 through replication and reopening; relays never replace it with their own ID.
 Persisted system authorship is provenance, not the internal permission-bypass
 capability. Decoding an author must never create that capability.
+Authoritative permission advice on a shared backend carries an immutable
+per-request delegated session binding (principal plus admitted claims) through
+the native and sync boundaries. Only a backend-admitted or scope-isolated relay
+link may carry that binding; ordinary account sessions, administrators, and
+authority links cannot self-delegate, and SYSTEM-shaped row provenance is never
+a fallback permission subject. The advice intent uses the current postcard wire
+shape for this unreleased matched-release alpha; cross-build v1 compatibility
+is intentionally not promised. Native query/control rows retain their existing
+versioned native encodings.
 Derived aggregate results have no originating write and omit author metadata;
 they do not manufacture a system author or expose a nullable author record.
 
