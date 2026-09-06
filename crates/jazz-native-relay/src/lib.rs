@@ -14058,6 +14058,12 @@ mod tests {
         // Internal byte fixtures pin host/OTA compatibility that row-level
         // database assertions cannot observe.
         let cases = [
+            (
+                ForegroundDbCommandRequest::WaitForPendingWrites {
+                    tier: "core".into(),
+                },
+                vec![39, 4, 99, 111, 114, 101],
+            ),
             (ForegroundDbCommandRequest::NativeSessionMetadata, vec![26]),
             (
                 ForegroundDbCommandRequest::WriteState { tx_id: [7; 16] },

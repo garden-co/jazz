@@ -172,4 +172,83 @@ mod tests {
         version[4] = 2;
         assert!(decode(&version).is_err());
     }
+
+    // Each closed tag pins independent bytes; journal replay alone would not
+    // detect an encoder and decoder accidentally changing together.
+    #[test]
+    fn v1_link_revocation_and_founder_bytes_are_pinned() {
+        let a = Principal {
+            issuer: "i".into(),
+            subject: "s".into(),
+        };
+        let b = Principal {
+            issuer: "j".into(),
+            subject: "λ".into(),
+        };
+        let a_bytes = b"\x00\x00\x00\x01i\x00\x00\x00\x01s".as_slice();
+        let b_bytes = b"\x00\x00\x00\x01j\x00\x00\x00\x02\xce\xbb".as_slice();
+        let nonce = Uuid::from_bytes([2; 16]);
+        let now = 0x0102030405060708;
+        let expiry = 0x1112131415161718;
+        let cases = [
+            (
+                AccountCommand::RequestLink {
+                    approver: a.clone(),
+                    candidate: b.clone(),
+                    nonce,
+                    now,
+                    expires_at: expiry,
+                },
+                [
+                    b"JACC\x01\x01".as_slice(),
+                    a_bytes,
+                    b_bytes,
+                    &[2; 16],
+                    b"\x01\x02\x03\x04\x05\x06\x07\x08",
+                    b"\x11\x12\x13\x14\x15\x16\x17\x18",
+                ]
+                .concat(),
+            ),
+            (
+                AccountCommand::AcceptLink {
+                    candidate: b.clone(),
+                    nonce,
+                    now,
+                },
+                [
+                    b"JACC\x01\x02".as_slice(),
+                    b_bytes,
+                    &[2; 16],
+                    b"\x01\x02\x03\x04\x05\x06\x07\x08",
+                ]
+                .concat(),
+            ),
+            (
+                AccountCommand::Revoke {
+                    approver: a.clone(),
+                    target: b,
+                },
+                [b"JACC\x01\x03".as_slice(), a_bytes, b_bytes].concat(),
+            ),
+            // Codec framing does not authenticate a founder; the state machine
+            // separately rejects this external principal for FoundLocalFirst.
+            (
+                AccountCommand::FoundLocalFirst {
+                    principal: a,
+                    app: nonce,
+                },
+                [b"JACC\x01\x04".as_slice(), a_bytes, &[2; 16]].concat(),
+            ),
+        ];
+        for (command, golden) in cases {
+            assert_eq!(encode(&command).unwrap(), golden);
+            assert_eq!(decode(&golden).unwrap(), command);
+            for end in 0..golden.len() {
+                assert!(decode(&golden[..end]).is_err());
+            }
+            let mut trailing = golden;
+            trailing.push(0);
+            assert!(decode(&trailing).is_err());
+        }
+    }
 }

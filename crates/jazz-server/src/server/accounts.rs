@@ -152,3 +152,103 @@ impl Drop for AccountRegistryOwner {
 fn unavailable() -> RegistryError {
     RegistryError::Unavailable("registry owner stopped".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz::account_registry::{AccountError, AccountId};
+    use uuid::Uuid;
+
+    // Internal durable-owner test: HTTP tests cover authentication, while this
+    // test must close and reopen the exact registry root between protocol steps.
+    #[tokio::test]
+    async fn disk_recovery_preserves_pending_links_and_permanent_revoked_assignments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("accounts.rocksdb");
+        let open = || {
+            AccountRegistryOwner::open(Some((
+                Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+                path.clone(),
+            )))
+            .unwrap()
+        };
+        let alice = Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "alice".into(),
+        };
+        let bob = Principal {
+            subject: "bob".into(),
+            ..alice.clone()
+        };
+        let account = AccountId(Uuid::from_u128(1));
+        let nonce = Uuid::from_u128(2);
+        let first = open();
+        first
+            .execute(AccountCommand::Register {
+                principal: alice.clone(),
+                account,
+            })
+            .await
+            .unwrap();
+        first
+            .execute(AccountCommand::RequestLink {
+                approver: alice.clone(),
+                candidate: bob.clone(),
+                nonce,
+                now: 100,
+                expires_at: 200,
+            })
+            .await
+            .unwrap();
+        first.close().unwrap();
+
+        let second = open();
+        assert_eq!(second.login(alice.clone()).await.unwrap().account, account);
+        assert!(matches!(
+            second.login(bob.clone()).await,
+            Err(RegistryError::Decision(AccountError::NotAssigned))
+        ));
+        let accept = AccountCommand::AcceptLink {
+            candidate: bob.clone(),
+            nonce,
+            now: 150,
+        };
+        let linked = second.execute(accept.clone()).await.unwrap();
+        assert!(
+            matches!(linked, AccountCommandResult::Assignment(Assignment { account: id, .. }) if id == account)
+        );
+        second.close().unwrap();
+
+        let third = open();
+        assert_eq!(third.execute(accept.clone()).await.unwrap(), linked);
+        third
+            .execute(AccountCommand::Revoke {
+                approver: alice.clone(),
+                target: bob.clone(),
+            })
+            .await
+            .unwrap();
+        third.close().unwrap();
+
+        let fourth = open();
+        assert_eq!(fourth.login(alice).await.unwrap().account, account);
+        assert!(matches!(
+            fourth.login(bob.clone()).await,
+            Err(RegistryError::Decision(AccountError::NotAuthorized))
+        ));
+        assert!(matches!(
+            fourth.execute(accept).await,
+            Err(RegistryError::Decision(AccountError::NotAuthorized))
+        ));
+        assert!(matches!(
+            fourth
+                .execute(AccountCommand::Register {
+                    principal: bob,
+                    account: AccountId(Uuid::from_u128(3)),
+                })
+                .await,
+            Err(RegistryError::Decision(AccountError::AlreadyAssigned))
+        ));
+        fourth.close().unwrap();
+    }
+}
