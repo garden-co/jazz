@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type AccountHandle, type Db } from "jazz-tools";
+import { createAccountManager } from "../../../../../../packages/jazz-tools/src/accounts/create-account-manager.js";
+import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/accounts/state.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { createDb } from "../../../../../../packages/jazz-tools/src/runtime/default-create-db.js";
+import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import {
   sleep,
   TestCleanup,

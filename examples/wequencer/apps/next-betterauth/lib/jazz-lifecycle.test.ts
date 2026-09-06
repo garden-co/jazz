@@ -11,7 +11,7 @@ function client(events: string[], id: string, failShutdown = false) {
       events.push(`shutdown:${id}:${waitForSync}`);
       if (failShutdown) throw new Error(`sync failed:${id}`);
     }),
-  } as never;
+  };
 }
 
 describe("example-owned account lifecycle", () => {
@@ -28,7 +28,7 @@ describe("example-owned account lifecycle", () => {
       } as never,
       async (next) => {
         events.push(`open:${next.id}`);
-        return client(events, next.id);
+        return client(events, next.id) as never;
       },
       () => {},
     );
@@ -49,7 +49,7 @@ describe("example-owned account lifecycle", () => {
       { getLoggedIn: () => selected } as never,
       async (next) => {
         events.push(`open:${next.id}`);
-        return client(events, next.id);
+        return client(events, next.id) as never;
       },
       (next) => published.push(next ? "client" : "none"),
     );
@@ -72,7 +72,7 @@ describe("example-owned account lifecycle", () => {
     const current = client(events, "A", true);
     const lifecycle = new JazzLifecycle(
       { getLoggedIn: () => selected, logout: vi.fn() } as never,
-      async () => current,
+      async () => current as never,
       (next) => published.push(next ? "client" : "none"),
     );
 
@@ -91,7 +91,7 @@ describe("example-owned account lifecycle", () => {
     const current = client(events, "A");
     const lifecycle = new JazzLifecycle(
       { getLoggedIn: () => account("A") } as never,
-      async () => current,
+      async () => current as never,
       () => {},
     );
 
@@ -110,8 +110,8 @@ describe("example-owned account lifecycle", () => {
     const lifecycle = new JazzLifecycle(
       { getLoggedIn: () => account("A") } as never,
       () =>
-        new Promise((resolve) => {
-          resolveOpen = resolve;
+        new Promise<never>((resolve) => {
+          resolveOpen = (next) => resolve(next as never);
         }),
       (next) => events.push(next ? "publish" : "clear"),
     );
@@ -124,7 +124,7 @@ describe("example-owned account lifecycle", () => {
         events.push(`shutdown:A:${waitForSync}`);
         if (waitForSync) throw new Error("stale client must not request sync");
       }),
-    } as never;
+    };
     resolveOpen(stale);
     await opening;
 

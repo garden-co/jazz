@@ -10,7 +10,7 @@ function client(events: string[], id: string) {
     shutdown: vi.fn(async ({ waitForSync }: { waitForSync?: boolean } = {}) =>
       events.push(`shutdown:${id}:${waitForSync}`),
     ),
-  } as never;
+  };
 }
 
 describe("BigLabel account lifecycle", () => {
@@ -19,7 +19,7 @@ describe("BigLabel account lifecycle", () => {
     const current = client(events, "A");
     const lifecycle = new JazzLifecycle(
       { getLoggedIn: () => account("A") } as never,
-      async () => current,
+      async () => current as never,
       () => {},
     );
 
@@ -37,7 +37,7 @@ describe("BigLabel account lifecycle", () => {
       { getLoggedIn: () => selected } as never,
       async (next) => {
         events.push(`open:${next.id}`);
-        return client(events, next.id);
+        return client(events, next.id) as never;
       },
       () => {},
     );

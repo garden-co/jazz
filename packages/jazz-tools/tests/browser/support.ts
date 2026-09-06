@@ -6,6 +6,7 @@
  */
 
 import { createDb } from "../../src/runtime/default-create-db.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
@@ -237,12 +238,14 @@ export async function createSyncedDb(
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
   const { appId, serverUrl } = testingServer ?? (await getJazzServerInfo());
+  const accounts = await createAccountManager({ appId, serverUrl });
+  const account = accounts.restoreLocalFirst(localFirstSecret);
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
-      secret: localFirstSecret,
+      account,
     }),
   );
 }
