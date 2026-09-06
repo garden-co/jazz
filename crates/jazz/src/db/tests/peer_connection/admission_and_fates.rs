@@ -1832,6 +1832,42 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
 }
 
 #[test]
+fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
+    // Internal protocol-admission test: a raw intent is the only way to plant
+    // a forged delegation field; public callers cannot manufacture it.
+    let schema = owner_read_schema();
+    let ordinary = AuthorSubject::for_test_bytes([0xa0; 16]);
+    let forged = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut client_transport, server_transport) = duplex_with_admitted_session_context(
+        ordinary,
+        NodeUuid::from_bytes([0xa0; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let subscriber = server.accept_subscriber(server_transport, ordinary);
+    client_transport
+        .send(SyncMessage::AuthorizationScopeIntent {
+            request_id: PermissionAdviceRequestId([0xa1; 16]),
+            action: PermissionAdviceAction::Read {
+                table: "todos".to_owned(),
+                row: row(1),
+            },
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: forged,
+                claims: BTreeMap::new(),
+            }),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an ordinary session link cannot turn a forged delegation into authority advice"
+    );
+}
+
+#[test]
 fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
