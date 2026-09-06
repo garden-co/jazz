@@ -487,7 +487,16 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false).await
+        self.below_global_transaction_ids(Some(author), false, false).await
+    }
+
+    /// A Global synchronization barrier also needs the authority timestamp.
+    /// A Global durability observation alone is not a completed write receipt.
+    pub(crate) async fn synchronizing_transaction_ids_for_author(
+        &mut self,
+        author: AuthorSubject,
+    ) -> Result<Vec<TxId>, Error> {
+        self.below_global_transaction_ids(Some(author), false, true).await
     }
 
     /// Edge-host recovery includes accepted writes from every originating
@@ -496,13 +505,14 @@ where
     pub(crate) async fn pending_edge_authority_transaction_ids(
         &mut self,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(None, true).await
+        self.below_global_transaction_ids(None, true, false).await
     }
 
     async fn below_global_transaction_ids(
         &mut self,
         author: Option<AuthorSubject>,
         edge_only: bool,
+        include_missing_authority_timestamp: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
         for raw in self
@@ -526,7 +536,8 @@ where
                 || if edge_only {
                     fate != 1 || durability != DurabilityTier::Edge
                 } else {
-                    !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global
+                    !(fate == 0 || fate == 1)
+                        || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
                 }
             {
                 continue;

@@ -231,7 +231,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
             "members",
             [
                 public_outer_eq("room", "id"),
-                public_session_eq("author", &["user"]),
+                public_session_eq("author", &["user", "identity", "subject"]),
             ],
         ),
     ]);
@@ -331,7 +331,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
             row(0x76),
             BTreeMap::from([
                 ("room".into(), Value::Uuid(room.0)),
-                ("author".into(), Value::String(bob.canonical().into())),
+                ("author".into(), Value::String(bob.principal_parts().1)),
             ]),
         )
         .unwrap();

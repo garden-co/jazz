@@ -150,11 +150,134 @@ fn failure(error: RegistryError) -> Failure {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AccountResponse {
     account: Uuid,
     identity: Principal,
     generation: u64,
+}
+
+/// Read-only service lookup. An edge must authenticate the user independently;
+/// service authority can resolve an assignment but cannot create or link one.
+pub(super) async fn resolve_for_edge(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<RequestLink>,
+) -> Result<Json<AccountResponse>, Failure> {
+    crate::middleware::auth::validate_admin_secret(
+        headers
+            .get("x-jazz-admin-secret")
+            .and_then(|value| value.to_str().ok()),
+        &state.auth_config,
+    )?;
+    let assignment = owner(&state)?
+        .login(request.identity.clone())
+        .await
+        .map_err(failure)?;
+    Ok(response(request.identity, assignment))
+}
+
+async fn read_upstream_assignment(
+    request: reqwest::RequestBuilder,
+    principal: &Principal,
+) -> Result<AccountId, String> {
+    let mut response = request
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| "account registry unavailable")?;
+    if !response.status().is_success() {
+        return Err("account identity not admitted by core".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "account registry unavailable")?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+            return Err("invalid account registry response".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let assignment: AccountResponse =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid account registry response")?;
+    if assignment.identity != *principal {
+        return Err("account registry returned another identity".into());
+    }
+    Ok(AccountId(assignment.account))
+}
+
+pub(super) async fn resolve_assignment(
+    state: &ServerState,
+    principal: Principal,
+) -> Result<AccountId, String> {
+    if let Some(registry) = &state.accounts {
+        return registry
+            .login(principal)
+            .await
+            .map(|value| value.account)
+            .map_err(|error| error.to_string());
+    }
+    let base = state
+        .upstream_http_url
+        .as_deref()
+        .ok_or("account registry unavailable")?;
+    let secret = state
+        .auth_config
+        .admin_secret
+        .as_deref()
+        .ok_or("edge registry authority unavailable")?;
+    let request = state
+        .http_client
+        .post(format!(
+            "{}/apps/{}/admin/accounts/resolve",
+            base.trim_end_matches('/'),
+            state.app_id,
+        ))
+        .header("x-jazz-admin-secret", secret)
+        .json(&serde_json::json!({ "identity": principal }));
+    read_upstream_assignment(request, &principal).await
+}
+
+/// Offline local founding becomes durable on the first authenticated connection.
+/// An edge forwards the actual founder's proof, never its own service secret.
+pub(super) async fn admit_local_founder(
+    state: &ServerState,
+    principal: &Principal,
+    headers: &HeaderMap,
+) -> Result<(), String> {
+    if let Some(registry) = &state.accounts {
+        registry
+            .execute(AccountCommand::FoundLocalFirst {
+                principal: principal.clone(),
+                app: *state.app_id.uuid(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let base = state
+        .upstream_http_url
+        .as_deref()
+        .ok_or("account registry unavailable")?;
+    let proof = headers
+        .get("authorization")
+        .ok_or("local founding requires bearer proof")?;
+    if headers.contains_key("x-jazz-session") {
+        return Err("local founding requires the founder's own proof".into());
+    }
+    let request = state
+        .http_client
+        .post(format!(
+            "{}/apps/{}/accounts/found-local-first",
+            base.trim_end_matches('/'),
+            state.app_id,
+        ))
+        .header("authorization", proof);
+    read_upstream_assignment(request, principal).await?;
+    Ok(())
 }
 fn response(identity: Principal, assignment: Assignment) -> Json<AccountResponse> {
     Json(AccountResponse {
@@ -303,6 +426,98 @@ pub(super) async fn revoke(
 mod tests {
     use super::*;
     use crate::server::testing::{JazzServer, TestJwtIssuer};
+
+    /// Exercise public HTTP enrollment through an actual edge/core topology.
+    /// Service lookup is deliberately read-only and rejects user credentials.
+    #[tokio::test]
+    async fn edge_forwards_identity_proof_and_core_resolves_revocation() {
+        let core = JazzServer::start().await;
+        let edge = JazzServer::builder()
+            .with_app_id(core.app_id())
+            .with_upstream_url(core.base_url())
+            .start()
+            .await;
+        let client = reqwest::Client::new();
+        let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let bob = TestJwtIssuer::jwt_for_user("bob");
+        let identity = serde_json::json!({"issuer": "urn:jazz:test", "subject": "bob"});
+        let resolve = format!(
+            "{}/apps/{}/admin/accounts/resolve",
+            core.base_url(),
+            core.app_id()
+        );
+        let denied = client
+            .post(&resolve)
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({"identity": identity}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let registered = client
+            .post(format!("{base}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::OK);
+        let account: AccountResponse = registered.json().await.unwrap();
+        let requested = client
+            .post(format!("{base}/links/request"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({"identity": identity}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(requested.status(), StatusCode::OK);
+        let intent: serde_json::Value = requested.json().await.unwrap();
+        let accepted = client
+            .post(format!("{base}/links/accept"))
+            .bearer_auth(&bob)
+            .json(&serde_json::json!({"nonce": intent["nonce"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let linked: AccountResponse = accepted.json().await.unwrap();
+        assert_eq!(linked.account, account.account);
+        let active = client
+            .post(&resolve)
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({"identity": identity}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(active.status(), StatusCode::OK);
+        let resolved: AccountResponse = active.json().await.unwrap();
+        assert_eq!(resolved.account, account.account);
+        let revoked = client
+            .post(format!("{base}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({"identity": identity}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        let inactive = client
+            .post(&resolve)
+            .header("x-jazz-admin-secret", core.admin_secret())
+            .json(&serde_json::json!({"identity": identity}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(inactive.status(), StatusCode::FORBIDDEN);
+        let login = client
+            .post(format!("{base}/login"))
+            .bearer_auth(&bob)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::FORBIDDEN);
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
 
     /// Alice registers, approves Bob, and Bob accepts using ordinary JWTs.
     /// Mallory cannot accept Bob's nonce. Revocation survives nonce replay.

@@ -346,24 +346,11 @@ async fn ws_admission(
             issuer: session.issuer.clone(),
             subject: session.user_id.clone(),
         };
-        let registry = state
-            .accounts
-            .as_ref()
-            .ok_or("account admission requires the core authority")?;
         if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
-            registry
-                .execute(jazz::account_registry::AccountCommand::FoundLocalFirst {
-                    principal: principal.clone(),
-                    app: *state.app_id.uuid(),
-                })
-                .await
-                .map_err(|error| error.to_string())?;
+            super::accounts::admit_local_founder(state, &principal, &headers).await?;
         }
-        let assignment = registry
-            .login(principal)
-            .await
-            .map_err(|error| error.to_string())?;
-        if assignment.account != account {
+        let assignment = super::accounts::resolve_assignment(state, principal).await?;
+        if assignment != account {
             return Err("account does not match authenticated identity assignment".into());
         }
         session.account_id = Some(account);
@@ -385,14 +372,13 @@ async fn account_still_admitted(state: &ServerState, identity: Option<AuthorSubj
     let Some(account) = identity.account_id() else {
         return false;
     };
-    let Some(registry) = &state.accounts else {
-        return false;
-    };
     let (issuer, subject) = identity.principal_parts();
-    registry
-        .login(jazz::account_registry::Principal { issuer, subject })
-        .await
-        .is_ok_and(|assignment| assignment.account == account)
+    super::accounts::resolve_assignment(
+        state,
+        jazz::account_registry::Principal { issuer, subject },
+    )
+    .await
+    .is_ok_and(|assignment| assignment == account)
 }
 
 fn session_claims(
@@ -887,7 +873,12 @@ async fn handle_ws_connection(
         tokio::select! {
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
-                else { std::future::pending::<()>().await; }
+                else if account_identity.is_some() {
+                    // Edges have no local registry watch. Recheck idle sessions,
+                    // as well as every inbound/outbound operation, without an
+                    // admission cache that could outlive revocation.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else { std::future::pending::<()>().await; }
             } => {
                 if !account_still_admitted(&state, account_identity).await {
                     close_ws_for_policy(&mut socket, "account identity revoked").await;

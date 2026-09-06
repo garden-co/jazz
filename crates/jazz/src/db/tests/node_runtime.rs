@@ -1287,6 +1287,94 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
     );
 }
 
+/// Internal receipt injection is needed to separate durability from authority
+/// time; public transport normally delivers both fields in the same fate.
+#[test]
+fn pending_writes_barrier_waits_for_global_authority_timestamp() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let client = open_db(0xc2, author, &schema);
+    let write = client
+        .insert(
+            "todos",
+            cells("graceful handoff", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let mut barrier = std::pin::pin!(client.wait_for_pending_writes(DurabilityTier::Global));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    // Let asynchronous storage and the normal scheduler run before deciding
+    // this is a receipt wait, rather than merely an unfinished index read.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        client.tick().unwrap();
+        assert!(
+            std::future::Future::poll(barrier.as_mut(), &mut context).is_pending(),
+            "Global durability without authority time must not permit context handoff"
+        );
+        if client
+            .node
+            .write_state_waiters
+            .borrow()
+            .contains_key(&tx_id)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "barrier must reach the transaction receipt wait"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(8)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    // This direct node injection bypasses PeerConnection's ordinary receipt
+    // notification. Deliver that wake explicitly; the barrier still owns and
+    // evaluates the actual transaction completion predicate.
+    if let Some(waiters) = client.node.write_state_waiters.borrow_mut().remove(&tx_id) {
+        for waiter in waiters {
+            let crate::db::WriteStateWaiterNotify::Future(sender) = waiter.notify;
+            let _ = sender.send(());
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        client.tick().unwrap();
+        if let std::task::Poll::Ready(result) =
+            std::future::Future::poll(barrier.as_mut(), &mut context)
+        {
+            result.expect("complete authority receipt releases the handoff");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "complete authority receipt must release the handoff"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();

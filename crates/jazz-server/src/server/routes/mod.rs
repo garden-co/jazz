@@ -91,6 +91,7 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
+        .route("/accounts/resolve", post(accounts::resolve_for_edge))
         .route("/schemas", post(publish_schema_handler))
         .route("/schema-connectivity", get(schema_connectivity_handler))
         .route("/permissions/head", get(permissions_head_handler))

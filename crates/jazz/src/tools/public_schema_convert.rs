@@ -4064,7 +4064,11 @@ mod tests {
                                     PolicyExpr::Cmp {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
-                                        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+                                        value: PolicyValue::SessionRef(vec![
+                                            "user".to_owned(),
+                                            "identity".to_owned(),
+                                            "subject".to_owned(),
+                                        ]),
                                     },
                                     PolicyExpr::Cmp {
                                         column: "role".to_owned(),

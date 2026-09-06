@@ -6146,9 +6146,9 @@ mod tests {
             .create(&[
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(high), tx_id_value(low)]),
-                Value::String(author.canonical().to_owned()),
+                author.to_value(),
                 Value::U64(7),
-                Value::String(author.canonical().to_owned()),
+                author.to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),

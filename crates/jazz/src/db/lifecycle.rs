@@ -855,7 +855,7 @@ where
         self.node.settle_local_publications().await?;
         let pending = {
             let mut node = self.node.node.lock().await;
-            node.pending_transaction_ids_for_author(self.identity.author)
+            node.synchronizing_transaction_ids_for_author(self.identity.author)
                 .await?
         };
         for tx_id in pending {

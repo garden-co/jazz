@@ -7,18 +7,18 @@ fn project_preserves_logical_binding_fields() {
     let descriptor = records::RecordDescriptor::new([
         ("row_uuid".to_owned(), records::ValueType::Uuid),
         ("user_check".to_owned(), records::ValueType::Bool),
-        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdBy".to_owned(), AuthorSubject::value_type()),
         ("$createdAt".to_owned(), records::ValueType::U64),
-        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedBy".to_owned(), AuthorSubject::value_type()),
         ("$updatedAt".to_owned(), records::ValueType::U64),
     ]);
     let raw = descriptor
         .create(&[
             Value::Uuid(row(0x6d).0),
             Value::Bool(true),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(10),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(20),
         ])
         .unwrap();
@@ -51,18 +51,18 @@ fn project_keeps_literal_aggregate_shaped_column_names() {
         .with_identity(records::FieldIdentity::Name(
             "__jazz_aggregate_foo".to_owned(),
         )),
-        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
         records::DescriptorField::new("$createdAt", records::ValueType::U64),
-        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
         records::DescriptorField::new("$updatedAt", records::ValueType::U64),
     ]);
     let raw = descriptor
         .create(&[
             Value::Uuid(row(0x70).0),
             Value::U64(9),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(10),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(20),
         ])
         .unwrap();
@@ -250,9 +250,9 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     ("branch_key".to_owned(), records::ValueType::Bytes),
                     ("row_uuid".to_owned(), records::ValueType::Uuid),
                     ("schema_version".to_owned(), records::ValueType::U64),
-                    ("created_by".to_owned(), records::ValueType::String),
+                    ("created_by".to_owned(), AuthorSubject::value_type()),
                     ("created_at".to_owned(), records::ValueType::U64),
-                    ("updated_by".to_owned(), records::ValueType::String),
+                    ("updated_by".to_owned(), AuthorSubject::value_type()),
                     ("updated_at".to_owned(), records::ValueType::U64),
                     (user_column_field("title"), records::ValueType::String),
                 ]),
@@ -260,9 +260,9 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     Value::Bytes(Vec::new()),
                     Value::Uuid(row_uuid.0),
                     Value::U64(1),
-                    Value::String(created_by.canonical().to_owned()),
+                    created_by.to_value(),
                     Value::U64(created_at),
-                    Value::String(updated_by.canonical().to_owned()),
+                    updated_by.to_value(),
                     Value::U64(updated_at),
                     Value::String(title.to_owned()),
                 ],
@@ -272,17 +272,17 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                 records::RecordDescriptor::new([
                     ("row_uuid".to_owned(), records::ValueType::Uuid),
                     ("title".to_owned(), records::ValueType::String),
-                    ("$createdBy".to_owned(), records::ValueType::String),
+                    ("$createdBy".to_owned(), AuthorSubject::value_type()),
                     ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::String),
+                    ("$updatedBy".to_owned(), AuthorSubject::value_type()),
                     ("$updatedAt".to_owned(), records::ValueType::U64),
                 ]),
                 vec![
                     Value::Uuid(row_uuid.0),
                     Value::String(title.to_owned()),
-                    Value::String(created_by.canonical().to_owned()),
+                    created_by.to_value(),
                     Value::U64(created_at),
-                    Value::String(updated_by.canonical().to_owned()),
+                    updated_by.to_value(),
                     Value::U64(updated_at),
                 ],
             )
@@ -313,32 +313,32 @@ fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() 
         ("branch_key".to_owned(), records::ValueType::Bytes),
         ("row_uuid".to_owned(), records::ValueType::Uuid),
         ("schema_version".to_owned(), records::ValueType::U64),
-        ("created_by".to_owned(), records::ValueType::String),
+        ("created_by".to_owned(), AuthorSubject::value_type()),
         ("created_at".to_owned(), records::ValueType::U64),
-        ("updated_by".to_owned(), records::ValueType::String),
+        ("updated_by".to_owned(), AuthorSubject::value_type()),
         ("updated_at".to_owned(), records::ValueType::U64),
     ];
     let mut physical_values = vec![
         Value::Bytes(Vec::new()),
         Value::Uuid(row_uuid.0),
         Value::U64(1),
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        AuthorSubject::SYSTEM.to_value(),
         Value::U64(10),
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        AuthorSubject::SYSTEM.to_value(),
         Value::U64(20),
     ];
     let mut public_fields = vec![
         ("row_uuid".to_owned(), records::ValueType::Uuid),
-        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdBy".to_owned(), AuthorSubject::value_type()),
         ("$createdAt".to_owned(), records::ValueType::U64),
-        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedBy".to_owned(), AuthorSubject::value_type()),
         ("$updatedAt".to_owned(), records::ValueType::U64),
     ];
     let mut public_values = vec![
         Value::Uuid(row_uuid.0),
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        AuthorSubject::SYSTEM.to_value(),
         Value::U64(10),
-        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        AuthorSubject::SYSTEM.to_value(),
         Value::U64(20),
     ];
     for idx in 0..CELL_COUNT {
@@ -375,9 +375,9 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
                         .with_identity(records::FieldIdentity::Name(logical.to_owned()))
                 }))
                 .chain([
-                    records::DescriptorField::new("$createdBy", records::ValueType::String),
+                    records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
                     records::DescriptorField::new("$createdAt", records::ValueType::U64),
-                    records::DescriptorField::new("$updatedBy", records::ValueType::String),
+                    records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
                     records::DescriptorField::new("$updatedAt", records::ValueType::U64),
                 ]),
         );
@@ -385,9 +385,9 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
             .into_iter()
             .chain(values)
             .chain([
-                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                AuthorSubject::SYSTEM.to_value(),
                 Value::U64(10),
-                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                AuthorSubject::SYSTEM.to_value(),
                 Value::U64(20),
             ])
             .collect::<Vec<_>>();
@@ -435,9 +435,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
             user_column_field("user___jazz_aggregate_foo"),
             records::ValueType::U64,
         ).with_identity(records::FieldIdentity::Name("user___jazz_aggregate_foo".to_owned())),
-        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdBy", AuthorSubject::value_type()),
         records::DescriptorField::new("$createdAt", records::ValueType::U64),
-        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedBy", AuthorSubject::value_type()),
         records::DescriptorField::new("$updatedAt", records::ValueType::U64),
     ]);
     let raw = descriptor
@@ -445,9 +445,9 @@ fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
             Value::Uuid(row(0x71).0),
             Value::U64(2),
             Value::U64(7),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(10),
-            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            AuthorSubject::SYSTEM.to_value(),
             Value::U64(20),
         ])
         .unwrap();

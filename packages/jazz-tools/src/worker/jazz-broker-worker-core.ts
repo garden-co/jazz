@@ -1222,13 +1222,29 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   }
   if (message.type === "close") {
     const releaseWhenIdle = peer.context.peers.size === 1 && message.releaseContext;
-    if (message.id !== undefined) result(peer, message.id);
     // The requester owns graceful port closure. Closing this endpoint in the
     // same task as the acknowledgement can discard that queued message in
     // WebKit, leaving shutdown pending forever. Detach runtime ownership now;
     // the client closes both ends after it observes the result.
     closeTab(peer.context, peer.tabId, false);
-    if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
+    try {
+      if (releaseWhenIdle) await releaseIdleContext(peer.context);
+      // The peer is already detached, so result() would intentionally ignore it.
+      // Acknowledge only after its last runtime has released the physical root:
+      // an immediately linked identity may now open that root with a new auth
+      // fingerprint without racing the former 50ms idle-release timer.
+      if (message.id !== undefined) post(peer.port, { type: "result", id: message.id });
+      if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
+    } catch (error) {
+      if (message.id !== undefined)
+        post(peer.port, {
+          type: "result",
+          id: message.id,
+          error: serializeBrowserRelayError(
+            error instanceof Error ? error : new Error(String(error)),
+          ),
+        });
+    }
     return;
   }
   if (message.type === "diagnostic-query-coverage") {

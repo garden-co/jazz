@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { resetClientRegistryForTest, acquireClient, releaseClient } from "./client-registry.js";
 
 function fakeClient() {
@@ -320,14 +321,14 @@ describe("graceful synchronization before shutdown", () => {
   it("preserves the same owner when synchronization fails and lets it retry", async () => {
     const shutdown = vi
       .fn()
-      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new GracefulShutdownSyncError(new Error("offline")))
       .mockResolvedValue(undefined);
     const client = { shutdown };
     const create = vi.fn(async () => client);
     const holder = {};
     await acquireClient("graceful", create, holder);
     await expect(releaseClient("graceful", holder, { waitForSync: true })).rejects.toThrow(
-      "offline",
+      "context remains open",
     );
     expect(await acquireClient("graceful", create, holder)).toBe(client);
     expect(create).toHaveBeenCalledOnce();
@@ -350,5 +351,46 @@ describe("graceful synchronization before shutdown", () => {
     await releaseClient("shared-graceful", second);
     await releaseClient("shared-graceful", first, { waitForSync: true });
     expect(client.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it("retains the usable owner after a racing acquire observes a failed sync wait", async () => {
+    let rejectSync!: (error: Error) => void;
+    const client = {
+      shutdown: vi.fn(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectSync = reject;
+          }),
+      ),
+    };
+    const create = vi.fn(async () => client);
+    const holder = {};
+    await acquireClient("sync-race", create, holder);
+    const release = releaseClient("sync-race", holder, { waitForSync: true });
+    const racing = acquireClient("sync-race", create, {});
+    await Promise.resolve();
+    const failure = new GracefulShutdownSyncError(new Error("offline"));
+    rejectSync(failure);
+    await expect(release).rejects.toBe(failure);
+    await expect(racing).rejects.toBe(failure);
+    expect(await acquireClient("sync-race", create, holder)).toBe(client);
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("blocks replacement when teardown fails after a successful sync wait", async () => {
+    const failure = new Error("storage close failed");
+    const client = {
+      shutdown: vi.fn(async () => {
+        throw failure;
+      }),
+    };
+    const create = vi.fn(async () => client);
+    const holder = {};
+    await acquireClient("close-failure", create, holder);
+    await expect(releaseClient("close-failure", holder, { waitForSync: true })).rejects.toBe(
+      failure,
+    );
+    await expect(acquireClient("close-failure", create, {})).rejects.toBe(failure);
+    expect(create).toHaveBeenCalledOnce();
   });
 });

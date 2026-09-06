@@ -5057,9 +5057,9 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), ValueType::String),
+                ("$createdBy".to_owned(), AuthorSubject::value_type()),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::String),
+                ("$updatedBy".to_owned(), AuthorSubject::value_type()),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),

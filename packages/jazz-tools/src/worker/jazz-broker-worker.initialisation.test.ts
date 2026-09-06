@@ -424,6 +424,7 @@ function enabledTelemetryOptions(dbName: string): BrowserWorkerInitOptions {
 async function connect(
   initOptions: BrowserWorkerInitOptions,
   tabId: string,
+  fingerprint = "shared-fingerprint",
 ): Promise<{ outcome: RuntimeOutcome; port: TestPort }> {
   const port = new TestPort();
   const outcome = port.waitForOutcome();
@@ -435,7 +436,7 @@ async function connect(
   port.emitMessage({
     type: "connect-runtime",
     tabId,
-    fingerprint: "shared-fingerprint",
+    fingerprint,
     options: initOptions,
   });
   return { outcome: await outcome, port };
@@ -649,6 +650,23 @@ describe("broker worker context initialization", () => {
       expect.objectContaining({ type: "foreground-node-lease-ready" }),
     );
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
+  });
+
+  it("can immediately reopen an account root for a linked identity after close acknowledgement", async () => {
+    const initial = options("linked-account-handoff");
+    const first = await connect(initial, "identity-a", "identity-a-fingerprint");
+    await initializeFollower(first.port, 1);
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    first.port.emitMessage({ type: "close", id: 2, releaseContext: true });
+    await expect(closed).resolves.toEqual({ type: "result", id: 2 });
+    const second = await connect(
+      { ...initial, authSessionKey: "linked-identity-b", author: new Uint8Array([3]) },
+      "identity-b",
+      "identity-b-fingerprint",
+    );
+    expect(second.outcome.type).toBe("runtime-ready");
+    expect(mocks.runtimes[0]?.discard).toHaveBeenCalledOnce();
+    expect(mocks.runtimes).toHaveLength(2);
   });
 
   it("does not admit a lease probe after worker termination is acknowledged", async () => {
