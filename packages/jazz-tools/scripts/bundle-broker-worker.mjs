@@ -15,8 +15,9 @@ const correctnessArtifactRun = process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1"
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 if (correctnessArtifactRun && !sealedWasmPackage)
   throw new Error("sealed correctness consumer is missing its admitted WASM package");
-const wasmSource = sealedWasmPackage
-  ? resolve(sealedWasmPackage, "jazz_wasm_bg.wasm")
+const correctnessWasmPackage = correctnessArtifactRun ? sealedWasmPackage : undefined;
+const wasmSource = correctnessWasmPackage
+  ? resolve(correctnessWasmPackage, "jazz_wasm_bg.wasm")
   : fileURLToPath(new URL("../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm", import.meta.url));
 
 export function brokerWorkerOutputDir(args = process.argv.slice(2)) {
@@ -57,7 +58,9 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir) {
       // Correctness consumers pin both wasm-bindgen glue and the binary.  A
       // binary-only override would still let esbuild follow a mutable package
       // pointer for the JS half of the ABI pair.
-      alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+      alias: correctnessWasmPackage
+        ? { "jazz-wasm": resolve(correctnessWasmPackage, "jazz_wasm.js") }
+        : {},
       bundle: true,
       format: "esm",
       platform: "browser",
