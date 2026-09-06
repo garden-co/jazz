@@ -13,12 +13,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
-import { schema as s } from "../../src/index.js";
+import { createAccountManager, schema as s, type DbConfig } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
+import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
-import { type Db, type DbConfig } from "../../src/runtime/db.js";
+import { type Db } from "../../src/runtime/db.js";
 import {
+  INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
@@ -87,7 +89,11 @@ describe("browser Jazz storage compatibility corpus", () => {
     pinnedCorpusPhase = `${stage}:start`;
     receipt(pinnedCorpusPhase);
     try {
-      const result = await operation();
+      const result = await withTimeout(
+        operation(),
+        15_000,
+        `browser corpus phase ${stage} stalled`,
+      );
       pinnedCorpusPhase = `${stage}:done`;
       receipt(pinnedCorpusPhase);
       return result;
@@ -100,7 +106,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
   async function shutdownTrackedDb(db: Db, label: string): Promise<void> {
     receipt(`shutdown:${label}:start; pinned-phase=${pinnedCorpusPhase}`);
-    await db.shutdown();
+    await withTimeout(db.shutdown(), 5_000, `browser corpus shutdown ${label} stalled`);
     receipt(`shutdown:${label}:done; pinned-phase=${pinnedCorpusPhase}`);
     openDbLabels.delete(db);
   }
@@ -133,7 +139,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       permissions,
     });
     const dbName = uniqueDbName("browser-storage-current-producer");
-    const config = persistentConfig(
+    const config = await persistentConfig(
       dbName,
       "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       server,
@@ -207,27 +213,45 @@ describe("browser Jazz storage compatibility corpus", () => {
   it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
     pinnedCorpusPhase = "pinned-test:start";
     receipt(pinnedCorpusPhase);
-    const server = await pinnedPhase("server-info", () =>
-      getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96"),
+    const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
+    const owner = JSON.parse(
+      rawManifest(rawBeforeReadOnlyInspection).find(
+        ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+      )![1] as string,
     );
-    await pinnedPhase("deploy", () =>
-      deploy({
-        appId: server.appId,
-        serverUrl: server.serverUrl,
-        adminSecret: server.adminSecret,
-        schema: app.wasmSchema,
-        permissions,
-      }),
-    );
-
+    expect(owner).toMatchObject({
+      version: 1,
+      appId: "ba96582c-7167-5f52-ba63-3ebefe1c2b96",
+      env: "dev",
+      auth: { kind: "account" },
+    });
+    const registry = new URL(owner.auth.registry);
+    const registrySuffix = `/apps/${owner.appId}/accounts`;
+    expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
+    const serverBase = new URL(registry);
+    serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
+    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
+    // Registry authority is part of the stored owner. Reopen under the exact
+    // producer authority, even though that test server no longer exists. A
+    // newly allocated test-server port is a different account namespace.
+    const accounts = await createAccountManager({
+      appId: owner.appId,
+      serverUrl: serverBase.href,
+    });
     const dbName = "browser-storage-compat-historical-root-v1";
     const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
-    const config = persistentConfig(dbName, secret, server);
-    expect(server.appId).toBe("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
-    // `secret` is resolved to a local-first session during public Db creation,
-    // so the pre-auth config's physical-name helper points at the anonymous
-    // root. Provision once through the public path to identify the actual
-    // principal-scoped root before installing the historical receipt.
+    const account = accounts.restoreLocalFirst(secret);
+    expect(account.id).toBe(owner.auth.account);
+    // Omit serverUrl on the context: every pinned read and append is local,
+    // including the first open, so upstream cannot repair a missing page.
+    const config: DbConfig = {
+      appId: owner.appId,
+      account,
+      driver: { type: "persistent", dbName },
+    };
+    // Prepare the real key-bound account before creating a context. Provision
+    // once through the public path to identify its account-scoped physical root
+    // before installing the pinned receipt.
     const bootstrap = await pinnedPhase("bootstrap-open", () =>
       openPersistentDb(config, "pinned-bootstrap"),
     );
@@ -235,7 +259,6 @@ describe("browser Jazz storage compatibility corpus", () => {
     await pinnedPhase("bootstrap-shutdown", () => shutdownTrackedDb(bootstrap, "pinned-bootstrap"));
     openDbs.splice(openDbs.indexOf(bootstrap), 1);
     await pinnedPhase("bootstrap-settle", () => sleep(100));
-    const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
     await pinnedPhase("install-pinned-records", () =>
       installRawRecords(physicalDbName, rawBeforeReadOnlyInspection),
     );
@@ -330,7 +353,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     // Network isolation makes this a persistence receipt: the server cannot
     // repair lost current pages before the post-reopen assertions.
-    await pinnedPhase("block-network", () => blockJazzServerNetwork(server.serverUrl));
+    await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
     try {
       db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
       expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
@@ -367,7 +390,7 @@ describe("browser Jazz storage compatibility corpus", () => {
         mixedMain.find((document) => document.title === "current writer document")?.projectId,
       ).toBe(currentProject!.id);
     } finally {
-      await pinnedPhase("unblock-network", () => unblockJazzServerNetwork(server.serverUrl));
+      await pinnedPhase("unblock-network", () => unblockJazzServerNetwork(registry.origin));
     }
     pinnedCorpusPhase = "pinned-test:complete";
     receipt(pinnedCorpusPhase);
@@ -376,7 +399,7 @@ describe("browser Jazz storage compatibility corpus", () => {
   it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
     const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
     const dbName = uniqueDbName("browser-storage-retired-profile");
-    const config = persistentConfig(
+    const config = await persistentConfig(
       dbName,
       "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       server,
@@ -398,7 +421,15 @@ describe("browser Jazz storage compatibility corpus", () => {
     const cleanup = new TestCleanup();
     const dbName = databaseName();
     const appId = "browser-storage-compat-corruption";
-    const config = { appId, driver: { type: "persistent" as const, dbName } } satisfies DbConfig;
+    const accounts = await createAccountManager({
+      appId,
+      serverUrl: "https://storage-fixture.example",
+    });
+    const config = {
+      appId,
+      account: accounts.createLocalFirst(),
+      driver: { type: "persistent" as const, dbName },
+    } satisfies DbConfig;
     const db = cleanup.track(await createDb(config));
     const physicalDbName = await trackPhysicalDatabase(dbName);
     await withTimeout(
@@ -450,15 +481,19 @@ describe("browser Jazz storage compatibility corpus", () => {
     return name;
   }
 
-  function persistentConfig(
+  async function persistentConfig(
     dbName: string,
     secret: string,
     server: Awaited<ReturnType<typeof getJazzServerInfo>>,
-  ): DbConfig {
+  ): Promise<DbConfig> {
+    const accounts = await createAccountManager({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+    });
     return {
       appId: server.appId,
       serverUrl: server.serverUrl,
-      secret,
+      account: accounts.restoreLocalFirst(secret),
       driver: { type: "persistent", dbName },
     };
   }
