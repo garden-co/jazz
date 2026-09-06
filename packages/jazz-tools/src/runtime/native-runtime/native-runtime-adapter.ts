@@ -1869,7 +1869,11 @@ export class NativeRuntimeAdapter implements Runtime {
    * binding carried by one advice request. */
   private delegatedPermissionAdviceSession(session?: Session): RuntimeSession | null {
     if (!this.trustedBackend || !session || !this.isScopedPermissionAdvice(session)) return null;
-    return readSession(JSON.stringify(session));
+    try {
+      return readSession(JSON.stringify(session));
+    } catch {
+      return null;
+    }
   }
 
   requestInsertPermissionAdvice(

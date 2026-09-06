@@ -1685,7 +1685,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     const id = "00000000-0000-0000-0000-000000000001";
     await expect(
       Promise.all([
-        runtime.requestInsertPermissionAdvice("todos", {}, session),
+        runtime.requestInsertPermissionAdvice(
+          "todos",
+          { title: { type: "Text", value: "candidate" } },
+          session,
+        ),
         runtime.requestReadPermissionAdvice("todos", id, session),
         runtime.requestUpdatePermissionAdvice("todos", id, {}, session),
         runtime.requestDeletePermissionAdvice("todos", id, session),
