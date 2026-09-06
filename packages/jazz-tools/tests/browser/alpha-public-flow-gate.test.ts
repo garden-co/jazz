@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  createDb,
   generateAuthSecret,
   schema,
   type CompiledPermissions,
@@ -11,6 +10,7 @@ import {
 import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
+  createBrowserTestDb,
   uniqueDbName,
   waitForCondition,
   waitForQuery,
@@ -81,14 +81,14 @@ afterEach(async () => {
 describe("alpha public package flow", () => {
   it("isolates multiple persistent databases hosted by the same SharedWorker", async () => {
     const first = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId: uniqueDbName("alpha-shared-worker-first-app"),
         secret: generateAuthSecret(),
         driver: { type: "persistent", dbName: uniqueDbName("alpha-shared-worker-first-db") },
       }),
     );
     const second = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId: uniqueDbName("alpha-shared-worker-second-app"),
         secret: generateAuthSecret(),
         driver: { type: "persistent", dbName: uniqueDbName("alpha-shared-worker-second-db") },
@@ -111,7 +111,7 @@ describe("alpha public package flow", () => {
     const persistentDbName = uniqueDbName("alpha-public-local-indexeddb");
     const sharedSecret = generateAuthSecret();
     let db = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
         secret: sharedSecret,
         driver: { type: "persistent", dbName: persistentDbName },
@@ -164,7 +164,7 @@ describe("alpha public package flow", () => {
     const persistentDbName = uniqueDbName("alpha-public-local-reopen-indexeddb");
     const sharedSecret = generateAuthSecret();
     let db = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
         secret: sharedSecret,
         driver: { type: "persistent", dbName: persistentDbName },
@@ -182,7 +182,7 @@ describe("alpha public package flow", () => {
     ctx.untrack(db);
 
     db = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
         secret: sharedSecret,
         driver: { type: "persistent", dbName: persistentDbName },
@@ -195,7 +195,7 @@ describe("alpha public package flow", () => {
     const appId = uniqueDbName("alpha-public-local-predicate-move");
     const persistentDbName = uniqueDbName("alpha-public-local-predicate-move-indexeddb");
     const db = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
         secret: generateAuthSecret(),
         driver: { type: "persistent", dbName: persistentDbName },
@@ -254,7 +254,7 @@ describe("alpha public package flow", () => {
     const appId = uniqueDbName("alpha-public-rich-local-flow");
     const persistentDbName = uniqueDbName("alpha-public-rich-local-indexeddb");
     const db = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
         secret: generateAuthSecret(),
         driver: { type: "persistent", dbName: persistentDbName },
@@ -858,16 +858,15 @@ describe("alpha public package flow", () => {
 async function openAlphaDb(
   appId: string,
   serverUrl: string,
-  adminSecret: string,
+  _adminSecret: string,
   label: string,
   secret: string,
   options: { uniqueLabel?: boolean } = {},
 ): Promise<Db> {
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       serverUrl,
-      adminSecret,
       secret,
       driver: {
         type: "persistent",
@@ -880,14 +879,13 @@ async function openAlphaDb(
 async function openAlphaMemoryDb(
   appId: string,
   serverUrl: string,
-  adminSecret: string,
+  _adminSecret: string,
   secret: string,
 ): Promise<Db> {
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       serverUrl,
-      adminSecret,
       secret,
       driver: { type: "memory" },
     }),

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { createDb, generateAuthSecret, type Db } from "../../src/index.js";
+import { generateAuthSecret, type Db } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
   liveEdgeApp as app,
@@ -8,7 +8,13 @@ import {
   type LiveEdgeSeed,
 } from "./live-edge-replay-schema.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
-import { TestCleanup, uniqueDbName, waitForCondition, withTimeout } from "./support.js";
+import {
+  TestCleanup,
+  createBrowserTestDb,
+  uniqueDbName,
+  waitForCondition,
+  withTimeout,
+} from "./support.js";
 
 interface BackendCommands {
   liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdgeSeed>;
@@ -46,7 +52,7 @@ describe("live authoritative overlapping relation replay", () => {
       const databasesBeforeOpen = (await indexedDB.databases()).map((entry) => entry.name);
       let physical: string | undefined;
       for (let reopen = 0; reopen < 2; reopen++) {
-        const db = cleanup.track(await createDb(config));
+        const db = cleanup.track(await createBrowserTestDb(config));
         await assertUnrelatedRead(db);
         const matchingDatabases = (await indexedDB.databases())
           .map((entry) => entry.name)
