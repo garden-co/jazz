@@ -5,17 +5,14 @@ import { useAll, useDb } from "jazz-tools/react";
 import { app } from "@/schema";
 import { TrackLane } from "@/components/track-lane";
 import { schedulePresenceHeartbeat } from "@/components/presence-heartbeat";
-import { sessionAuthor } from "@/lib/identity";
 
 export function SequencerSession({
   sessionId,
   author,
-  issuer,
   profileId,
 }: {
   sessionId: string;
   author: string;
-  issuer: string;
   profileId: string;
 }) {
   const db = useDb();
@@ -39,7 +36,7 @@ export function SequencerSession({
   // `$createdBy` is immutable system metadata. Unlike a mutable `owner`
   // membership record, it remains the creator's administrative identity even
   // if that record is removed or its collaboration role changes.
-  const isCreator = session?.$createdBy === author;
+  const isCreator = session?.$createdBy?.account === author;
   const [memberUserId, setMemberUserId] = useState("");
   const [memberRole, setMemberRole] = useState<"editor" | "viewer">("editor");
 
@@ -76,11 +73,11 @@ export function SequencerSession({
   }
 
   function addMember() {
-    const invitedUserId = memberUserId.trim();
-    if (!invitedUserId) return;
+    const invitedAccountId = memberUserId.trim();
+    if (!invitedAccountId) return;
     db.insert(app.session_members, {
       session_id: sessionId,
-      member_author: sessionAuthor(issuer, invitedUserId),
+      member_author: invitedAccountId,
       role: memberRole,
     });
     setMemberUserId("");
@@ -108,13 +105,13 @@ export function SequencerSession({
       <p className="transport-note">
         Transport is a convergent observation for collaborators, not a claim of sample-accurate
         distributed clock sync. {presence.length} cached collaborator observation
-        {presence.length === 1 ? "" : "s"}; observations may be stale. Your author: {author}
+        {presence.length === 1 ? "" : "s"}; observations may be stale. Your account: {author}
       </p>
-      <p className="member-id">Your canonical author: {author}</p>
+      <p className="member-id">Your Jazz account: {author}</p>
       {isCreator ? (
         <div className="member-controls">
           <label>
-            Collaborator user ID from this auth provider
+            Collaborator Jazz account ID
             <input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} />
           </label>
           <label>

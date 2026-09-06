@@ -24,17 +24,31 @@ export function useJazzLifecycle(): JazzLifecycleApi {
 
 export function JazzProvider({ children }: React.PropsWithChildren) {
   const [accounts, setAccounts] = useState<Awaited<ReturnType<typeof createAccountManager>>>();
+  const [startupError, setStartupError] = useState<Error>();
+  const [attempt, retry] = useState(0);
   useEffect(() => {
     if (!APP_ID || !SERVER_URL)
       throw new Error("NEXT_PUBLIC_JAZZ_APP_ID and NEXT_PUBLIC_JAZZ_SERVER_URL must be set");
     let cancelled = false;
-    void prepareAccounts().then((manager) => {
-      if (!cancelled) setAccounts(manager);
-    });
+    setStartupError(undefined);
+    void prepareAccounts()
+      .then((manager) => {
+        if (!cancelled) setAccounts(manager);
+      })
+      .catch((cause) => {
+        if (!cancelled) setStartupError(cause instanceof Error ? cause : new Error(String(cause)));
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
+  if (startupError)
+    return (
+      <section>
+        <p role="alert">{startupError.message}</p>
+        <button onClick={() => retry((value) => value + 1)}>Retry account preparation</button>
+      </section>
+    );
   if (!accounts || !APP_ID || !SERVER_URL) return <p>Loading...</p>;
   return (
     <AccountContext accounts={accounts} appId={APP_ID} serverUrl={SERVER_URL}>
@@ -100,7 +114,7 @@ function AccountContext({
       })
       .catch((cause) => setError(cause instanceof Error ? cause : new Error(String(cause))));
     return () => {
-      void lifecycle.close();
+      void lifecycle.close().catch((cause) => console.error("Jazz client shutdown failed", cause));
     };
   }, [accounts, lifecycle]);
 

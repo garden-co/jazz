@@ -8,12 +8,12 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
   const member = (organizationId: unknown) =>
     policy.memberships.exists.where({
       organizationId: organizationId as never,
-      userId: session.user,
+      userId: session.user.account,
     });
   const admin = (organizationId: unknown) =>
     policy.memberships.exists.where({
       organizationId: organizationId as never,
-      userId: session.user,
+      userId: session.user.account,
       role: "admin",
     });
   const personMatchesMembership = (row: { personId: unknown; userId: unknown }) =>
@@ -44,7 +44,9 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
   // prevents a client-created duplicate from splitting a user's membership
   // identity before their personal tenant is established.
   policy.people.allowInsert.never();
-  policy.people.allowUpdate.whereOld({ userId: session.user }).whereNew({ userId: session.user });
+  policy.people.allowUpdate
+    .whereOld({ userId: session.user.account })
+    .whereNew({ userId: session.user.account });
   policy.people.allowDelete.never();
 
   policy.organizations.allowRead.where((row) => member(row.id));

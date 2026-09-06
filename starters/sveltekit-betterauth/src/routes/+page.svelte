@@ -1,7 +1,9 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
+  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
 
+  const lifecycle = getJazzLifecycle();
   let isSignUp = $state(false);
   let error = $state<string | null>(null);
 
@@ -13,15 +15,16 @@
     const password = data.get("password") as string;
     const name = data.get("name") as string | null;
 
-    const res = name
-      ? await authClient.signUp.email({ name, email, password })
-      : await authClient.signIn.email({ email, password });
-
-    if (res.error) {
-      error = res.error.message ?? (name ? "Sign-up failed" : "Sign-in failed");
-      return;
+    try {
+      await lifecycle.authenticate(isSignUp, () =>
+        isSignUp
+          ? authClient.signUp.email({ name: name!, email, password })
+          : authClient.signIn.email({ email, password }),
+      );
+      await goto("/dashboard");
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : "Account setup failed";
     }
-    await goto("/dashboard");
   }
 </script>
 

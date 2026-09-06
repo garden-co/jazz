@@ -3,9 +3,9 @@ import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 
 const schema = {
   ...betterAuthSchema,
-  profiles: s.table({ author: s.string(), displayName: s.string() }),
+  profiles: s.table({ author: s.uuid(), displayName: s.string() }),
   rooms: s.table({ name: s.string() }),
-  roomMembers: s.table({ roomId: s.ref("rooms"), memberAuthor: s.string() }),
+  roomMembers: s.table({ roomId: s.ref("rooms"), memberAuthor: s.uuid() }),
   messages: s.table({
     roomId: s.ref("rooms"),
     senderId: s.ref("profiles"),
@@ -16,7 +16,7 @@ const schema = {
   reactions: s.table({
     roomId: s.ref("rooms"),
     messageId: s.ref("messages"),
-    author: s.string(),
+    author: s.uuid(),
     emoji: s.string(),
   }),
 };

@@ -54,15 +54,16 @@ Route protection is handled by two server components. `app/page.tsx` calls
 `app/dashboard/layout.tsx` does the same check in the other direction,
 redirecting signed-out users back to `/`.
 
-`app/dashboard/layout.tsx` fetches a Better Auth JWT on each server render and
-passes it to `<JazzProvider>`. Because the layout guard guarantees a
-session on `/dashboard/*`, the provider is only mounted when the user is
-authenticated — there's no anonymous fallback path to reason about.
+`components/jazz-provider.tsx` prepares an `AccountManager` and opens its one
+Jazz client with the selected opaque account handle. Its token callback calls
+`authClient.$fetch("/token")` whenever Jazz needs a current Better Auth JWT;
+the token is not used as a one-shot client identity.
 
-`components/jazz-provider.tsx` mounts a `JwtRefresh` component inside the
-provider that re-mints the JWT via `authClient.$fetch("/token")` whenever
-`db.onAuthChanged` reports the token as expired, so long-lived sessions
-won't silently drop to unauthenticated.
+Reloads and ordinary sign-ins use `loginJWT`; `registerJWT` is reserved for an
+explicit sign-up or recovery retry. Provider session changes and form actions
+are serialized and freshness-fenced. The old client shuts down with
+`waitForSync: true` before logout or account replacement, while a failed
+operation reopens the selected handle and surfaces a retryable setup error.
 
 ## Extending the schema
 

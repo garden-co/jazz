@@ -1,8 +1,10 @@
 import { authClient, useSession } from "./auth-client";
 import { SignInForm } from "./sign-in-form";
 import { TodoWidget } from "./todo-widget";
+import { useJazzLifecycle } from "./main";
 
 export function App() {
+  const lifecycle = useJazzLifecycle();
   const { data: session, isPending } = useSession();
   if (isPending) return <div>Loading…</div>;
 
@@ -16,8 +18,15 @@ export function App() {
   }
 
   async function handleSignOut() {
-    await authClient.signOut();
-    window.location.assign("/");
+    try {
+      await lifecycle.transition(async (accounts) => {
+        await authClient.signOut();
+        accounts.logout();
+      });
+      window.location.assign("/");
+    } catch (cause) {
+      lifecycle.reportFailure(cause);
+    }
   }
 
   return (

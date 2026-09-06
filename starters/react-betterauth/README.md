@@ -58,15 +58,16 @@ Two processes run in development:
 1. **Hono** on port 3001, serving `/api/auth/*` (sign-up, sign-in, token, JWKS).
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
-`BetterAuthProvider` in `src/main.tsx` watches the Better Auth session. When a
-session exists, it fetches a JWT via `authClient.$fetch("/token")` and passes it to
-`<JazzProvider>` as `jwtToken`. The Jazz dev server verifies that JWT against
-the JWKS endpoint at `http://localhost:3001/api/auth/jwks`, whose URL is
-declared in `vite.config.ts` so the plugin can wire it up automatically.
+`BetterAuthProvider` prepares an `AccountManager` and owns one Jazz client for
+its selected opaque account handle. `getToken` re-mints a Better Auth JWT with
+`authClient.$fetch("/token")` whenever Jazz needs credentials; it does not use a
+one-shot JWT as identity.
 
-A `JwtRefresh` component inside the provider re-mints the JWT whenever
-`db.onAuthChanged` reports the token as expired, so long-lived sessions stay
-authenticated silently.
+Reloads and ordinary sign-ins use `loginJWT`; `registerJWT` is reserved for an
+explicit sign-up or recovery retry. Provider session changes and form actions
+are serialized and freshness-fenced. The old client shuts down with
+`waitForSync: true` before a logout or account replacement, while a failed
+operation reopens the selected handle and leaves an actionable error visible.
 
 ## Extending the schema
 

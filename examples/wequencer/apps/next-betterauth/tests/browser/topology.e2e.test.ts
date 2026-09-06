@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { userIdentity } from "jazz-tools";
-import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
+import { createAccountManager, createDb, type AccountHandle, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   sleep,
@@ -65,8 +64,10 @@ describe("Wequencer cross-topology recovery", () => {
     let owner: Db;
     let editor: Db;
     let ownerToken: string;
+    let ownerAccount: AccountHandle;
     let ownerDbName: string;
     let editorToken: string;
+    let editorAccount: AccountHandle;
     let editorDbName: string;
     let session: { id: string };
     let ownerProfile: { id: string };
@@ -98,7 +99,7 @@ describe("Wequencer cross-topology recovery", () => {
             restart: async () => {
               await owner.shutdown();
               ctx.untrack(owner);
-              owner = await openClient(server, "owner", ownerToken, ownerDbName);
+              owner = await openClient(server, "owner", ownerAccount, ownerDbName);
             },
           },
           editor: {
@@ -119,15 +120,20 @@ describe("Wequencer cross-topology recovery", () => {
               await editor.disconnect();
               await editor.shutdown();
               ctx.untrack(editor);
-              editor = await openClient(server, "editor", editorToken, editorDbName);
+              editor = await openClient(server, "editor", editorAccount, editorDbName);
             },
           },
           authorization: {
             failure: async () => {
+              const outsiderToken = await getJazzServerJwtForUser(
+                "wequencer-outsider",
+                undefined,
+                server.appId,
+              );
               const outsider = await openClient(
                 server,
                 "outsider",
-                await getJazzServerJwtForUser("wequencer-outsider", undefined, server.appId),
+                await registerAccount(server, outsiderToken),
               );
               await expect(
                 outsider
@@ -162,17 +168,19 @@ describe("Wequencer cross-topology recovery", () => {
               ownerDbName = uniqueDbName("wequencer-owner");
               editorToken = issuedEditorToken;
               editorDbName = uniqueDbName("wequencer-editor");
-              owner = await openClient(server, "owner", ownerToken, ownerDbName);
-              editor = await openClient(server, "editor", editorToken, editorDbName);
+              ownerAccount = await registerAccount(server, ownerToken);
+              editorAccount = await registerAccount(server, editorToken);
+              owner = await openClient(server, "owner", ownerAccount, ownerDbName);
+              editor = await openClient(server, "editor", editorAccount, editorDbName);
               ownerProfile = await owner
                 .insert(app.profiles, {
-                  author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  author: ownerAccount.id,
                   displayName: "Owner",
                 })
                 .wait({ tier: "edge" });
               editorProfile = await editor
                 .insert(app.profiles, {
-                  author: userIdentity("urn:jazz:test", "wequencer-editor"),
+                  author: editorAccount.id,
                   displayName: "Editor",
                 })
                 .wait({ tier: "edge" });
@@ -186,7 +194,7 @@ describe("Wequencer cross-topology recovery", () => {
               creatorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  member_author: ownerAccount.id,
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
@@ -201,7 +209,7 @@ describe("Wequencer cross-topology recovery", () => {
               editorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: userIdentity("urn:jazz:test", "wequencer-editor"),
+                  member_author: editorAccount.id,
                   role: "editor",
                 })
                 .wait({ tier: "edge" });
@@ -255,14 +263,23 @@ describe("Wequencer cross-topology recovery", () => {
               await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  member_author: ownerAccount.id,
                   role: "viewer",
                 })
                 .wait({ tier: "edge" });
               await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: userIdentity("urn:jazz:test", "wequencer-admin-proof"),
+                  member_author: (
+                    await registerAccount(
+                      server,
+                      await getJazzServerJwtForUser(
+                        "wequencer-admin-proof",
+                        undefined,
+                        server.appId,
+                      ),
+                    )
+                  ).id,
                   role: "viewer",
                 })
                 .wait({ tier: "edge" });
@@ -275,7 +292,7 @@ describe("Wequencer cross-topology recovery", () => {
               creatorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  member_author: ownerAccount.id,
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
@@ -630,15 +647,27 @@ function trackSteps(trackId: string) {
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
-  jwtToken: string,
+  account: AccountHandle,
   dbName = uniqueDbName(`wequencer-${label}`),
 ): Promise<Db> {
   return ctx.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
-      jwtToken,
+      account,
       driver: { type: "persistent", dbName },
     }),
   );
+}
+
+async function registerAccount(
+  server: { appId: string; serverUrl: string },
+  jwtToken: string,
+): Promise<AccountHandle> {
+  const accounts = await createAccountManager({
+    appId: server.appId,
+    serverUrl: server.serverUrl,
+    env: `wequencer-topology-${crypto.randomUUID()}`,
+  });
+  return accounts.registerJWT(jwtToken);
 }

@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { app } from "@/schema";
 import { authJazzContext } from "@/lib/auth-jazz-context";
-import { sessionAuthor } from "@/lib/identity";
 
 /** Provision the signed-in profile outside the application's read path. */
-export async function ensureProfile(issuer: string, userId: string, displayName: string) {
-  const author = sessionAuthor(issuer, userId);
+export async function ensureProfile(accountId: string, displayName: string) {
+  const author = accountId;
   const db = authJazzContext().asBackend(app);
   const existing = await db.one(app.profiles.where({ author }));
   if (existing) return existing;

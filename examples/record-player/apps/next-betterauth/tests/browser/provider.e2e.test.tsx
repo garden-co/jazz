@@ -7,26 +7,66 @@ const auth = vi.hoisted(() => ({
     data: { session: { id: "better-auth-session" }, user: { id: "better-auth-user" } },
     isPending: false,
   },
-  token: vi.fn(async () => "jazz-jwt"),
+  token: vi.fn(
+    async () =>
+      `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
+  ),
+  signIn: vi.fn(),
+  accounts: undefined as { logout(): void } | undefined,
+  prepareError: undefined as Error | undefined,
 }));
 
 vi.mock("../../src/lib/auth-client", () => ({
   authClient: {
     useSession: () => auth.session,
-    signIn: { email: vi.fn() },
+    signIn: { email: auth.signIn },
     signUp: { email: vi.fn() },
   },
   getJwtFromBetterAuth: auth.token,
 }));
 
+vi.mock("../../src/lib/accounts", async () => {
+  const { createAccountManagerWithRuntime } =
+    await import("../../../../../../packages/jazz-tools/src/accounts/enrollment.js");
+  const { accountRegistryUrl } =
+    await import("../../../../../../packages/jazz-tools/src/accounts/context.js");
+  return {
+    prepareAccounts: async (appId: string, serverUrl: string) => {
+      if (auth.prepareError) throw auth.prepareError;
+      return (auth.accounts ??= createAccountManagerWithRuntime({
+        registry: accountRegistryUrl(
+          serverUrl || "https://core.example",
+          appId || "record-player-test",
+        ),
+        localFirst: {
+          create: () => {
+            throw new Error("not used");
+          },
+        },
+        fetch: (async () =>
+          new Response(
+            JSON.stringify({
+              account: "00000000-0000-4000-8000-000000000001",
+              identity: { issuer: "https://auth.example", subject: "better-auth-user" },
+            }),
+          ) as Response) as typeof fetch,
+      }));
+    },
+  };
+});
+
 vi.mock("jazz-tools/react", () => ({
-  JazzProvider: ({
+  createJazzClient: async ({ account }: { account: { id: string } }) => ({
+    account,
+    shutdown: vi.fn(),
+  }),
+  JazzClientProvider: ({
     children,
-    config,
+    client,
   }: {
     children: React.ReactNode;
-    config: { jwtToken: string };
-  }) => <div data-jazz-jwt={config.jwtToken}>{children}</div>,
+    client: { account: { id: string } };
+  }) => <div data-jazz-account={client.account.id}>{children}</div>,
   useDb: () => ({ insert: vi.fn() }),
   useAll: () => ({ data: [] }),
 }));
@@ -65,6 +105,10 @@ describe("RecordPlayer Better Auth bridge", () => {
       isPending: false,
     };
     auth.token.mockClear();
+    auth.signIn.mockReset();
+    auth.prepareError = undefined;
+    auth.accounts?.logout();
+    auth.accounts = undefined;
     vi.unstubAllGlobals();
   });
 
@@ -82,7 +126,9 @@ describe("RecordPlayer Better Auth bridge", () => {
     });
 
     await waitFor(
-      () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
+      () =>
+        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
+        null,
       "expected the authenticated Jazz provider to mount",
     );
     expect(container.querySelector("button")?.textContent).toBe("Create playlist");
@@ -104,17 +150,21 @@ describe("RecordPlayer Better Auth bridge", () => {
     });
 
     await waitFor(() => auth.token.mock.calls.length === 1, "expected token request to start");
-    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
+    expect(container.querySelector("[data-jazz-account]")).toBeNull();
     expect(container.querySelector("button")).toBeNull();
     expect(container.textContent).toContain("Connecting RecordPlayer");
 
     await act(async () => {
-      token.resolve("jazz-jwt");
+      token.resolve(
+        `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
+      );
       await token.promise;
     });
 
     await waitFor(
-      () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
+      () =>
+        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
+        null,
       "expected Jazz to mount after token acquisition",
     );
     expect(container.querySelector("button")?.textContent).toBe("Create playlist");
@@ -134,14 +184,17 @@ describe("RecordPlayer Better Auth bridge", () => {
       );
     });
 
-    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
+    expect(container.querySelector("[data-jazz-account]")).toBeNull();
     expect(container.textContent).toContain("Sign in to RecordPlayer");
   });
 
   it("surfaces a missing token and retries rather than connecting forever", async () => {
     auth.token
       .mockImplementationOnce(async () => null)
-      .mockImplementationOnce(async () => "jazz-jwt");
+      .mockImplementationOnce(
+        async () =>
+          `header.${btoa(JSON.stringify({ iss: "https://auth.example", sub: "better-auth-user" }))}.signature`,
+      );
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -164,8 +217,46 @@ describe("RecordPlayer Better Auth bridge", () => {
       container?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await waitFor(
-      () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
+      () =>
+        container?.querySelector("[data-jazz-account='00000000-0000-4000-8000-000000000001']") !==
+        null,
       "expected retry to mount Jazz after a token becomes available",
     );
+  });
+
+  it("surfaces an account-manager startup failure and retries it", async () => {
+    auth.prepareError = new Error("registry unavailable");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<RecordPlayerProvider>rooms</RecordPlayerProvider>));
+    await waitFor(
+      () => container?.textContent?.includes("registry unavailable") ?? false,
+      "expected startup error",
+    );
+    auth.prepareError = undefined;
+    await act(async () =>
+      container?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    await waitFor(
+      () => container?.querySelector("[data-jazz-account]") !== null,
+      "expected startup retry to connect",
+    );
+  });
+
+  it("clears sign-in pending state when Better Auth rejects", async () => {
+    auth.session = { data: null, isPending: false };
+    auth.signIn.mockRejectedValueOnce(new Error("auth offline"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<RecordPlayerProvider>rooms</RecordPlayerProvider>));
+    const signIn = container.querySelector("button") as HTMLButtonElement;
+    await act(async () => signIn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await waitFor(
+      () => container?.textContent?.includes("auth offline") ?? false,
+      "expected auth rejection",
+    );
+    expect(signIn.disabled).toBe(false);
   });
 });

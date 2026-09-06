@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createAccountManager, createDb, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
@@ -16,7 +16,6 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
-import { authorForSession } from "../../src/lib/identity";
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -25,12 +24,6 @@ interface ClientIdentity {
   db: Db;
   author: string;
   profileId: string;
-}
-
-/** Decode only the test issuer used to construct the canonical Jazz author. */
-function authorFromTestToken(token: string, userId: string): string {
-  const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string };
-  return authorForSession(claims.iss, userId);
 }
 
 /**
@@ -402,16 +395,18 @@ async function openMember(
   userId: string,
   jwtToken: string,
 ): Promise<ClientIdentity> {
+  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
+  const account = await accounts.registerJWT({ getToken: async () => jwtToken });
   const db = cleanup.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
-      jwtToken,
+      account,
       logLevel: "trace",
       driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
     }),
   );
-  const author = authorFromTestToken(jwtToken, userId);
+  const author = account.id;
   const profile = await db
     .insert(app.profiles, { author, displayName: userId })
     .wait({ tier: "edge" });
