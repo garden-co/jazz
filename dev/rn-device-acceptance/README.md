@@ -20,6 +20,8 @@ generic TurboModule frame executor. Remote-tier reads still fail closed.
 That is deliberately a source/ABI contract, complementary to—not a substitute
 for—the installed Android/iOS device receipts. The device app exercises the same public scenario using a genuine account handle and a borrowed native lease.
 
+The Expo config enables `experiments.autolinkingModuleResolution` so Metro uses the same native-module versions selected by autolinking. This matters in the pnpm workspace: Jazz Tools may resolve a newer Expo peer for its own development, but the installed app must bundle its own Expo Crypto and SecureStore versions.
+
 ## Fixture boundary
 
 The Android and iOS host adapters supply validated endpoint and lifecycle-control metadata and collect receipts. They do not admit accounts or receive account credentials. `src/native-fixture.ts` uses the production Expo account manager with retained profiles, then the private device-test helper wraps the same native begin/attach flow as public context creation. Rust validates proof and selects account-scoped storage. The helper owns the opaque lease until its raw and public aliases close.
