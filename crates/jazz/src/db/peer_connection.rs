@@ -3070,6 +3070,7 @@ where
                                         && authorization_scope_receipt_matches_transport_context(
                                             &receipt,
                                             *expected,
+                                            request.session_claim_binding.0,
                                             applied_cut,
                                         );
                                 if !receipt_current {
@@ -3234,6 +3235,7 @@ where
                                 if !authorization_scope_receipt_matches_transport_context(
                                     &receipt,
                                     *expected,
+                                    expected.link,
                                     scope_view_cuts.get(&subscription).copied(),
                                 ) {
                                     drop_peer_request(&self.node);
@@ -6377,10 +6379,11 @@ pub(super) fn aggregate_authorization_scope_bounds(
 pub(super) fn authorization_scope_receipt_matches_transport_context(
     receipt: &AuthorizationScopeReceipt,
     expected: AuthorityContext,
+    expected_subject: AuthorSubject,
     applied_cut: Option<crate::time::GlobalTime>,
 ) -> bool {
-    receipt.link == expected.link
-        && receipt.link == receipt.key.subject
+    receipt.link == expected_subject
+        && receipt.key.subject == expected_subject
         && receipt.authority == expected.authority
         && receipt.authority_epoch == expected.connection_epoch
         && receipt.claims_revision == expected.claims_revision
