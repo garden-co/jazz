@@ -14,8 +14,8 @@ it("restores local selection and retains its root after logout", async () => {
     async read() {
       return value;
     },
-    async write(next: string) {
-      value = next;
+    async update(transform: (current: string | null) => string) {
+      value = transform(value);
     },
   };
   const options = { appId: "test", registry, store, mintToken };
@@ -48,7 +48,7 @@ it("does not release a local credential before asynchronous root persistence fin
       async read() {
         return null;
       },
-      write,
+      update: write,
     },
   });
   const handle = manager.createLocalFirst();
@@ -59,4 +59,31 @@ it("does not release a local credential before asynchronous root persistence fin
   finish();
   await pending;
   expect(released).toHaveBeenCalledOnce();
+});
+
+it("retains roots created by independent managers with stale inventories", async () => {
+  let value: string | null = null;
+  const store = {
+    async read() {
+      return value;
+    },
+    async update(transform: (current: string | null) => string) {
+      value = transform(value);
+    },
+  };
+  const options = { appId: "test", registry, store, mintToken };
+  const first = await prepareAccountManager(options);
+  const second = await prepareAccountManager(options);
+  const a = first.createLocalFirst();
+  await accountToken(a, registry);
+  const firstRoot = JSON.parse(value!).roots[0];
+  const b = second.createLocalFirst();
+  await accountToken(b, registry);
+  const afterSecond = JSON.parse(value!);
+  expect(afterSecond.roots).toHaveLength(2);
+  expect(afterSecond.roots[0]).toBe(firstRoot);
+  expect(afterSecond.selected).toBe(1);
+  first.logout();
+  await vi.waitFor(() => expect(JSON.parse(value!).selected).toBeNull());
+  expect(JSON.parse(value!).roots).toEqual(afterSecond.roots);
 });

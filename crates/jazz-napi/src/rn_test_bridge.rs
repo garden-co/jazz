@@ -373,6 +373,7 @@ pub fn foreground_response_corpus() -> Result<String> {
             connected: true,
         },
         ForegroundDbCommandResponse::NativeSessionMetadata {
+            account_id: Some([7; 16]),
             issuer: "fixture-issuer".into(),
             user_id: "fixture-user".into(),
         },

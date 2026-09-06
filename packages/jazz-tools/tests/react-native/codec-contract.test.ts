@@ -152,7 +152,12 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         explicitlyOffline: false,
         connected: true,
       },
-      { type: "nativeSessionMetadata", issuer: "fixture-issuer", userId: "fixture-user" },
+      {
+        type: "nativeSessionMetadata",
+        accountId: "07070707-0707-0707-0707-070707070707",
+        issuer: "fixture-issuer",
+        userId: "fixture-user",
+      },
     ]);
     for (const response of responses) {
       expect(() =>

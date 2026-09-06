@@ -409,16 +409,16 @@ The following ordinals are reserved for the coordinated V1 continuation.
 Reservation alone does not imply that a native artifact implements a handler;
 unsupported operations must fail closed until their acceptance gates pass.
 
-| Request ordinal | Reserved request                                               | Response ordinal / payload                              |
-| --------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
-| 26              | NativeSessionMetadata (no fields)                              | 18 NativeSessionMetadata: issuer string, user_id string |
-| 27              | WriteState: tx_id 16 raw bytes                                 | 19 WriteState: state_json string                        |
-| 28              | DrainMutationErrors (no fields)                                | 20 MutationErrors: events_json string                   |
-| 29              | BeginStreamingMutation                                         | 21 StreamingMutationOpened: upload u64                  |
-| 30              | PushStreamingMutation: upload u64, chunk byte vector           | 22 StreamingMutationPushed (no fields)                  |
-| 31              | FinishStreamingMutation: upload u64                            | existing 14 TransactionCommitted                        |
-| 32              | AbortStreamingMutation: upload u64                             | 23 StreamingMutationAborted: aborted bool               |
-| 33              | AllRelationQuery: query_bytes byte vector, options_json string | existing 3 Rows                                         |
+| Request ordinal | Reserved request                                               | Response ordinal / payload                                                                       |
+| --------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 26              | NativeSessionMetadata (no fields)                              | 18 NativeSessionMetadata: account_id Option<[u8;16]> (UUID bytes), issuer string, user_id string |
+| 27              | WriteState: tx_id 16 raw bytes                                 | 19 WriteState: state_json string                                                                 |
+| 28              | DrainMutationErrors (no fields)                                | 20 MutationErrors: events_json string                                                            |
+| 29              | BeginStreamingMutation                                         | 21 StreamingMutationOpened: upload u64                                                           |
+| 30              | PushStreamingMutation: upload u64, chunk byte vector           | 22 StreamingMutationPushed (no fields)                                                           |
+| 31              | FinishStreamingMutation: upload u64                            | existing 14 TransactionCommitted                                                                 |
+| 32              | AbortStreamingMutation: upload u64                             | 23 StreamingMutationAborted: aborted bool                                                        |
+| 33              | AllRelationQuery: query_bytes byte vector, options_json string | existing 3 Rows                                                                                  |
 
 BeginStreamingMutation has ordered fields mutation enum, table string,
 row_id 16 raw bytes, cells byte vector, column string, options_json string.
