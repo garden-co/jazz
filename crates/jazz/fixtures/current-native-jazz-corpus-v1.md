@@ -8,9 +8,9 @@ evidence.
 The V1 refresh was produced with:
 
 ```sh
-JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/lane2-v1-rocksdb.tar.gz \
-JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/lane2-v1.sqlite \
-JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/lane2-v1.pack \
+JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/account-v1-native-corpus-rocksdb.tar.gz \
+JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/account-v1-native-corpus.sqlite \
+JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/account-v1-native-corpus.pack \
 dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
 ```
 
@@ -37,31 +37,37 @@ The logical pack has 35 entries. Its complete store inventory is:
 | `jazz_storage_consistency_markers`        |       1 |
 | `jazz_transactions`                       |       4 |
 
-Fifteen logical entry payloads change from the previous current corpus: all
-seven `jazz_catalogue` records, both `jazz_catalogue_pointer` records, the
-single `jazz_known_state_facts` and `jazz_settled_program_facts` records, both
-`jazz_schema_versions` records, and two `jazz_transactions` records. They are
-the transitive schema identifiers created by changing the canonical schema hash
-domain from `jazz-schema-v3-large-value-kinds` to
-`jazz-schema-v1-large-value-kinds`; the remaining twenty entries retain their
-logical payloads.
+This refresh changes eleven logical entry payloads in seven stores:
+`jazz_deletion_history` (one), `jazz_physical_1_ahead_current` (one),
+`jazz_physical_1_history` (one),
+`jazz_physical_1_register_global_current` (one),
+`jazz_physical_2_global_current` (one), `jazz_physical_2_history` (two),
+and `jazz_transactions` (four). The other twenty-four entries are unchanged.
 
-The dense JPFK integration additionally changes the sole
-`jazz_settled_program_facts` key/value pair: source coverage is tag `0` and
-covered input is tag `1`; every other tag is unknown. Its derived direct-store
-key therefore changes together with its value.
+These changes replace canonical author strings with native structured author
+records in row metadata and transaction provenance. An author contains an
+optional account UUID and an identity record with issuer and subject strings.
+The whole record is interned only in memory; no interner identifier is stored.
+The producer exercises system authors, whose account is null. Account-bearing
+authors are additionally covered by the account-author and native row codec
+tests. The account registry journal has its own storage root and codec; it is
+not part of this row-storage corpus.
 
-The RocksDB archive additionally records the final storage profile: internal
-column family `__groove_storage_internal_v1` and profile marker `raw-v1`.
-The binding ResultKey V1 codec is exercised by its separate golden fixture; this
-native logical corpus contains no ResultKey occurrence payload, so no corpus
-entry is attributed to that ABI change.
+This is a pre-release V1 format refresh, not a migration of the previous
+pre-release positive corpus. Historical `epoch-1-*` archives remain unchanged
+and must still be rejected. The producer verifies fresh SQLite and RocksDB
+copies, mixed writes, and another reopen before publishing these artifacts.
+
+The RocksDB archive retains internal column family
+`__groove_storage_internal_v1` and profile marker `raw-v1`. The binding
+ResultKey V1 codec has a separate golden fixture; this native logical corpus
+contains no ResultKey occurrence payload.
 
 Producer digests:
 
 | Artifact                          | SHA-256                                                            |
 | --------------------------------- | ------------------------------------------------------------------ |
-| logical pack                      | `4aec397721f146845becdf0d5268a2229242a88ffe8b882312345d0039482d65` |
-| SQLite payload                    | `68392b7e23153baece369a7905532c5ed52efb1f572a35383cbfedaefa3e251c` |
-| deterministic gzip SQLite archive | `8ad336a716f3166896cd9d5bcbc73140871bb2b6ed1dbe1e06589db924eb39ef` |
-| RocksDB archive                   | `d215f099b52e40da63ad1b8d9ea55efa44deb67fe6811f870b185fc63b4314d6` |
+| logical pack                      | `abce5e0168d4c517d4cb4d2b5a65b826ecf273dbcb8d61c29aac51369f80d35f` |
+| SQLite payload                    | `fcb4aaf5d53f4704dfd9274d481212b54c565a7d3f7893020f9df2fb77cc0968` |
+| deterministic gzip SQLite archive | `1896704543a53f20c03905616c3c1800b4a9392c1010ac5fa5fa6c0ed9d2a45e` |
+| RocksDB archive                   | `fcdfc337ca160d6edcff8c53a6390dc9536f20de963a5cb664a58be210868055` |

@@ -6238,9 +6238,9 @@ mod tests {
             vec![
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(low), tx_id_value(high)]),
-                Value::String(author.canonical().to_owned()),
+                author.to_value(),
                 Value::U64(7),
-                Value::String(author.canonical().to_owned()),
+                author.to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
@@ -6264,7 +6264,30 @@ mod tests {
         };
 
         let mut noncanonical_author = base_values();
-        noncanonical_author[2] = Value::String(r#"[ "issuer", "subject" ]"#.to_owned());
+        // Structurally valid native bytes still need principal validation.
+        // An empty issuer cannot become a valid author by arriving in a row.
+        let ValueType::Record(author_descriptor) = AuthorSubject::value_type() else {
+            unreachable!()
+        };
+        let ValueType::Record(principal_descriptor) = &author_descriptor.fields()[1].value_type
+        else {
+            unreachable!()
+        };
+        let principal = Value::Record(OwnedRecord::new(
+            principal_descriptor
+                .create(&[
+                    Value::String(String::new()),
+                    Value::String("subject".into()),
+                ])
+                .unwrap(),
+            principal_descriptor.as_ref().clone(),
+        ));
+        noncanonical_author[2] = Value::Record(OwnedRecord::new(
+            author_descriptor
+                .create(&[Value::Nullable(None), principal])
+                .unwrap(),
+            author_descriptor.as_ref().clone(),
+        ));
         let message = malformed_message(make_record(
             table.wire_record_descriptor(),
             noncanonical_author,
