@@ -78,7 +78,11 @@ describe("broker worker packaging", () => {
       );
       await execFileAsync(process.execPath, [bundleScript, "--out-dir", outputDir], {
         cwd: packageRoot,
-        env: { ...process.env, JAZZ_CORRECTNESS_WASM_PACKAGE: fakeSealedPackage },
+        env: {
+          ...process.env,
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "0",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: fakeSealedPackage,
+        },
       });
       await expect(access(join(outputDir, "jazz-broker-worker.js"))).resolves.toBeUndefined();
       await expect(access(join(outputDir, "jazz_wasm_bg.wasm"))).resolves.toBeUndefined();
