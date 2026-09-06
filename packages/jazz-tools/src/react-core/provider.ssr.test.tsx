@@ -3,9 +3,9 @@ import { act, render, type RenderResult } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig } from "../accounts/context.js";
 import { JazzProvider } from "./provider.js";
-import { makeFakeClient } from "./test-utils.js";
+import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
 const registry = vi.hoisted(() => {
   const entries = new Map<string, { promise: Promise<unknown>; holders: Set<object> }>();
@@ -60,7 +60,11 @@ describe("JazzProvider client acquisition lifecycle", () => {
 
     const html = renderToStaticMarkup(
       <JazzProvider
-        config={{ appId: "app-1", serverUrl: "https://jazz.example.com" }}
+        config={{
+          appId: "app-1",
+          serverUrl: "https://jazz.example.com",
+          account: makeFakeAccount(),
+        }}
         createJazzClient={createJazzClient}
         fallback={<p id="loading">loading</p>}
       >
@@ -75,15 +79,15 @@ describe("JazzProvider client acquisition lifecycle", () => {
   });
 
   it("acquires one lease after mount and releases each config on replacement and unmount", async () => {
-    const initialConfig: DbConfig = {
+    const initialConfig: AccountDbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      account: makeFakeAccount(),
     };
-    const replacementConfig: DbConfig = {
+    const replacementConfig: AccountDbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      jwtToken: "token",
+      account: makeFakeAccount(),
     };
     const createJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
@@ -147,15 +151,15 @@ describe("JazzProvider client acquisition lifecycle", () => {
   });
 
   it("does not acquire a replacement cancelled behind an in-flight release", async () => {
-    const initialConfig: DbConfig = {
+    const initialConfig: AccountDbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      account: makeFakeAccount(),
     };
-    const replacementConfig: DbConfig = {
+    const replacementConfig: AccountDbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      jwtToken: "token",
+      account: makeFakeAccount(),
     };
     let resolveRelease!: () => void;
     const releaseGate = new Promise<void>((resolve) => {
