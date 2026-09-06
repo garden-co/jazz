@@ -88,6 +88,7 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
               driver?: { type?: string };
               jwtToken?: string;
               runtimeSources?: {
+                inspectorHostPhysicalDbName?: string;
                 browserWorkerSession?: {
                   issuer?: string;
                   user_id?: string;
@@ -101,6 +102,7 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       ).__jazzInspectorHost;
       return {
         driverType: host?.getConnectionConfig().driver?.type,
+        physicalDbName: host?.getConnectionConfig().runtimeSources?.inspectorHostPhysicalDbName,
         hasControlPort: typeof host?.openControlPort === "function",
         hasJwtToken: Boolean(host?.getConnectionConfig().jwtToken),
         browserWorkerSession: host?.getConnectionConfig().runtimeSources?.browserWorkerSession,
@@ -129,10 +131,13 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await expect(runtimeSelect).toBeVisible({ timeout: 10_000 });
     const runtimeOptions = runtimeSelect.locator("option");
     await expect(runtimeOptions).toHaveCount(2);
-    const primaryContext = runtimeOptions.filter({ hasText: "local-first" });
-    const secondaryContext = runtimeOptions.filter({ hasText: "external" });
-    const primaryContextValue = await primaryContext.getAttribute("value");
-    const secondaryContextValue = await secondaryContext.getAttribute("value");
+    const choices = await runtimeOptions.evaluateAll((elements) =>
+      elements.map((element) => (element as HTMLOptionElement).value),
+    );
+    const primaryContextValue = choices.find((value) =>
+      value.endsWith(overlayConfig.physicalDbName!),
+    );
+    const secondaryContextValue = choices.find((value) => value !== primaryContextValue);
     expect(primaryContextValue).toBeTruthy();
     expect(secondaryContextValue).toBeTruthy();
     await runtimeSelect.selectOption(primaryContextValue!);

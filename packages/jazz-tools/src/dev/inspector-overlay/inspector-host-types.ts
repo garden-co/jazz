@@ -1,6 +1,18 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { ActiveQuerySubscriptionTrace, DbConfig } from "../../runtime/db.js";
 
+/** Resolved bearer plus non-secret scope; never a signing root or admin credential. */
+export type InspectorHostConfig = Pick<
+  DbConfig,
+  | "appId"
+  | "accountId"
+  | "accountRegistryAuthority"
+  | "serverUrl"
+  | "env"
+  | "driver"
+  | "runtimeSources"
+> & { jwtToken: string };
+
 /** Active subscription as sent to the overlay — the trace minus the JS stack. */
 export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
 
@@ -12,7 +24,7 @@ export interface JazzInspectorHost {
    * actual worker peer from {@link openControlPort}; it never constructs a
    * second SharedWorker.
    */
-  getConnectionConfig(): DbConfig;
+  getConnectionConfig(contextKey?: string): InspectorHostConfig;
   /** Open a session-scoped channel for discovering and attaching to worker contexts. */
   openControlPort(): Promise<MessagePort>;
   /** The host's runtime schema (plain serializable data — safe across realms). */

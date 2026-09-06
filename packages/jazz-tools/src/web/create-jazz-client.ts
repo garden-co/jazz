@@ -21,10 +21,14 @@ export interface JazzClient {
 }
 
 async function createJazzClientInternal(config: AccountDbConfig): Promise<JazzClient> {
-  const db = await createDb(config);
+  return createJazzClientFromDb(await createDb(config));
+}
+
+/** @internal Wrap an already admitted runtime for framework observers. */
+export async function createJazzClientFromDb(db: Db): Promise<JazzClient> {
   let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator(
-    { appId: config.appId },
+    { appId: db.getConfig().appId },
     getDbSubscriptionSource(db),
     getDbInternalSession(db),
   );
