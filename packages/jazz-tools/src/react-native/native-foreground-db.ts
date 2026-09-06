@@ -177,6 +177,7 @@ export type NativeForegroundModule = {
 };
 
 export type NativeForegroundFactory = {
+  accountSecret?(): Uint8Array;
   beginAccountSession?(requestJson: string): Uint8Array;
   attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
   releaseAccountSession?(capability: Uint8Array): void;
@@ -349,6 +350,7 @@ export class NativeForegroundDb {
       query: queryHandle(query),
       optionsJson: JSON.stringify(opts),
     });
+    if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
   }

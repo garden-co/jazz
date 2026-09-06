@@ -42,6 +42,7 @@ import {
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   internalSessionFromVerifiedReservedJwtPayload,
   trustedReservedSessionToken,
+  markTrustedReservedSession,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 
@@ -1654,6 +1655,56 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(advice).resolves.toBe("unknown");
     expect(cancellations).toBe(1);
     vi.useRealTimers();
+  });
+
+  it("does not return connection-authority advice for a scoped backend request", async () => {
+    const authoritative = vi.fn(() => "allowed" as const);
+    const backend = fakeDb({
+      requestInsertPermissionAdviceEncoded: authoritative,
+      requestReadPermissionAdvice: authoritative,
+      requestUpdatePermissionAdviceEncoded: authoritative,
+      requestDeletePermissionAdvice: authoritative,
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      null,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving", backendMode: true, db: backend },
+    );
+    Object.assign(runtime as object, { serverTransport: {}, serverCarrier: {} });
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "requester",
+      claims: {},
+      authMode: "external" as const,
+    };
+    const id = "00000000-0000-0000-0000-000000000001";
+    await expect(
+      Promise.all([
+        runtime.requestInsertPermissionAdvice("todos", {}, session),
+        runtime.requestReadPermissionAdvice("todos", id, session),
+        runtime.requestUpdatePermissionAdvice("todos", id, {}, session),
+        runtime.requestDeletePermissionAdvice("todos", id, session),
+      ]),
+    ).resolves.toEqual(["unknown", "unknown", "unknown", "unknown"]);
+    expect(authoritative).not.toHaveBeenCalled();
+    const forgedSystem = { ...session, issuer: SYSTEM_SESSION_ISSUER, user_id: SYSTEM_AUTHOR_ID };
+    await expect(runtime.requestReadPermissionAdvice("todos", id, forgedSystem)).resolves.toBe(
+      "unknown",
+    );
+    expect(authoritative).not.toHaveBeenCalled();
+    const trustedSystem = markTrustedReservedSession({ ...forgedSystem });
+    await expect(runtime.requestReadPermissionAdvice("todos", id, trustedSystem)).resolves.toBe(
+      "allowed",
+    );
+    expect(authoritative).toHaveBeenCalledTimes(1);
+    // The unscoped connection operation still has its ordinary advice path.
+    await expect(runtime.requestReadPermissionAdvice("todos", id)).resolves.toBe("allowed");
+    expect(authoritative).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed for malformed direct and pollable native permission advice", async () => {
@@ -8565,4 +8616,42 @@ it("keeps same-query admissions with different claims out of the shared prepared
   expect(b.claims).toEqual({ team: "team-b" });
   expect(setClaims).not.toHaveBeenCalled();
   await runtime.close();
+});
+
+it("rejects scoped relation operations on an older native without mutating ambient claims", async () => {
+  const setIdentityClaims = vi.fn();
+  const allRelationQuery = vi.fn();
+  const subscribeRelationQueryForIdentity = vi.fn();
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemoryAsBackend: () =>
+        fakeDb({ setIdentityClaims, allRelationQuery, subscribeRelationQueryForIdentity } as never),
+      openBrowser: async () => {
+        throw new Error("unused");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { backendMode: true, readAuthorizationHost: "trusted-serving" },
+  );
+  const query = JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") });
+  const session = JSON.stringify({
+    issuer: "https://issuer.example",
+    user_id: "alice",
+    claims: { team: "a" },
+  });
+  try {
+    await expect(runtime.query(query, session)).rejects.toThrow("immutable scoped preparation");
+    expect(() => runtime.createSubscription(query, session)).toThrow(
+      "immutable scoped preparation",
+    );
+    expect(setIdentityClaims).not.toHaveBeenCalled();
+    expect(allRelationQuery).not.toHaveBeenCalled();
+    expect(subscribeRelationQueryForIdentity).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
 });

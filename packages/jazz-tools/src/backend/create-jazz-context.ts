@@ -80,12 +80,36 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;
+  private backendSyncEnabled = false;
+  private isDisconnected = false;
+  private reconnectWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
+  private explicitOfflineListeners = new Map<
+    (offline: boolean) => void,
+    { signal: AbortSignal; onAbort: () => void }
+  >();
+  private transportTransition: Promise<void> = Promise.resolve();
+  private shutdownState: "open" | "closing" | "closed" = "open";
+  private shutdownPromise?: Promise<void>;
 
   constructor(
     private readonly config: ResolvedBackendContextConfig,
     private readonly nodeIdentityScope: string,
   ) {
     super();
+    this.nativeConnection = {
+      configured: () => !!this.config.serverUrl,
+      disconnect: () => this.disconnectTransport(),
+      reconnect: () => this.reconnectTransport(),
+      isExplicitlyOffline: () => this.isDisconnected,
+      waitForTransportTransition: () => this.waitForTransportTransition(),
+      waitForReconnect: (signal) => this.waitForReconnect(signal),
+      onExplicitOfflineChange: (listener, signal) => {
+        if (signal.aborted) return;
+        const onAbort = () => this.explicitOfflineListeners.delete(listener);
+        this.explicitOfflineListeners.set(listener, { signal, onAbort });
+        signal.addEventListener("abort", onAbort, { once: true });
+      },
+    };
   }
 
   get currentRuntime(): FlushableRuntime | undefined {
@@ -97,6 +121,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     schema,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
+    this.assertOpen();
     const hasSeparatePermissionsBundle =
       this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
     const schemaJson = serializeRuntimeSchema(schema, {
@@ -155,20 +180,147 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   }
 
   async shutdown(): Promise<void> {
+    if (this.shutdownState === "closed") return;
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    this.shutdownState = "closing";
+    this.rejectReconnectWaiters(this.shutdownError());
     const client = this.client;
-    this.client = undefined;
-    this.runtime = undefined;
-    this.initializedSchemaJson = undefined;
-    if (client) {
-      await client.shutdown();
+    const shutdown = this.enqueueTransportTransition(async () => {
+      await client?.shutdown();
+      this.client = undefined;
+      this.runtime = undefined;
+      this.initializedSchemaJson = undefined;
+      this.backendSyncEnabled = false;
+      this.isDisconnected = false;
+      this.shutdownState = "closed";
+      for (const { signal, onAbort } of this.explicitOfflineListeners.values()) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      this.explicitOfflineListeners.clear();
+    });
+    this.shutdownPromise = shutdown;
+    // A failed native close may have partially torn down the runtime. Keep
+    // the source terminal and retain the failure rather than admitting a new
+    // facade or pretending the old client can be used again.
+    await shutdown;
+  }
+
+  enableBackendSync(client: JazzClient): void {
+    this.assertOpen();
+    if (!this.config.serverUrl) return;
+    if (!this.config.backendSecret) {
+      throw new Error(
+        "backendSecret required for request/session-scoped sync when serverUrl is configured.",
+      );
     }
+    client.asBackend();
+    if (this.backendSyncEnabled) return;
+    this.backendSyncEnabled = true;
+    if (!this.isDisconnected) this.connectBackendTransport(client);
+  }
+
+  private connectBackendTransport(client: JazzClient): void {
+    if (!this.config.serverUrl) return;
+    client.connectTransport(this.config.serverUrl, {
+      jwt_token: undefined,
+      backend_secret: this.config.backendSecret,
+      backend_session: this.config.cookieSession,
+    });
+  }
+
+  private async disconnectTransport(): Promise<void> {
+    this.assertOpen();
+    await this.enqueueTransportTransition(async () => {
+      await this.client?.disconnectTransport();
+      this.isDisconnected = true;
+      this.publishExplicitOfflineState();
+    });
+  }
+
+  private async reconnectTransport(): Promise<void> {
+    this.assertOpen();
+    await this.enqueueTransportTransition(() => {
+      if (this.client && this.backendSyncEnabled) this.connectBackendTransport(this.client);
+      this.isDisconnected = false;
+      this.publishExplicitOfflineState();
+    });
+    this.resolveReconnectWaiters();
+  }
+
+  private async waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    this.assertOpen();
+    await this.transportTransition;
+    if (signal?.aborted) return;
+    this.assertOpen();
+    if (!this.isDisconnected) return;
+    await new Promise<void>((resolve, reject) => {
+      const finish = () => {
+        this.reconnectWaiters.delete(waiter);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const fail = (error: Error) => {
+        this.reconnectWaiters.delete(waiter);
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const waiter = { resolve: finish, reject: fail };
+      this.reconnectWaiters.add(waiter);
+    });
+  }
+
+  private async waitForTransportTransition(): Promise<void> {
+    this.assertOpen();
+    await this.transportTransition;
+    this.assertOpen();
+  }
+
+  private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
+    const transition = this.transportTransition.then(run, run);
+    this.transportTransition = transition.catch(() => undefined);
+    return transition;
+  }
+
+  private publishExplicitOfflineState(): void {
+    for (const listener of this.explicitOfflineListeners.keys()) {
+      try {
+        listener(this.isDisconnected);
+      } catch {
+        // Observers must not turn a completed transport state change into a
+        // failed transition for every scoped Db sharing this source.
+      }
+    }
+  }
+
+  private resolveReconnectWaiters(): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const { resolve } of waiters) resolve();
+  }
+
+  private rejectReconnectWaiters(error: Error): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const { reject } of waiters) reject(error);
+  }
+
+  assertOpen(): void {
+    if (this.shutdownState !== "open") throw this.shutdownError();
+  }
+
+  private shutdownError(): Error {
+    return new Error("JazzContext is shutting down or has already shut down.");
   }
 }
 
 class BackendDb extends Db {
   constructor(
     config: DbConfig,
-    coreSource: RuntimeSource<DbConfig>,
+    private readonly coreSource: BackendRuntimeSource,
     private readonly client: JazzClient,
     private readonly runtimeSchema: WasmSchema,
     private readonly operationContext: {
@@ -199,10 +351,12 @@ class BackendDb extends Db {
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
+    this.coreSource.assertOpen();
     return this.client;
   }
 
   protected override getCurrentClient(): JazzClient {
+    this.coreSource.assertOpen();
     return this.client;
   }
 }
@@ -246,7 +400,6 @@ export class JazzContext {
   private readonly defaultSchemaInput?: BackendSchemaInput;
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
-  private backendSyncEnabled = false;
 
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
@@ -379,24 +532,7 @@ export class JazzContext {
    * to a sync server. Local-only runtimes can scope sessions without backend auth.
    */
   private enableBackendSyncIfConfigured(client: JazzClient): void {
-    if (!this.config.serverUrl) {
-      return;
-    }
-    if (!this.config.backendSecret) {
-      throw new Error(
-        "backendSecret required for request/session-scoped sync when serverUrl is configured.",
-      );
-    }
-    client.asBackend();
-    if (this.backendSyncEnabled) {
-      return;
-    }
-    client.connectTransport(this.config.serverUrl, {
-      jwt_token: undefined,
-      backend_secret: this.config.backendSecret,
-      backend_session: this.config.cookieSession,
-    });
-    this.backendSyncEnabled = true;
+    this.coreSource.enableBackendSync(client);
   }
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
@@ -472,7 +608,6 @@ export class JazzContext {
    * Shutdown the context and release runtime resources.
    */
   async shutdown(): Promise<void> {
-    this.backendSyncEnabled = false;
     await this.coreSource.shutdown();
   }
 }

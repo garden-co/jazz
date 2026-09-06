@@ -1,3 +1,4 @@
+import { runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import type {
   ColumnDescriptor,
@@ -37,6 +38,7 @@ import {
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   isReservedJazzIssuer,
   isTrustedReservedSession,
+  trustedReservedSessionToken,
 } from "../client-session.js";
 import {
   authorBytesForSession,
@@ -243,6 +245,11 @@ type NativeDb = {
   detachQuery?(attachment: unknown): void;
   prepareQuery(query: Uint8Array): PreparedQuery;
   prepareQueryAsync?(
+    query: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): PendingNativeOperation<PreparedQuery>;
+  prepareRelationQueryAsync?(
     query: Uint8Array,
     author?: Uint8Array,
     claims?: Record<string, unknown>,
@@ -1406,7 +1413,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return attributedInsert!.call(
           this.db,
           table,
-          suppliedRowId ?? crypto.getRandomValues(new Uint8Array(16)),
+          suppliedRowId ?? runtimeRandomBytes(16),
           cells,
           attribution,
         );
@@ -1462,7 +1469,7 @@ export class NativeRuntimeAdapter implements Runtime {
         `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
       );
     }
-    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const rowId = objectId ? parseUuid(objectId) : runtimeRandomBytes(16);
     const cells =
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
@@ -1831,11 +1838,25 @@ export class NativeRuntimeAdapter implements Runtime {
     return "unknown";
   }
 
+  private isScopedPermissionAdvice(session?: Session): boolean {
+    // #2614: scope intents currently carry the authenticated connection's identity,
+    // not an immutable per-request binding. Never answer a user-scoped call
+    // with the shared backend connection's SYSTEM authority.
+    if (this.readAuthorizationHost !== "trusted-serving" || !session) return false;
+    return !(
+      this.trustedBackend &&
+      session.issuer === SYSTEM_SESSION_ISSUER &&
+      session.user_id === SYSTEM_AUTHOR_ID &&
+      isTrustedReservedSession(session, trustedReservedSessionToken(session))
+    );
+  }
+
   requestInsertPermissionAdvice(
     table: string,
     values: InsertValues,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
     const request = this.db.requestInsertPermissionAdviceEncoded;
     if (!request) return Promise.resolve("unknown");
     const cells = encodeCellsForRow(this.table(table), values, table);
@@ -1845,8 +1866,9 @@ export class NativeRuntimeAdapter implements Runtime {
   requestReadPermissionAdvice(
     table: string,
     objectId: string,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
     const request = this.db.requestReadPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
@@ -1858,8 +1880,9 @@ export class NativeRuntimeAdapter implements Runtime {
     table: string,
     objectId: string,
     values: Record<string, Value>,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
     const request = this.db.requestUpdatePermissionAdviceEncoded;
     if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
@@ -1871,8 +1894,9 @@ export class NativeRuntimeAdapter implements Runtime {
   requestDeletePermissionAdvice(
     table: string,
     objectId: string,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session)) return Promise.resolve("unknown");
     const request = this.db.requestDeletePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
@@ -2034,6 +2058,25 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
+      if (this.db.prepareRelationQueryAsync) {
+        const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
+        const attachment = await this.attachQueryIfNeeded(
+          tier,
+          optionsJson,
+          query,
+          session,
+          pendingTx,
+        );
+        try {
+          if (this.closed) return [];
+          const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+          return rowsFromBatches(readRowBatches(rows), this.schema);
+        } finally {
+          if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+        }
+      }
+      if (this.readAuthorizationHost === "trusted-serving" && session && !session.backendAuthority)
+        throw new Error("Native relation requests require immutable scoped preparation");
       this.applySessionClaims(session);
       await this.waitForStrictRemoteQueryTransport(tier);
       if (this.closed) return [];
@@ -2106,7 +2149,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const identity = session?.identity;
     let immediateSource: ReadableStream<unknown> | Subscription | undefined;
     let immediateQuery: PreparedQuery | null = null;
-    if (usesNativeRelationApi || !this.db.prepareQueryAsync) {
+    const canPrepareAsync = usesNativeRelationApi
+      ? !!this.db.prepareRelationQueryAsync
+      : !!this.db.prepareQueryAsync;
+    if (!canPrepareAsync) {
+      if (
+        usesNativeRelationApi &&
+        this.readAuthorizationHost === "trusted-serving" &&
+        session &&
+        !session.backendAuthority
+      )
+        throw new Error("Native relation subscriptions require immutable scoped preparation");
       this.applySessionClaims(session);
       try {
         if (usesNativeRelationApi) {
@@ -2980,17 +3033,22 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
     signal?: AbortSignal,
   ): PreparedQuery | Promise<PreparedQuery> {
-    if (!this.db.prepareQueryAsync) {
+    const relation = queryUsesNativeRelationApi(queryJson);
+    const prepare = relation ? this.db.prepareRelationQueryAsync : this.db.prepareQueryAsync;
+    if (!prepare) {
       this.applySessionClaims(session);
       return this.prepareQuery(queryJson);
     }
     const contextual =
       session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
-    const queryBytes = encodeQueryJson(queryJson, this.schema);
-    const key = bytesKey(queryBytes);
+    const queryBytes = relation
+      ? relationQueryBytes(queryJson)
+      : encodeQueryJson(queryJson, this.schema);
+    const key = `${relation ? "relation" : "query"}:${bytesKey(queryBytes)}`;
     const cached = contextual ? undefined : this.preparedQueries.get(key);
     if (cached) return cached;
-    const pending = this.db.prepareQueryAsync(
+    const pending = prepare.call(
+      this.db,
       queryBytes,
       contextual ? session.identity : undefined,
       contextual ? session.claims : undefined,

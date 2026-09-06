@@ -1,3 +1,4 @@
+import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
@@ -97,6 +98,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const session = resolveNativeSession(config);
         const module = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         const factory = module.installNativeForegroundRuntime();
+        if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
         this.pendingCapability = beginNativeAccountSession(factory, config, session);
         this.foregroundFactory = factory;
         this.foregroundModule = module;
@@ -126,6 +128,8 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const capability = new Uint8Array(config.nativeRelay.capability);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
+        if (this.foregroundFactory.accountSecret)
+          installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);
         this.foregroundModule = foreground;
         const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
           if (this.lifecycleForeground) return run(this.lifecycleForeground);
@@ -171,7 +175,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             account_id: metadata.accountId ?? undefined,
             issuer: metadata.issuer,
             user_id: metadata.userId,
-            claims: {},
+            claims: selected.claims,
             authMode:
               metadata.issuer === "urn:jazz:local-first"
                 ? "local-first"
@@ -208,12 +212,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   override admitConfig(config: ReactNativeDbConfig): void {
     if (!this.admittedSession) throw new Error("React Native native session is not admitted");
     if (this.ownsAdmission) return;
-    // Public identity is derived from the native admission. Caller metadata
-    // neither chooses authorization nor overrides the displayed identity.
-    delete config.jwtToken;
-    delete config.secret;
-    delete config.adminSecret;
-    config.cookieSession = this.admittedSession;
+    // The handle's JWT was checked against the native account/identity during
+    // load. Keep its bearer representation: reserved local-first identities
+    // deliberately cannot enter through the generic cookie-session path.
+    // Native authority still comes exclusively from the admitted capability.
     setTrustedReservedSession(config, this.admittedSession);
   }
 

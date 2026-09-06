@@ -2550,7 +2550,7 @@ where
                     policy_plan_cache_signature(
                         &binding,
                         identity,
-                        self.session_claim_revision(identity),
+                        &self.prepared_plan_claim_scope(identity),
                     )
                 ),
             );
@@ -3152,6 +3152,12 @@ where
         })
     }
 
+    fn prepared_plan_claim_scope(&self, identity: AuthorSubject) -> String {
+        self.active_session_claim_scope_key(identity)
+            .map(|scope| format!("request:{scope}"))
+            .unwrap_or_else(|| format!("session:{}", self.session_claim_revision(identity)))
+    }
+
     pub(crate) async fn prepared_query_plan(
         &mut self,
         shape: &ValidatedQuery,
@@ -3162,7 +3168,11 @@ where
         let key = (
             shape.shape_id(),
             tier,
-            policy_plan_cache_signature(binding, identity, self.session_claim_revision(identity)),
+            policy_plan_cache_signature(
+                binding,
+                identity,
+                &self.prepared_plan_claim_scope(identity),
+            ),
         );
         if let Some(plan) = self.query.query_shape_cache.get(&key)
             && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
