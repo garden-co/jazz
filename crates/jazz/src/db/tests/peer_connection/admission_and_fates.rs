@@ -1802,6 +1802,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         expected,
+        expected.link,
         Some(GlobalTime(0)),
     ));
     assert!(
@@ -1812,6 +1813,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
                 ..receipt.clone()
             },
             expected,
+            expected.link,
             Some(GlobalTime(0)),
         ),
         "a receipt from the opposite duplex endpoint must not cross-wire"
@@ -1828,6 +1830,122 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     assert_ne!(
         subscriber.borrow().connection_epoch,
         resumed.borrow().connection_epoch
+    );
+}
+
+#[test]
+/// A trusted backend can reconnect with concurrent, distinct tenant bindings
+/// for the same delegated identity; each answer must use only its own support
+/// receipt.
+///
+/// backend ──editor tenant scope──► reconnect ──support view + receipt──► Allowed
+/// backend ──viewer tenant scope──► reconnect ──support view + receipt──► Denied
+fn backend_permission_advice_keeps_concurrent_delegated_claim_scopes_separate_after_reconnect() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("tenant", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("tenant", &["claims", "tenant"])),
+                ),
+        ),
+    );
+    let delegated = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let backend = open_db(0xbe, AuthorSubject::SYSTEM, &schema);
+    let authority = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let owned = authority
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("owned".to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("tenant".to_owned(), Value::String("editor".to_owned())),
+            ]),
+        )
+        .unwrap()
+        .row_uuid();
+    let (backend_transport, authority_transport) = duplex_with_admitted_session_context(
+        AuthorSubject::SYSTEM,
+        NodeUuid::from_bytes([0xbe; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let mut editor = test_provider_claims(delegated);
+    editor.insert(
+        crate::query::provider_claim_key("tenant"),
+        Value::String("editor".to_owned()),
+    );
+    let mut viewer = test_provider_claims(delegated);
+    viewer.insert(
+        crate::query::provider_claim_key("tenant"),
+        Value::String("viewer".to_owned()),
+    );
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    };
+    let allowed = backend.request_permission_advice_with_delegated_session(
+        action.clone(),
+        crate::protocol::DelegatedSessionBinding {
+            identity: delegated,
+            claims: editor,
+        },
+    );
+    let denied = backend.request_permission_advice_with_delegated_session(
+        action,
+        crate::protocol::DelegatedSessionBinding {
+            identity: delegated,
+            claims: viewer,
+        },
+    );
+    // The first admitted backend link sends both intents but disappears
+    // before the authority can hydrate either support scope.
+    backend.tick().unwrap();
+    assert!(backend.detach_connection(&upstream));
+    let (reconnected_backend_transport, reconnected_authority_transport) =
+        duplex_with_admitted_session_context(
+            AuthorSubject::SYSTEM,
+            NodeUuid::from_bytes([0xbe; 16]),
+            2,
+            NodeUuid::from_bytes([0x5e; 16]),
+            2,
+        );
+    let _reconnected_upstream =
+        crate::db::block_on(backend.connect_upstream(reconnected_backend_transport));
+    let _reconnected_subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        reconnected_authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    for _ in 0..16 {
+        backend.tick().unwrap();
+        authority.tick().unwrap();
+    }
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut allowed = Box::pin(allowed);
+    let mut denied = Box::pin(denied);
+    assert_eq!(
+        allowed.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "backend must receive and apply the editor-bound authority receipt"
+    );
+    assert_eq!(
+        denied.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "viewer binding must not coalesce with the editor support scope"
     );
 }
 

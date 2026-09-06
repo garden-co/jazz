@@ -1151,6 +1151,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         context,
+        context.link,
         Some(GlobalTime(17)),
     ));
     assert!(
@@ -1160,6 +1161,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
                 ..receipt.clone()
             },
             context,
+            context.link,
             Some(GlobalTime(17)),
         ),
         "a stale authorization generation must not ride a fresh support view"
@@ -1171,6 +1173,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
                 ..receipt
             },
             context,
+            context.link,
             Some(GlobalTime(17)),
         ),
         "a stale support cut must not ride a fresh authorization generation"

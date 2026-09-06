@@ -2810,7 +2810,7 @@ where
                                 clause_count,
                                 view,
                             } => {
-                                let Some(expected) = expected_scope_authority else {
+                                let Some(_) = expected_scope_authority else {
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -2820,10 +2820,7 @@ where
                                     .peer_payload_inventory
                                     .authorization_progress
                                     .unwrap_or_default();
-                                if clause_count == 0
-                                    || clause_index >= clause_count
-                                    || key.subject != expected.link
-                                {
+                                if clause_count == 0 || clause_index >= clause_count {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
@@ -2846,6 +2843,14 @@ where
                                     // late/replayed authority view.
                                     continue;
                                 };
+                                // A trusted backend's link identity is SYSTEM,
+                                // while its request carries the user binding that
+                                // owns this support proof. The authority-selected
+                                // key must name that exact immutable binding.
+                                if key.subject != session_claim_binding.0 {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
                                 let claims_still_bound = self
                                     .node
                                     .borrow()
@@ -3138,13 +3143,22 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
+                                // Transport admission remains bound to the
+                                // backend's SYSTEM link, while this support
+                                // lease uses the now-current authority context
+                                // under the immutable delegated subject named
+                                // by the request and receipt.
+                                let scope_authority = AuthorityContext {
+                                    link: request.session_claim_binding.0,
+                                    ..*expected
+                                };
                                 let admitted = match (request.lease.as_ref(), request.owner.take())
                                 {
                                     (Some(lease), Some(owner)) => matches!(
                                         scope_lease_manager.registry.install(
                                             lease,
                                             owner,
-                                            *expected,
+                                            scope_authority,
                                             receipt.clone(),
                                         ),
                                         AuthorizationScopeInstall::Installed
@@ -3152,7 +3166,7 @@ where
                                     (Some(lease), None) => matches!(
                                         scope_lease_manager.registry.receipt(
                                             lease,
-                                            *expected,
+                                            scope_authority,
                                             receipt.authorization_progress,
                                             receipt.settled_through.0,
                                         ),
