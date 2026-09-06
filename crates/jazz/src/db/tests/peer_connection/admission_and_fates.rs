@@ -1432,7 +1432,9 @@ fn reconnect_replays_live_scope_waiters_once_and_drops_cancelled_ones() {
     let _second = crate::db::block_on(client.connect_upstream(second_transport));
     client.tick().unwrap();
     let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
-        Some(SyncMessage::AuthorizationScopeIntent { request_id, action }) => {
+        Some(SyncMessage::AuthorizationScopeIntent {
+            request_id, action, ..
+        }) => {
             assert_eq!(
                 action,
                 PermissionAdviceAction::Read {
@@ -1997,7 +1999,10 @@ fn scope_receipt_claim_transition_ignores_late_a_support_and_requires_fresh_b_re
         else {
             break;
         };
-        if let SyncMessage::AuthorizationScopeIntent { request_id, action } = message {
+        if let SyncMessage::AuthorizationScopeIntent {
+            request_id, action, ..
+        } = message
+        {
             assert_eq!(
                 action,
                 PermissionAdviceAction::Read {
