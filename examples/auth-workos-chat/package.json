@@ -23,6 +23,7 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "jose": "^6.2.1",
+    "jsdom": "catalog:default",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",

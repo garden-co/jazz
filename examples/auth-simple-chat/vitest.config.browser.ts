@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { defineConfig } from "vitest/config";
+import { defineConfig, type ViteUserConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
@@ -18,7 +18,7 @@ function findFreePort(): Promise<number> {
   });
 }
 
-export default defineConfig(async () => {
+export default defineConfig(async (): Promise<ViteUserConfig> => {
   const { publicJwk, mintJwt } = await createTestKeySet();
   const adminJwt = await mintJwt("admin", "00000000-0000-4000-8000-0000000000aa");
   const memberJwt = await mintJwt("member", "00000000-0000-4000-8000-0000000000bb");
