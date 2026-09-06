@@ -5,6 +5,7 @@ import {
   TestCleanup,
   uniqueDbName,
   waitForQuery,
+  waitForCondition,
 } from "../../../../../../packages/jazz-tools/tests/browser/support";
 import {
   browserTopologyReporter,
@@ -235,6 +236,87 @@ describe("BandChat cross-topology recovery", () => {
     ]);
   }, 75_000);
 
+  it("never publishes an empty owner room snapshot while another browser member bootstraps", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("band-chat-room-subscription"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [ownerToken, guestToken] = await Promise.all([
+      getJazzServerJwtForUser("subscription-owner", undefined, server.appId),
+      getJazzServerJwtForUser("subscription-guest", undefined, server.appId),
+    ]);
+    const owner = await openMemberDb(server, "subscription-owner", ownerToken);
+    const observedSnapshots: Array<ReadonlyArray<string>> = [];
+    const unsubscribers: Array<() => void> = [];
+    try {
+      unsubscribers.push(
+        owner.db.subscribe(app.rooms.select("*", "$createdBy").orderBy("name", "asc"), (rooms) =>
+          observedSnapshots.push(rooms.map((room) => room.id)),
+        ),
+        owner.db.subscribe(app.profiles.where({ author: owner.author }), () => {}),
+      );
+      void owner.db.insert(app.profiles, {
+        author: owner.author,
+        displayName: "subscription-owner",
+      });
+      const ownerRoom = owner.db.insert(app.rooms, { name: "Owner subscription room" });
+      const ownerRoomId = ownerRoom.value.id;
+      void owner.db.insert(app.roomMembers, {
+        roomId: ownerRoomId,
+        memberAuthor: owner.author,
+      });
+      unsubscribers.push(owner.db.subscribe(app.rooms.where({ id: ownerRoomId }), () => {}));
+
+      await waitForCondition(
+        async () => observedSnapshots.some((snapshot) => snapshot.includes(ownerRoomId)),
+        15_000,
+        "owner room-list callback observes its locally created room",
+      );
+
+      const guest = await openMemberDb(server, "subscription-guest", guestToken);
+      const guestRoomSnapshots: Array<ReadonlyArray<string>> = [];
+      unsubscribers.push(
+        guest.db.subscribe(app.rooms.select("*", "$createdBy").orderBy("name", "asc"), (rooms) =>
+          guestRoomSnapshots.push(rooms.map((room) => room.id)),
+        ),
+        guest.db.subscribe(app.profiles.where({ author: guest.author }), () => {}),
+      );
+      void guest.db.insert(app.profiles, {
+        author: guest.author,
+        displayName: "subscription-guest",
+      });
+      const guestRoom = guest.db.insert(app.rooms, { name: "Guest bootstrap room" });
+      void guest.db.insert(app.roomMembers, {
+        roomId: guestRoom.value.id,
+        memberAuthor: guest.author,
+      });
+      unsubscribers.push(guest.db.subscribe(app.rooms.where({ id: guestRoom.value.id }), () => {}));
+
+      await waitForCondition(
+        async () => guestRoomSnapshots.some((snapshot) => snapshot.includes(guestRoom.value.id)),
+        15_000,
+        "guest room-list callback observes its locally created room",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const firstOwnRoomSnapshot = observedSnapshots.findIndex((snapshot) =>
+        snapshot.includes(ownerRoomId),
+      );
+      expect(firstOwnRoomSnapshot).toBeGreaterThanOrEqual(0);
+      expect(
+        observedSnapshots
+          .slice(firstOwnRoomSnapshot + 1)
+          .every((snapshot) => snapshot.includes(ownerRoomId)),
+      ).toBe(true);
+    } finally {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    }
+  }, 45_000);
+
   /**
    * A member keeps only a two-row projected message window after reconnect;
    * deleting that member's room access rejects its next server-authorized write.
@@ -390,11 +472,11 @@ describe("BandChat cross-topology recovery", () => {
   }, 75_000);
 });
 
-async function openMember(
+async function openMemberDb(
   server: { appId: string; serverUrl: string },
   userId: string,
   jwtToken: string,
-): Promise<ClientIdentity> {
+): Promise<Pick<ClientIdentity, "db" | "author">> {
   const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
   const account = await accounts.registerJWT({ getToken: async () => jwtToken });
   const db = cleanup.track(
@@ -406,7 +488,15 @@ async function openMember(
       driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
     }),
   );
-  const author = account.id;
+  return { db, author: account.id };
+}
+
+async function openMember(
+  server: { appId: string; serverUrl: string },
+  userId: string,
+  jwtToken: string,
+): Promise<ClientIdentity> {
+  const { db, author } = await openMemberDb(server, userId, jwtToken);
   const profile = await db
     .insert(app.profiles, { author, displayName: userId })
     .wait({ tier: "edge" });

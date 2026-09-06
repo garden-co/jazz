@@ -432,6 +432,14 @@ An empty opening is a valid result, not a reason to launch a second read.
 Explicit server-rendered hydration snapshots remain a separate initial-display
 facility; they do not replace the live stream's opening contract.
 
+When a local plan is replaced, a facade that has already delivered a result
+MUST retain that result while the successor plan is cold and its initial sink
+batch is pending. It MUST NOT publish a transient empty result during that
+replacement. Once the successor's initial sink batch is ready, it publishes one
+complete reset, including when the successor's actual result is empty. A later
+ordinary removal or deletion may of course publish an empty result. This is a
+local terminal-continuity rule; it does not wait for a remote-settlement receipt.
+
 Consumers own the materialized result set. The contract is that applying the
 delta reducer to events in stream order produces the same result as a one-shot
 read at the corresponding frontier. Non-reset deltas do not carry a complete
