@@ -176,6 +176,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
       const userDb = context.forSession({
         issuer: "urn:jazz:docs",
         user_id: req.params.userId,
+        account_id: req.params.userId,
         authMode: "external",
         claims: {},
       });

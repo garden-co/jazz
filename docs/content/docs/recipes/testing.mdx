@@ -43,23 +43,29 @@ afterEach(async () => {
 
 describe("todo permissions", () => {
   it("allows owners to update their own todos", async () => {
+    const aliceAccount = crypto.randomUUID();
+    const bobAccount = crypto.randomUUID();
     const todo = await testApp.seed((db) => {
       const { value } = db.insert(app.todos, {
         title: "Buy milk",
-        ownerId: "alice",
+        ownerId: aliceAccount,
       });
       return value;
     });
 
     const alice = testApp.as({
+      issuer: "https://auth.example.test",
       user_id: "alice",
+      account_id: aliceAccount,
       claims: {},
-      authMode: "local-first",
+      authMode: "external",
     });
     const bob = testApp.as({
+      issuer: "https://auth.example.test",
       user_id: "bob",
+      account_id: bobAccount,
       claims: {},
-      authMode: "local-first",
+      authMode: "external",
     });
 
     await alice
@@ -126,7 +132,7 @@ If your app uses external JWT auth, `startTestJwtIssuer` starts a local JWKS end
 
 ```typescript custom="noscroll"
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createAccountManager, createDb, type Db } from "jazz-tools";
 import {
   startLocalJazzServer,
   startTestJwtIssuer,
@@ -158,15 +164,27 @@ describe("external auth", () => {
       role: "admin",
     });
 
+    let stored: string | null = null;
+    const accounts = await createAccountManager({
+      appId: server.appId,
+      serverUrl: server.url,
+      store: {
+        read: async () => stored,
+        update: async (transform) => {
+          stored = transform(stored);
+        },
+      },
+    });
+    const account = await accounts.registerJWT(jwtToken);
     db = await createDb({
       appId: server.appId,
       serverUrl: server.url,
-      jwtToken,
+      account,
       driver: { type: "memory" },
     });
 
     expect(db.getAuthState().session).toMatchObject({
-      user_id: "alice",
+      user: { account: account.id, identity: { subject: "alice" } },
       authMode: "external",
     });
   });
@@ -210,28 +228,27 @@ export async function teardown(): Promise<void> {
 ```
 
 If you need to isolate data across tests, you can use different `dbName`s when creating the client database.
-For local-first auth in React browser tests, also use a separate auth storage key for each logical
-user. The key belongs to `useLocalFirstAuth`, then its returned secret is forwarded into the
-client configuration:
+For local-first auth in browser tests, create one account handle per logical user and reuse that handle when testing reloads. Prepare accounts before mounting the UI, outside any Jazz context:
 
 ```tsx
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { createAccountManager } from "jazz-tools";
+import { JazzProvider } from "jazz-tools/react";
 import type { ReactNode } from "react";
 
-const authKey = crypto.randomUUID();
+const accounts = await createAccountManager({
+  appId: APP_ID,
+  serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+});
+const account = accounts.createLocalFirst();
 const dbName = crypto.randomUUID();
 
 function TestApp({ children }: { children: ReactNode }) {
-  const { secret, isLoading } = useLocalFirstAuth({ key: authKey });
-
-  if (isLoading || !secret) return null;
-
   return (
     <JazzProvider
       config={{
         appId: APP_ID,
         serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-        secret,
+        account,
         driver: { type: "persistent", dbName },
       }}
     >

@@ -24,13 +24,13 @@ const api = new Hono();
 api.post("/api/todos", async (c) => {
   const db = await context.forRequest(c.req);
   const session = db.getAuthState().session;
-  if (!session) return c.json({ error: "Unauthenticated" }, 401);
+  if (!session?.user.account) return c.json({ error: "Account required" }, 401);
   const { title } = await c.req.json();
 
   const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
-    owner_id: session.user,
+    owner_id: session.user.account,
   });
 
   return c.json(todo, 201);
