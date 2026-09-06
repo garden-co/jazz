@@ -50,13 +50,13 @@ export function makeFakeClient(params: {
 }
 
 /** Mock only native crypto for provider lifecycle tests; use a real opaque handle. */
-export function makeFakeAccount() {
+export function makeFakeAccount(appId = "app-1", serverUrl = "https://jazz.example.com") {
   const identity = {
     issuer: "urn:jazz:local-first",
     subject: "00000000-0000-4000-8000-000000000001",
   };
   return createAccountManagerWithRuntime({
-    registry: accountRegistryUrl("https://jazz.example.com", "app-1"),
+    registry: accountRegistryUrl(serverUrl, appId),
     localFirst: {
       create: () => ({
         accountId: "00000000-0000-4000-8000-000000000002",
