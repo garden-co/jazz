@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { ExclusiveWriteHandle } from "./client.js";
+import { createDb as createAccountDb } from "./default-create-db.js";
 import { type Db } from "./db.js";
+import { localAccountConfig } from "./testing/account-fixtures.js";
 import { createDb } from "./testing/create-internal-db.js";
 
 const todoSchema = {
@@ -425,11 +427,9 @@ describe("Db mergeable transactions", () => {
   });
 
   it("stages session-scoped mergeable transaction writes with core identity", async () => {
-    const sessionDb = await createDb({
-      appId: `db-transaction-session-test`,
-      driver: { type: "memory" },
-      serverUrl: "ws://example.invalid",
-    });
+    const sessionDb = await createAccountDb(
+      await localAccountConfig("db-transaction-session-test"),
+    );
 
     try {
       const tx = sessionDb.beginTransaction();

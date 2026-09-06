@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { DbConfig } from "../../../src/runtime/db.js";
+  import type { AccountDbConfig as DbConfig } from "../../../src/accounts/context.js";
   import JazzSvelteProvider from "../../../src/svelte/JazzSvelteProvider.svelte";
 
   interface Props {
@@ -18,7 +18,7 @@
 
 <JazzSvelteProvider {config} autoAttachDevTools={false}>
   {#snippet children({ db })}
-    <p data-provider-state="ready">{db.getAuthState().session?.authMode}</p>
+    <p data-provider-account>{db.getAuthState().session?.user.account}</p>
   {/snippet}
   {#snippet fallback()}
     <p data-provider-state="loading">loading</p>

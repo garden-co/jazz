@@ -304,8 +304,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
 
     const read = db.all(query(), { tier: ReadTier.RemoteIfPossible });
-    await settle();
-    expect(client.query).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(client.query).toHaveBeenCalledOnce());
     expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "remote-if-possible" });
 
     await db.disconnect();
