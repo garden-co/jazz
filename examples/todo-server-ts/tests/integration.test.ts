@@ -44,10 +44,19 @@ async function createIdentity(
   const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
+  let stored: string | null = null;
   const accounts = await createAccountManager({
     appId: upstream.appId,
     serverUrl: upstream.url,
     env: `todo-server-integration-${crypto.randomUUID()}`,
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
   });
   const account = await accounts.registerJWT(token);
   return { token, userId, user: account.id };
