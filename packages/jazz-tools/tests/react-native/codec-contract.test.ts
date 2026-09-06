@@ -159,6 +159,8 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       },
       {
         type: "nativeSessionMetadata",
+        node: new Uint8Array(16).fill(9),
+        registryAuthority: "https://registry.example",
         accountId: "07070707-0707-0707-0707-070707070707",
         issuer: "fixture-issuer",
         userId: "fixture-user",

@@ -138,6 +138,7 @@ export async function createAccountDbWithRuntimeSource(
     return opened;
   } catch (error) {
     unsubscribe();
+    if (!db) await runtimeSource.shutdown();
     throw error;
   }
 }

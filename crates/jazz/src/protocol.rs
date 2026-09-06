@@ -2135,6 +2135,54 @@ impl PolicyBindingKey {
         self.canonical_claims.claims()
     }
 
+    /// Store provider claims once; reserved author bindings are reconstructed
+    /// from the separately stored exact identity when they match it. Other
+    /// scalar bindings remain exact; authorization validation lives at admission.
+    pub(crate) fn directory_value(&self) -> Result<Value, String> {
+        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+            &self.identity,
+            BTreeMap::new(),
+        );
+        let mut claims = self.claims().clone();
+        let mut presence = 0_u8;
+        // Bits use the eight derived names' canonical UTF-8 ordering. Absent
+        // entries remain absent: internal bindings may intentionally be partial.
+        for (bit, (name, expected)) in derived.into_iter().enumerate() {
+            if claims.get(&name) == Some(&expected) {
+                claims.remove(&name);
+                presence |= 1 << bit;
+            }
+        }
+        policy_directory_payload(presence, policy_binding_directory_claims_value(&claims)?)
+    }
+
+    pub(crate) fn from_directory_value(
+        identity: AuthorSubject,
+        value: Value,
+    ) -> Result<Self, String> {
+        let Value::Record(record) = value else {
+            return Err("policy directory payload must be record".into());
+        };
+        if *record.descriptor() != policy_directory_descriptor() {
+            return Err("policy directory descriptor mismatch".into());
+        }
+        let Value::U8(presence) = record.get_idx(0).map_err(|error| error.to_string())? else {
+            return Err("policy directory presence must be u8".into());
+        };
+        let value = record.get_idx(1).map_err(|error| error.to_string())?;
+        let mut claims = policy_binding_directory_claims_from_value(value)?;
+        for (bit, (name, expected)) in
+            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, BTreeMap::new())
+                .into_iter()
+                .enumerate()
+        {
+            if presence & (1 << bit) != 0 && claims.insert(name, expected).is_some() {
+                return Err("policy directory contains a redundant identity-derived claim".into());
+            }
+        }
+        Ok(Self::from_canonical_parts(identity, claims))
+    }
+
     pub(crate) fn directory_digest(&self) -> [u8; 32] {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
@@ -2187,11 +2235,31 @@ pub(crate) fn policy_binding_directory_claims_from_value(
     Ok(claims)
 }
 
+fn policy_directory_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("derived_v1", ValueType::U8),
+        (
+            "claims_v1",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *policy_claim_node_descriptor(),
+            )))),
+        ),
+    ])
+}
+
+fn policy_directory_payload(presence: u8, claims: Value) -> Result<Value, String> {
+    let descriptor = policy_directory_descriptor();
+    Ok(Value::Record(OwnedRecord::new(
+        descriptor
+            .create(&[Value::U8(presence), claims])
+            .map_err(|error| error.to_string())?,
+        descriptor,
+    )))
+}
+
 /// Direct-store value type for the collision-checked policy-binding directory.
 pub(crate) fn policy_binding_directory_claims_value_type() -> ValueType {
-    ValueType::Array(Box::new(ValueType::Record(Box::new(
-        *policy_claim_node_descriptor(),
-    ))))
+    ValueType::Record(Box::new(policy_directory_descriptor()))
 }
 
 const POLICY_CLAIM_DIRECTORY_MAX_NODES: usize = 1024;
@@ -5466,8 +5534,17 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 None => bytes.push(0),
             }
         }
-        Value::Record(_) => {
-            panic!("record-valued values have no v3 protocol encoding")
+        Value::Record(record) => {
+            // Policy comparison keys retain the complete portable record,
+            // including typed field identities. Migration defaults still
+            // reject records before this shared helper can encode them.
+            bytes.push(16);
+            put_bytes(
+                bytes,
+                &groove::records::encode_record_descriptor(record.descriptor())
+                    .expect("admitted policy record descriptor has canonical encoding"),
+            );
+            put_bytes(bytes, record.raw());
         }
         Value::Enum(_) => {
             panic!(
@@ -5712,6 +5789,111 @@ mod tests {
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn policy_directory_rebuilds_only_identity_derived_claims() {
+        // The private directory stores provider data and an exact identity;
+        // its encoded payload must not retain a second author representation.
+        let identity = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                [7; 16],
+            )));
+        let provider = BTreeMap::from([("role".into(), Value::String("editor".into()))]);
+        let claims =
+            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, provider);
+        let key = PolicyBindingKey::from_canonical_parts(identity, claims.clone());
+        let encoded = key.directory_value().unwrap();
+        let Value::Record(fields) = encoded.clone() else {
+            panic!("typed directory record")
+        };
+        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(255));
+        let stored =
+            policy_binding_directory_claims_from_value(fields.get_idx(1).unwrap()).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored.get("\0claims:role"),
+            Some(&Value::String("editor".into()))
+        );
+        let rebuilt = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+        assert_eq!(rebuilt, key);
+        assert_eq!(rebuilt.directory_digest(), key.directory_digest());
+        let mut inconsistent = claims;
+        inconsistent.insert("user".into(), Value::String("spoof".into()));
+        // Internal policy tests may deliberately bind provider sub or user to
+        // a different scalar. Storage preserves it; admission owns validation.
+        let inconsistent = PolicyBindingKey::from_canonical_parts(identity, inconsistent);
+        assert_eq!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                inconsistent.directory_value().unwrap()
+            )
+            .unwrap(),
+            inconsistent
+        );
+        let redundant = policy_binding_directory_claims_value(&BTreeMap::from([(
+            "user".into(),
+            Value::String("spoof".into()),
+        )]))
+        .unwrap();
+        assert!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                policy_directory_payload(255, redundant).unwrap()
+            )
+            .is_err()
+        );
+        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+            &identity,
+            BTreeMap::new(),
+        );
+        assert_eq!(derived.len(), 8);
+        for mask in 0_u16..=255 {
+            let partial = derived
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, (key, value))| (key.clone(), value.clone()))
+                .collect();
+            let key = PolicyBindingKey::from_canonical_parts(identity, partial);
+            let encoded = key.directory_value().unwrap();
+            let Value::Record(fields) = &encoded else {
+                panic!("typed directory record")
+            };
+            assert_eq!(fields.get_idx(0).unwrap(), Value::U8(mask as u8));
+            let recovered = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+            assert_eq!(recovered, key);
+            assert_eq!(recovered.directory_digest(), key.directory_digest());
+        }
+    }
+
+    #[test]
+    fn canonical_policy_claims_preserve_record_descriptor_and_payload() {
+        // Internal comparison identity is not directly observable through a
+        // public query; distinguish equal bytes with different field identities.
+        let record = |field: &str, value: u64| {
+            let descriptor = RecordDescriptor::new([(field, ValueType::U64)]);
+            Value::Record(OwnedRecord::new(
+                descriptor.create(&[Value::U64(value)]).unwrap(),
+                descriptor,
+            ))
+        };
+        let claims = |value| CanonicalPolicyClaims::new(BTreeMap::from([("user".into(), value)]));
+        assert_eq!(claims(record("a", 1)), claims(record("a", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("b", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("a", 2)));
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        assert_ne!(
+            claims(author.to_value()),
+            claims(
+                author
+                    .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                        [7; 16]
+                    )))
+                    .to_value()
+            )
+        );
     }
 
     #[test]

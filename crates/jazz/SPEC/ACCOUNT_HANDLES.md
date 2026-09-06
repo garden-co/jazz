@@ -167,3 +167,49 @@ its final holder requests graceful-sync teardown.
 Transactions retain their complete original author. An external identity must
 never upload pending local-first transactions as if it were that author. This
 release uses sync-before-switch; it does not add cross-author replay authority.
+
+## Native account roots and advisory admission
+
+The RN platform supplies its absolute application storage directory; JavaScript
+supplies no filename or path. The native account filename is lowercase BLAKE3
+hex plus `.sqlite`, over these exact bytes in order:
+
+- ASCII `jazz-native-account-root-v1` followed by one NUL byte;
+- each of canonical registry URL, canonical application UUID, and environment:
+  big-endian unsigned 32-bit UTF-8 byte count followed by those UTF-8 bytes;
+- the account UUID's 16 raw bytes in standard UUID order.
+
+Application names resolve through the shared application-ID derivation before
+this encoding. Registry URLs use the same canonical HTTP(S) account endpoint
+as the shared handle; optional ws/wss transport URLs normalize to HTTP(S) only
+for comparison. The exact acting principal and active transport are excluded
+from the filename. Linked principals share the durable account root only after
+the prior live identity closes. Same-principal contexts share the relay while
+owning independent foreground node leases and shutdown lifetimes.
+
+The shared TypeScript JWT decoder supplies local advisory provider claims to
+native admission and same-identity refresh. Rust uses the common JavaScript
+numeric/value projection and reconstructs reserved author bindings from the
+admitted identity. These claims cannot grant remote admission: the server
+verifies the original bearer and constructs its own policy binding. Refresh
+changes neither account nor acting principal. Local claims and subscriber
+bindings update together; upstream renewal reconnects with the new bearer.
+
+## Durable policy-binding directory
+
+The directory retains the existing typed provider-claim node encoding. It
+stores the exact author identity plus a native record with `derived_v1: U8` presence mask and
+`claims_v1: Array<Record>` typed provider-claim nodes, omitting the canonical
+identity-derived entries (`user` and its structured paths, `authMode`, and the
+namespaced `iss`/`sub`). Writing omits an entry only when it equals the value derived from the
+stored identity; other portable scalar bindings remain stored verbatim. The mask bits 0–7 correspond to `\0claims:iss`,
+`\0claims:sub`, `authMode`, `user`, `user.account`, `user.identity`,
+`user.identity.issuer`, and `user.identity.subject`. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
+identity before producing the policy-binding key. Partial internal bindings
+therefore remain exact; missing claims are never implicitly added. Provider
+claims named `user` remain separately namespaced and are retained.
+
+In-memory policy equality and its digest still include the complete canonical
+binding. Structured author records contribute their native descriptor and
+payload to that comparison encoding; process-local intern IDs never enter it.
+This introduces no generic record-valued durable key or migration-lens default.

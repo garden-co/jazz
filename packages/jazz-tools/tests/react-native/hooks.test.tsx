@@ -2,10 +2,7 @@
 import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
-import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import {
   JazzProvider,
   useAll,
@@ -57,7 +54,7 @@ function Probe({
               ? "disabled"
               : (one.data?.title ?? "empty")}
       </output>
-      <output data-testid="session">{session?.user}</output>
+      <output data-testid="session">{JSON.stringify(session?.user)}</output>
     </>
   );
 }
@@ -121,23 +118,7 @@ it("preserves equivalent provider config and isolates a replacement native ident
     await firstWriter
       .insert(app.notes, { title: "first scope", done: false })
       .wait({ tier: "local" });
-    const capability = fixture.nativeHost.admit(
-      JSON.stringify({
-        scope: {
-          app_namespace: fixture.config.appId,
-          storage_namespace: "default",
-          auth_scope: "hook-second",
-        },
-        sqlite_path: join(fixture.directory, "hook-second.sqlite"),
-        schema_json: serializeSchemaSource(app.wasmSchema),
-        identity: {
-          node: randomUUID(),
-          author: JSON.stringify(["https://auth.example", "hook-second"]),
-        },
-        claims: {},
-      }),
-    );
-    const secondConfig = { ...fixture.config, nativeRelay: { capability } };
+    const secondConfig = await fixture.registerIdentity("hook-second");
     const secondWriter = await fixture.createDb(secondConfig);
     await secondWriter
       .insert(app.notes, { title: "second scope", done: false })
@@ -155,16 +136,17 @@ it("preserves equivalent provider config and isolates a replacement native ident
     try {
       await waitFor(() => expect(mounted.getByTestId("all").textContent).toBe("first scope"));
       const first = observed!;
-      mounted.rerender(
-        view({ ...fixture.config, nativeRelay: { capability: fixture.capability } }),
-      );
+      mounted.rerender(view({ ...fixture.config }));
       await waitFor(() => expect(mounted.getByTestId("all").textContent).toBe("first scope"));
       expect(observed).toBe(first);
       mounted.rerender(view(secondConfig));
       await waitFor(() => expect(mounted.getByTestId("all").textContent).toBe("second scope"));
       expect(mounted.getByTestId("one").textContent).toBe("second scope");
       expect(mounted.getByTestId("session").textContent).toBe(
-        JSON.stringify(["https://auth.example", "hook-second"]),
+        JSON.stringify({
+          account: secondConfig.account.id,
+          identity: secondConfig.account.identity,
+        }),
       );
       expect(observed).not.toBe(first);
       await expectClosed(first);
@@ -178,7 +160,6 @@ it("preserves equivalent provider config and isolates a replacement native ident
     } finally {
       mounted.unmount();
       if (observed) await expectClosed(observed);
-      fixture.nativeHost.revoke(capability);
     }
   });
 });

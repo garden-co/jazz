@@ -1714,8 +1714,12 @@ export class Db {
     }
   }
 
-  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
-    this.runtimeSource.assertAuthUpdateAllowed();
+  protected applyAuthUpdate(
+    token: string | null,
+    trustedReservedSession?: Session,
+    nativeAccountRefresh = false,
+  ): boolean {
+    if (!nativeAccountRefresh) this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1728,7 +1732,11 @@ export class Db {
     // Browser persistent roots are principal-bound. Let the connection manager
     // reject a token-carried incompatible switch while config, local auth state
     // and worker claims still describe the preceding principal.
-    if (tokenChanged && this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) {
+    if (
+      !nativeAccountRefresh &&
+      tokenChanged &&
+      this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)
+    ) {
       this.connection.updateAuth({ jwtToken, trustedReservedSession });
     }
 
@@ -1745,7 +1753,8 @@ export class Db {
 
     // A same-token package-private session refresh cannot cross the public
     // principal boundary above; preserve the old no-op/refresh behavior.
-    if (!tokenChanged) this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    if (!nativeAccountRefresh && !tokenChanged)
+      this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1868,7 +1877,14 @@ export class Db {
   /** @internal Refresh only through the immutable handle that owns this context. */
   async refreshAccountAuth(account: AccountHandle): Promise<string> {
     assertAccountConfig(this.config);
-    if (account.id !== this.config.accountId) throw new Error("Account context mismatch");
+    const current = getDbInternalSession(this);
+    if (
+      account.id !== this.config.accountId ||
+      accountRegistry(account) !== this.config.accountRegistryAuthority ||
+      account.identity.issuer !== current?.issuer ||
+      account.identity.subject !== current?.user_id
+    )
+      throw new Error("Account context mismatch");
     try {
       const token = await accountToken(account, accountRegistry(account));
       if (this.shutdownAbort.signal.aborted) throw new Error("Account context closed");
@@ -1879,7 +1895,8 @@ export class Db {
               "local-first",
             )
           : undefined;
-      this.applyAuthUpdate(token, reserved ?? undefined);
+      const nativeRefresh = this.runtimeSource.refreshAccountToken(token);
+      this.applyAuthUpdate(token, reserved ?? undefined, nativeRefresh);
       return token;
     } catch (error) {
       this.markUnauthenticated("invalid");
@@ -2998,7 +3015,11 @@ export class Db {
     this.clearActiveQuerySubscriptionTraces();
     this.mutationErrorListeners.clear();
 
-    await this.connection.shutdown();
+    try {
+      await this.connection.shutdown();
+    } finally {
+      await this.runtimeSource.shutdown();
+    }
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {

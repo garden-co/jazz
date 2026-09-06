@@ -8,9 +8,9 @@ evidence.
 The V1 refresh was produced with:
 
 ```sh
-JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/account-v1-native-corpus-rocksdb.tar.gz \
-JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/account-v1-native-corpus.sqlite \
-JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/account-v1-native-corpus.pack \
+JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/account-policy-mask-v1-rocksdb.tar.gz \
+JAZZ_NATIVE_CORPUS_SQLITE_OUT=/tmp/account-policy-mask-v1.sqlite \
+JAZZ_NATIVE_CORPUS_PACK_OUT=/tmp/account-policy-mask-v1.pack \
 dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
 ```
 
@@ -42,7 +42,11 @@ This refresh changes eleven logical entry payloads in seven stores:
 `jazz_physical_1_history` (one),
 `jazz_physical_1_register_global_current` (one),
 `jazz_physical_2_global_current` (one), `jazz_physical_2_history` (two),
-and `jazz_transactions` (four). The other twenty-four entries are unchanged.
+and `jazz_transactions` (four). The policy-directory follow-up additionally changes its one logical entry to
+a native record containing the derived-claim presence mask and typed provider
+claim nodes. Relative to the preceding account-author corpus, exactly this one
+of 35 entries changes; all row and transaction entries remain identical.
+Relative to the pre-account corpus, the other twenty-three entries are unchanged.
 
 These changes replace canonical author strings with native structured author
 records in row metadata and transaction provenance. An author contains an
@@ -67,7 +71,7 @@ Producer digests:
 
 | Artifact                          | SHA-256                                                            |
 | --------------------------------- | ------------------------------------------------------------------ |
-| logical pack                      | `abce5e0168d4c517d4cb4d2b5a65b826ecf273dbcb8d61c29aac51369f80d35f` |
-| SQLite payload                    | `fcb4aaf5d53f4704dfd9274d481212b54c565a7d3f7893020f9df2fb77cc0968` |
-| deterministic gzip SQLite archive | `1896704543a53f20c03905616c3c1800b4a9392c1010ac5fa5fa6c0ed9d2a45e` |
-| RocksDB archive                   | `fcdfc337ca160d6edcff8c53a6390dc9536f20de963a5cb664a58be210868055` |
+| logical pack                      | `a058545376e972ae6cb814c8f0793c4c7f2aea1e8ec4001a6787ca8dfb5d4d48` |
+| SQLite payload                    | `7d98bc08207333381342304ccdb52c4191529402fd238035bf427a28a3d1e522` |
+| deterministic gzip SQLite archive | `d3f8d44f208c4a5bcdc0d0761418e3ec810eb8e0967d297e869d288ec527b86b` |
+| RocksDB archive                   | `9584c8b147b0d3a48c4bef2aabc501180d1e8a6caa6e9b6c41dc17c2e31d3701` |

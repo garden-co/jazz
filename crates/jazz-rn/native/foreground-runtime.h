@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <ReactCommon/CallInvoker.h>
@@ -25,15 +26,17 @@ class ForegroundRuntimeLease {
   ForegroundRuntimeLease(
       jazz_native_relay_host *host,
       uint64_t runtime_token,
-      std::shared_ptr<facebook::react::CallInvoker> callInvoker)
+      std::shared_ptr<facebook::react::CallInvoker> callInvoker,
+      std::string storageRoot = {})
       : lease_(jazz_native_relay_host_retain(host, runtime_token)),
-        callInvoker_(std::move(callInvoker)) {}
+        callInvoker_(std::move(callInvoker)), storageRoot_(std::move(storageRoot)) {}
   ~ForegroundRuntimeLease();
 
   /** Hold the lifecycle lock through one FFI call. An empty lock means the
    * platform invalidated this JS runtime first. */
   std::unique_lock<std::mutex> lockIfActive();
   jazz_native_relay_host_lease *nativeLease() const { return lease_; }
+  const std::string &storageRoot() const { return storageRoot_; }
   const std::shared_ptr<facebook::react::CallInvoker> &callInvoker() const {
     return callInvoker_;
   }
@@ -50,6 +53,7 @@ class ForegroundRuntimeLease {
  private:
   jazz_native_relay_host_lease *lease_;
   std::shared_ptr<facebook::react::CallInvoker> callInvoker_;
+  std::string storageRoot_;
   mutable std::mutex mutex_;
   bool active_{true};
   std::vector<std::weak_ptr<ForegroundWakeRegistration>> wakeRegistrations_;

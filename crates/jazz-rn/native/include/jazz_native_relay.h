@@ -70,6 +70,24 @@ jazz_native_relay_status jazz_native_relay_host_execute(
  * jwt, and the platform-selected storage root; JWT payload decoding only
  * selects a local cache scope and is never authentication. Attach receives
  * only the opaque setup capability and canonical schema JSON. */
+/* Internal account adapter: logical handle metadata is separate from the
+ * platform-selected absolute OS storage root. Returned capabilities belong to
+ * this runtime lease and are released on runtime invalidation. */
+jazz_native_relay_status jazz_native_relay_host_lease_begin_account_session_json(
+    jazz_native_relay_host_lease *lease, const uint8_t *request, size_t request_len,
+    const uint8_t *storage_root, size_t storage_root_len,
+    jazz_native_relay_bytes *out);
+jazz_native_relay_status jazz_native_relay_host_lease_attach_account_schema_json(
+    jazz_native_relay_host_lease *lease, const uint8_t *capability, size_t capability_len,
+    const uint8_t *schema, size_t schema_len, jazz_native_relay_bytes *out);
+/* Refresh JSON is {"jwt": string, "claims": object}; claims are local advisory
+ * values, not authenticated remote authority. Identity must remain exact. */
+jazz_native_relay_status jazz_native_relay_host_lease_refresh_account_session(
+    jazz_native_relay_host_lease *lease, const uint8_t *capability, size_t capability_len,
+    const uint8_t *request, size_t request_len);
+jazz_native_relay_status jazz_native_relay_host_lease_release_account_session(
+    jazz_native_relay_host_lease *lease, const uint8_t *capability, size_t capability_len);
+
 jazz_native_relay_status jazz_native_relay_host_begin_private_session_json(
     jazz_native_relay_host *host, const uint8_t *request, size_t request_len,
     jazz_native_relay_bytes *out);

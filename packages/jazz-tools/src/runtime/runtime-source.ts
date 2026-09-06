@@ -116,8 +116,17 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   /** Admission-bound native sources reject updates before any public state changes. */
   assertAuthUpdateAllowed(): void {}
 
+  /** Return true when the native host renewed its own same-identity transport. */
+  refreshAccountToken(_token: string): boolean {
+    return false;
+  }
+
   /** Apply source-specific admission after the shared auth config is resolved. */
   admitConfig(_config: RuntimeConfig): void {}
+
+  /** Release runtime admission after ordinary client shutdown, including a
+   * prepared source whose lazy schema client was never materialized. */
+  async shutdown(): Promise<void> {}
 
   protected async loadRuntime(_config: RuntimeConfig): Promise<unknown> {
     return undefined;

@@ -45,14 +45,14 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "abce5e0168d4c517d4cb4d2b5a65b826ecf273dbcb8d61c29aac51369f80d35f";
+    "a058545376e972ae6cb814c8f0793c4c7f2aea1e8ec4001a6787ca8dfb5d4d48";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "a6eca249b2398aeb0a199d88f8b0dec4dd34eba3bcf3216a43e5a921a8e9d192";
+    "54ee8cec94a1845a6df4abc4d5914fb37cbba6b3621b3d286e43012d8cc1ad0b";
 const CURRENT_NATIVE_SQLITE_BASE64: &str = include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
-const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "1896704543a53f20c03905616c3c1800b4a9392c1010ac5fa5fa6c0ed9d2a45e";
-const CURRENT_NATIVE_SQLITE_SHA256: &str = "fcb4aaf5d53f4704dfd9274d481212b54c565a7d3f7893020f9df2fb77cc0968";
+const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "d3f8d44f208c4a5bcdc0d0761418e3ec810eb8e0967d297e869d288ec527b86b";
+const CURRENT_NATIVE_SQLITE_SHA256: &str = "7d98bc08207333381342304ccdb52c4191529402fd238035bf427a28a3d1e522";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str = include_str!("../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
-const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "fcdfc337ca160d6edcff8c53a6390dc9536f20de963a5cb664a58be210868055";
+const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "9584c8b147b0d3a48c4bef2aabc501180d1e8a6caa6e9b6c41dc17c2e31d3701";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =

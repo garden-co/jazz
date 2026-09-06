@@ -5,6 +5,12 @@ import { join } from "node:path";
 import { createDb, type Db, type DbConfig } from "../../src/react-native/create-db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { Session } from "../../src/runtime/context.js";
+import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
+import { accountRegistryUrl } from "../../src/accounts/context.js";
+import {
+  internalSessionFromJwtPayload,
+  parseJwtPayload,
+} from "../../src/runtime/client-session.js";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 
@@ -24,7 +30,7 @@ export async function createNativeRelayFixture(
   options: NativeRelayFixtureOptions = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "jazz-rn-api-"));
-  const nativeHost = createPlatformHost();
+  const nativeHost = createPlatformHost(directory);
   const databases: Db[] = [];
   let cleanupCapability: Uint8Array | undefined;
   let closePromise: Promise<void> | undefined;
@@ -59,39 +65,85 @@ export async function createNativeRelayFixture(
       claims: {},
       authMode: "external" as const,
     };
-    const schema = serializeSchemaSource(app.wasmSchema);
-    const capability = options.upstream
-      ? nativeHost.attachCanonicalSchema(
-          nativeHost.beginPrivateSession(
-            JSON.stringify({
-              server_url: options.upstream.serverUrl,
-              app_id: appId,
-              jwt: options.upstream.jwt,
-              storage_root: directory,
-            }),
-          ),
-          schema,
-        )
-      : nativeHost.admit(
-          JSON.stringify({
-            scope: {
-              app_namespace: appId,
-              storage_namespace: "default",
-              auth_scope: JSON.stringify([session.issuer, session.user_id]),
-            },
-            sqlite_path: join(directory, "relay.sqlite"),
-            schema_json: schema,
-            identity: {
-              node: randomUUID(),
-              author: JSON.stringify([session.issuer, session.user_id]),
-            },
-            claims: session.claims,
-          }),
-        );
+    const serverUrl = options.upstream?.serverUrl ?? "https://edge.example";
+    const registry = accountRegistryUrl(serverUrl, appId);
+    const jwt =
+      options.upstream?.jwt ??
+      `e30.${Buffer.from(
+        JSON.stringify({
+          ...session.claims,
+          iss: session.issuer,
+          sub: session.user_id,
+        }),
+      ).toString("base64url")}.fixture-signature`;
+    const assignments = new Map<string, string>();
+    const manager = createAccountManagerWithRuntime({
+      registry,
+      localFirst: {
+        create() {
+          throw new Error("External fixture has no local-first key");
+        },
+      },
+      // Only offline enrollment is substituted. All database operations still
+      // traverse the production native account/foreground boundary.
+      ...(!options.upstream
+        ? {
+            fetch: (async (_url, init) => {
+              const token = new Headers(init?.headers).get("Authorization")!.slice(7);
+              const identity = parseJwtPayload(token)!;
+              const key = JSON.stringify([identity.iss, identity.sub]);
+              let id = assignments.get(key);
+              if (!id) {
+                id =
+                  identity.iss === session.issuer && identity.sub === session.user_id
+                    ? (session.account_id ?? randomUUID())
+                    : randomUUID();
+                assignments.set(key, id);
+              }
+              return new Response(
+                JSON.stringify({
+                  account: id,
+                  identity: { issuer: identity.iss, subject: identity.sub },
+                }),
+                { status: 200 },
+              );
+            }) as typeof fetch,
+          }
+        : {}),
+    });
+    const account = await manager.registerJWT(jwt);
+    const claims = internalSessionFromJwtPayload(parseJwtPayload(jwt)!)!.claims;
+    // Keep a separate native admission for below-public-API ownership probes.
+    // Public createDb calls below prepare their own account-bound admission.
+    const capability = nativeHost.attachAccountSchema(
+      nativeHost.beginAccountSession(
+        JSON.stringify({
+          registry,
+          app_id: appId,
+          env: "dev",
+          account_id: account.id,
+          issuer: account.identity.issuer,
+          subject: account.identity.subject,
+          jwt,
+          claims,
+          server_url: options.upstream?.serverUrl ?? null,
+        }),
+      ),
+      serializeSchemaSource(app.wasmSchema),
+    );
     cleanupCapability = capability;
-    const config: DbConfig = { appId, nativeRelay: { capability }, cookieSession: session };
+    const config: DbConfig = { appId, account, ...(options.upstream ? { serverUrl } : {}) };
     return {
       nativeHost,
+      manager,
+      async loginOriginal(): Promise<DbConfig> {
+        return { ...config, account: await manager.loginJWT(jwt) };
+      },
+      async registerIdentity(subject: string): Promise<DbConfig> {
+        if (options.upstream) throw new Error("Real upstream fixtures need real provider tokens");
+        const token = `e30.${Buffer.from(JSON.stringify({ iss: session.issuer, sub: subject })).toString("base64url")}.fixture-signature`;
+        return { ...config, account: await manager.registerJWT(token) };
+      },
       capability,
       config,
       directory,
