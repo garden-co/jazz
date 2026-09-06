@@ -777,7 +777,7 @@ test("React Native docs advertise the supported alpha account-handle client", as
   assert.match(readme, /`jazz-tools\/react-native`/);
   assert.match(readme, /`AccountHandle`/);
   assert.match(readme, /`createJazzClient`/);
-  assert.match(readme, /canonical Expo scaffold/);
+  assert.match(readme, /canonical Expo\s+scaffold/);
   assert.match(readme, /two physical JSI runtimes/);
   assert.doesNotMatch(readme, /not yet a supported high-level React Native Jazz client/);
   assert.doesNotMatch(
@@ -792,7 +792,7 @@ test("React Native docs advertise the supported alpha account-handle client", as
   );
   assert.match(
     installGuide,
-    /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo scaffold/,
+    /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
     "the public install guide must direct RN users to the supported account-handle client path",
   );
   assert.match(clientSetupGuide, /React Native and Expo/);
