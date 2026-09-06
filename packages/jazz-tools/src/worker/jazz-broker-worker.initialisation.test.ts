@@ -536,10 +536,84 @@ describe("broker worker context initialization", () => {
       tabId: "inspector-tab",
       port: inspectorPeer as unknown as MessagePort,
     });
+    const expected = options("inspector-authenticated-root");
+    const binding = {
+      appId: expected.appId,
+      physicalDbName: expected.dbName,
+      authSessionKey: expected.authSessionKey,
+      storageOwner: expected.storageOwner,
+    };
+    // A genuine inspector port cannot authorize a changed account/author or
+    // root. Both preflight and actual init must enforce the worker binding.
+    let invalidId = 100;
+    for (const field of Object.keys(binding) as (keyof typeof binding)[]) {
+      for (const type of ["inspect-binding", "init"] as const) {
+        const id = invalidId++;
+        const rejected = inspectorPeer.waitForEvent((event) => "id" in event && event.id === id);
+        const changed = { ...binding, [field]: binding[field] + "-other" };
+        inspectorPeer.emitMessage(
+          type === "init"
+            ? { type, id, sessionClaims: {}, inspectorBinding: changed }
+            : { type, id, binding: changed },
+        );
+        await expect(rejected).resolves.toMatchObject({
+          error: expect.objectContaining({
+            message: "Inspector attachment does not match the worker account and storage scope",
+          }),
+        });
+      }
+    }
+    const checked = inspectorPeer.waitForEvent(
+      (event) => event.type === "inspector-binding" && event.id === 99,
+    );
+    inspectorPeer.emitMessage({ type: "inspect-binding", id: 99, binding });
+    await expect(checked).resolves.toMatchObject({ binding });
+    // The overlay's lease uses this same worker; its lease-only port cannot
+    // escape to a different root or durable owner.
+    for (const field of ["dbName", "storageOwner", "connect-runtime"] as const) {
+      const leasePort = new TestPort();
+      const id = invalidId++;
+      const leaseAttached = inspectorPeer.waitForEvent(
+        (event) => event.type === "inspector-binding" && event.id === id,
+      );
+      inspectorPeer.emitMessage({
+        type: "inspect-binding",
+        id,
+        binding,
+        leasePort: leasePort as unknown as MessagePort,
+      });
+      await leaseAttached;
+      const rejectedLease = leasePort.waitForLeaseOutcome();
+      leasePort.emitMessage((field === "connect-runtime"
+          ? {
+              type: "connect-runtime" as const,
+              tabId: "forbidden",
+              fingerprint: "forbidden",
+              options: expected,
+            }
+          : {
+              type: "acquire-foreground-node-lease" as const,
+              dbName: expected.dbName,
+              storageOwner: expected.storageOwner,
+              [field]: expected[field] + "-other",
+            }));
+      await expect(rejectedLease).resolves.toMatchObject({
+        type: "foreground-node-lease-error",
+        error: expect.objectContaining({
+          message: "Inspector lease cannot select another storage scope",
+        }),
+      });
+    }
+
     const receipt = inspectorPeer.waitForEvent(
       (event) => event.type === "result" && event.id === 4,
     );
-    inspectorPeer.emitMessage({ type: "init", id: 4, sessionClaims: {} });
+    inspectorPeer.emitMessage({
+      type: "init",
+      id: 4,
+      sessionClaims: {},
+      inspectorBinding: binding,
+    });
     await expect(receipt).resolves.toMatchObject({
       inspectorAttachmentPhysicalDbName: "inspector-authenticated-root",
     });
@@ -572,6 +646,76 @@ describe("broker worker context initialization", () => {
     await expect(staleAttach).resolves.toMatchObject({
       error: expect.objectContaining({ message: "Inspector context is no longer available" }),
     });
+
+    vi.useFakeTimers();
+    try {
+      const abandoned = new TestPort();
+      const expiryPreflight = inspectorPeer.waitForEvent(
+        (event) => event.type === "inspector-binding" && event.id === 198,
+      );
+      inspectorPeer.emitMessage({
+        type: "inspect-binding",
+        id: 198,
+        binding,
+        leasePort: abandoned as unknown as MessagePort,
+      });
+      await expiryPreflight;
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(abandoned.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(abandoned.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const allocatingLease = new TestPort();
+    const allocationPreflight = inspectorPeer.waitForEvent(
+      (event) => event.type === "inspector-binding" && event.id === 199,
+    );
+    inspectorPeer.emitMessage({
+      type: "inspect-binding",
+      id: 199,
+      binding,
+      leasePort: allocatingLease as unknown as MessagePort,
+    });
+    await allocationPreflight;
+    const allocation = deferred<{ leaseId: string; node: Uint8Array; confirmedTxTime: bigint }>();
+    const pageStore = mocks.pageStores[0]!;
+    pageStore.acquireForegroundNodeLease.mockImplementationOnce(() => allocation.promise);
+    allocatingLease.emitMessage({
+      type: "acquire-foreground-node-lease",
+      dbName: expected.dbName,
+      storageOwner: expected.storageOwner,
+    });
+    await vi.waitFor(() => expect(pageStore.acquireForegroundNodeLease).toHaveBeenCalledOnce());
+
+    const unclaimedLease = new TestPort();
+    const preflight = inspectorPeer.waitForEvent(
+      (event) => event.type === "inspector-binding" && event.id === 200,
+    );
+    inspectorPeer.emitMessage({
+      type: "inspect-binding",
+      id: 200,
+      binding,
+      leasePort: unclaimedLease as unknown as MessagePort,
+    });
+    await preflight;
+    expect(unclaimedLease.close).not.toHaveBeenCalled();
+    const closed = inspectorPeer.waitForEvent(
+      (event) => event.type === "result" && event.id === 201,
+    );
+    inspectorPeer.emitMessage({ type: "close", id: 201 });
+    await closed;
+    expect(unclaimedLease.close).toHaveBeenCalledOnce();
+    const cancelled = allocatingLease.waitForLeaseCancellation();
+    allocation.resolve({
+      leaseId: "abandoned-inspector",
+      node: new Uint8Array(16),
+      confirmedTxTime: 0n,
+    });
+    await expect(cancelled).resolves.toMatchObject({ type: "foreground-node-lease-cancelled" });
+    expect(pageStore.retireForegroundNodeLease).toHaveBeenCalledWith("abandoned-inspector");
+    expect(allocatingLease.close).toHaveBeenCalledOnce();
   });
 
   it("serializes direct inspector-control failures as bounded relay errors", async () => {

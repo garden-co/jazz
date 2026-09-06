@@ -313,6 +313,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           onStorageReset,
           onStorageInvalidated,
         },
+        config.runtimeSources.inspectorBinding,
       );
     }
     return new SharedBrowserWorkerConnection(

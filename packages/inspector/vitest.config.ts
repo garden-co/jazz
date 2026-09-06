@@ -11,6 +11,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: "jazz-tools/_dev/inspector-client",
+        replacement: resolve(__dirname, "../jazz-tools/src/_dev/inspector-client.ts"),
+      },
+      {
         find: "jazz-tools/react",
         replacement: resolve(__dirname, "../jazz-tools/src/react/index.ts"),
       },

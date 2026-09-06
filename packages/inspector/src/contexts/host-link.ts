@@ -1,8 +1,8 @@
+import type { InspectorHostConfig as DbConfig } from "jazz-tools/_dev/inspector-client";
 import { useEffect, useState } from "react";
 import {
   INSPECTOR_HOST_GLOBAL,
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
-  type DbConfig,
   type InspectorSubscription,
   type InspectorSubscriptionsMessage,
   type JazzInspectorHost,
@@ -47,9 +47,9 @@ function readHost(): { handle: JazzInspectorHost; window: Window } | null {
   return null;
 }
 
-export function readInspectorHostConfig(): DbConfig | null {
+export function readInspectorHostConfig(contextKey?: string): DbConfig | null {
   const host = readHost();
-  return host ? host.handle.getConnectionConfig() : null;
+  return host ? host.handle.getConnectionConfig(contextKey) : null;
 }
 
 export function readInspectorHostSchema(): WasmSchema | null {

@@ -79,7 +79,7 @@ function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): st
  * explicit clean return or retirement.
  */
 export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
-  private worker: SharedWorker | null = null;
+  private worker: Pick<SharedWorker, "port"> | null = null;
   private port: MessagePort | null = null;
   private closed = false;
 
@@ -165,8 +165,24 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     );
   }
 
+  /** @internal A context-scoped lease port minted by Inspector control. */
+  static async acquireFromPort(
+    port: MessagePort,
+    options: BrowserForegroundNodeLeaseOptions,
+  ): Promise<SharedBrowserForegroundNodeLease> {
+    const outcome = await this.acquireFromWorkerGeneration(
+      { port },
+      options,
+      `inspector:${options.dbName}:${options.storageOwner}`,
+      crypto.randomUUID(),
+      FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS,
+    );
+    if (outcome.type !== "ready") throw new Error("Inspector worker is no longer available");
+    return outcome.lease;
+  }
+
   private static acquireFromWorkerGeneration(
-    worker: SharedWorker,
+    worker: Pick<SharedWorker, "port">,
     options: BrowserForegroundNodeLeaseOptions,
     cleanupKey: string,
     attemptId: string,

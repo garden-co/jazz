@@ -73,6 +73,10 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
+    "./_dev/inspector-client": {
+      "types": "./dist/_dev/inspector-client.d.ts",
+      "default": "./dist/_dev/inspector-client.js"
+    },
     "./_dev/schema-hash": {
       "types": "./dist/_dev/schema-hash.d.ts",
       "default": "./dist/_dev/schema-hash.js"

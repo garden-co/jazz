@@ -80,8 +80,9 @@ export class BrowserConnectionManager extends ConnectionManager {
     });
     this.connection = connection;
     this.unregisterInspectorControl?.();
-    this.unregisterInspectorControl = registerBrowserInspectorControl(() =>
-      connection.openInspectorControlPort(),
+    this.unregisterInspectorControl = registerBrowserInspectorControl(
+      () => connection.openInspectorControlPort(),
+      () => this.host.config,
     );
     this.initialExplicitOfflineStateKnown = false;
     this.connectionReady = connection.ready().then(

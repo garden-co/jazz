@@ -51,6 +51,8 @@ export interface RuntimeSourcesConfig {
    * still derives and verifies its own namespace from the attached session.
    */
   inspectorHostPhysicalDbName?: string;
+  /** @internal Worker-verified diagnostic attachment scope; never public account admission. */
+  inspectorBinding?: import("./native-runtime/browser-worker-protocol.js").InspectorAttachmentBinding;
 
   /**
    * @internal Verified identity forwarded by the same-origin inspector host.

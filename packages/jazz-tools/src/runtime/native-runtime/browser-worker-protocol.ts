@@ -376,8 +376,28 @@ export type BrowserSharedWorkerConnectResponse =
   /** The realm has acknowledged inspector-directed termination. */
   | { type: "worker-closing" };
 
+/** Exact non-secret scope of a worker-minted diagnostic attachment. */
+export interface InspectorAttachmentBinding {
+  appId: string;
+  physicalDbName: string;
+  // Canonical encodings include account, registry, issuer, subject and auth mode.
+  authSessionKey: string;
+  storageOwner: string;
+}
+
 export type BrowserFollowerPortRequest =
-  | { type: "init"; id: number; sessionClaims: Record<string, unknown> }
+  | {
+      type: "init";
+      id: number;
+      sessionClaims: Record<string, unknown>;
+      inspectorBinding?: InspectorAttachmentBinding;
+    }
+  | {
+      type: "inspect-binding";
+      id: number;
+      binding: InspectorAttachmentBinding;
+      leasePort?: MessagePort;
+    }
   | { type: "frames"; frames: Uint8Array[] }
   /** @internal Trace-only redacted query-coverage progress from a foreground tab. */
   | {
@@ -481,6 +501,7 @@ export type BrowserInspectorControlEvent =
     };
 
 export type BrowserFollowerPortEvent =
+  | { type: "inspector-binding"; id: number; binding: InspectorAttachmentBinding }
   | { type: "frames"; frames: Uint8Array[] }
   /**
    * Explicit offline is a property of the durable SharedWorker namespace: it

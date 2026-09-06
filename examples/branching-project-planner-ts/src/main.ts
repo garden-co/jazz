@@ -1,12 +1,14 @@
-import { BrowserAuthSecretStore, createDb } from "jazz-tools";
+import { createAccountManager, createDb } from "jazz-tools";
 import { app, type Scenario, type Task } from "../schema.js";
 
 const appId = "branching-project-planner-example";
-const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId });
+// Local-only demo: the manager names its registry, but the context does not sync.
+const accounts = await createAccountManager({ appId, serverUrl: location.origin });
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
 const db = await createDb({
   appId,
   driver: { type: "memory" },
-  auth: { localFirstSecret: secret },
+  account,
 });
 
 const mainScenario = db.insert(app.scenarios, {
