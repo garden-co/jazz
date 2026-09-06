@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type QueryBuilder, type TableProxy } from "../../src/runtime/index.js";
+import type { QueryBuilder, TableProxy } from "../../src/runtime/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { TestCleanup, sleep, waitForQuery } from "./support.js";
+import {
+  acquireBrowserTestAccount,
+  createBrowserTestDb,
+  TestCleanup,
+  sleep,
+  waitForQuery,
+} from "./support.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -30,9 +36,6 @@ const todos: TableProxy<Todo, TodoInit> = {
   _initType: {} as TodoInit,
 };
 
-const ALICE_USER_ID = "00000000-0000-0000-0000-0000000000a1";
-const BOB_USER_ID = "00000000-0000-0000-0000-0000000000b2";
-
 const allTodos: QueryBuilder<Todo> = {
   _table: "todos",
   _schema: schema,
@@ -48,7 +51,7 @@ const allTodos: QueryBuilder<Todo> = {
 };
 
 async function expectRowsToStayEmpty(
-  queryDb: Awaited<ReturnType<typeof createDb>>,
+  queryDb: Awaited<ReturnType<typeof createBrowserTestDb>>,
   durationMs: number,
 ): Promise<void> {
   const deadline = Date.now() + durationMs;
@@ -68,21 +71,13 @@ describe("Db browser storage isolation", () => {
 
   it("isolates default persistent storage by user_id while preserving same-user continuity", async () => {
     const appId = `browser-storage-isolation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const aliceJwt = makeFakeJwt({
-      sub: ALICE_USER_ID,
-      claims: { role: "member" },
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
-    const bobJwt = makeFakeJwt({
-      sub: BOB_USER_ID,
-      claims: { role: "member" },
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
+    const alice = await acquireBrowserTestAccount({ appId, key: "alice" });
+    const bob = await acquireBrowserTestAccount({ appId, key: "bob" });
 
     const aliceWriter = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: aliceJwt,
+        account: alice,
       }),
     );
 
@@ -99,9 +94,9 @@ describe("Db browser storage isolation", () => {
     await sleep(200);
 
     const bobReader = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: bobJwt,
+        account: bob,
       }),
     );
 
@@ -112,9 +107,9 @@ describe("Db browser storage isolation", () => {
     await sleep(200);
 
     const aliceReader = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: aliceJwt,
+        account: alice,
       }),
     );
 
@@ -128,27 +123,19 @@ describe("Db browser storage isolation", () => {
 
   it("logout with wipeData only clears the current user's scoped storage", async () => {
     const appId = `browser-storage-logout-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const aliceJwt = makeFakeJwt({
-      sub: ALICE_USER_ID,
-      claims: { role: "member" },
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
-    const bobJwt = makeFakeJwt({
-      sub: BOB_USER_ID,
-      claims: { role: "member" },
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
+    const alice = await acquireBrowserTestAccount({ appId, key: "alice" });
+    const bob = await acquireBrowserTestAccount({ appId, key: "bob" });
 
     const aliceWriter = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: aliceJwt,
+        account: alice,
       }),
     );
     const bobWriter = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: bobJwt,
+        account: bob,
       }),
     );
 
@@ -180,23 +167,12 @@ describe("Db browser storage isolation", () => {
     );
 
     const aliceReader = ctx.track(
-      await createDb({
+      await createBrowserTestDb({
         appId,
-        jwtToken: aliceJwt,
+        account: alice,
       }),
     );
 
     await expectRowsToStayEmpty(aliceReader, 1500);
   });
 });
-
-function toBase64Url(value: unknown): string {
-  return btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function makeFakeJwt(payload: Record<string, unknown>): string {
-  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url({
-    iss: "https://issuer.jazz.test",
-    ...payload,
-  })}.bad-signature`;
-}

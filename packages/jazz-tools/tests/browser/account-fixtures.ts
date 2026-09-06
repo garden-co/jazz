@@ -6,6 +6,39 @@ import type { Db, DbConfig } from "../../src/runtime/db.js";
 
 const implicitAccounts = new Map<string, Promise<AccountHandle>>();
 
+/**
+ * Acquire a genuine local-first account for a browser fixture.
+ *
+ * Reusing a key models reopening the same signed-in account; distinct keys
+ * model distinct users without introducing copied credentials into public Db
+ * configuration.
+ */
+export async function acquireBrowserTestAccount(config: {
+  appId: string;
+  serverUrl?: string;
+  env?: string;
+  key?: string;
+}): Promise<AccountHandle> {
+  const serverUrl = config.serverUrl ?? "http://127.0.0.1:1";
+  const implicitKey = JSON.stringify([
+    config.appId,
+    serverUrl,
+    config.env ?? "dev",
+    config.key ?? "",
+  ]);
+  let issued = implicitAccounts.get(implicitKey);
+  if (!issued) {
+    issued = issueImplicitAccount(config.appId, serverUrl, config.env);
+    implicitAccounts.set(implicitKey, issued);
+  }
+  try {
+    return await issued;
+  } catch (error) {
+    implicitAccounts.delete(implicitKey);
+    throw error;
+  }
+}
+
 /** Open browser test Dbs with genuine manager-issued opaque handles. */
 export async function createBrowserTestDb(
   config: Omit<DbConfig, "secret" | "jwtToken" | "adminSecret"> & {
@@ -40,14 +73,11 @@ export async function createBrowserTestDb(
         : undefined;
     if (!account) {
       if (secret === undefined && jwtToken === undefined) {
-        const issued = issueImplicitAccount(config.appId, serverUrl, config.env);
-        implicitAccounts.set(implicitKey, issued);
-        try {
-          account = await issued;
-        } catch (error) {
-          implicitAccounts.delete(implicitKey);
-          throw error;
-        }
+        account = await acquireBrowserTestAccount({
+          appId: config.appId,
+          serverUrl,
+          env: config.env,
+        });
       } else {
         let stored: string | null = null;
         const accounts = await createAccountManager({

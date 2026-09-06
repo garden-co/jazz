@@ -11,7 +11,7 @@ import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
 import type { JazzServerInfo } from "./testing-server.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-export { createBrowserTestDb } from "./account-fixtures.js";
+export { acquireBrowserTestAccount, createBrowserTestDb } from "./account-fixtures.js";
 
 // ---------------------------------------------------------------------------
 // Primitives
