@@ -6,7 +6,7 @@ const schema = {
   chats: s.table({}),
   chatMembers: s.table({
     chatId: s.ref("chats"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     inviteId: s.string().optional(),
   }),
   chatInvites: s.table({
@@ -28,14 +28,14 @@ function navigate(to: string) {
 // #region invite-create-link
 export function createInviteLink(
   db: ReturnType<typeof useDb>,
-  userId: string,
+  accountId: string,
   { singleUse = false }: { singleUse?: boolean } = {},
 ): string {
   const joinCode = crypto.randomUUID();
 
   const { value: chat } = db.insert(app.chats, {});
 
-  db.insert(app.chatMembers, { chatId: chat.id, user_id: userId });
+  db.insert(app.chatMembers, { chatId: chat.id, user_id: accountId });
   db.insert(app.chatInvites, { chatId: chat.id, code: joinCode, singleUse });
 
   return `${window.location.origin}/#/invite/${chat.id}/${joinCode}`;

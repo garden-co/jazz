@@ -19,18 +19,18 @@ Jazz supports external JWT-based authentication for production use. This recipe 
   steps={[
     { kind: "message", from: "browser", to: "auth", text: "Sign in" },
     { kind: "message", from: "auth", to: "browser", text: "JWT token", line: "dashed" },
-    { kind: "message", from: "browser", to: "jazz", text: "Connect with JWT" },
+    { kind: "message", from: "browser", to: "jazz", text: "Register or log in with JWT" },
     { kind: "message", from: "jazz", to: "auth", text: "Fetch JWKS" },
     { kind: "message", from: "auth", to: "jazz", text: "Public keys", line: "dashed" },
-    { kind: "message", from: "jazz", to: "jazz", text: "Verify JWT" },
-    { kind: "message", from: "jazz", to: "browser", text: "Session ready", line: "dashed" },
+    { kind: "message", from: "jazz", to: "jazz", text: "Verify JWT and resolve account" },
+    { kind: "message", from: "jazz", to: "browser", text: "Account handle ready", line: "dashed" },
   ]}
 />
 
 1. The user signs in with your auth provider and gets a JWT.
-2. Your client passes that JWT to Jazz.
+2. Your client calls `loginJWT({ getToken })` for an existing identity, or explicitly calls `registerJWT` to create its account.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz derives the opaque `session.user` author identity from the verified JWT's canonical `iss` and `sub` pair. The complete verified JWT payload, including registered fields, is inspectable through public `session.claims`; those fields do not create another authorship identity.
+4. Core resolves the exact `(iss, sub)` assignment and returns an opaque account handle. Pass that handle to the Jazz context. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Authenticating an unregistered identity alone never creates an account.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -63,7 +63,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
 
     ### Connecting to Jazz
 
-    Get the JWT from Better Auth and pass it to Jazz via the `config` prop.
+    Use a token callback to log in or explicitly register, then pass the returned account handle in the `config` prop.
 
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/auth-betterauth-chat/src/docs/recipe-connect-snippet.tsx#betterauth-jazz-react
@@ -128,6 +128,6 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-Jazz uses the exact JWT `iss` and `sub` pair as the author identity. It is fine for a provider to keep `sub` fixed to its own user ID: model any link from that identity to your application's user row explicitly.
+Jazz records the exact JWT `iss` and `sub` pair as the acting identity. Providers keep their existing subjects. Use `linkJWT` to associate a fresh identity with an existing account; use application rows for profile data.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).

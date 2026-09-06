@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
-import { userIdentity } from "jazz-tools";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
@@ -167,9 +166,8 @@ describe("Todo Server Integration", () => {
       const bobTitle = `Bob private ${Date.now()}`;
       const aliceId = randomUUID();
       const bobId = randomUUID();
-      const issuer = "urn:jazz:docs";
-      const aliceOwner = userIdentity(issuer, aliceId);
-      const bobOwner = userIdentity(issuer, bobId);
+      const aliceOwner = aliceId;
+      const bobOwner = bobId;
 
       const createAlice = await fetch(`${baseUrl}/todos`, {
         method: "POST",
