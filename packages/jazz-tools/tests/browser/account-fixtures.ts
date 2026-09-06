@@ -4,7 +4,7 @@ import type { AccountHandle } from "../../src/accounts/state.js";
 import { createDb as createAccountDb } from "../../src/runtime/default-create-db.js";
 import type { Db, DbConfig } from "../../src/runtime/db.js";
 
-const implicitAccounts = new Map<string, AccountHandle>();
+const implicitAccounts = new Map<string, Promise<AccountHandle>>();
 
 /** Open browser test Dbs with genuine manager-issued opaque handles. */
 export async function createBrowserTestDb(
@@ -36,33 +36,63 @@ export async function createBrowserTestDb(
     const implicitKey = JSON.stringify([config.appId, serverUrl, config.env ?? "dev"]);
     account =
       secret === undefined && jwtToken === undefined
-        ? implicitAccounts.get(implicitKey)
+        ? await implicitAccounts.get(implicitKey)
         : undefined;
     if (!account) {
-      let stored: string | null = null;
-      const accounts = await createAccountManager({
-        appId: config.appId,
-        serverUrl,
-        env: config.env,
-        store: {
-          async read() {
-            return stored;
-          },
-          async update(transform) {
-            stored = transform(stored);
-          },
-        },
-      });
-      if (secret !== undefined) {
-        account = accounts.restoreLocalFirst(secret);
-      } else if (jwtToken !== undefined) {
-        if (registerJwt) await accounts.registerJWT(jwtToken);
-        account = await accounts.loginJWT(jwtToken);
+      if (secret === undefined && jwtToken === undefined) {
+        const issued = issueImplicitAccount(config.appId, serverUrl, config.env);
+        implicitAccounts.set(implicitKey, issued);
+        try {
+          account = await issued;
+        } catch (error) {
+          implicitAccounts.delete(implicitKey);
+          throw error;
+        }
       } else {
-        account = accounts.createLocalFirst();
-        implicitAccounts.set(implicitKey, account);
+        let stored: string | null = null;
+        const accounts = await createAccountManager({
+          appId: config.appId,
+          serverUrl,
+          env: config.env,
+          store: {
+            async read() {
+              return stored;
+            },
+            async update(transform) {
+              stored = transform(stored);
+            },
+          },
+        });
+        if (secret !== undefined) {
+          account = accounts.restoreLocalFirst(secret);
+        } else if (jwtToken !== undefined) {
+          if (registerJwt) await accounts.registerJWT(jwtToken);
+          account = await accounts.loginJWT(jwtToken);
+        }
       }
     }
   }
   return await createAccountDb({ ...dbConfig, account });
+}
+
+async function issueImplicitAccount(
+  appId: string,
+  serverUrl: string,
+  env: string | undefined,
+): Promise<AccountHandle> {
+  let stored: string | null = null;
+  const accounts = await createAccountManager({
+    appId,
+    serverUrl,
+    env,
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
+  });
+  return accounts.createLocalFirst();
 }

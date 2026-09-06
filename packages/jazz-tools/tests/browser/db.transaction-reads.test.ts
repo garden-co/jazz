@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDb, schema, type Db, type RowOf } from "../../src/index.js";
-import { uniqueDbName } from "./support.js";
+import { schema, type Db, type RowOf } from "../../src/index.js";
+import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
