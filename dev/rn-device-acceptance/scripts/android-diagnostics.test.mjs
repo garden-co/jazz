@@ -45,6 +45,19 @@ test("Android post-commit wake failure retains only allowlisted B bridge stages 
   );
 });
 
+test("Android reports an acknowledged epoch with no later native wake", () => {
+  const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
+    "08-29 22:52:21.500  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
+  ].join("\n");
+  assert.equal(androidForegroundWakeDiagnostic(output), "armed-no-wake");
+  assert.match(
+    androidAcceptanceFailure("timeout", "seed", output),
+    /foreground wake: armed-no-wake/,
+  );
+  assert.equal(androidForegroundWakeDiagnostic("JazzForegroundWake: armed"), undefined);
+});
+
 test("Android timeout reports only the bounded scope writer-read counters", () => {
   const detail =
     "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no";

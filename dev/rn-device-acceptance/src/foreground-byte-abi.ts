@@ -245,6 +245,10 @@ export async function proveSameJsiRuntimeWriteSubscription(
     // off so all other foreground aliases and production callbacks are quiet.
     setWakeTraceBestEffort(openedB, true);
     await wakeTiming.onPostCommitWakeArmed?.();
+    while (openedB.consumeWake()) {
+      // The acknowledged trace boundary can yield to JS. Retire callbacks
+      // delivered in that interval before A establishes the commit epoch.
+    }
 
     markFailure("same-runtime-write-failed");
     markFailure("same-runtime-transaction-open-failed");

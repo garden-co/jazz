@@ -1289,6 +1289,30 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     /did not observe foreground A's committed row after \d+ turns and \d+ms without a post-commit native wake/,
   );
 
+  // Plant an initial-settlement callback in the asynchronous trace-boundary
+  // gap. It must be retired before A commits, rather than satisfying the
+  // post-commit proof when the real commit wake is suppressed.
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  emitCommitWake = false;
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        factory,
+        capability,
+        command,
+        subscriptionRowId,
+        undefined,
+        {
+          ...shortPostCommitWakeTiming(),
+          onPostCommitWakeArmed: () => schedulers[1]?.("immediate"),
+        },
+      ),
+    /without a post-commit native wake/,
+  );
+
   committed = false;
   opened = 0;
   schedulers.length = 0;

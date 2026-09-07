@@ -32,6 +32,32 @@ export const relevantAppLogs = (value, processName) =>
     { tail: true },
   );
 
+const foregroundWakeStages = new Set([
+  "armed",
+  "requested",
+  "scheduled",
+  "delivered",
+  "callback-invoked",
+]);
+
+/** Parse only the fixed native wake vocabulary from a separately queried log. */
+export const foregroundWakeDiagnostic = (value) => {
+  let armed = false;
+  const stages = [];
+  for (const line of String(value).split("\n")) {
+    const stage =
+      /JazzForegroundWake\s+(armed|requested|scheduled|delivered|callback-invoked)\b/.exec(
+        line,
+      )?.[1];
+    if (!stage || !foregroundWakeStages.has(stage)) continue;
+    if (stage === "armed") {
+      armed = true;
+      stages.length = 0;
+    } else if (armed) stages.push(stage);
+  }
+  return stages.slice(-16).join(",") || (armed ? "armed-no-wake" : "no-arm");
+};
+
 export const sanitizedCommandFailure = (error) => {
   const status =
     error && typeof error === "object" && "status" in error && typeof error.status === "number"

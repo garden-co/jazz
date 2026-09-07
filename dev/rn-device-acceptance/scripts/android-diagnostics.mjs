@@ -56,7 +56,8 @@ export function androidForegroundWakeDiagnostic(output) {
       stages.length = 0;
     } else if (armed && stage) stages.push(stage);
   }
-  return stages.slice(-16).join(",") || undefined;
+  const trace = stages.slice(-16).join(",");
+  return trace || (armed ? "armed-no-wake" : undefined);
 }
 
 export function androidAcceptanceFailure(kind, phase, output) {
