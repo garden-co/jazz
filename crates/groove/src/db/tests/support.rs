@@ -699,6 +699,28 @@ pub(super) fn nullable_files_parts_schema() -> DatabaseSchema {
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
     ])
 }
+pub(super) fn nullable_join_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "left_rows",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("join_key", ColumnType::U64.nullable()),
+                ColumnSchema::new("value", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "right_rows",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("join_key", ColumnType::U64.nullable()),
+                ColumnSchema::new("value", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
 
 pub(super) fn albums_blockers_schema() -> DatabaseSchema {
     DatabaseSchema::new([
