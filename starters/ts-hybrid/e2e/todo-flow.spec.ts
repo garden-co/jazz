@@ -115,15 +115,27 @@ test("a separate account sees only its own todos", async ({ page, browser }) => 
     await waitForTodoApp(other);
     const otherTodo = `Private other todo ${runId}`;
     await addTodo(other, otherTodo);
-    // Reload to exercise the server's published policies with a new subscription.
-    await other.reload();
-    await waitForTodoApp(other);
-    await expect(other.getByText(otherTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
-    await expect(other.getByText(ownerTodo, { exact: true })).toHaveCount(0);
-    await page.reload();
-    await waitForTodoApp(page);
-    await expect(page.getByText(ownerTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
-    await expect(page.getByText(otherTodo, { exact: true })).toHaveCount(0);
+    // Fresh contexts have no Jazz row cache: seeing the account's own row is
+    // a positive remote-delivery barrier before checking the same query's isolation.
+    for (const [email, visible, hidden] of [
+      [`owner-${runId}@example.com`, ownerTodo, otherTodo],
+      [`other-${runId}@example.com`, otherTodo, ownerTodo],
+    ]) {
+      const freshContext = await browser.newContext();
+      try {
+        const fresh = await freshContext.newPage();
+        await fresh.goto(page.url());
+        await waitForTodoApp(fresh);
+        await signIn(fresh, email, "s3cr3tpassword");
+        await waitForTodoApp(fresh);
+        await expect(fresh.getByText(visible, { exact: true })).toHaveCount(1, {
+          timeout: TIMEOUT,
+        });
+        await expect(fresh.getByText(hidden, { exact: true })).toHaveCount(0);
+      } finally {
+        await freshContext.close();
+      }
+    }
   } finally {
     await otherContext.close();
   }
