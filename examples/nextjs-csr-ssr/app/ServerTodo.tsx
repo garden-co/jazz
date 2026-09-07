@@ -15,7 +15,7 @@ async function TodoList() {
   // An RSC is a fresh HTTP render but this backend context is process-cached.
   // Read the shared authority so a client write already admitted at edge is
   // visible without waiting for this replica's asynchronous subscription.
-  const todos = await getBackendDb().all(app.todos, { tier: "edge" });
+  const todos = await (await getBackendDb()).all(app.todos, { tier: "edge" });
   return (
     <ul className="mt-4 space-y-1">
       {todos.length === 0 && <li className="text-sm text-foreground/30 italic">No todos yet.</li>}
@@ -33,7 +33,7 @@ function TodoForm() {
     "use server";
     const title = formData.get("titleField");
     if (typeof title !== "string" || !title.trim()) return;
-    getBackendDb().insert(app.todos, { title: title.trim(), done: false });
+    (await getBackendDb()).insert(app.todos, { title: title.trim(), done: false });
     revalidatePath("/");
   }
 

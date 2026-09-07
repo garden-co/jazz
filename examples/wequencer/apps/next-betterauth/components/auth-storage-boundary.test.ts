@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzContext, type JazzContext } from "jazz-tools/backend";
+import { createJazzSession } from "jazz-tools/backend";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../permissions";
 import { app } from "../schema";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
-  let context: JazzContext | undefined;
+  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let ordinarySession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
 
   afterEach(async () => {
-    await context?.shutdown();
+    await session?.close();
+    await ordinarySession?.close();
     await server?.stop();
   });
 
@@ -24,19 +26,19 @@ describe("Better Auth storage boundary", () => {
     });
 
     const openContext = () =>
-      createJazzContext({
+      createJazzSession({
         appId: server!.appId,
         app,
         permissions,
         driver: { type: "memory" },
         serverUrl: server!.url,
-        backendSecret: server!.backendSecret,
+        initial: { backendSecret: server!.backendSecret },
         env: "test",
       });
 
-    context = openContext();
-    const stored = await context
-      .asBackend(app)
+    session = await openContext();
+    const backend = session.getSnapshot().client!;
+    const stored = await backend.db
       .insert(app.better_auth_user, {
         name: "Persisted auth user",
         email: "persisted@example.test",
@@ -46,16 +48,16 @@ describe("Better Auth storage boundary", () => {
       })
       .wait({ tier: "edge" });
 
-    const client = context.forSession(
-      {
-        issuer: "https://auth.example.test",
-        user_id: "ordinary-client",
-        account_id: "00000000-0000-4000-8000-000000000001",
-        claims: {},
-        authMode: "external",
-      },
+    ordinarySession = await createJazzSession({
+      appId: server.appId,
       app,
-    );
+      permissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      env: "test-client",
+      initial: "local-first",
+    });
+    const client = ordinarySession.getSnapshot().client!.db;
     await expect(client.all(app.better_auth_user, { tier: "edge" })).resolves.toEqual([]);
     await expect(
       client
@@ -69,14 +71,14 @@ describe("Better Auth storage boundary", () => {
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
-    await context.shutdown();
-    context = openContext();
+    await session.close();
+    session = await openContext();
     await expect
       .poll(
         async () =>
-          (await context!.asBackend(app).all(app.better_auth_user, { tier: "global" })).find(
-            (row) => row.id === stored.id,
-          ),
+          (
+            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "global" })
+          ).find((row) => row.id === stored.id),
         { timeout: 10_000 },
       )
       .toEqual(expect.objectContaining({ email: "persisted@example.test" }));

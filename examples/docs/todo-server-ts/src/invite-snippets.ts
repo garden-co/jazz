@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import type { JazzContext } from "jazz-tools/backend";
+import type { JazzClient } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
@@ -65,29 +65,18 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
 });
 // #endregion invite-permissions
 
-declare const context: JazzContext;
-
-// Supplied by trusted middleware after JWT verification AND core registry resolution.
-// Never derive account_id from a provider claim or request input.
-type AuthenticatedRequest = Request & {
-  session: {
-    issuer: string;
-    user_id: string;
-    account_id: string;
-    authMode: "external" | "local-first";
-    claims: Record<string, unknown>;
-  };
-};
+declare const client: JazzClient;
 
 // #region invite-redeem-route
-export async function POST(req: AuthenticatedRequest): Promise<Response> {
-  const { session } = req;
-  const user = session.account_id;
+export async function POST(req: Request): Promise<Response> {
+  const requester = await client.forRequest(req);
+  const user = requester.getAuthState().session?.user.account;
+  if (!user) return new Response("Account required", { status: 401 });
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
-  // This handle has backend permissions but attributes writes to the authenticated session.
-  const backendDb = context.withAttributionForSession(session, app);
+  // Preserve the verified caller as author while using backend permissions.
+  const backendDb = await client.withAttributionForRequest(req);
   const result = await backendDb.exclusiveTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.

@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
+import { createJazzSession, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -74,7 +74,6 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const appId = config.appId ?? process.env.JAZZ_APP_ID ?? "todo-server-ts";
   const serverUrl = config.serverUrl ?? process.env.JAZZ_SERVER_URL?.trim();
   const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
-  const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
   const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
   const allowLocalFirstAuth =
@@ -88,20 +87,24 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   }
 
   // #region context-setup-ts-backend
-  const context = createJazzContext({
+  const session = await createJazzSession({
     appId,
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     serverUrl,
-    backendSecret,
-    adminSecret,
+    initial: { backendSecret },
     jwksUrl,
     jwtPublicKey,
     allowLocalFirstAuth,
     env: "dev",
   });
-  const db = context.asBackend();
+  const snapshot = session.getSnapshot();
+  if (snapshot.status !== "ready" || !snapshot.client) {
+    throw snapshot.error ?? new Error("Backend session is not ready");
+  }
+  const client = snapshot.client;
+  const db = client.db;
   // #endregion context-setup-ts-backend
 
   // Create Express app
@@ -173,13 +176,11 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // List todos as a specific session user (for policy verification/testing)
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userDb = context.forSession({
-        issuer: "urn:jazz:docs",
-        user_id: req.params.userId,
-        account_id: req.params.userId,
-        authMode: "external",
-        claims: {},
-      });
+      const userDb = await client.forRequest(req);
+      if (userDb.getAuthState().session?.user.account !== req.params.userId) {
+        res.status(403).json({ error: "Account mismatch" });
+        return;
+      }
       const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
@@ -294,10 +295,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     app,
     db,
     shutdown: async () => {
-      await context.shutdown();
+      await session.close();
     },
     flush: () => {
-      context.flush();
+      client.flush();
     },
   };
 }

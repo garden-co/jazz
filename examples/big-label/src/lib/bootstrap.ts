@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { app } from "../../schema";
-import { authJazzContext } from "./auth-jazz-context";
+import { authJazzClient } from "./auth-jazz-client";
 import { planPersonalBootstrap } from "./bootstrap-state";
 
 /**
@@ -8,7 +8,7 @@ import { planPersonalBootstrap } from "./bootstrap-state";
  * backend secret and remain subject to the admin-only membership policy.
  */
 export async function ensurePersonalOrganization(userId: string, name: string) {
-  const db = authJazzContext().asBackend(app);
+  const db = (await authJazzClient()).db;
   const slug = `personal-${userId}`;
   // Both the initial read and every retry happen inside the exclusive
   // transaction. A concurrent bootstrap can therefore only either commit the

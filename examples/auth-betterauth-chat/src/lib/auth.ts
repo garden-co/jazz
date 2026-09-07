@@ -2,7 +2,7 @@ import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { authJazzContext } from "./auth-jazz-context";
+import { authJazzClient } from "./auth-jazz-client";
 import { app } from "../../schema";
 
 const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
@@ -12,7 +12,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
   const auth = betterAuth({
     baseURL: issuer,
     database: jazzAdapter({
-      db: () => authJazzContext().asBackend(app),
+      db: async () => (await authJazzClient()).db,
       schema: app.wasmSchema,
     }),
     secret: BETTER_AUTH_SECRET,

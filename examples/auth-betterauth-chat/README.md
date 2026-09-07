@@ -60,7 +60,7 @@ Open `NEXT_PUBLIC_APP_ORIGIN`.
 
 ## How the Better Auth integration works
 
-### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-context.ts`, and `schema-better-auth/schema.ts`
+### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-client.ts`, and `schema-better-auth/schema.ts`
 
 `auth.ts` wires up the Better Auth instance with four plugins and points the adapter at the
 root app schema, which includes both the generated Better Auth tables and the chat table:
@@ -71,7 +71,7 @@ import { app } from "../../schema";
 
 betterAuth({
   database: jazzAdapter({
-    db: () => authJazzContext().asBackend(app),
+    db: async () => (await authJazzClient()).db,
     schema: app.wasmSchema,
   }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
@@ -97,8 +97,8 @@ betterAuth({
 
 `schema-better-auth/schema.ts` is the generated Better Auth schema source file. Its deny-all
 `permissions` export is spread into the root `permissions.ts` alongside the message policies, so
-ordinary clients cannot read or mutate authentication rows. `authJazzContext()` uses
-`asBackend(app)` with the sync server's backend secret, so the adapter can still access those rows.
+ordinary clients cannot read or mutate authentication rows. `authJazzClient()` uses
+a cached session initialized with `initial: { backendSecret }` and its ready client’s `.db`, so the adapter can still access those rows.
 It caches the context on `globalThis` so route modules don't instantiate it at import time (which
 would fail during Next's build-time page data collection before env vars are available). That
 keeps Better Auth state out of Better Auth's in-process memory adapter while still avoiding local

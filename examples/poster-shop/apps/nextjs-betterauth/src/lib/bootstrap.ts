@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { app } from "@/schema";
-import { authJazzContext } from "@/src/lib/auth-jazz-context";
+import { authJazzClient } from "@/src/lib/auth-jazz-client";
 import { authorForSession } from "@/src/lib/identity";
 
 // The only first-open side effect. It executes server-side with backend
 // authority, never from a query hook or a browser-held secret.
 export async function ensurePersonalCanvas(accountId: string, displayName: string) {
   const memberAuthor = authorForSession(accountId);
-  const db = authJazzContext().asBackend(app);
+  const db = (await authJazzClient()).db;
   for (;;) {
     try {
       const write = await db.exclusiveTransaction(async (tx) => {

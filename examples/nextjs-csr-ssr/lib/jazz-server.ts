@@ -2,21 +2,21 @@ import "server-only";
 
 import { app as schemaApp } from "../schema";
 import permissions from "../permissions";
-import type { BackendContextConfig, Db, JazzContext } from "jazz-tools/backend";
+import type { JazzSessionConfig, Db } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo
-// Real-world apps should just `import { createJazzContext } from "jazz-tools/backend"`
+// Real-world apps should just `import { createJazzSession } from "jazz-tools/backend"`
 import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
 
-type BackendState = { context: JazzContext; db: Db };
+type BackendState = Awaited<ReturnType<typeof import("jazz-tools/backend").createJazzSession>>;
 type BackendModule = {
-  createJazzContext: (config: BackendContextConfig) => JazzContext;
+  createJazzSession: (config: JazzSessionConfig) => Promise<BackendState>;
 };
 type GlobalBackendState = typeof globalThis & {
-  __jazzNextCsrSsrBackend?: BackendState;
+  __jazzNextCsrSsrBackend?: Promise<BackendState>;
 };
 
 const globalState = globalThis as GlobalBackendState;
@@ -40,21 +40,30 @@ function readBackendConfig(): {
   return { appId: appId!, serverUrl: serverUrl!, backendSecret: backendSecret! };
 }
 
-export function getBackendDb(): Db {
-  const existing = globalState.__jazzNextCsrSsrBackend;
-  if (existing) return existing.db;
-
-  const config = readBackendConfig();
-  const { createJazzContext } = nodeRequire("jazz-tools/backend") as BackendModule;
-  const context = createJazzContext({
-    appId: config.appId,
-    app: schemaApp,
-    permissions,
-    driver: { type: "memory" },
-    serverUrl: config.serverUrl,
-    backendSecret: config.backendSecret,
-  });
-  const db = context.asBackend();
-  globalState.__jazzNextCsrSsrBackend = { context, db };
-  return db;
+export async function getBackendDb(): Promise<Db> {
+  if (!globalState.__jazzNextCsrSsrBackend) {
+    const config = readBackendConfig();
+    const { createJazzSession } = nodeRequire("jazz-tools/backend") as BackendModule;
+    globalState.__jazzNextCsrSsrBackend = createJazzSession({
+      appId: config.appId,
+      app: schemaApp,
+      permissions,
+      driver: { type: "memory" },
+      serverUrl: config.serverUrl,
+      initial: { backendSecret: config.backendSecret },
+    });
+  }
+  const pending = globalState.__jazzNextCsrSsrBackend;
+  try {
+    const snapshot = (await pending).getSnapshot();
+    if (snapshot.status !== "ready" || !snapshot.client) {
+      throw snapshot.error ?? new Error("Backend session is not ready");
+    }
+    return snapshot.client.db;
+  } catch (error) {
+    if (globalState.__jazzNextCsrSsrBackend === pending) {
+      globalState.__jazzNextCsrSsrBackend = undefined;
+    }
+    throw error;
+  }
 }

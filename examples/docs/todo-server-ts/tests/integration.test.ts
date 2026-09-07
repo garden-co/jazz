@@ -7,11 +7,18 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
+import { createAccountManager } from "jazz-tools";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJwtIssuer,
+  type TestJwtIssuerHandle,
+  type LocalJazzServerHandle,
+} from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
 import {
@@ -28,12 +35,18 @@ describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
   let upstream: LocalJazzServerHandle | undefined;
+  let issuer: TestJwtIssuerHandle;
 
   // This awaits two native durable-server readiness boundaries (upstream and
   // backend). Keep individual request tests on the suite default, while
   // allowing this explicit lifecycle setup to contend safely with CI workers.
   beforeAll(async () => {
-    upstream = await startLocalJazzServer();
+    issuer = await startTestJwtIssuer();
+    upstream = await startLocalJazzServer({
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: "https://todo-docs.example.test",
+      jwtAudience: issuer.audience,
+    });
 
     await deploy({
       serverUrl: upstream.url,
@@ -48,6 +61,7 @@ describe("Todo Server Integration", () => {
       appId: upstream.appId,
       serverUrl: upstream.url,
       backendSecret: upstream.backendSecret,
+      jwksUrl: issuer.jwksUrl,
       adminSecret: upstream.adminSecret,
     });
 
@@ -64,6 +78,7 @@ describe("Todo Server Integration", () => {
     if (upstream) {
       await upstream.stop();
     }
+    await issuer?.stop();
   });
 
   describe("Health Check", () => {
@@ -164,8 +179,33 @@ describe("Todo Server Integration", () => {
     it("filters rows by owner_id when querying with session context", async () => {
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
-      const aliceId = randomUUID();
-      const bobId = randomUUID();
+      const admit = async () => {
+        const token = issuer.jwtForUser(
+          randomUUID(),
+          {},
+          { issuer: "https://todo-docs.example.test" },
+        );
+        let stored: string | null = null;
+        const accounts = await createAccountManager({
+          appId: upstream!.appId,
+          serverUrl: upstream!.url,
+          env: `todo-docs-${randomUUID()}`,
+          store: {
+            async read() {
+              return stored;
+            },
+            async update(transform) {
+              stored = transform(stored);
+            },
+          },
+        });
+        const account = await accounts.registerJWT(token);
+        return { id: account.id, token };
+      };
+      const alice = await admit();
+      const bob = await admit();
+      const aliceId = alice.id;
+      const bobId = bob.id;
       const aliceOwner = aliceId;
       const bobOwner = bobId;
 
@@ -187,14 +227,18 @@ describe("Todo Server Integration", () => {
       const bobTodo: Todo = await createBob.json();
       expect(bobTodo.owner_id).toBe(bobOwner);
 
-      const aliceViewRes = await fetch(`${baseUrl}/todos/as/${aliceId}`);
+      const aliceViewRes = await fetch(`${baseUrl}/todos/as/${aliceId}`, {
+        headers: { Authorization: `Bearer ${alice.token}` },
+      });
       expect(aliceViewRes.status).toBe(200);
       const aliceView: Todo[] = await aliceViewRes.json();
       const aliceTitles = new Set(aliceView.map((todo) => todo.title));
       expect(aliceTitles.has(aliceTitle)).toBe(true);
       expect(aliceTitles.has(bobTitle)).toBe(false);
 
-      const bobViewRes = await fetch(`${baseUrl}/todos/as/${bobId}`);
+      const bobViewRes = await fetch(`${baseUrl}/todos/as/${bobId}`, {
+        headers: { Authorization: `Bearer ${bob.token}` },
+      });
       expect(bobViewRes.status).toBe(200);
       const bobView: Todo[] = await bobViewRes.json();
       const bobTitles = new Set(bobView.map((todo) => todo.title));

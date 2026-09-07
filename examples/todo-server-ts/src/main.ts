@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type Db } from "jazz-tools/backend";
+import { createJazzSession, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -81,21 +81,29 @@ export async function createServer(
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
   const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
 
-  const context = createJazzContext({
+  if (!serverUrl || !backendSecret) {
+    throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
+  }
+
+  const session = await createJazzSession({
     appId,
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     serverUrl,
-    backendSecret,
-    adminSecret: options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET,
+    initial: { backendSecret },
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
-  const db = context.asBackend();
+  const snapshot = session.getSnapshot();
+  if (snapshot.status !== "ready" || !snapshot.client) {
+    throw snapshot.error ?? new Error("Backend session is not ready");
+  }
+  const client = snapshot.client;
+  const db = client.db;
 
   const app = express();
 
@@ -130,7 +138,7 @@ export async function createServer(
   // Authenticate every todo request before selecting a session-scoped database.
   app.use("/todos", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = await context.forRequest(req);
+      const db = await client.forRequest(req);
       const session = db.getAuthState().session;
       if (!session) {
         res.status(401).json({ error: "Unauthorized" });
@@ -281,10 +289,10 @@ export async function createServer(
     app,
     db,
     shutdown: async () => {
-      await context.shutdown();
+      await session.close();
     },
     flush: () => {
-      context.flush();
+      client.flush();
     },
   };
 }
