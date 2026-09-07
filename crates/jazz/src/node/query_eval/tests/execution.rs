@@ -721,6 +721,73 @@ fn aggregate_count_over_empty_query_returns_identity_row() {
         );
     }
 }
+#[test]
+fn aggregate_read_frontiers_and_exclusive_validation() {
+    let (_empty_dir, mut empty_node) = open_node();
+    let shape = Query::from("issues")
+        .count()
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let empty_tx = OpenTransactionId::new();
+    empty_node.open_exclusive(empty_tx).unwrap();
+    let empty_snapshot = empty_node
+        .open_transaction_snapshot(empty_tx)
+        .unwrap();
+    let empty_snapshot_rows = empty_node
+        .query_rows_at_snapshot(&shape, &binding, &empty_snapshot)
+        .unwrap();
+    let empty_tx_rows = empty_node.tx_query(empty_tx, &shape, &binding).unwrap();
+    assert_eq!(empty_snapshot_rows.len(), 1);
+    assert_eq!(empty_tx_rows.len(), 1);
+    assert_eq!(
+        empty_snapshot_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    assert_eq!(
+        empty_tx_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    empty_node
+        .commit_exclusive_settled(empty_tx, AuthorSubject::SYSTEM, 1)
+        .unwrap();
+
+    let (_dir, mut node) = open_node();
+    commit_global_issue(&mut node, 1, "open", author(1), 1);
+    let current_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(1)).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let snapshot = node.open_transaction_snapshot(tx).unwrap();
+    let snapshot_rows = node
+        .query_rows_at_snapshot(&shape, &binding, &snapshot)
+        .unwrap();
+    let tx_rows = node.tx_query(tx, &shape, &binding).unwrap();
+    assert_eq!(current_rows.len(), 1);
+    assert_eq!(historical_rows.len(), 1);
+    assert_eq!(snapshot_rows.len(), 1);
+    assert_eq!(tx_rows.len(), 1);
+    let expected_uuid = current_rows[0].row_uuid();
+    let expected_cells = current_rows[0].test_cells_by_descriptor();
+    for rows in [&historical_rows, &snapshot_rows, &tx_rows] {
+        assert_eq!(rows[0].row_uuid(), expected_uuid);
+        assert_eq!(rows[0].test_cells_by_descriptor(), expected_cells);
+    }
+    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 2)
+        .unwrap();
+
+    let conflicting_tx = OpenTransactionId::new();
+    node.open_exclusive(conflicting_tx).unwrap();
+    let _ = node.tx_query(conflicting_tx, &shape, &binding).unwrap();
+    commit_global_issue(&mut node, 2, "open", author(1), 2);
+    assert!(matches!(
+        node.commit_exclusive_settled(conflicting_tx, AuthorSubject::SYSTEM, 3),
+        Err(Error::TransactionConflict)
+    ));
+}
+
 
 #[test]
 fn aggregate_sum_min_max_over_filtered_query() {
