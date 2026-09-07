@@ -447,9 +447,15 @@ export async function proveForegroundScopeIsolation(
           observation,
         );
       } catch (error) {
-        await reportWriterReadDiagnostic(
-          `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}`,
-        );
+        try {
+          void Promise.resolve(
+            reportWriterReadDiagnostic(
+              `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}`,
+            ),
+          ).catch(() => {});
+        } catch {
+          // Diagnostics must not replace or delay the native read failure.
+        }
         throw error;
       }
     }

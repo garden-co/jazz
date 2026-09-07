@@ -392,6 +392,36 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no",
   ]);
 
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      scopeFactory(false, false, 0, false, false, "rejected"),
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      () => Promise.reject(new Error("diagnostic sink rejected")),
+    ),
+    /subscription ended before its read/,
+  );
+
+  const terminal = await Promise.race([
+    proveForegroundScopeIsolation(
+      scopeFactory(false, false, 0, false, false, "rejected"),
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      () => new Promise<void>(() => {}),
+    ).then(
+      () => "unexpected success",
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("diagnostic blocked failure"), 25)),
+  ]);
+  assert.match(terminal, /subscription ended before its read/);
+
   aWasWritten = false;
   bWasWritten = false;
   const writerProgressRequired = scopeFactory(false, false, 0, true);
