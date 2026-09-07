@@ -972,9 +972,12 @@ fn affected_recursive_frontier(
                         Err(error) => return Err(error),
                     }
                     for delta in accumulated {
-                        for key in
-                            super::join::join_keys(&frontier_desc, delta.raw(), &frontier_fields)?
-                        {
+                        for key in super::join::join_keys(
+                            &frontier_desc,
+                            delta.raw(),
+                            &frontier_fields,
+                            join.comparison,
+                        )? {
                             if touched.contains(key.as_slice()) {
                                 selected.insert(delta.record.clone());
                                 break;
@@ -1750,6 +1753,7 @@ impl HydrationEvaluator<'_> {
                             &join.right_descriptor,
                             right_delta.raw(),
                             &right_on,
+                            join.comparison,
                         )? {
                             right_by_key.entry(key).or_default().push(right_delta);
                         }
@@ -1760,6 +1764,7 @@ impl HydrationEvaluator<'_> {
                             &join.left_descriptor,
                             left_delta.raw(),
                             &left_on,
+                            join.comparison,
                         )? {
                             let Some(matches) = right_by_key.get(&key) else {
                                 continue;
