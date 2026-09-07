@@ -15,6 +15,7 @@ const session: Session = {
   isPending: false,
   data: null,
 };
+let sessionSubscriber: ((next: Session) => void) | undefined;
 
 vi.mock("./auth-client.js", () => ({
   authClient: {
@@ -23,8 +24,11 @@ vi.mock("./auth-client.js", () => ({
     useSession: {
       get: () => session,
       subscribe(listener: (next: typeof session) => void) {
+        sessionSubscriber = listener;
         listener(session);
-        return () => {};
+        return () => {
+          if (sessionSubscriber === listener) sessionSubscriber = undefined;
+        };
       },
     },
   },
@@ -41,6 +45,7 @@ describe("mountApp", () => {
   beforeEach(() => {
     session.isPending = false;
     session.data = null;
+    sessionSubscriber = undefined;
     vi.clearAllMocks();
   });
 
@@ -71,6 +76,29 @@ describe("mountApp", () => {
     const app = mountApp(root, lifecycle);
 
     expect(mountTodoWidget).toHaveBeenCalledTimes(1);
+    app.destroy();
+  });
+
+  it("renders a later same-session profile update", () => {
+    session.data = {
+      session: { id: "session-1" },
+      user: { id: "user-1", name: "Ada" },
+    };
+    const root = document.createElement("div");
+    const lifecycle = {
+      getClient: () => ({}),
+      transition: vi.fn(),
+    } as unknown as JazzLifecycle;
+
+    const app = mountApp(root, lifecycle);
+    session.data = {
+      session: { id: "session-1" },
+      user: { id: "user-1", name: "Grace" },
+    };
+    sessionSubscriber?.(session);
+
+    expect(root.textContent).toContain("Hello, Grace");
+    expect(mountTodoWidget).toHaveBeenCalledTimes(2);
     app.destroy();
   });
 });

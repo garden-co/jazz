@@ -173,15 +173,18 @@ export function mountApp(
     );
   }
 
+  let acceptingInitialSessionSnapshot = true;
   const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
-    const previousKey = sessionKey(session);
+    const isSynchronousInitialSnapshot = acceptingInitialSessionSnapshot;
     session = next;
     reconcile(next);
-    // Better Auth publishes an immediate snapshot after subscribe(). Rebuilding
-    // the dashboard for that same authenticated session tears down the freshly
-    // opened todo subscription before its initial snapshot arrives.
-    if (sessionKey(next) !== previousKey) render();
+    // Better Auth synchronously publishes the current session from subscribe().
+    // The initial render below already uses it, so do not tear down the newly
+    // mounted todo subscription before its opening snapshot. Later notifications
+    // still render, including same-session profile changes.
+    if (!isSynchronousInitialSnapshot) render();
   });
+  acceptingInitialSessionSnapshot = false;
 
   render();
 
