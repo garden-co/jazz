@@ -24,7 +24,7 @@ pre-commit:
       # Node child_process spawns that restricted shells may reject.
       run: sh dev/scripts/clippy-staged.sh {staged_files}
     oxfmt:
-      glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}"
       exclude:
         - "crates/jazz-napi/index.d.ts"
         # This package owns its Prettier policy (single quotes); root oxfmt

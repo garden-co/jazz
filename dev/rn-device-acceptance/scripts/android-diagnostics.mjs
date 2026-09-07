@@ -5,7 +5,8 @@ import { isDeviceDiagnosticCode } from "../src/device-diagnostics.ts";
 // ReactNativeJS console line must never impersonate the native diagnostic tag.
 const THREADTIME_DIAGNOSTIC =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzDeviceAcceptance\s*:\s*(\S+)\s*$/;
-const WRITER_READ_DETAIL = /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
+const WRITER_READ_DETAIL =
+  /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 
