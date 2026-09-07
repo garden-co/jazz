@@ -11,12 +11,64 @@ interface RemoteBrowserDbHandle {
   pages: Page[];
   input: RemoteBrowserDbCreateInput;
   harnessUrl: string;
+  lifecycle: string[];
 }
 
 const HARNESS_LOAD_COUNT_KEY = "jazz-test:remote-harness-load-count";
+const STORAGE_INVALIDATION_RELOAD_MARKER = "jazz:indexeddb-invalidation-reload";
 
 const remoteBrowserDbs = new Map<string, RemoteBrowserDbHandle>();
 const remoteHarnessModulePath = "/tests/browser/remote-db-harness.ts";
+
+function recordRemoteBrowserDbLifecycle(lifecycle: string[], event: string): void {
+  lifecycle.push(event);
+  // A failing page can emit an unbounded stream of browser console messages.
+  // Keep the receipt deterministic and bounded while preserving its causal
+  // lifecycle order.
+  if (lifecycle.length > 32) lifecycle.splice(0, lifecycle.length - 32);
+}
+
+function observeRemoteBrowserDbPage(page: Page, lifecycle: string[], tabIndex: number): void {
+  const label = `tab=${tabIndex}`;
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    recordRemoteBrowserDbLifecycle(lifecycle, `${label} navigated url=${frame.url()}`);
+  });
+  page.on("close", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} closed`));
+  page.on("crash", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} crashed`));
+  page.on("pageerror", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} pageerror`));
+  page.on("console", (message) =>
+    recordRemoteBrowserDbLifecycle(lifecycle, `${label} console=${message.type()}`),
+  );
+}
+
+async function remoteBrowserDbLifecycleReceipt(handle: RemoteBrowserDbHandle): Promise<string> {
+  const page = handle.pages[0];
+  if (!page) return `remote-page=missing lifecycle=${JSON.stringify(handle.lifecycle)}`;
+  const pageUrl = page.url();
+  const closed = page.isClosed();
+  const pageState = closed
+    ? { loadCount: "unavailable", invalidationReloadMarker: "unavailable" }
+    : await page
+        .evaluate(
+          ({ loadCountKey, invalidationReloadKey }) => ({
+            loadCount: sessionStorage.getItem(loadCountKey) ?? "0",
+            invalidationReloadMarker: sessionStorage.getItem(invalidationReloadKey) ?? "absent",
+          }),
+          {
+            loadCountKey: HARNESS_LOAD_COUNT_KEY,
+            invalidationReloadKey: STORAGE_INVALIDATION_RELOAD_MARKER,
+          },
+        )
+        .catch(() => ({ loadCount: "unavailable", invalidationReloadMarker: "unavailable" }));
+  return [
+    `remote-page-url=${pageUrl}`,
+    `closed=${closed}`,
+    `harness-load-count=${pageState.loadCount}`,
+    `invalidation-reload-marker=${pageState.invalidationReloadMarker}`,
+    `lifecycle=${JSON.stringify(handle.lifecycle)}`,
+  ].join(" ");
+}
 
 function getBrowserFromContext(context: BrowserContext): Browser {
   const browser = context.browser();
@@ -71,6 +123,7 @@ export async function createRemoteBrowserDb(
 
   const browser = getBrowserFromContext(currentContext);
   const remoteContext = await browser.newContext();
+  const lifecycle: string[] = [];
   await remoteContext.addInitScript((key) => {
     const count = Number(sessionStorage.getItem(key) ?? 0);
     sessionStorage.setItem(key, String(count + 1));
@@ -92,6 +145,7 @@ export async function createRemoteBrowserDb(
   const pages: Page[] = [];
   for (let index = 0; index < (resolvedInput.tabCount ?? 1); index += 1) {
     const page = await remoteContext.newPage();
+    observeRemoteBrowserDbPage(page, lifecycle, index);
     await page.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
     await evaluateHarness(page, "createRemoteBrowserDb", {
       ...resolvedInput,
@@ -106,6 +160,7 @@ export async function createRemoteBrowserDb(
     pages,
     input: resolvedInput,
     harnessUrl: harnessUrlFromPage(currentPage),
+    lifecycle,
   });
 }
 
@@ -178,7 +233,12 @@ export async function waitForRemoteBrowserDbTitle(
     throw new Error(`Remote browser db "${input.id}" is not open`);
   }
 
-  return evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
+  try {
+    return await evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
+  } catch (error) {
+    const receipt = await remoteBrowserDbLifecycleReceipt(handle);
+    throw new Error(`Remote browser db title wait failed: ${receipt}`, { cause: error });
+  }
 }
 
 export async function insertRemoteBrowserDbRow(
