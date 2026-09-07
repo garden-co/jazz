@@ -16,6 +16,16 @@ async function addTodo(page: Page, title: string) {
   await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });
 }
 
+async function restorePhrase(page: Page, phrase: string) {
+  // The replacement client can render before the intentional document reload.
+  // Observe navigation before submitting so the next step uses the final page.
+  const reload = page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame());
+  await page.getByLabel("Restore from recovery phrase").fill(phrase);
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await reload;
+  await waitForApp(page);
+}
+
 test("recovery phrase round-trips the local-first identity", async ({ page }) => {
   const runId = Date.now();
   const todo = `Backup todo ${runId}`;
@@ -40,10 +50,8 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
 
   // Restore the phrase.
   await page.getByText("Back up or restore your local-only account").click();
-  await page.getByLabel("Restore from recovery phrase").fill(phrase);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await restorePhrase(page, phrase);
 
-  // Page reloads; the original todo should reappear.
-  await waitForApp(page);
+  // After the restore reload, the original todo should reappear.
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
