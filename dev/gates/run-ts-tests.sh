@@ -96,6 +96,9 @@ interrupt() {
 trap 'interrupt 130' INT
 trap 'interrupt 143' TERM
 
+echo "Node test live log: ${node_tests_log}"
+echo "Browser test live log: ${browser_tests_log}"
+
 setsid bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
 setsid bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
