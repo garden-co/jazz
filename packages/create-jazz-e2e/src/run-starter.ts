@@ -445,17 +445,46 @@ function replaceExactly(
  * readiness but before its first public callback.
  */
 function injectTsBetterAuthCancelReopenSubscriptionProbe(appDir: string): void {
-  const file = path.join(appDir, "src", "todo-widget.ts");
-  let source = fs.readFileSync(file, "utf-8");
+  const widgetFile = path.join(appDir, "src", "todo-widget.ts");
+  let source = fs.readFileSync(widgetFile, "utf-8");
   source = replaceExactly(
     source,
     `    callback: (rows: T[]) => void,`,
     `    callback:\n      | ((rows: T[]) => void)\n      | { onUpdate(rows: T[]): void; onError(error: Error): void },`,
-    file,
+    widgetFile,
+  );
+  source = replaceExactly(
+    source,
+    `export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {`,
+    `export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {\n  const probeWindow = window as typeof window & {\n    __jazzCancelReopenSubscriptionProbe?: { errors: string[] };\n  };\n  const probe = (probeWindow.__jazzCancelReopenSubscriptionProbe ??= { errors: [] });\n  document.documentElement.dataset.jazzCancelReopenSubscriptionProbe = "installed";`,
+    widgetFile,
   );
   const expected = `  return db.subscribe(app.todos, (todos) => {\n    // The simplest possible approach: rebuild the whole list on every tick.\n    // It's fine here — the list is small and there's no DOM state to preserve\n    // (no inline editing, no focused inputs inside rows).\n    //\n    renderTodos(todos);\n  });\n}`;
-  const replacement = `  const cancelledOpening = db.subscribe(app.todos, {\n    onUpdate: () => undefined,\n    onError: (error) => {\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n  cancelledOpening();\n\n  return db.subscribe(app.todos, {\n    onUpdate: (todos) => {\n      // The simplest possible approach: rebuild the whole list on every tick.\n      // It's fine here — the list is small and there's no DOM state to preserve\n      // (no inline editing, no focused inputs inside rows).\n      //\n      renderTodos(todos);\n    },\n    onError: (error) => {\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n}`;
-  fs.writeFileSync(file, replaceExactly(source, expected, replacement, file), "utf-8");
+  const replacement = `  const cancelledOpening = db.subscribe(app.todos, {\n    onUpdate: () => undefined,\n    onError: (error) => {\n      probe.errors.push(error.message);\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n  cancelledOpening();\n\n  return db.subscribe(app.todos, {\n    onUpdate: (todos) => {\n      // The simplest possible approach: rebuild the whole list on every tick.\n      // It's fine here — the list is small and there's no DOM state to preserve\n      // (no inline editing, no focused inputs inside rows).\n      //\n      renderTodos(todos);\n    },\n    onError: (error) => {\n      probe.errors.push(error.message);\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n}`;
+  source = replaceExactly(source, expected, replacement, widgetFile);
+  fs.writeFileSync(widgetFile, source, "utf-8");
+
+  const testFile = path.join(appDir, "e2e", "todo-flow.spec.ts");
+  source = fs.readFileSync(testFile, "utf-8");
+  source = replaceExactly(
+    source,
+    `const TIMEOUT = 20_000;`,
+    `const TIMEOUT = 20_000;\nconst CANCEL_REOPEN_PROBE = process.env.JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE === "1";\n\nasync function assertCancelReopenProbeHealthy(page: Page) {\n  if (!CANCEL_REOPEN_PROBE) return;\n  await expect(page.locator("html")).toHaveAttribute(\n    "data-jazz-cancel-reopen-subscription-probe",\n    "installed",\n  );\n  await expect\n    .poll(() =>\n      page.evaluate(() => {\n        const probeWindow = window as typeof window & {\n          __jazzCancelReopenSubscriptionProbe?: { errors: string[] };\n        };\n        return probeWindow.__jazzCancelReopenSubscriptionProbe?.errors ?? [];\n      }),\n    )\n    .toEqual([]);\n}`,
+    testFile,
+  );
+  source = replaceExactly(
+    source,
+    `  await expect(page.getByLabel(TODO_INPUT_LABEL)).toBeVisible({ timeout: TIMEOUT });`,
+    `  await expect(page.getByLabel(TODO_INPUT_LABEL)).toBeVisible({ timeout: TIMEOUT });\n  await assertCancelReopenProbeHealthy(page);`,
+    testFile,
+  );
+  source = replaceExactly(
+    source,
+    `  await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });`,
+    `  await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });\n  await assertCancelReopenProbeHealthy(page);`,
+    testFile,
+  );
+  fs.writeFileSync(testFile, source, "utf-8");
 }
 
 function writeEnvFile(
@@ -643,7 +672,13 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       await recordPhase("e2e", () =>
         runChild("pnpm", ["exec", "playwright", "test", "--reporter=line"], {
           cwd: appDir,
-          env: { ...process.env, JAZZ_E2E_PROD: "1" },
+          env: {
+            ...process.env,
+            JAZZ_E2E_PROD: "1",
+            JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE: opts.cancelReopenSubscriptionProbe
+              ? "1"
+              : "",
+          },
           verbose,
           description: `playwright test ${opts.starter}`,
         }),

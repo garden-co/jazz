@@ -131,6 +131,7 @@ jobs:
 
   e2e:
     needs: prepare
+    name: E2E ${{ matrix.starter }}${{ matrix.cancel_reopen_subscription_probe && ' cancel/reopen' || '' }}
     if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
@@ -219,7 +220,7 @@ jobs:
         if: failure() && steps.filter.outputs.skip != '1'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: playwright-traces-${{ matrix.starter }}
+          name: playwright-traces-${{ matrix.starter }}${{ matrix.cancel_reopen_subscription_probe && '-cancel-reopen' || '' }}
           path: /tmp/cje2e-${{ matrix.starter }}-*/test-app/test-results/**
           if-no-files-found: ignore
           retention-days: 7
