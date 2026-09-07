@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
@@ -17,6 +18,18 @@ const APP_NAME = "test-app";
  * yet (e.g. during a release PR).
  */
 const PACKAGES_TO_PACK = ["jazz-tools", "jazz-napi", "jazz-wasm"] as const;
+const requireFromHarness = createRequire(import.meta.url);
+const requireFromJazzTools = createRequire(requireFromHarness.resolve("jazz-tools/dev"));
+
+export function loadedHarnessNapiFingerprint(): string {
+  const binding = requireFromJazzTools("jazz-napi") as {
+    nativeArtifactFingerprint?: () => string;
+  };
+  if (typeof binding.nativeArtifactFingerprint !== "function") {
+    throw new Error("Harness Jazz NAPI binding is missing nativeArtifactFingerprint");
+  }
+  return binding.nativeArtifactFingerprint();
+}
 
 export interface RunStarterOptions {
   starter: StarterName;
@@ -160,11 +173,12 @@ function installedJazzNapiDirs(appDir: string): string[] {
 }
 
 /** Reject a packed candidate that cannot run with this harness's native binding. */
-export function assertInstalledJazzNapiMatchesHarness(appDir: string, repoRoot: string): void {
-  const napiSourceDir = path.join(repoRoot, "crates/jazz-napi");
+export function assertInstalledJazzNapiMatchesHarness(
+  appDir: string,
+  harnessFingerprint = loadedHarnessNapiFingerprint(),
+): void {
   const installedDirs = installedJazzNapiDirs(appDir);
-  if (!fs.existsSync(napiSourceDir) || installedDirs.length === 0) return;
-  const harnessFingerprint = expectedNativeArtifactFingerprint(napiSourceDir);
+  if (installedDirs.length === 0) return;
   for (const installedDir of installedDirs) {
     const candidateFingerprint = expectedNativeArtifactFingerprint(installedDir);
     if (candidateFingerprint !== harnessFingerprint) {
@@ -174,6 +188,18 @@ export function assertInstalledJazzNapiMatchesHarness(appDir: string, repoRoot: 
       );
     }
   }
+}
+
+function installedNapiIsUsable(dir: string): boolean {
+  const binary = fs.readdirSync(dir).find((entry) => entry.endsWith(".node"));
+  if (!binary) return false;
+  const candidate = requireFromHarness(path.join(dir, "index.cjs")) as {
+    nativeArtifactFingerprint?: () => string;
+  };
+  if (candidate.nativeArtifactFingerprint?.() !== expectedNativeArtifactFingerprint(dir)) {
+    throw new Error(`Installed Jazz NAPI binary does not match its package fingerprint: ${dir}`);
+  }
+  return true;
 }
 
 function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
@@ -186,6 +212,7 @@ function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
   if (binaries.length === 0) return;
 
   for (const dir of installedJazzNapiDirs(appDir)) {
+    if (installedNapiIsUsable(dir)) continue;
     for (const src of binaries) {
       fs.copyFileSync(src, path.join(dir, path.basename(src)));
     }
@@ -413,7 +440,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       ),
     );
 
-    assertInstalledJazzNapiMatchesHarness(appDir, opts.repoRoot);
+    assertInstalledJazzNapiMatchesHarness(appDir);
     patchInstalledJazzNapi(appDir, opts.repoRoot);
     assertInstalledBrokerWorkerArtifacts(appDir);
 
