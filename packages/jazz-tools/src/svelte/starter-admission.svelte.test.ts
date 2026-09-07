@@ -105,8 +105,8 @@ it("B's startup retry cannot admit A after failed B login and failed A reopen", 
   expect(observed).not.toContain("PRIVATE DATA");
 });
 
-async function setupNotifications() {
-  controls.read = undefined;
+async function setupNotifications(read?: typeof controls.read) {
+  controls.read = read;
   const events: string[] = [];
   let releaseLogin: (() => void) | undefined;
   let delayedSubject: string | undefined;
@@ -295,6 +295,24 @@ it("does not turn a resolved provider read error into logout during reconciliati
   expect(owner.getSnapshot().account?.identity.subject).toBe("principal-a");
   expect(target.textContent).not.toContain("PRIVATE DATA");
   controls.read = undefined;
+  await unmount(component);
+  await settle();
+});
+
+it("retains the prepared session and retries an initial provider read failure", async () => {
+  const { owner, target, events, component } = await setupNotifications(async () => ({
+    data: null,
+    error: { message: "initial provider read unavailable" },
+  }));
+  expect(target.textContent).toContain("initial provider read unavailable");
+  expect(events).toEqual([]);
+  expect(owner.getSnapshot().status).toBe("signed-out");
+  controls.read = undefined;
+  target.querySelector<HTMLButtonElement>("button")!.click();
+  await settle();
+  expect(events).toEqual(["login:principal-a"]);
+  expect(owner.getSnapshot().status).toBe("ready");
+  expect(target.textContent).toContain("PRIVATE DATA");
   await unmount(component);
   await settle();
 });

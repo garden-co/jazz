@@ -162,7 +162,11 @@
       const current = await readProviderSession();
       if (disposed) return;
       const key = sessionKey(current);
-      if (!key) throw new Error("Provider did not establish a session");
+      if (!key) {
+        await owner.logout();
+        if (!disposed) { handledSession = null; admittedSession = null; setupError = undefined; }
+        return;
+      }
       handledSession = key;
       if (owner.getSnapshot().status === "error" &&
         owner.getSnapshot().account?.identity.subject === current?.user.id &&
@@ -182,7 +186,8 @@
     void (async () => {
       owner = await createJazzSession({ appId, serverUrl });
       if (disposed) { await owner.close(); return; }
-      await selectCurrent(owner);
+      try { await selectCurrent(owner); }
+      catch (cause) { if (!disposed) { recovery = "login"; setupError = toError(cause); } }
       if (disposed) await owner.close();
       else { jazz = owner; ready = true; }
     })().catch((cause) => { if (!disposed) setupError = toError(cause); });
@@ -209,7 +214,7 @@
       {:else}<p>Loading...</p>{/if}
     {/snippet}
     {#snippet fallback()}
-      {#if setupError && $session.data?.session}
+      {#if setupError}
         <main class="page-center"><div class="card"><p class="alert-error" role="alert">{setupError.message}</p><button type="button" class="btn-primary" onclick={recover} disabled={explicitAuth || reconciliation !== undefined}>{recovery === "logout" ? "Retry sign out" : recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>
       {:else if !$session.data?.session}{@render pageChildren?.()}
       {:else}<p>Loading...</p>{/if}
