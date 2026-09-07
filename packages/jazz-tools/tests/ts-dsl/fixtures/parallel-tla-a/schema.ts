@@ -13,7 +13,10 @@ type TlaGlobals = typeof globalThis & {
 const globals = globalThis as TlaGlobals;
 let barrier = globals.__jazzSchemaLoaderTlaBarrier;
 if (!barrier) {
-  const { promise, resolve } = Promise.withResolvers<void>();
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
   barrier = { registered: new Set(), promise, resolve };
   globals.__jazzSchemaLoaderTlaBarrier = barrier;
 }
