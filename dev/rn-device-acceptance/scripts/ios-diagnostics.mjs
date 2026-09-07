@@ -34,10 +34,13 @@ export const relevantAppLogs = (value, processName) =>
 
 const foregroundWakeStages = new Set([
   "armed",
+  "enabled",
   "requested",
   "scheduled",
   "delivered",
   "callback-invoked",
+  "foreground-mismatch",
+  "inactive",
 ]);
 
 /** Parse only the fixed native wake vocabulary from a separately queried log. */
@@ -46,7 +49,7 @@ export const foregroundWakeDiagnostic = (value) => {
   const stages = [];
   for (const line of String(value).split("\n")) {
     const stage =
-      /JazzForegroundWake\s+(armed|requested|scheduled|delivered|callback-invoked)\b/.exec(
+      /JazzForegroundWake\s+(armed|enabled|requested|scheduled|delivered|callback-invoked|foreground-mismatch|inactive)\b/.exec(
         line,
       )?.[1];
     if (!stage || !foregroundWakeStages.has(stage)) continue;

@@ -58,6 +58,15 @@ test("Android reports an acknowledged epoch with no later native wake", () => {
   assert.equal(androidForegroundWakeDiagnostic("JazzForegroundWake: armed"), undefined);
 });
 
+test("Android distinguishes an enabled B trace from native callback guards", () => {
+  const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
+    "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: enabled",
+    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: inactive",
+  ].join("\n");
+  assert.equal(androidForegroundWakeDiagnostic(output), "enabled,inactive");
+});
+
 test("Android timeout reports only the bounded scope writer-read counters", () => {
   const detail =
     "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no";

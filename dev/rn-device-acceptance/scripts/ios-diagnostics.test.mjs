@@ -24,6 +24,12 @@ test("iOS foreground wake diagnostics retain only fixed stages from a narrow que
     "requested,delivered",
   );
   assert.equal(foregroundWakeDiagnostic("JazzForegroundWake armed"), "armed-no-wake");
+  assert.equal(
+    foregroundWakeDiagnostic(
+      "JazzForegroundWake armed\nJazzForegroundWake enabled\nJazzForegroundWake foreground-mismatch",
+    ),
+    "enabled,foreground-mismatch",
+  );
   assert.equal(foregroundWakeDiagnostic("unrelated secret=never-printed"), "no-arm");
 });
 

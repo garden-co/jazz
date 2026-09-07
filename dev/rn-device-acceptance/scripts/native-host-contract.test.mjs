@@ -775,6 +775,9 @@ test("post-commit wake tracing is private, default-off, and enabled only for B",
 
   assert.match(foregroundRuntime, /bool traceEnabled_\{false\};/);
   assert.match(foregroundRuntime, /void setTraceEnabled\(bool enabled\) noexcept/);
+  assert.match(foregroundRuntime, /if \(enabled\) traceForegroundWake\("enabled"\);/);
+  assert.match(foregroundRuntime, /traceRejected = "foreground-mismatch"/);
+  assert.match(foregroundRuntime, /traceRejected = "inactive"/);
   assert.match(foregroundRuntime, /if \(property == "setWakeTrace"\)/);
   assert.match(relayAdapter, /setWakeTrace\?\(enabled: boolean\): void;/);
   assert.match(relayAdapter, /typeof foreground\.setWakeTrace === "function"/);

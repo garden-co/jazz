@@ -98,6 +98,7 @@ class ForegroundWakeRegistration final
   void setTraceEnabled(bool enabled) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     traceEnabled_ = enabled;
+    if (enabled) traceForegroundWake("enabled");
   }
 
   /** Clear the Rust scheduler synchronously before this callback context can
@@ -125,25 +126,31 @@ class ForegroundWakeRegistration final
   void requestWake(uint64_t foreground, uint8_t kind, uint64_t delayMs) noexcept {
     std::shared_ptr<facebook::react::CallInvoker> invoker;
     bool traceRequested = false;
+    const char *traceRejected = nullptr;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (foreground != foreground_) return;
-      if (!active_) return;
-      // Record bridge entry before coalescing can return for an already
-      // scheduled wake. The fixed marker intentionally carries no identity or
-      // payload data.
-      traceRequested = traceEnabled_;
-      if (kind == kWakeCancelled) {
-        active_ = false;
-        pending_ = false;
+      if (foreground != foreground_) {
+        if (traceEnabled_) traceRejected = "foreground-mismatch";
+      } else if (!active_) {
+        if (traceEnabled_) traceRejected = "inactive";
       } else {
-        mergeWakeLocked(kind, delayMs);
-        if (!scheduled_ && callInvoker_) {
-          scheduled_ = true;
-          invoker = callInvoker_;
+        // Record bridge entry before coalescing can return for an already
+        // scheduled wake. The fixed marker intentionally carries no identity or
+        // payload data.
+        traceRequested = traceEnabled_;
+        if (kind == kWakeCancelled) {
+          active_ = false;
+          pending_ = false;
+        } else {
+          mergeWakeLocked(kind, delayMs);
+          if (!scheduled_ && callInvoker_) {
+            scheduled_ = true;
+            invoker = callInvoker_;
+          }
         }
       }
     }
+    if (traceRejected) traceForegroundWake(traceRejected);
     if (traceRequested) traceForegroundWake("requested");
     if (!invoker) return;
     schedule(std::move(invoker));
