@@ -5,11 +5,41 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 
-import { runStarter } from "./run-starter.js";
+import { assertInstalledJazzNapiMatchesHarness, runStarter } from "./run-starter.js";
 
 function missingTarballDir(): string {
   return path.join(os.tmpdir(), `create-jazz-e2e-missing-${randomUUID()}`);
 }
+
+function writeNapiFingerprint(packageDir: string, fingerprint: string): void {
+  fs.mkdirSync(packageDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(packageDir, "native-artifact-fingerprint.cjs"),
+    `module.exports = { expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
+  );
+}
+
+test("rejects a packed NAPI candidate before the harness can replace its binary", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-mismatch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeNapiFingerprint(path.join(root, "crates", "jazz-napi"), "a".repeat(64));
+  writeNapiFingerprint(path.join(root, "app", "node_modules", "jazz-napi"), "b".repeat(64));
+
+  assert.throws(
+    () => assertInstalledJazzNapiMatchesHarness(path.join(root, "app"), root),
+    /Packed Jazz NAPI fingerprint b{64} does not match this harness's native binding a{64}/,
+  );
+});
+
+test("accepts a packed NAPI candidate with the harness fingerprint", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-match-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "c".repeat(64);
+  writeNapiFingerprint(path.join(root, "crates", "jazz-napi"), fingerprint);
+  writeNapiFingerprint(path.join(root, "app", "node_modules", "jazz-napi"), fingerprint);
+
+  assert.doesNotThrow(() => assertInstalledJazzNapiMatchesHarness(path.join(root, "app"), root));
+});
 
 test("cleanup preserves a caller-provided work directory", async (t) => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-caller-test-"));
