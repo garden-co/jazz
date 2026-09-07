@@ -1,7 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { JazzSessionProvider, useJazzSession, useAuthState } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSessionOwner,
+  useJazzSession,
+  useAuthState,
+} from "jazz-tools/react";
 import { ChatPanel } from "../src/ChatPanel";
 import { AuthCard } from "../src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
@@ -67,21 +72,41 @@ async function getToken(): Promise<string> {
   return token;
 }
 
-// Track provider restoration per session, including StrictMode's replacement session.
-const restored = new WeakSet<() => Promise<void>>();
-
 export default function Page() {
+  const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
+  const [providerError, setProviderError] = React.useState<Error>();
+  React.useEffect(() => {
+    if (!session) return;
+    void (async () => {
+      const token = await getJwtFromBetterAuth();
+      if (token) await session.loginJWT({ getToken });
+    })().catch((cause) =>
+      setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+    );
+  }, [session]);
+  if (!session)
+    return error ? (
+      <p role="alert">
+        {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </p>
+    ) : (
+      <p>Preparing account…</p>
+    );
+  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
   return (
-    <JazzSessionProvider
-      config={{ ...config, initial: "local-first" }}
-      fallback={<SessionScreen />}
-    >
-      <SessionScreen />
+    <JazzSessionProvider session={session} fallback={screen}>
+      {screen}
     </JazzSessionProvider>
   );
 }
 
-function SessionScreen() {
+function SessionScreen({
+  providerError,
+  reportError,
+}: {
+  providerError?: Error;
+  reportError(error: Error | undefined): void;
+}) {
   const session = useJazzSession();
   const {
     account,
@@ -94,17 +119,7 @@ function SessionScreen() {
     createLocalFirst,
     retry,
   } = session;
-  const [providerError, setProviderError] = React.useState<Error>();
   const error = sessionError ?? providerError;
-  React.useEffect(() => {
-    if (status !== "ready" || restored.has(logout)) return;
-    restored.add(logout);
-    void getJwtFromBetterAuth()
-      .then((token) => (token ? loginJWT({ getToken }) : undefined))
-      .catch((cause) =>
-        setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
-      );
-  }, [status, loginJWT, logout]);
 
   async function signIn(email: string, password: string) {
     const result = await authClient.signIn.email({ email, password });
@@ -117,10 +132,16 @@ function SessionScreen() {
     await linkJWT({ getToken });
   }
   async function signOut() {
-    await logout();
-    await authClient.signOut();
-    // This demo deliberately returns to a fresh local-first account.
-    await createLocalFirst();
+    reportError(undefined);
+    try {
+      await logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await createLocalFirst();
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      throw cause;
+    }
   }
   async function registerProvider() {
     if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
@@ -142,6 +163,14 @@ function SessionScreen() {
       )}
       {status === "ready" ? (
         <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
+      ) : status === "signed-out" ? (
+        <div>
+          <button onClick={() => void loginJWT({ getToken: getToken }).catch(() => {})}>
+            Retry sign in
+          </button>
+          <button onClick={() => void createLocalFirst().catch(() => {})}>Continue locally</button>
+          <button onClick={() => void signOut().catch(() => {})}>Retry sign out</button>
+        </div>
       ) : (
         <p>Preparing account…</p>
       )}

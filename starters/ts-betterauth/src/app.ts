@@ -85,10 +85,12 @@ export function mountApp(
   async function handleSignOut() {
     try {
       await jazz.logout();
-      await authClient.signOut();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
       location.assign("/");
     } catch (cause) {
       actionError = cause instanceof Error ? cause : new Error(String(cause));
+      recovery = "login";
       render();
     }
   }
@@ -130,8 +132,9 @@ export function mountApp(
     }
 
     if (!db || admittedSession !== sessionKey(session)) {
-      root.innerHTML = registrationError
-        ? `<main class="page-center"><div class="card"><p class="alert-error" role="alert">${escapeHtml(registrationError.message)}</p><p>Finish setting up your Jazz account.</p><button type="button" class="btn-primary" data-action="register">${recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>`
+      const error = registrationError ?? actionError ?? jazz.getSnapshot().error;
+      root.innerHTML = error
+        ? `<main class="page-center"><div class="card"><p class="alert-error" role="alert">${escapeHtml(error.message)}</p><p>Finish setting up your Jazz account.</p><button type="button" class="btn-primary" data-action="register">${recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>`
         : `<div>Loading…</div>`;
       root.querySelector('[data-action="register"]')?.addEventListener("click", register);
       return;

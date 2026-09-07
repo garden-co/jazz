@@ -149,3 +149,24 @@ describe("session auth intent", () => {
     app.destroy();
   });
 });
+
+it("provider signout failure remains visible after Jazz detaches", async () => {
+  const { authClient } = await import("./auth-client.js");
+  session.isPending = false;
+  session.data = { session: { id: "session-1" }, user: { id: "user-1", name: "Ada" } };
+  vi.mocked(authClient.signOut).mockRejectedValueOnce(new Error("provider signout unavailable"));
+  const root = document.createElement("div");
+  let app: ReturnType<typeof mountApp>;
+  const jazz = {
+    getSnapshot: () => ({ client: { db: {} } }),
+    logout: vi.fn(async () => {
+      app.setDb(null);
+    }),
+  } as unknown as JazzSession;
+  app = mountApp(root, jazz);
+  root.querySelector<HTMLButtonElement>('[data-action="signout"]')!.click();
+  await vi.waitFor(() => expect(authClient.signOut).toHaveBeenCalled());
+  await vi.waitFor(() => expect(root.textContent).toContain("provider signout unavailable"));
+  expect(root.querySelector('[data-action="register"]')?.textContent).toBe("Retry sign in");
+  app.destroy();
+});

@@ -1,5 +1,10 @@
 import * as React from "react";
-import { JazzSessionProvider, useJazzSession, useAuthState } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSessionOwner,
+  useJazzSession,
+  useAuthState,
+} from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -61,26 +66,46 @@ const config = {
   driver: { type: "memory" as const },
 };
 
-// Track provider restoration per session, including StrictMode's replacement session.
-const restored = new WeakSet<() => Promise<void>>();
-
 export function App() {
+  const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
+  const [providerError, setProviderError] = React.useState<Error>();
+  React.useEffect(() => {
+    if (!session) return;
+    void (async () => {
+      const saved = readStoredAuthSession(DEFAULT_APP_ID);
+      if (saved) await session.loginJWT({ getToken: async () => saved.token });
+    })().catch((cause) =>
+      setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+    );
+  }, [session]);
+  if (!session)
+    return error ? (
+      <p role="alert">
+        {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </p>
+    ) : (
+      <p>Preparing account…</p>
+    );
+  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
   return (
-    <JazzSessionProvider
-      config={{ ...config, initial: "local-first" }}
-      fallback={<SessionScreen />}
-    >
-      <SessionScreen />
+    <JazzSessionProvider session={session} fallback={screen}>
+      {screen}
     </JazzSessionProvider>
   );
 }
 
-function SessionScreen() {
+function SessionScreen({
+  providerError,
+  reportError,
+}: {
+  providerError?: Error;
+  reportError(error: Error | undefined): void;
+}) {
   const session = useJazzSession();
   const {
     account,
     status,
-    error,
+    error: sessionError,
     loginJWT,
     linkJWT,
     registerJWT,
@@ -88,12 +113,7 @@ function SessionScreen() {
     createLocalFirst,
     retry,
   } = session;
-  React.useEffect(() => {
-    if (status !== "ready" || restored.has(logout)) return;
-    restored.add(logout);
-    const saved = readStoredAuthSession(DEFAULT_APP_ID);
-    if (saved) void loginJWT({ getToken: async () => saved.token }).catch(() => {});
-  }, [status, loginJWT, logout]);
+  const error = sessionError ?? providerError;
 
   async function signIn(email: string, password: string) {
     const auth = await requestSignIn(email, password);
@@ -106,10 +126,15 @@ function SessionScreen() {
     await linkJWT({ getToken: async () => auth.token });
   }
   async function signOut() {
-    await logout();
-    clearStoredAuthSession(DEFAULT_APP_ID);
-    // This demo deliberately returns to a fresh local-first account.
-    await createLocalFirst();
+    reportError(undefined);
+    try {
+      await logout();
+      clearStoredAuthSession(DEFAULT_APP_ID);
+      await createLocalFirst();
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      throw cause;
+    }
   }
   async function registerProvider() {
     const auth = readStoredAuthSession(DEFAULT_APP_ID);
@@ -134,6 +159,24 @@ function SessionScreen() {
       )}
       {status === "ready" ? (
         <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
+      ) : status === "signed-out" ? (
+        <div>
+          <button
+            onClick={() =>
+              void loginJWT({
+                getToken: async () => {
+                  const saved = readStoredAuthSession(DEFAULT_APP_ID);
+                  if (!saved) throw new Error("Sign in to the provider first");
+                  return saved.token;
+                },
+              }).catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button onClick={() => void createLocalFirst().catch(() => {})}>Continue locally</button>
+          <button onClick={() => void signOut().catch(() => {})}>Retry sign out</button>
+        </div>
       ) : (
         <p>Preparing account…</p>
       )}

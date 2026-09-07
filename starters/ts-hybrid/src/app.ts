@@ -24,6 +24,7 @@ export function mountApp(
   let db: Db | undefined = initialDb;
   let view: View = "dashboard";
   let providerLinkError = initialProviderLinkError;
+  let providerError: Error | undefined;
   let unsubscribeTodos: (() => void) | null = null;
 
   const sessionAtom = authClient.useSession;
@@ -39,10 +40,17 @@ export function mountApp(
   }
 
   async function handleSignOut() {
-    await jazz.logout();
-    await authClient.signOut();
-    await jazz.createLocalFirst();
-    setView("dashboard");
+    providerError = undefined;
+    try {
+      await jazz.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await jazz.createLocalFirst();
+      setView("dashboard");
+    } catch (cause) {
+      providerError = cause instanceof Error ? cause : new Error(String(cause));
+      render();
+    }
   }
 
   function reportProviderLinkFailure(cause: unknown) {
@@ -69,11 +77,17 @@ export function mountApp(
       return;
     }
 
-    const sessionError = jazz.getSnapshot().error;
+    const sessionError = jazz.getSnapshot().error ?? providerError;
     if (!db) {
       root.innerHTML = sessionError
-        ? `<p role="alert">${escapeHtml(sessionError.message)}</p><button data-action="retry-session">Retry Jazz startup</button>`
+        ? `<p role="alert">${escapeHtml(sessionError.message)}</p><button data-action="retry-session">Retry Jazz startup</button><button data-action="retry-login">Retry sign in</button><button data-action="continue-local">Continue locally</button>`
         : `<div>Loading…</div>`;
+      root.querySelector('[data-action="retry-login"]')?.addEventListener("click", () => {
+        void jazz.loginJWT({ getToken }).catch(() => {});
+      });
+      root.querySelector('[data-action="continue-local"]')?.addEventListener("click", () => {
+        void jazz.createLocalFirst().catch(() => {});
+      });
       root.querySelector('[data-action="retry-session"]')?.addEventListener("click", () => {
         void jazz.retry().catch(() => {});
       });
