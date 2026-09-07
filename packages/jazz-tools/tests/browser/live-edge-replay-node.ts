@@ -9,7 +9,8 @@ import type { JazzServerInfo } from "./testing-server.js";
 const sessions = new Map<string, Awaited<ReturnType<typeof createJazzSession>>>();
 export async function liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdgeSeed> {
   const session = await createJazzSession({
-    ...info,
+    appId: info.appId,
+    serverUrl: info.serverUrl,
     initial: { backendSecret: "jazz-browser-test-backend" },
     app,
     permissions: liveEdgePermissions,
@@ -18,18 +19,27 @@ export async function liveEdgeBackendOpen(info: JazzServerInfo): Promise<LiveEdg
     defaultDurabilityTier: "global",
   });
   sessions.set(info.appId, session);
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
+  try {
+    const snapshot = session.getSnapshot();
+    if (snapshot.status !== "ready" || !snapshot.client) {
+      throw snapshot.error ?? new Error("Backend session is not ready");
+    }
+    const db = snapshot.client.db;
+    const parent = await db.insert(app.parents, { name: "Parent" }).wait({ tier: "global" });
+    const author = await db.insert(app.authors, { name: "Author" }).wait({ tier: "global" });
+    const label = await db.insert(app.labels, { name: "Label" }).wait({ tier: "global" });
+    await db.insert(app.unrelated, { value: "still usable" }).wait({ tier: "global" });
+    const seed = { parentId: parent.id, authorId: author.id, labelId: label.id, itemId: "" };
+    seed.itemId = await liveEdgeBackendInsert(info.appId, seed, "hydrated");
+    return seed;
+  } catch (error) {
+    try {
+      await liveEdgeBackendClose(info.appId);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Backend seed and cleanup failed");
+    }
+    throw error;
   }
-  const db = snapshot.client.db;
-  const parent = await db.insert(app.parents, { name: "Parent" }).wait({ tier: "global" });
-  const author = await db.insert(app.authors, { name: "Author" }).wait({ tier: "global" });
-  const label = await db.insert(app.labels, { name: "Label" }).wait({ tier: "global" });
-  await db.insert(app.unrelated, { value: "still usable" }).wait({ tier: "global" });
-  const seed = { parentId: parent.id, authorId: author.id, labelId: label.id, itemId: "" };
-  seed.itemId = await liveEdgeBackendInsert(info.appId, seed, "hydrated");
-  return seed;
 }
 export async function liveEdgeBackendInsert(
   appId: string,
@@ -57,6 +67,6 @@ export async function liveEdgeBackendInsert(
 }
 export async function liveEdgeBackendClose(appId: string): Promise<void> {
   const session = sessions.get(appId);
-  sessions.delete(appId);
   await session?.close();
+  if (sessions.get(appId) === session) sessions.delete(appId);
 }
