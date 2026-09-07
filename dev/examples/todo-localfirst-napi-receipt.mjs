@@ -19,7 +19,7 @@ const app = s.defineApp({
     title: s.string(),
     done: s.boolean(),
     description: s.string().optional(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
   }),
@@ -50,15 +50,7 @@ async function waitFor(check, label, timeoutMs = 15_000) {
 }
 
 const dataRoot = await mkdtemp(join(tmpdir(), "jazz-todo-napi-receipt-"));
-const session = await createJazzSession({
-  appId,
-  app,
-  permissions,
-  driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
-  serverUrl,
-  initial: { backendSecret },
-  env: "dev",
-});
+let session;
 
 try {
   await deploy({
@@ -67,6 +59,16 @@ try {
     adminSecret,
     schema: app,
     permissions,
+  });
+
+  session = await createJazzSession({
+    appId,
+    app,
+    permissions,
+    driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+    serverUrl,
+    initial: { backendSecret },
+    env: "dev",
   });
 
   let stored = null;
@@ -133,6 +135,6 @@ try {
     ),
   );
 } finally {
-  await session.close();
+  await session?.close();
   await rm(dataRoot, { recursive: true, force: true });
 }
