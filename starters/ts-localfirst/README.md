@@ -87,13 +87,18 @@ session on every row and the permission policy scopes reads/writes to it.
 | `BACKEND_SECRET`       | cloud only | scaffolder or manual                                  |
 
 Leave all four unset for self-hosted mode — the `jazzPlugin` Vite plugin
-spawns a local Jazz dev server and writes `VITE_JAZZ_APP_ID` /
-`VITE_JAZZ_SERVER_URL` into `.env` on first `pnpm dev`. For cloud mode,
+spawns a local Jazz dev server, persists `VITE_JAZZ_APP_ID` in `.env`,
+and injects `VITE_JAZZ_SERVER_URL` while running `pnpm dev`. For cloud mode,
 either scaffold via `create-jazz --hosting hosted` (writes `.env` for you)
 or provision an app at https://v2.dashboard.jazz.tools and paste the four
 values into `.env`.
 
 ## Deploying to production
+
+For either hosting mode, set `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL`
+before running `pnpm build`. Vite embeds these values in the browser bundle;
+setting them only when starting `pnpm preview` does not configure an existing
+build. The dev plugin does not supply a production server URL.
 
 For cloud-hosted deployments, set the four env vars above in your hosting
 provider and your app will sync against Jazz Cloud.

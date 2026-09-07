@@ -1,12 +1,12 @@
-import { createAccountManager, type AccountHandle } from "jazz-tools";
-import { createJazzClient, type JazzClientConfig } from "jazz-tools/client";
+import { createAccountManager } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
 import { mountApp } from "./app.js";
 import { shutdownOnDispose } from "./client-lifecycle.js";
 import "./app.css";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL as string | undefined;
-function buildConfig(account: AccountHandle): JazzClientConfig {
+function buildConfig() {
   if (!APP_ID || !SERVER_URL) {
     const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
       .filter((v) => !!v)
@@ -15,12 +15,13 @@ function buildConfig(account: AccountHandle): JazzClientConfig {
       `${missing} not set. The jazzPlugin Vite plugin injects these at dev time; in production, set them explicitly in your environment.`,
     );
   }
-  return { appId: APP_ID, serverUrl: SERVER_URL, account };
+  return { appId: APP_ID, serverUrl: SERVER_URL };
 }
 
 async function boot() {
   const root = document.getElementById("root");
   if (!root) throw new Error("#root not found");
+  const config = buildConfig();
   let disposed = false;
   let client: Awaited<ReturnType<typeof createJazzClient>> | undefined;
   const shutdownClients = new WeakSet<Awaited<ReturnType<typeof createJazzClient>>>();
@@ -42,10 +43,10 @@ async function boot() {
   };
   window.addEventListener("pagehide", onPageHide);
 
-  const accounts = await createAccountManager({ appId: APP_ID!, serverUrl: SERVER_URL! });
+  const accounts = await createAccountManager(config);
   if (disposed) return;
   let account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-  client = await createJazzClient(buildConfig(account));
+  client = await createJazzClient({ ...config, account });
   if (disposed) {
     if (!shutdownClients.has(client)) {
       shutdownClients.add(client);
@@ -81,7 +82,7 @@ async function boot() {
         } finally {
           // Reopen even after a rejected restore and for the same account.
           account = accounts.getLoggedIn() ?? account;
-          const next = await createJazzClient(buildConfig(account));
+          const next = await createJazzClient({ ...config, account });
           if (disposed) {
             if (!shutdownClients.has(next)) {
               shutdownClients.add(next);
@@ -100,4 +101,7 @@ async function boot() {
   mount();
 }
 
-boot();
+boot().catch((error: unknown) => {
+  const root = document.getElementById("root");
+  if (root) root.textContent = error instanceof Error ? error.message : String(error);
+});
