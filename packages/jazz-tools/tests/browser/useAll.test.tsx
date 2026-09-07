@@ -144,6 +144,7 @@ function makeQuery<T>(
   };
 }
 
+const clients: JazzClient[] = [];
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -153,7 +154,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Keep React unmount and client shutdown in one hook so nested teardown
+  // cannot close a Db while its consumers are still mounted.
   if (root) {
     root.unmount();
     root = null;
@@ -161,6 +164,9 @@ afterEach(() => {
   if (container) {
     container.remove();
     container = null;
+  }
+  for (const client of clients.splice(0).reverse()) {
+    await client.shutdown();
   }
 });
 
@@ -212,7 +218,6 @@ function UseAllProbe<T extends { id: string }>({
 }
 
 describe("useAll browser integration", () => {
-  const clients: JazzClient[] = [];
   let conditionsClient: JazzClient;
   const conditionCases: Array<{
     name: string;
@@ -388,12 +393,6 @@ describe("useAll browser integration", () => {
 
   afterAll(async () => {
     await conditionsClient.shutdown();
-  });
-
-  afterEach(async () => {
-    for (const client of clients.splice(0).reverse()) {
-      await client.shutdown();
-    }
   });
 
   for (const testCase of conditionCases) {
