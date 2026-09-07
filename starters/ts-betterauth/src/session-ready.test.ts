@@ -6,7 +6,7 @@ describe("waitForInitialSession", () => {
   it("handles a synchronous ready notification without reading an uninitialized unsubscribe", async () => {
     let unsubscribed = false;
     await expect(
-      waitForInitialSession({
+      waitForInitialSession<{ isPending: boolean }>({
         get: () => ({ isPending: true }),
         subscribe(listener) {
           listener({ isPending: false });
