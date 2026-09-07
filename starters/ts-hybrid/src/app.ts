@@ -69,8 +69,14 @@ export function mountApp(
       return;
     }
 
+    const sessionError = jazz.getSnapshot().error;
     if (!db) {
-      root.innerHTML = `<div>Loading…</div>`;
+      root.innerHTML = sessionError
+        ? `<p role="alert">${escapeHtml(sessionError.message)}</p><button data-action="retry-session">Retry Jazz startup</button>`
+        : `<div>Loading…</div>`;
+      root.querySelector('[data-action="retry-session"]')?.addEventListener("click", () => {
+        void jazz.retry().catch(() => {});
+      });
       return;
     }
 
@@ -108,6 +114,7 @@ export function mountApp(
     const name = session.data?.user?.name ?? "";
     root.innerHTML = `
       <main class="dashboard">
+        ${sessionError ? `<p role="alert">${escapeHtml(sessionError.message)}</p>` : ""}
         <header>
           <img src="/jazz.svg" alt="Jazz" class="wordmark" width="80" height="24" />
           <div class="auth-nav">
