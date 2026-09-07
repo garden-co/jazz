@@ -289,6 +289,203 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 }
 
 #[test]
+fn authoritative_reset_retries_after_refresh_error() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = groove::storage::TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc3; 16]),
+            author: client_author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+    }))
+    .unwrap();
+
+    seed(&server, "todos", cells("retry after error", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+    block_on(upstream.borrow_mut().tick()).expect("install the reset without refreshing it");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        })
+    ));
+    seed(
+        &server,
+        "todos",
+        cells("second authoritative row", true, owner),
+    );
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+    block_on(upstream.borrow_mut().tick()).expect("install the incremental update");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        })
+    ));
+    eviction.evict_all();
+    control.fail_next(groove::storage::TestStorageOperation::Get);
+
+    let error = block_on(client.refresh_subscriptions())
+        .expect_err("the injected refresh storage failure must surface");
+    assert!(
+        error.to_string().contains("injected Get failure"),
+        "unexpected refresh failure: {error}"
+    );
+    block_on(client.refresh_subscriptions()).expect("the authoritative reset can be retried");
+    let retry = subscription
+        .try_next_event()
+        .expect("the authoritative reset remains pending after refresh error");
+    let SubscriptionEvent::Delta { reset, settled, .. } = retry else {
+        panic!("expected retried authoritative reset");
+    };
+    assert!(reset);
+    assert!(settled);
+}
+
+#[test]
+fn authoritative_reset_retries_after_refresh_cancellation() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc4; 16]);
+
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = groove::storage::TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc4; 16]),
+            author: client_author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc4))),
+    }))
+    .unwrap();
+
+    seed(
+        &server,
+        "todos",
+        cells("retry after cancellation", false, owner),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+    block_on(upstream.borrow_mut().tick()).expect("install the reset without refreshing it");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        })
+    ));
+    seed(
+        &server,
+        "todos",
+        cells("second authoritative row", true, owner),
+    );
+    server.tick().unwrap();
+    upstream
+        .borrow_mut()
+        .fail_next_subscription_refresh
+        .set(true);
+    block_on(upstream.borrow_mut().tick()).expect("install the incremental update");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        })
+    ));
+    eviction.evict_all();
+    control.pause_on(groove::storage::TestStorageOperation::Get);
+    control.pause_on(groove::storage::TestStorageOperation::ScanOpen);
+
+    let mut client_refresh = Box::pin(client.refresh_subscriptions());
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut reached_refresh = false;
+    for _ in 0..128 {
+        assert!(
+            matches!(client_refresh.as_mut().poll(&mut context), Poll::Pending),
+            "refresh must suspend at controlled storage before cancellation"
+        );
+        if control.take_observed().iter().any(|operation| {
+            matches!(
+                operation,
+                groove::storage::TestStorageOperation::Get
+                    | groove::storage::TestStorageOperation::ScanOpen
+            )
+        }) {
+            reached_refresh = true;
+            break;
+        }
+    }
+    assert!(reached_refresh, "refresh did not reach controlled storage");
+    drop(client_refresh);
+    control.resume();
+
+    block_on(client.refresh_subscriptions()).expect("the cancelled refresh can be retried");
+    let retry = subscription
+        .try_next_event()
+        .expect("the authoritative reset remains pending after cancellation");
+    let SubscriptionEvent::Delta { reset, settled, .. } = retry else {
+        panic!("expected retried authoritative reset");
+    };
+    assert!(reset);
+    assert!(settled);
+}
+
+#[test]
 fn runtime_reset_rebuilds_occurrence_sidecar_after_order_change() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
