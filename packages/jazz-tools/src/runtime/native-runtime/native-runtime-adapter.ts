@@ -3177,11 +3177,11 @@ export class NativeRuntimeAdapter implements Runtime {
       ) {
         return attachment;
       }
-      const minimumPeerActivityEpoch = this.nonDurableClient
-        ? this.peerTransportActivityEpoch
-        : undefined;
+      const minimumPeerActivityEpoch =
+        this.nonDurableClient && tier !== "local" ? this.peerTransportActivityEpoch : undefined;
       const pendingPeerActivityEpoch =
         this.nonDurableClient &&
+        tier !== "local" &&
         !requiresFreshPeerConfirmation &&
         this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
           ? this.peerTransportActivityEpoch
