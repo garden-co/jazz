@@ -238,6 +238,15 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }
 
+  @ReactMethod fun recordScopeWriterReadDiagnostic(detail: String, promise: Promise) {
+    try {
+      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-rows-[0-9]{1,6}-ready-(yes|no)$").matches(detail)) { "invalid scope writer read diagnostic" }
+      writeAtomicDiagnostic(detail)
+      Log.e("JazzDeviceAcceptance", detail)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
   @ReactMethod fun clearDiagnostic(promise: Promise) {
     try {
       val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")

@@ -23,6 +23,7 @@ type FixtureModule = {
   receiptContext(): Promise<DeviceReceiptContext>;
   recordReceipt(receipt: string): Promise<void>;
   recordDiagnostic(code: DeviceDiagnosticCode): Promise<void>;
+  recordScopeWriterReadDiagnostic?(detail: string): Promise<void>;
   clearDiagnostic(): Promise<void>;
   acceptancePhase(): Promise<"seed" | "verify">;
 };
@@ -149,6 +150,21 @@ export async function recordDeviceReceipt(receipt: string): Promise<void> {
 /** Persist only an allowlisted, non-secret pre-receipt failure for the host driver. */
 export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promise<void> {
   await fixtureModule().recordDiagnostic(code);
+}
+
+/** Android-only, bounded counters for the scope writer read timeout. */
+export async function recordScopeWriterReadDiagnostic(detail: string): Promise<void> {
+  if (NativePlatform.OS !== "android") return;
+  if (
+    !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-\d{1,6}-polls-\d{1,6}-rows-\d{1,6}-ready-(yes|no)$/.test(
+      detail,
+    )
+  )
+    throw new Error("invalid scope writer read diagnostic");
+  const fixture = fixtureModule();
+  if (!fixture.recordScopeWriterReadDiagnostic)
+    throw new Error("JazzDeviceFixture cannot record scope writer read diagnostics");
+  await fixture.recordScopeWriterReadDiagnostic(detail);
 }
 
 /** Clear the pending stage only after the complete native lifecycle succeeds. */

@@ -386,6 +386,7 @@ export async function proveForegroundScopeIsolation(
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
   readTiming: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
+  reportWriterReadDiagnostic: (detail: string) => void = () => {},
 ): Promise<void> {
   let writer: ScopeForeground | undefined;
   try {
@@ -428,14 +429,29 @@ export async function proveForegroundScopeIsolation(
       // view. This separates write/admission failures from propagation to the
       // independently attached reader below without exposing runtime details.
       markFailure("scope-isolation-writer-read-failed");
-      await readScopeRows(
-        openedWriter.runtime,
-        codec,
-        (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
-        undefined,
-        openedWriter.consumeWake,
-        readTiming,
-      );
+      const observation: ScopeReadObservation = {
+        last: "none",
+        wakes: 0,
+        polls: 0,
+        rows: 0,
+        ready: false,
+      };
+      try {
+        await readScopeRows(
+          openedWriter.runtime,
+          codec,
+          (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
+          undefined,
+          openedWriter.consumeWake,
+          readTiming,
+          observation,
+        );
+      } catch (error) {
+        reportWriterReadDiagnostic(
+          `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-rows-${observation.rows}-ready-${observation.ready ? "yes" : "no"}`,
+        );
+        throw error;
+      }
     }
 
     markFailure("scope-isolation-open-failed");
@@ -477,6 +493,14 @@ type ScopeForeground = {
   consumeWake: () => boolean;
 };
 
+type ScopeReadObservation = {
+  last: "none" | "pending" | "subscription" | "rows";
+  wakes: number;
+  polls: number;
+  rows: number;
+  ready: boolean;
+};
+
 function openScopeForeground(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
@@ -514,9 +538,21 @@ async function readScopeRows(
   progressWriter: () => void = () => {},
   consumeWake: () => boolean = () => true,
   timing: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
+  observation?: ScopeReadObservation,
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
+  const observeResponse = (response: NativeForegroundResponse) => {
+    if (!observation) return;
+    observation.last =
+      response.type === "pending"
+        ? "pending"
+        : response.type === "subscriptionEvents"
+          ? "subscription"
+          : response.type === "rows"
+            ? "rows"
+            : "none";
+  };
   const prepared = execute({ type: "prepareQuery", query: scopeQuery });
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the owner-protected scope query");
@@ -554,17 +590,25 @@ async function readScopeRows(
       // publication and keep the coverage alive until the local read finishes.
       await timing.yieldTurn();
       if (timing.now() >= deadline) break;
-      if (pendingOperation !== undefined && !consumeWake()) continue;
+      if (pendingOperation !== undefined) {
+        const woke = consumeWake();
+        if (woke && observation) observation.wakes += 1;
+        if (!woke) continue;
+      }
       if (timing.now() >= deadline) break;
-      let response =
-        pendingOperation !== undefined
-          ? execute({ type: "poll", operation: pendingOperation })
-          : published
-            ? execute({ type: "all", query: prepared.query })
-            : execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      let response: NativeForegroundResponse;
+      if (pendingOperation !== undefined) {
+        if (observation) observation.polls += 1;
+        response = execute({ type: "poll", operation: pendingOperation });
+      } else if (published) {
+        response = execute({ type: "all", query: prepared.query });
+      } else {
+        response = execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      }
       // Retain a newly admitted operation even if execution crossed the deadline,
       // so timeout cleanup can cancel it rather than abandoning its future.
       pendingOperation = response.type === "pending" ? response.operation : undefined;
+      observeResponse(response);
       if (timing.now() >= deadline) break;
       if (response.type === "subscriptionEvents") {
         if (response.events.some((event) => event.type === "rejected" || event.type === "closed"))
@@ -573,10 +617,13 @@ async function readScopeRows(
         published = true;
         response = execute({ type: "all", query: prepared.query });
         pendingOperation = response.type === "pending" ? response.operation : undefined;
+        observeResponse(response);
         if (timing.now() >= deadline) break;
       }
       if (response.type === "rows") {
+        if (observation) observation.rows += 1;
         if (ready(response.rows)) {
+          if (observation) observation.ready = true;
           failed = false;
           return response.rows;
         }

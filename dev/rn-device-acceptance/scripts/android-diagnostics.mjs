@@ -5,6 +5,7 @@ import { isDeviceDiagnosticCode } from "../src/device-diagnostics.ts";
 // ReactNativeJS console line must never impersonate the native diagnostic tag.
 const THREADTIME_DIAGNOSTIC =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzDeviceAcceptance\s*:\s*(\S+)\s*$/;
+const WRITER_READ_DETAIL = /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-\d{1,6}-polls-\d{1,6}-rows-\d{1,6}-ready-(yes|no)$/;
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =
@@ -26,7 +27,7 @@ export function androidDeviceDiagnostic(output) {
   for (const line of String(output).split(/\r?\n/)) {
     const candidate = THREADTIME_DIAGNOSTIC.exec(line)?.[1];
     if (!candidate) continue;
-    if (isDeviceDiagnosticCode(candidate)) latest = candidate;
+    if (isDeviceDiagnosticCode(candidate) || WRITER_READ_DETAIL.test(candidate)) latest = candidate;
   }
   return latest;
 }

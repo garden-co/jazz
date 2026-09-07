@@ -21,6 +21,18 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
   assert.doesNotMatch(failure, /secret-device-token|linked-abi-admission/);
 });
 
+test("Android timeout reports only the bounded scope writer-read counters", () => {
+  const detail =
+    "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-rows-0-ready-no";
+  const output = [
+    "08-29 22:52:21.495  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
+    `08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: ${detail}`,
+    "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-rows-0-ready-no-secret",
+  ].join("\n");
+  assert.equal(androidDeviceDiagnostic(output), detail);
+  assert.match(androidAcceptanceFailure("timeout", "seed", output), new RegExp(detail));
+});
+
 test("invalid Android receipt keeps its safe stage without echoing receipt contents", () => {
   const output = [
     "08-29 22:52:21.495  4268  4288 I ReactNativeJS: JAZZ_DEVICE_RESULT capability=secret-receipt-token",

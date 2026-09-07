@@ -22,6 +22,7 @@ import {
   closeNativeRelay,
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
+  recordScopeWriterReadDiagnostic,
   recordDeviceReceipt,
   recordNativeSeedBoundary,
   switchNativeRelayAuthScope,
@@ -43,6 +44,11 @@ import { rowIdForRun } from "./src/run-marker";
 async function observeTrustedAdmissionLifecycleInner(
   markFailure: (code: DeviceDiagnosticCode) => void,
 ) {
+  const reportWriterReadDiagnostic = (detail: string) => {
+    try {
+      void recordScopeWriterReadDiagnostic(detail).catch(() => {});
+    } catch {}
+  };
   // The native fixture returns the same host-issued nonce from both launches.
   // It is also bound into every accepted device receipt, so use it to make
   // retained app data from an old install unable to satisfy this run's reopen
@@ -153,6 +159,8 @@ async function observeTrustedAdmissionLifecycleInner(
       excludes: ["b"],
     },
     markFailure,
+    undefined,
+    reportWriterReadDiagnostic,
   );
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
   markFailure("auth-switch-failed");
@@ -171,6 +179,8 @@ async function observeTrustedAdmissionLifecycleInner(
       excludes: ["a"],
     },
     markFailure,
+    undefined,
+    reportWriterReadDiagnostic,
   );
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.

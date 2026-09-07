@@ -334,6 +334,31 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     },
   );
 
+  const stalledWriter = scopeFactory(false, false, 1_000);
+  const writerDetails: string[] = [];
+  let stalledWriterClock = 0;
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      stalledWriter,
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      {
+        timeoutMs: 3,
+        now: () => stalledWriterClock,
+        yieldTurn: async () => {
+          stalledWriterClock += 1;
+        },
+      },
+      (detail) => writerDetails.push(detail),
+    ),
+    /did not settle before its bounded deadline/,
+  );
+  assert.deepEqual(writerDetails, [
+    "scope-isolation-writer-read-detail:last-rows-wakes-0-polls-0-rows-2-ready-no",
+  ]);
+
   aWasWritten = false;
   bWasWritten = false;
   const writerProgressRequired = scopeFactory(false, false, 0, true);
