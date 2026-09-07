@@ -32,11 +32,6 @@ export function mountApp(
 
   const sessionAtom = authClient.useSession;
   let session: AuthSession = sessionAtom.get();
-  const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
-    session = next;
-    reconcile(next);
-    render();
-  });
 
   function reconcile(next: AuthSession) {
     const key = sessionKey(next);
@@ -177,6 +172,12 @@ export function mountApp(
       todoDb,
     );
   }
+
+  const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
+    session = next;
+    reconcile(next);
+    render();
+  });
 
   render();
 
