@@ -24,6 +24,7 @@
     "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "concurrently": "^9.1.0",
+    "jsdom": "catalog:default",
     "tsx": "^4.19.4",
     "typescript": "catalog:default",
     "vite": "catalog:default",
