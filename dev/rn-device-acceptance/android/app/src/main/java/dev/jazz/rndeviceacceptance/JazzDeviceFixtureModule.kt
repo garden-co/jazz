@@ -67,6 +67,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "same-runtime-commit-failed",
     "same-runtime-delta-failed",
     "same-runtime-postcommit-wake-failed",
+    "same-runtime-wake-trace-unavailable",
     "same-runtime-delta-drain-failed",
     "same-runtime-delta-decode-failed",
     "same-runtime-delta-content-failed",
@@ -106,8 +107,12 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     return true
   }
 
-  @ReactMethod(isBlockingSynchronousMethod = true)
-  fun recordSameRuntimeWakeBoundary(): Boolean { Log.e("JazzForegroundWake", "armed"); return true }
+  /** An acknowledged, asynchronous boundary: synchronous React methods are
+   * not exported by every installed runtime configuration. */
+  @ReactMethod fun recordSameRuntimeWakeBoundary(promise: Promise) {
+    Log.e("JazzForegroundWake", "armed")
+    promise.resolve(null)
+  }
 
   @ReactMethod fun waitForCoreObservation(promise: Promise) {
     try {

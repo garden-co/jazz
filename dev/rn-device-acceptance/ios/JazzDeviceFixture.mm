@@ -68,6 +68,7 @@ static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
     @"same-runtime-commit-failed",
     @"same-runtime-delta-failed",
     @"same-runtime-postcommit-wake-failed",
+    @"same-runtime-wake-trace-unavailable",
     @"same-runtime-delta-drain-failed",
     @"same-runtime-delta-decode-failed",
     @"same-runtime-delta-content-failed",
@@ -197,6 +198,13 @@ RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:
     reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", error.localizedDescription, error);
     return;
   }
+  resolve(nil);
+}
+
+/** This receipt boundary is asynchronous on both platforms: RN can omit
+ * blocking synchronous exports in an installed release runtime. */
+RCT_REMAP_METHOD(recordSameRuntimeWakeBoundary, recordSameRuntimeWakeBoundaryWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSLog(@"JazzForegroundWake armed");
   resolve(nil);
 }
 

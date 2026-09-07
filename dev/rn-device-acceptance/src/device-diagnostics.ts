@@ -44,6 +44,7 @@ export const DEVICE_DIAGNOSTIC_CODES = [
   "same-runtime-commit-failed",
   "same-runtime-delta-failed",
   "same-runtime-postcommit-wake-failed",
+  "same-runtime-wake-trace-unavailable",
   "same-runtime-delta-drain-failed",
   "same-runtime-delta-decode-failed",
   "same-runtime-delta-content-failed",

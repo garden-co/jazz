@@ -202,7 +202,14 @@ async function observeTrustedAdmissionLifecycleInner(
       timeoutMs: 5_000,
       now: () => performance.now(),
       yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
-      onPostCommitWakeArmed: recordSameRuntimeWakeBoundary,
+      onPostCommitWakeArmed: async () => {
+        try {
+          await recordSameRuntimeWakeBoundary();
+        } catch {
+          markFailure("same-runtime-wake-trace-unavailable");
+          throw new Error("native post-commit wake trace boundary is unavailable");
+        }
+      },
     },
   );
   // Closing B's trusted relay before re-admitting A forces its scope owner and

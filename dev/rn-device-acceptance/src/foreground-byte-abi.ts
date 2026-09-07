@@ -23,7 +23,7 @@ type PostCommitWakeTiming = {
   now(): number;
   yieldTurn(): Promise<void>;
   onWake?(details: { elapsedMs: number; turns: number }): void;
-  onPostCommitWakeArmed?(): void;
+  onPostCommitWakeArmed?(): void | Promise<void>;
 };
 
 const DEVICE_POST_COMMIT_WAKE_TIMING: PostCommitWakeTiming = {
@@ -244,7 +244,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     // B alone traces the post-commit bridge path. The native flag defaults to
     // off so all other foreground aliases and production callbacks are quiet.
     setWakeTraceBestEffort(openedB, true);
-    wakeTiming.onPostCommitWakeArmed?.();
+    await wakeTiming.onPostCommitWakeArmed?.();
 
     markFailure("same-runtime-write-failed");
     markFailure("same-runtime-transaction-open-failed");
