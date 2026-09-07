@@ -220,3 +220,14 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
   await expect(pending).rejects.toThrow(/account_logged_out/);
   expect(manager.getLoggedIn()).toBeUndefined();
 });
+
+it("rejects SYSTEM identities through every ordinary JWT enrollment path", async () => {
+  const fetcher = vi.fn<typeof fetch>();
+  const manager = setup(fetcher);
+  const forged = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:system", sub: id }))}.signature`;
+  await expect(manager.registerJWT(forged)).rejects.toThrow(/external_identity_required/);
+  await expect(manager.loginJWT(forged)).rejects.toThrow(/external_identity_required/);
+  manager.createLocalFirst();
+  await expect(manager.linkJWT(forged)).rejects.toThrow(/external_identity_required/);
+  expect(fetcher).not.toHaveBeenCalled();
+});
