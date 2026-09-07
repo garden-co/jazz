@@ -6,8 +6,10 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 
 import {
+  assertNapiBindingMatchesHarness,
   assertInstalledJazzNapiMatchesHarness,
   loadedHarnessNapiFingerprint,
+  patchInstalledJazzNapi,
   runStarter,
 } from "./run-starter.js";
 
@@ -59,6 +61,67 @@ test("accepts a packed NAPI candidate with the loaded harness fingerprint", (t) 
   writeNapiFingerprint(path.join(root, "app", "node_modules", "jazz-napi"), fingerprint);
 
   assert.doesNotThrow(() => assertInstalledJazzNapiMatchesHarness(path.join(root, "app")));
+});
+
+test("rejects a stale repair binary even when candidate metadata matches the harness", () => {
+  const fingerprint = "e".repeat(64);
+  assert.throws(
+    () =>
+      assertNapiBindingMatchesHarness(
+        "f".repeat(64),
+        fingerprint,
+        fingerprint,
+        "/workspace/crates/jazz-napi/jazz-napi.linux-x64-gnu.node",
+      ),
+    /binding .* fingerprint f{64} does not match candidate e{64} and harness e{64}/,
+  );
+});
+
+test("accepts a repair binary whose actual binding matches candidate and harness", () => {
+  const fingerprint = "e".repeat(64);
+  assert.doesNotThrow(() =>
+    assertNapiBindingMatchesHarness(
+      fingerprint,
+      fingerprint,
+      fingerprint,
+      "/workspace/crates/jazz-napi/jazz-napi.linux-x64-gnu.node",
+    ),
+  );
+});
+
+test("refuses to copy a stale workspace NAPI binary despite matching candidate metadata", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-repair-stale-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "e".repeat(64);
+  const staleFingerprint = "f".repeat(64);
+  const source = path.join(root, "crates", "jazz-napi", "jazz-napi.fake.node");
+  const candidateDir = path.join(root, "app", "node_modules", "jazz-napi");
+  writeNapiFingerprint(candidateDir, fingerprint);
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "fixture");
+
+  assert.throws(
+    () =>
+      patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, (bindingPath) =>
+        bindingPath === source ? staleFingerprint : fingerprint,
+      ),
+    /binding .* fingerprint f{64} does not match candidate e{64} and harness e{64}/,
+  );
+  assert.equal(fs.existsSync(path.join(candidateDir, path.basename(source))), false);
+});
+
+test("copies a workspace NAPI binary only after its actual binding matches", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-repair-match-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "e".repeat(64);
+  const source = path.join(root, "crates", "jazz-napi", "jazz-napi.fake.node");
+  const candidateDir = path.join(root, "app", "node_modules", "jazz-napi");
+  writeNapiFingerprint(candidateDir, fingerprint);
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "fixture");
+
+  patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, () => fingerprint);
+  assert.equal(fs.existsSync(path.join(candidateDir, path.basename(source))), true);
 });
 
 test("cleanup preserves a caller-provided work directory", async (t) => {
