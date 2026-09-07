@@ -1,100 +1,99 @@
 ---
 title: Lifecycle
-description: "Account selection, graceful context handoff, logout, and local recovery."
-reviewedAt: "f14d92bf11"
+description: "One session owns account selection, graceful client replacement, logout, and recovery."
 ---
 
-The account manager owns selection and credentials. A context owns queries, writes, and its runtime. Changing account selection does not change the identity of an existing context.
+A Jazz session owns the selected account and its client. Configure it once; use session commands to link, log in, log out, or restore an account. Each underlying context remains bound to one immutable account handle.
 
-## Starting a context
+## Starting a session
 
 ```ts
-import { createAccountManager, createJazzClient } from "jazz-tools/client";
+import { createJazzSession } from "jazz-tools/client";
 
-const config = { appId: "my-app", serverUrl: "https://core.example" };
-const accounts = await createAccountManager(config);
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
-  ...config,
-  account,
+const jazz = await createJazzSession({
+  appId: "my-app",
+  serverUrl: "https://core.example",
+  initial: "local-first",
 });
+const { client, account } = jazz.getSnapshot();
 ```
 
-Browser managers retain local-first signing roots and selected-root metadata in browser storage. They never persist external provider JWTs. Other hosts supply an atomic `AccountStore`. Each server-rendering request must own its own manager rather than sharing credentials in a module singleton.
+`initial: "local-first"` restores usable saved selection or creates a local-first account when none exists. Without it, an empty selection stays signed out. External identities are never registered implicitly. Browser account storage retains local signing roots and selection; provider JWTs are not persisted.
 
-The account's registry authority is independent of active transport. Omit `serverUrl` from context creation to stay local-only. When supplied, it must match the handle's configured authority.
-
-## Linking after graceful shutdown
-
-Stop submitting application work and release any other holders of the shared client. The handoff must have exclusive ownership of its context. Wait for ordinary graceful shutdown, then link:
+## Linking and switching accounts
 
 ```ts
-async function linkProvider(getToken: () => Promise<string>) {
-  // If the sync barrier fails, the existing context remains usable.
-  await client?.shutdown({ waitForSync: true });
-  client = undefined;
-  try {
-    await accounts.linkJWT({ getToken });
-  } finally {
-    // Linking failure preserves selection, but concurrent logout clears it.
-    const selected = accounts.getLoggedIn();
-    if (selected) client = await createJazzClient({ ...config, account: selected });
-    // Otherwise the app renders its signed-out state.
-  }
+await jazz.linkJWT({ getToken }); // Add an identity to this account.
+await jazz.loginJWT({ getToken }); // Select an already registered identity.
+await jazz.registerJWT({ getToken }); // Explicitly register a fresh identity.
+```
+
+For each transition Jazz hides the old client, waits for framework consumers to detach, then performs ordinary graceful shutdown with `waitForSync: true`. Only afterward does it perform the account operation, outside any context, and open the replacement client. Earlier rows retain their original issuer and subject. Linking preserves the stable account ID and its data.
+
+A sync-barrier failure leaves the old client usable and prevents the account operation. If enrollment fails after shutdown, Jazz reopens the previous selection when possible. If enrollment succeeds but client startup fails, the new selection remains and `await jazz.retry()` retries startup without repeating enrollment. A teardown failure after sync is reported with no usable client; Jazz does not pretend a stopped context is ready.
+
+Overlapping account-changing commands reject with a busy error instead of silently applying to a later account. Logout and close supersede in-flight work and prevent late completions from publishing a client. A remote link that already succeeded remains discoverable by a later explicit login.
+
+## Reactive state
+
+`getSnapshot()` and `subscribe(listener)` expose stable snapshots. Status is `ready`, `signed-out`, `transitioning`, `error`, or `closed`. A client is available only in `ready`. A recoverable operation error may accompany `ready`, so the app can show it while the previous account remains usable.
+
+```tsx
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
+
+function App() {
+  return (
+    <JazzSessionProvider
+      config={{ appId, serverUrl, initial: "local-first" }}
+      fallback={<AccountStatus />}
+    >
+      <TodoApp />
+    </JazzSessionProvider>
+  );
+}
+
+function AccountStatus() {
+  const { status, error, retry } = useJazzSession();
+  return error ? (
+    <button onClick={() => void retry().catch(console.error)}>{error.message}: retry</button>
+  ) : (
+    <p>{status === "signed-out" ? "Sign in to continue" : "Loading…"}</p>
+  );
 }
 ```
 
-The account manager does not track contexts or flush writes itself. `waitForSync` is a general shutdown option. A teardown failure after the sync barrier does not promise a usable old context. Ordinary shutdown without it remains usable offline and preserves local durability; it does not promise that remote synchronization finished.
+The hook is available in children and fallback. Data consumers unmount during a transition; Jazz handles the shutdown/replacement sequence. An app can put sign-in UI in the signed-out fallback and invoke `loginJWT` or `registerJWT` there. Config is captured at mount; use a React key to replace an application's configuration. Passing an existing `session` instead of `config` leaves ownership with its caller: unmounting the provider does not close it.
 
-Linked identities share the same account's durable storage root. Different acting identities cannot own that root concurrently: the old context closes before the new one opens. Earlier rows retain their original issuer and subject, while account ownership remains unchanged.
+React Native and Expo expose the same provider/hook from their platform entrypoints. Svelte provides `JazzSessionProvider`, `getJazzSession()` (a store with bound commands), and `sessionState(session)`. Vue and Solid provide providers and reactive session adapters over the same state machine.
 
-To log into a different account, use the same close / account operation / new context sequence with `loginJWT`. Register a new account explicitly with `registerJWT`.
-
-## Logout
-
-Close the context before clearing selection:
+## Logout and disposal
 
 ```ts
-await client?.shutdown({ waitForSync: true });
-accounts.logout();
+await jazz.logout();
 await signOutFromYourProvider();
+// For apps that intentionally return to a fresh anonymous account:
+await jazz.createLocalFirst();
 ```
 
-Logout invalidates all handles issued by that manager and fences pending operations so a late response cannot log the user back in. If a remote link completed just before cancellation, a later explicit login can discover the assignment.
+Logout stays signed out until the app chooses another account. It does not erase the local database or revoke an identity at core. Provider cookies remain the provider's responsibility. Local-first signing roots remain available for recovery.
 
-Local-first signing roots remain retained for recovery. Logout does not erase the account's local database or revoke an identity at the core. Your provider owns its own cookies and login session.
+Call `await jazz.close()` when retiring an imperatively owned session. Ordinary close preserves local durability and works offline; it does not promise remote sync completed. Account-changing commands use the stronger sync barrier automatically.
 
 ## Recovery phrases and passkeys
-
-Export a local-first root explicitly for backup:
 
 ```ts
 import { exportLocalFirstSecret } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
-const secret = exportLocalFirstSecret(accounts.getLoggedIn()!);
+const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
 const phrase = RecoveryPhrase.fromSecret(secret);
+await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(recoveredPhrase));
 ```
 
-Use the same secret with `BrowserPasskeyBackup` from `jazz-tools/passkey-backup` for a passkey backup. Treat a recovery phrase as a credential: possessing it allows acting as that local-first identity.
+Use the same secret with `BrowserPasskeyBackup` for a passkey backup. Export requires a live local-first handle; external or logged-out handles cannot export it. Secrets never appear in snapshots. Possession of a recovery phrase allows acting as that local-first identity.
 
-Restore outside a context:
+## Lower-level composition
 
-```ts
-const secret = RecoveryPhrase.toSecret(recoveredPhrase);
-await client?.shutdown({ waitForSync: true });
-const restored = accounts.restoreLocalFirst(secret);
-client = await createJazzClient({ ...config, account: restored });
-```
+`createAccountManager`, opaque `AccountHandle`, and `createJazzClient` remain available for applications that intentionally own their lifecycle. The manager handles credentials and registry operations only. Contexts accept valid handles and never change identity; low-level callers must arrange graceful shutdown before linking or replacing contexts themselves. The session abstraction composes these primitives in shared TypeScript; framework adapters only observe state and acknowledge consumer cleanup.
 
-Export requires a live local-first handle. External and logged-out handles cannot export a signing root. Secrets never appear in account-state snapshots.
-
-## Framework state
-
-React and Vue provide `useAccountState(accounts)`, Solid provides `createAccountState(accounts)`, and Svelte provides `accountState(accounts)`. Each observes the same `{ account, pending, error }` snapshot.
-
-A pending login or link preserves the current handle. Show errors beside the account controls; do not replace a working context merely because an account request started. The app owns the handoff shown above, and can render a loading state between the old context closing and the replacement opening.
-
-## Storage reset
-
-Account credentials and database contents are separate. `db.deleteClientStorage()` clears supported browser database storage without erasing the account's retained signing roots. Use it for development resets, not account registration or linking.
+`db.deleteClientStorage()` resets supported browser database storage without erasing retained account signing roots. It is a development reset, not account registration or linking.

@@ -2,9 +2,9 @@
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
   import { credential } from "$lib/accounts";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { getJazzSession } from "jazz-tools/svelte";
 
-  const lifecycle = getJazzLifecycle();
+  const jazz = getJazzSession();
 
 
   let error = $state<string | null>(null);
@@ -29,9 +29,8 @@
     }
 
     try {
-      await lifecycle.transition((manager) => manager.linkJWT({ getToken: credential }));
+      await jazz.linkJWT({ getToken: credential });
     } catch (cause) {
-      lifecycle.reportLinkFailure(cause);
       error = cause instanceof Error ? cause.message : "Sign-up failed";
       return;
     }

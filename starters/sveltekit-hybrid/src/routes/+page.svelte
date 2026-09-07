@@ -1,19 +1,17 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { getJazzSession } from "jazz-tools/svelte";
   import TodoWidget from "$lib/TodoWidget.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
-  const lifecycle = getJazzLifecycle();
+  const jazz = getJazzSession();
 
   async function handleSignOut() {
-    await lifecycle.transition(async (manager) => {
-      await authClient.signOut();
-      manager.logout();
-      manager.createLocalFirst();
-    });
+    await jazz.logout();
+    await authClient.signOut();
+    await jazz.createLocalFirst();
     await goto("/");
   }
 </script>

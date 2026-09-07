@@ -6,18 +6,19 @@ reviewedAt: "f14d92bf11"
 
 A Jazz context always belongs to an account and acts as one exact identity. An identity is the pair of JWT claims `iss` (issuer) and `sub` (subject). An account is a stable ID that can admit several identities.
 
-Prepare an account manager before creating a context:
+Create a session with configuration once:
 
 ```ts
-import { createAccountManager, createDb } from "jazz-tools";
+import { createJazzSession } from "jazz-tools/client";
 
-const config = { appId: "my-app", serverUrl: "https://core.example" };
-const accounts = await createAccountManager(config);
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const db = await createDb({ ...config, account });
+const jazz = await createJazzSession({
+  appId: "my-app",
+  serverUrl: "https://core.example",
+  initial: "local-first",
+});
 ```
 
-`createAccountManager` prepares the host's crypto and restores local selection. After that, `createLocalFirst()` is synchronous and works offline. A local-first account lets someone use your app before signing up with a provider.
+The session restores a usable saved account or creates a local-first account when none exists. It owns graceful context replacement for subsequent auth commands. Local-first creation works offline once runtime assets are available.
 
 Contexts accept an opaque `AccountHandle`, rather than raw JWTs or signing secrets. A handle fixes both the account and acting identity. The server still verifies credentials independently; copying an account ID into a JWT or object grants no access.
 
@@ -29,22 +30,22 @@ Choose the operation that matches the user's intent:
 
 | Operation                    | Result                                                                                        |
 | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `accounts.registerJWT(auth)` | Create an account for a fresh external identity.                                              |
-| `accounts.loginJWT(auth)`    | Select an existing, active account assignment.                                                |
-| `accounts.linkJWT(auth)`     | Attach a fresh external identity to the currently selected account and select its new handle. |
-| `accounts.getLoggedIn()`     | Read the locally selected handle, or `undefined`.                                             |
-| `accounts.logout()`          | Clear selection and invalidate this manager's issued credentials.                             |
+| `jazz.registerJWT(auth)`     | Create an account for a fresh external identity.                                              |
+| `jazz.loginJWT(auth)`        | Select an existing, active account assignment.                                                |
+| `jazz.linkJWT(auth)`         | Attach a fresh external identity to the currently selected account and select its new handle. |
+| `jazz.getSnapshot().account` | Read the locally selected handle, or `undefined`.                                             |
+| `jazz.logout()`              | Clear selection and invalidate this manager's issued credentials.                             |
 
 Registration, login, and linking require a connection to the core. Authenticating with your provider does not implicitly register a Jazz account. A failed operation preserves the previous selection.
 
 ```ts
-const account = await accounts.loginJWT({
+await jazz.loginJWT({
   getToken: async () => {
     const token = await getTokenFromYourProvider();
     return token;
   },
 });
-const db = await createDb({ ...config, account });
+const { client } = jazz.getSnapshot();
 ```
 
 `auth` can also be a JWT string. Use a `getToken` callback for renewable credentials. The shared account context refreshes them across all framework bindings; there is no provider-level `onJWTExpired` callback. Every refreshed token must have the same exact issuer and subject. A callback that does not settle within 30 seconds fails that attempt; its eventual result cannot replace a later credential.
@@ -53,7 +54,7 @@ const db = await createDb({ ...config, account });
 
 An exact identity can belong to only one account, permanently. Revocation prevents its use but does not free it for reassignment. Linking therefore accepts only a fresh identity. If the identity already belongs to a different account, the app must decide how to migrate data; Jazz does not merge accounts.
 
-Linking happens outside contexts. Close the old context normally, link through the account manager, then open a new context. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
+`jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
 
 The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.
 

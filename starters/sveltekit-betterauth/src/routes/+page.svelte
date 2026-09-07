@@ -1,9 +1,9 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { getAuthActions } from "$lib/auth-actions";
 
-  const lifecycle = getJazzLifecycle();
+  const auth = getAuthActions();
   let isSignUp = $state(false);
   let error = $state<string | null>(null);
 
@@ -16,7 +16,7 @@
     const name = data.get("name") as string | null;
 
     try {
-      await lifecycle.authenticate(isSignUp, () =>
+      await auth.authenticate(isSignUp, () =>
         isSignUp
           ? authClient.signUp.email({ name: name!, email, password })
           : authClient.signIn.email({ email, password }),

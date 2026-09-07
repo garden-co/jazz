@@ -1,7 +1,6 @@
 <script lang="ts">
   import { exportLocalFirstSecret } from "jazz-tools";
-  import { accounts } from "$lib/accounts";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { getJazzSession } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
 
   // In production, pin this to your deployed hostname so passkeys remain
@@ -23,7 +22,7 @@
     mode?: "full" | "restore-only";
   } = $props();
 
-  const lifecycle = getJazzLifecycle();
+  const jazz = getJazzSession();
 
   let phrase = $state<string | null>(null);
   let restoreInput = $state("");
@@ -46,7 +45,7 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      const account = (await accounts()).getLoggedIn();
+      const account = $jazz.account;
       if (!account) {
         status = { kind: "error", message: "No local secret to reveal yet." };
         return;
@@ -80,7 +79,7 @@
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+      await jazz.restoreLocalFirst(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -93,7 +92,7 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      const account = (await accounts()).getLoggedIn();
+      const account = $jazz.account;
       if (!account) {
         status = { kind: "error", message: "No local secret to back up yet." };
         return;
@@ -122,7 +121,7 @@
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+      await jazz.restoreLocalFirst(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };

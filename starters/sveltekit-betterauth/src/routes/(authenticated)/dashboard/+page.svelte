@@ -1,18 +1,21 @@
 <script lang="ts">
+  import { getJazzSession } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
   import TodoWidget from "$lib/TodoWidget.svelte";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { getAuthActions } from "$lib/auth-actions";
 
+  const jazz = getJazzSession();
   const session = authClient.useSession();
-  const lifecycle = getJazzLifecycle();
+  const auth = getAuthActions();
 
   async function handleSignOut() {
     try {
-      await lifecycle.transition(async (accounts) => { await authClient.signOut(); accounts.logout(); });
+      await jazz.logout();
+      await authClient.signOut();
       await goto("/");
     } catch (cause) {
-      lifecycle.reportFailure(cause);
+      auth.reportFailure(cause);
     }
   }
 </script>

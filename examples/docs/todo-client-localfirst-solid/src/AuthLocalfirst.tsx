@@ -1,12 +1,13 @@
 import { type ParentProps } from "solid-js";
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/solid";
+import type { JazzSession } from "jazz-tools/solid";
+import type { JazzClient } from "jazz-tools/client";
+import { JazzSessionProvider } from "jazz-tools/solid";
 
-// Prepare a handle outside this context with createAccountManager.
-export function AuthLocalfirst(props: ParentProps<{ config: DbConfig }>) {
+// Configure once with await createJazzSession({ appId, serverUrl, initial: "local-first" }).
+export function AuthLocalfirst(props: ParentProps<{ session: JazzSession<JazzClient> }>) {
   return (
-    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+    <JazzSessionProvider session={props.session} fallback={<p>Loading...</p>}>
       {props.children}
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }

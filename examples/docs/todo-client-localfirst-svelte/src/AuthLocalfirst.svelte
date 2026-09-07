@@ -1,10 +1,9 @@
 <!-- #region auth-localfirst-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  // Prepare a handle outside this context with createAccountManager.
-  let { config, children }: { config: DbConfig; children: Snippet } = $props();
+  import type { JazzSessionConfig } from "jazz-tools/svelte";
+  import { JazzSessionProvider } from "jazz-tools/svelte";
+  let { config, children }: { config: JazzSessionConfig; children: Snippet } = $props();
 </script>
-<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
+<JazzSessionProvider config={{ ...config, initial: "local-first" }}>{@render children()}</JazzSessionProvider>
 <!-- #endregion auth-localfirst-svelte -->

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { accounts, credential } from "$lib/accounts";
-  import { getJazzLifecycle } from "$lib/jazz-lifecycle";
+  import { credential } from "$lib/accounts";
+  import { getJazzSession } from "jazz-tools/svelte";
 
-  const lifecycle = getJazzLifecycle();
+  const jazz = getJazzSession();
 
   let error = $state<string | null>(null);
 
@@ -21,7 +21,7 @@
       return;
     }
     try {
-      await lifecycle.transition((manager) => manager.loginJWT({ getToken: credential }));
+      await jazz.loginJWT({ getToken: credential });
     } catch (cause) {
       error = cause instanceof Error ? cause.message : "Sign-in failed";
       return;

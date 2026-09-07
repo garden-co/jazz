@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
+  import { exportLocalFirstSecret } from "jazz-tools";
+  import { getJazzSession } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
 
   // In production, pin this to your deployed hostname so passkeys remain
@@ -16,14 +17,12 @@
   let {
     redirectAfterRestore,
     mode = "full",
-    account,
-    onRestore,
   }: {
     redirectAfterRestore?: string;
     mode?: "full" | "restore-only";
-    account: AccountHandle;
-    onRestore: (secret: string) => Promise<void>;
   } = $props();
+
+  const jazz = getJazzSession();
 
   let phrase = $state<string | null>(null);
   let restoreInput = $state("");
@@ -48,7 +47,7 @@
     busy = true;
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      phrase = RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
+      phrase = RecoveryPhrase.fromSecret(exportLocalFirstSecret($jazz.account!));
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
     } finally {
@@ -75,7 +74,7 @@
     busy = true;
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      await onRestore(RecoveryPhrase.toSecret(restoreInput.trim()));
+      await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(restoreInput.trim()));
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -93,7 +92,7 @@
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await pb.backup(exportLocalFirstSecret(account), "My account");
+      await pb.backup(exportLocalFirstSecret($jazz.account!), "My account");
       status = { kind: "success", message: "Passkey backup created." };
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -111,7 +110,7 @@
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await onRestore(await pb.restore());
+      await jazz.restoreLocalFirst(await pb.restore());
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };

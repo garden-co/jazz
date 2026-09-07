@@ -8,20 +8,9 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import { Callout } from "fumadocs-ui/components/callout";
 import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
 
-## Prepare an account
+## Configure one session
 
-Every client needs an `appId` and an opaque `AccountHandle`. Prepare the account manager outside the context, then restore the selected account or create a local-first account:
-
-```ts
-import { createAccountManager } from "jazz-tools";
-
-const scope = { appId: "my-app", serverUrl: "https://core.example" };
-const accounts = await createAccountManager(scope);
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const config = { ...scope, account };
-```
-
-Creating a local-first account works offline once the runtime assets are available. The registry URL identifies its authority; it does not itself open a network connection. Pass `config` to the framework component below. A context's identity stays fixed: finish `shutdown({ waitForSync: true })` before linking or switching accounts, then create the next context. See [Authentication](/docs/auth/authentication).
+A Jazz session owns account selection and its current client. Give it the app configuration once, with `initial: "local-first"` to restore a saved account or start offline without signup. Its commands handle graceful shutdown and context replacement when authentication changes. See [Lifecycle](/docs/auth/lifecycle).
 
 <Tabs
   groupId="jazz-framework"
@@ -34,7 +23,7 @@ Creating a local-first account works offline once the runtime assets are availab
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
 
-    The provider receives the prepared handle. `useAccountState(accounts)` observes login progress and errors outside the context.
+    `useJazzSession()` exposes account state and bound auth commands in both the app and provider fallback.
 
   </Tab>
   <Tab value="Vue">
@@ -42,7 +31,7 @@ Creating a local-first account works offline once the runtime assets are availab
       ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
     </include>
 
-    Use `useAccountState(accounts)` to observe the shared account manager in Vue.
+    Use `useJazzSession()` to observe the shared session in Vue.
 
   </Tab>
   <Tab value="Svelte">
@@ -50,7 +39,7 @@ Creating a local-first account works offline once the runtime assets are availab
       ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
     </include>
 
-    Use `accountState(accounts)` for a Svelte store of selection, pending operations, and errors.
+    Use `getJazzSession()` for a Svelte store with account state and bound commands.
 
   </Tab>
   <Tab value="Solid">
@@ -58,7 +47,7 @@ Creating a local-first account works offline once the runtime assets are availab
       ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
     </include>
 
-    Use `createAccountState(accounts)` for a Solid accessor of the shared account state.
+    Use `useJazzSession()` for Solid session state and bound commands.
 
   </Tab>
   <Tab value="TypeScript">
@@ -72,21 +61,18 @@ The browser account store retains the local signing root and selection. Provider
 
 ## React Native and Expo
 
-React Native is supported as an alpha through `jazz-tools/react-native`. For
-Expo, prepare the account with `jazz-tools/expo`, then give the resulting
-`AccountHandle` to an effect-owned client. Close that client when the effect is
-retired.
+React Native and Expo use the same session API with platform-specific runtime and account storage adapters:
 
 ```tsx
-import { createAccountManager } from "jazz-tools/expo";
-import { createJazzClient, JazzClientProvider } from "jazz-tools/react-native";
+import { JazzSessionProvider } from "jazz-tools/expo";
 
-const accounts = await createAccountManager({ appId, serverUrl });
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const client = await createJazzClient({ appId, serverUrl, account });
-
-// Render <JazzClientProvider client={client}>…</JazzClientProvider>.
-// On unmount or account change: await client.shutdown();
+function App() {
+  return (
+    <JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
+      <TodoApp />
+    </JazzSessionProvider>
+  );
+}
 ```
 
 Install `jazz-rn` directly in the application alongside `jazz-tools`, add its

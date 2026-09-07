@@ -1,23 +1,4 @@
-import { createAccountManager } from "jazz-tools";
 import { getToken } from "$lib/auth-client";
-import { env } from "$env/dynamic/public";
-
-let prepared: Promise<Awaited<ReturnType<typeof createAccountManager>>> | undefined;
-
-export function accounts() {
-  const appId = env.PUBLIC_JAZZ_APP_ID;
-  const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
-  if (!appId || !serverUrl)
-    throw new Error("PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set");
-  if (!prepared) {
-    const attempt = createAccountManager({ appId, serverUrl });
-    prepared = attempt;
-    void attempt.catch(() => {
-      if (prepared === attempt) prepared = undefined;
-    });
-  }
-  return prepared;
-}
 
 export async function credential() {
   const token = await getToken();
