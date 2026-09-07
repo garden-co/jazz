@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { BrowserContext, Page } from "playwright";
 import type { RecoveryConfig, RecoveryRows } from "./indexeddb-pending-recovery-fixture.js";
@@ -19,6 +19,7 @@ export async function recoverPendingIndexedDbWrites(
   const url = new URL("/tests/browser/remote-db-harness.html", currentPage.url()).toString();
   let context: BrowserContext | undefined;
   let serverStopped = false;
+  let failed = false;
   let phase = "online startup";
 
   async function call<T>(page: Page, method: string): Promise<T> {
@@ -85,12 +86,26 @@ export async function recoverPendingIndexedDbWrites(
     phase = "offline recovered read";
     console.info("[pending-write recovery] browser reopened offline; reading recovered rows");
     return await call<RecoveryRows>(reopened, "read");
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
     // Never await db.shutdown here: admission may be blocking its worker.
     try {
       await context?.close();
     } finally {
-      await rm(profile, { recursive: true, force: true });
+      if (failed) {
+        // Keep only ignored, lane-local failure artifacts. This synthetic config
+        // contains ephemeral credentials: never print it or publish it in logs.
+        await writeFile(`${profile}/recovery-config.json`, JSON.stringify({ phase, config }), {
+          mode: 0o600,
+        }).catch(() => console.warn("[pending-write recovery] could not save replay config"));
+        console.warn(
+          `[pending-write recovery] failed profile retained: ${profile}; phase=${phase}`,
+        );
+      } else {
+        await rm(profile, { recursive: true, force: true });
+      }
       if (!serverStopped) await stopJazzServerByUrl(config.serverUrl);
     }
   }
