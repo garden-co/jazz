@@ -2135,6 +2135,12 @@ fn lookup_rejects_offset_before_variable_payload_start() {
         descriptor.get_idx(&record, 1).unwrap_err(),
         Error::InvalidOffset
     );
+
+    let later_field_record = vec![2, 0, 0, 0, 0];
+    assert_eq!(
+        descriptor.get_idx(&later_field_record, 2).unwrap_err(),
+        Error::InvalidOffset
+    );
 }
 
 #[test]
