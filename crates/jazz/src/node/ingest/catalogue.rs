@@ -416,6 +416,7 @@ where
         self.query.version_storage_sources_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
         }
@@ -856,6 +857,7 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
     }
 
     fn remove_staged_schema_lineage_from_memory(&mut self, staged: &StagedSchemaLineage) {
@@ -878,6 +880,7 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
     }
 
     async fn apply_publish_lens(
@@ -926,6 +929,7 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
         // Both endpoint schemas are already Active and their agreeing physical
         // projection cases were registered during activation. A cross-lens adds
         // a catalogue path only; re-registering those cases is unnecessary and
@@ -973,6 +977,7 @@ where
             self.query.version_storage_sources_cache.clear();
             self.query.read_policy_authorization_request_cache.clear();
             self.query.policy_authorization_graph_cache.clear();
+            self.query.policy_authorization_graph_replacements.clear();
             let active_schema = self
                 .catalogue
                 .catalogue_schemas

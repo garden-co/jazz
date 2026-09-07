@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -809,6 +809,18 @@ impl CachedTransactionVersions {
 }
 
 /// Query registration, cache, current-row graph, and settled-result state.
+#[derive(Clone, Debug)]
+struct PolicyProofStackEntry {
+    table: String,
+    lease: Weak<()>,
+}
+
+#[derive(Clone, Debug)]
+struct ScopedPolicyAuthorizationGraphReplacement {
+    previous: Option<query_eval::PolicyAuthorizationGraph>,
+    lease: Weak<()>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
     /// Prepared query plans keyed by shape, durability tier, and parameter
@@ -820,9 +832,13 @@ struct QueryServing {
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
+    /// Temporary point-policy replacements required by one compiler turn. The
+    /// weak lease lets a later owner restore state if that turn is cancelled.
+    policy_authorization_graph_replacements:
+        BTreeMap<String, Vec<ScopedPolicyAuthorizationGraphReplacement>>,
     /// Policy tables currently being compiled as membership proofs. This is
     /// transient recursion state, not a cache.
-    policy_proof_stack: Vec<String>,
+    policy_proof_stack: Vec<PolicyProofStackEntry>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction, indexed by

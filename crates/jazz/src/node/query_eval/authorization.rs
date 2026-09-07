@@ -8,6 +8,35 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+/// Test-only rendezvous at the cancellation-sensitive proof-stack boundary.
+#[cfg(test)]
+struct PolicyProofCompilationPause;
+
+#[cfg(test)]
+thread_local! {
+    static POLICY_PROOF_COMPILATION_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl Drop for PolicyProofCompilationPause {
+    fn drop(&mut self) {
+        POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(false));
+    }
+}
+
+#[cfg(test)]
+fn pause_policy_proof_compilation_for_test() -> PolicyProofCompilationPause {
+    POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(true));
+    PolicyProofCompilationPause
+}
+
+#[cfg(test)]
+async fn wait_for_policy_proof_compilation_for_test() {
+    if POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.get()) {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
 /// The support key deliberately excludes the row/candidate operation key: two
@@ -256,8 +285,8 @@ where
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
         let cache_key = policy_authorization_graph_cache_key(&request);
-        if let Some(graph) = self.query.policy_authorization_graph_cache.get(&cache_key) {
-            return Ok(graph.clone());
+        if let Some(graph) = self.policy_authorization_graph_cache_get(&cache_key) {
+            return Ok(graph);
         }
         self.policy_authorization_row_id_graph_inner(request, None, true)
             .await
@@ -280,26 +309,37 @@ where
         cache: bool,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         let cache_key = policy_authorization_graph_cache_key(&request);
+        self.restore_expired_policy_compilation_state();
         let proof_table = match &request.policy {
             PolicyContext::AuthorizationSubplan {
                 protected_source, ..
             } => Some(protected_source.table.clone()),
             PolicyContext::System | PolicyContext::Identity { .. } => None,
         };
+        let proof_lease = proof_table.as_ref().map(|_| std::rc::Rc::new(()));
         if let Some(table) = &proof_table {
             let depth = self.query.policy_proof_stack.len();
             if self
                 .query
                 .policy_proof_stack
                 .iter()
-                .any(|active| active == table)
+                .any(|active| active.table == *table)
             {
                 return Err(Error::PolicyProofCycle {
                     table: table.clone(),
                     depth,
                 });
             }
-            self.query.policy_proof_stack.push(table.clone());
+            self.query.policy_proof_stack.push(PolicyProofStackEntry {
+                table: table.clone(),
+                lease: std::rc::Rc::downgrade(
+                    proof_lease
+                        .as_ref()
+                        .expect("proof table owns a cancellation lease"),
+                ),
+            });
+            #[cfg(test)]
+            wait_for_policy_proof_compilation_for_test().await;
         }
 
         let result = async {
@@ -352,11 +392,16 @@ where
         }
         .await;
 
-        if proof_table.is_some() {
-            self.query
+        if let Some(lease) = proof_lease {
+            let entry = self
+                .query
                 .policy_proof_stack
                 .pop()
                 .expect("policy proof stack entry is balanced");
+            debug_assert!(std::rc::Weak::ptr_eq(
+                &entry.lease,
+                &std::rc::Rc::downgrade(&lease)
+            ));
         }
         result
     }
@@ -846,10 +891,7 @@ where
             });
         let cache_key = policy_authorization_graph_cache_key(&policy_request);
         let authorized = self
-            .query
-            .policy_authorization_graph_cache
-            .get(&cache_key)
-            .cloned()
+            .policy_authorization_graph_cache_get(&cache_key)
             .ok_or(Error::InvalidStoredValue(
                 "policy dependency was not prepared before source composition",
             ))?;
@@ -2058,5 +2100,67 @@ mod authorization_scope_compiler_tests {
             1,
             "v2 projected insert policy needs support"
         );
+    }
+
+    /// Alice cancels a paused policy-proof compiler before it can lower a
+    /// protected table; a later identical request must compile normally.
+    /// This stays at NodeState level because production callers cannot
+    /// deterministically cancel at the shared proof-stack mutation boundary.
+    ///
+    /// alice compiler ──push proof lease──► pause
+    /// alice cancel ──drop lease──────────► bob compiler ──prepare──► graph
+    #[test]
+    fn cancelling_policy_proof_compilation_does_not_poison_the_next_request() {
+        let schema = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
+                    )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([0x9a; 16]), schema, storage).unwrap();
+        let author = AuthorSubject::for_test_bytes([0x9b; 16]);
+        node.set_test_provider_claims(
+            author,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("user_id"),
+                Value::Uuid(uuid::Uuid::from_bytes([0x9b; 16])),
+            )]),
+        );
+        let request = node
+            .table_read_policy_authorization_request(
+                node.catalogue.current_schema_version_id,
+                "resources",
+                author,
+                ParamBindingMode::InlineAllReachableSeeds,
+                DurabilityTier::Local,
+                None,
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let pause = pause_policy_proof_compilation_for_test();
+        let mut cancelled = Box::pin(node.policy_authorization_row_id_graph(request.clone()));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+        drop(pause);
+
+        futures::executor::block_on(node.policy_authorization_row_id_graph(request))
+            .expect("the next policy compiler clears Alice's cancelled proof lease");
     }
 }

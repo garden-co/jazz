@@ -2276,12 +2276,7 @@ where
             return Ok(None);
         };
         let cache_key = policy_authorization_graph_cache_key(&policy_request);
-        let Some(authorization) = self
-            .node
-            .query
-            .policy_authorization_graph_cache
-            .get(&cache_key)
-        else {
+        let Some(authorization) = self.node.policy_authorization_graph_cache_get(&cache_key) else {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         };
         Ok(authorization.access_paths.get(&request.source).cloned())

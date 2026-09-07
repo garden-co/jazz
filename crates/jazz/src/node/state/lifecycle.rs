@@ -586,6 +586,7 @@ where
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
+                policy_authorization_graph_replacements: BTreeMap::new(),
                 policy_proof_stack: Vec::new(),
                 tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
@@ -821,6 +822,7 @@ where
             .expect("session claim revision overflow must stop authorization delivery");
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
     }
 
     /// Scope one node-locked operation to this subscriber's admitted claims.
@@ -1576,6 +1578,7 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
         self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
