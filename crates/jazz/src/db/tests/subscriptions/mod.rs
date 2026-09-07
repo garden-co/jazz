@@ -8,6 +8,20 @@ mod coverage;
 mod materialization;
 mod structured;
 
+/// Internal because the test-only refresh rendezvous owns thread-local state.
+/// Dropping its caller handle must clear that state without recursively
+/// borrowing the registry, so a later owner refresh remains unblocked.
+#[test]
+fn dropping_subscription_refresh_pause_clears_its_registry() {
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    drop(pause);
+    let db = block_on(doctest_support::open_todos_db()).expect("open refresh fixture");
+    assert_eq!(
+        block_on(db.node.refresh_subscriptions()).expect("refresh after pause drop"),
+        0
+    );
+}
+
 /// Internal because the public cancellation contract crosses the runtime
 /// owner's detached-maintained-view boundary. A test-only rendezvous is needed
 /// to order that handoff deterministically; the observable assertion is that

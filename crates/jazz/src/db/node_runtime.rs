@@ -27,15 +27,18 @@ pub(super) struct SubscriptionRefreshDetachPause {
 #[cfg(test)]
 impl Drop for SubscriptionRefreshDetachPause {
     fn drop(&mut self) {
-        SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| {
+        let removed = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| {
             if slot
                 .borrow()
                 .as_ref()
                 .is_some_and(|current| Rc::ptr_eq(&current.token, &self.token))
             {
-                slot.borrow_mut().take();
+                slot.borrow_mut().take()
+            } else {
+                None
             }
         });
+        drop(removed);
     }
 }
 
@@ -86,7 +89,8 @@ async fn wait_for_subscription_refresh_detach_for_test() {
         }
     })
     .await;
-    SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow_mut().take());
+    let removed = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow_mut().take());
+    drop(removed);
 }
 
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
