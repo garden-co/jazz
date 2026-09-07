@@ -704,7 +704,10 @@ where
     S: OrderedKvStorage,
 {
     pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
-        self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
+        // Binding mutations reserve through the shared clock before taking
+        // the node lock. A reused foreground must advance that mirror too,
+        // or its first synchronous reservation can repeat its predecessor.
+        self.merge_tx_time(high_water.tick_after()?);
         Ok(())
     }
 }

@@ -13325,6 +13325,37 @@ mod tests {
     }
 
     #[test]
+    fn clean_foreground_handoff_does_not_repeat_synchronous_transaction_ids() {
+        // The binding C ABI reserves transaction identities synchronously,
+        // before taking the node lock. Exercise that actual path across the
+        // host's clean node-lease handoff, rather than only reading its HLC.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("handoff-reservation.sqlite"),
+            "handoff-reservation",
+            &permissive_schema(),
+            0xc1,
+        );
+        let first = fixture.open_foreground(&capability);
+        let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
+        assert!(matches!(
+            fixture.execute(first, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        ));
+        let second = fixture.open_foreground(&capability);
+        let second_tx = fixture.insert_todo(second, [0xd2; 16], "second lease holder");
+        assert_ne!(
+            first_tx, second_tx,
+            "a cleanly reused foreground node must reserve a fresh public transaction identity"
+        );
+        assert!(matches!(
+            fixture.execute(second, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        ));
+    }
+
+    #[test]
     fn clean_foreground_handoff_reuses_one_node_only_after_advancing_its_hlc() {
         // This is intentionally an internal host-lifecycle receipt. The
         // user-visible write protocol is exercised by the Db integration
