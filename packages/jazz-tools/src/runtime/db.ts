@@ -1990,7 +1990,9 @@ export class Db {
    * {@link disconnect}.
    */
   async reconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    // Sync recovery is safe before teardown starts; it must remain available
+    // while a graceful transition waits for previously committed writes.
+    if ((this.isShuttingDown || this.shutdownPromise) && !this.cancelSyncShutdown) {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -2973,7 +2975,7 @@ export class Db {
     this.cancelSyncShutdown?.();
   }
 
-  private assertOpen(): void {
+  protected assertOpen(): void {
     if (this.isShuttingDown || this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
@@ -2991,12 +2993,21 @@ export class Db {
   private async runShutdown(options: ShutdownOptions): Promise<void> {
     this.isShuttingDown = true;
     if (options.waitForSync) {
+      const syncAbort = new AbortController();
       const cancelled = new Promise<never>((_resolve, reject) => {
-        this.cancelSyncShutdown = () => reject(new Error("Graceful shutdown cancelled"));
+        this.cancelSyncShutdown = () => {
+          syncAbort.abort();
+          reject(new Error("Graceful shutdown cancelled"));
+        };
       });
       try {
-        await Promise.race([this.connection.waitForPendingWrites(), cancelled]);
+        await Promise.race([
+          this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
+            this.connection.waitForPendingWrites(),
+          cancelled,
+        ]);
       } catch (error) {
+        syncAbort.abort();
         this.isShuttingDown = false;
         throw new GracefulShutdownSyncError(error);
       } finally {

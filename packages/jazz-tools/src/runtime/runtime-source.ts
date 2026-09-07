@@ -139,6 +139,9 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   /** Apply source-specific admission after the shared auth config is resolved. */
   admitConfig(_config: RuntimeConfig): void {}
 
+  /** Shared native hosts supply the pending-write barrier for all their facades. */
+  waitForPendingWrites?(signal?: AbortSignal): Promise<void>;
+
   /** Release runtime admission after ordinary client shutdown, including a
    * prepared source whose lazy schema client was never materialized. */
   async shutdown(): Promise<void> {}

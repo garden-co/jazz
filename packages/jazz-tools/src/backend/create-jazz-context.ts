@@ -90,6 +90,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private transportTransition: Promise<void> = Promise.resolve();
   private shutdownState: "open" | "closing" | "closed" = "open";
   private shutdownPromise?: Promise<void>;
+  private gracefulWait?: object;
 
   constructor(
     private readonly config: ResolvedBackendContextConfig,
@@ -181,6 +182,28 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     return this.client;
   }
 
+  override async waitForPendingWrites(signal?: AbortSignal): Promise<void> {
+    // Fence every facade while the shared owner settles its existing writes.
+    const attempt = {};
+    this.gracefulWait = attempt;
+    const release = () => {
+      if (this.gracefulWait === attempt) this.gracefulWait = undefined;
+    };
+    signal?.addEventListener("abort", release, { once: true });
+    try {
+      if (signal?.aborted) throw new Error("Graceful shutdown cancelled");
+      if (this.runtime instanceof NativeRuntimeAdapter) {
+        await this.runtime.waitForPendingWrites("global");
+      }
+      // Success keeps the fence until shutdown; failure restores the live source.
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", release);
+    }
+  }
+
   async shutdown(): Promise<void> {
     if (this.shutdownState === "closed") return;
     if (this.shutdownPromise) return this.shutdownPromise;
@@ -241,7 +264,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   }
 
   private async reconnectTransport(): Promise<void> {
-    this.assertOpen();
+    this.assertOpen(true);
     await this.enqueueTransportTransition(() => {
       if (this.client && this.backendSyncEnabled) this.connectBackendTransport(this.client);
       this.isDisconnected = false;
@@ -310,8 +333,9 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     for (const { reject } of waiters) reject(error);
   }
 
-  assertOpen(): void {
-    if (this.shutdownState !== "open") throw this.shutdownError();
+  assertOpen(allowSyncRecovery = false): void {
+    if (this.shutdownState !== "open" || (this.gracefulWait && !allowSyncRecovery))
+      throw this.shutdownError();
   }
 
   private shutdownError(): Error {
@@ -354,11 +378,13 @@ class BackendDb extends Db {
 
   protected override getClient(_schema: WasmSchema): JazzClient {
     this.coreSource.assertOpen();
+    this.assertOpen();
     return this.client;
   }
 
   protected override getCurrentClient(): JazzClient {
     this.coreSource.assertOpen();
+    this.assertOpen();
     return this.client;
   }
 }
@@ -585,8 +611,9 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      undefined,
+      session,
       canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+      true,
       true,
     );
   }

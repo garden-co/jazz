@@ -6861,6 +6861,73 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(attachMergeableTx).not.toHaveBeenCalled();
   });
 
+  it("binds reserved backend attribution to the exact verified session capability", () => {
+    const insertWithIdEncodedAttributed = vi.fn(
+      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
+    );
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () => fakeDb({ insertWithIdEncodedAttributed }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const session = internalSessionFromVerifiedReservedJwtPayload(
+      {
+        iss: LOCAL_FIRST_JWT_ISSUER,
+        sub: "verified-attribution",
+      },
+      "local-first",
+    )!;
+    session.account_id = "00000000-0000-4000-8000-000000000001";
+    const token = trustedReservedSessionToken(session);
+    const attribution = JSON.stringify([session.account_id, session.issuer, session.user_id]);
+    const write = (context: object) =>
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "verified provenance" },
+        },
+        JSON.stringify(context),
+        "00000000-0000-0000-0000-000000000123",
+      );
+    write({ attribution, session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } });
+    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(insertWithIdEncodedAttributed.mock.calls[0]![3])).toBe(
+      attribution,
+    );
+    for (const context of [
+      { attribution },
+      { attribution, session },
+      {
+        attribution: JSON.stringify([session.account_id, session.issuer, "different-subject"]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+      {
+        attribution: JSON.stringify([
+          "00000000-0000-4000-8000-000000000002",
+          session.issuer,
+          session.user_id,
+        ]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+      {
+        attribution: JSON.stringify([
+          "00000000-0000-0000-0000-000000000000",
+          SYSTEM_SESSION_ISSUER,
+          session.user_id,
+        ]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+    ])
+      expect(() => write(context)).toThrow("reserved issuer");
+    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects reserved public write-context sessions and attributions", async () => {
     const beginStreamingMutationEncoded = vi.fn(() => ({
       push: () => undefined,

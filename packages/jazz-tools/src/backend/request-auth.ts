@@ -433,7 +433,7 @@ async function verifyExternalJwt(
   }
 
   throw new Error(
-    "Received external JWT, but createJazzContext() has no jwksUrl or jwtPublicKey. Configure one of them or verify upstream and call forSession().",
+    "Received external JWT, but createJazzSession() has no jwksUrl or jwtPublicKey. Configure one of them to verify request credentials.",
   );
 }
 
@@ -461,7 +461,7 @@ export async function resolveRequestSession(
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
     if (!allowLocalFirstAuth) {
       throw new Error(
-        "Received local-first JWT, but createJazzContext() has allowLocalFirstAuth disabled.",
+        "Received local-first JWT, but createJazzSession() has allowLocalFirstAuth disabled.",
       );
     }
 

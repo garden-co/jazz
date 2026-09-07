@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSession } from "./index.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }) });
+const app = s.defineApp({
+  notes: s.table({ text: s.string() }),
+  posts: s.table({ text: s.string() }),
+});
 const permissions = s.definePermissions(app, ({ policy }) => {
+  policy.posts.allowRead.always();
+  policy.posts.allowInsert.always();
+  policy.posts.allowUpdate.always();
+  policy.posts.allowDelete.always();
   policy.notes.allowRead.always();
   policy.notes.allowInsert.never();
   policy.notes.allowUpdate.never();
@@ -31,6 +38,59 @@ describe("Node shared backend session", () => {
       await server.stop();
     }
   });
+
+  it("keeps unsynced scoped writes fenced until reconnect allows transition", async () => {
+    const appId = randomUUID();
+    const backendSecret = "pending-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    const owner = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: { backendSecret },
+    });
+    const user = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const backend = owner.getSnapshot().client!;
+      const scoped = await backend.forAccount(user.getSnapshot().account!);
+      await backend.db.disconnect();
+      const row = await scoped.insert(app.posts, { text: "pending scope" }).wait({ tier: "local" });
+      let finished = false;
+      const transition = owner.createLocalFirst().finally(() => {
+        finished = true;
+      });
+      await vi.waitFor(() => expect(owner.getSnapshot().status).toBe("transitioning"));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(finished).toBe(false);
+      expect(() => scoped.insert(app.posts, { text: "race" })).toThrow(/shut|closed/);
+      await backend.db.reconnect();
+      await transition;
+      expect(owner.getSnapshot().account?.identity.issuer).toBe("urn:jazz:local-first");
+      expect(
+        await owner.getSnapshot().client!.db.one(app.posts.where({ id: row.id }), { tier: "edge" }),
+      ).toMatchObject({ text: "pending scope" });
+    } finally {
+      await owner.close();
+      await user.close();
+      await server.stop();
+    }
+  }, 30_000);
 
   it("preserves SYSTEM provenance, drops authority on transition, and isolates user scopes", async () => {
     const appId = randomUUID();
@@ -77,16 +137,43 @@ describe("Node shared backend session", () => {
         /closed|shut down/,
       );
       await expect(user.client!.forRequest({ headers: {} })).rejects.toThrow("backend account");
+      expect(
+        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "edge" }),
+      ).toMatchObject({ text: "service" });
+      await user.client!.db.insert(app.posts, { text: "ordinary positive" }).wait({ tier: "edge" });
       await expect(async () => {
         await user.client!.db.insert(app.notes, { text: "denied user" }).wait({ tier: "edge" });
-      }).rejects.toThrow();
+      }).rejects.toThrow(/permission|denied|policy/i);
 
       await session.becomeBackend({ backendSecret });
       const current = session.getSnapshot().client!;
       const scoped = await current.forAccount(user.account!);
       await expect(async () => {
         await scoped.insert(app.notes, { text: "denied scoped user" }).wait({ tier: "edge" });
-      }).rejects.toThrow();
+      }).rejects.toThrow(/permission|denied|policy/i);
+      const other = await createJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: "local-first",
+      });
+      try {
+        const otherAccount = other.getSnapshot().account!;
+        const otherScope = await current.forAccount(otherAccount);
+        const rows = await Promise.all([
+          scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "edge" }),
+          otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "edge" }),
+        ]);
+        for (const [index, expected] of [user.account!, otherAccount].entries()) {
+          expect(
+            await current.db.one(app.posts.select("$createdBy").where({ id: rows[index]!.id })),
+          ).toMatchObject({ $createdBy: { account: expected.id, identity: expected.identity } });
+        }
+      } finally {
+        await other.close();
+      }
       const attributed = await current.withAttribution(user.account!);
       const row = await attributed
         .insert(app.notes, { text: "attributed service" })

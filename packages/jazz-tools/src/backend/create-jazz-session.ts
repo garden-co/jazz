@@ -25,6 +25,7 @@ import {
 import { selfSignedClientProofFromConfig } from "../runtime/default-runtime-source.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
+import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
 import {
   createJazzClientFromDb,
@@ -199,7 +200,13 @@ export async function createJazzSession(
           },
           source,
         );
-        const client = await createJazzClientFromDb(db);
+        let client: SharedJazzClient;
+        try {
+          client = await createJazzClientFromDb(db);
+        } catch (error) {
+          await db.shutdown();
+          throw error;
+        }
         return Object.assign(client, {
           flush() {
             source.flush();
@@ -223,73 +230,83 @@ export async function createJazzSession(
         { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
         uuidBytes(backend.nodeId),
       );
-      const db = context.openBackendAccount({
-        issuer: account.identity.issuer,
-        user_id: account.identity.subject,
-        account_id: account.id,
-        claims: {},
-        authMode: "external",
-      });
-      const client = await createJazzClientFromDb(db);
+      let db: Db;
+      let client: SharedJazzClient;
+      try {
+        db = context.openBackendAccount({
+          issuer: account.identity.issuer,
+          user_id: account.identity.subject,
+          account_id: account.id,
+          claims: {},
+          authMode: "external",
+        });
+        client = await createJazzClientFromDb(db);
+      } catch (error) {
+        await context.shutdown();
+        throw error;
+      }
       let closed = false;
       const assertActive = () => {
         if (closed) throw new Error("Backend client is closed");
         getBackendAuth(account, registry);
       };
-      return {
-        db,
-        flush() {
-          assertActive();
-          context.flush();
+      return attachSubscriptionStore(
+        {
+          db,
+          flush() {
+            assertActive();
+            context.flush();
+          },
+          get session(): PublicSession | null {
+            return client.session;
+          },
+          async forRequest(request: RequestLike) {
+            assertActive();
+            const scoped = await context.forRequest(request);
+            assertActive();
+            return scoped;
+          },
+          async forAccount(requestAccount: AccountHandle) {
+            assertActive();
+            if (accountRegistry(requestAccount) !== registry)
+              throw new Error("Account application mismatch");
+            if (getBackendAuth(requestAccount, registry))
+              throw new Error("Request scopes require a user account");
+            const token = await accountToken(requestAccount, registry);
+            // Re-verify bearer and core liveness through the same request admission path.
+            const scoped = await context.forRequest({
+              headers: { authorization: `Bearer ${token}` },
+            });
+            assertActive();
+            return scoped;
+          },
+          async withAttribution(requestAccount: AccountHandle) {
+            assertActive();
+            if (accountRegistry(requestAccount) !== registry)
+              throw new Error("Account application mismatch");
+            if (getBackendAuth(requestAccount, registry))
+              throw new Error("Attribution requires a user account");
+            const token = await accountToken(requestAccount, registry);
+            const scoped = await context.withAttributionForRequest({
+              headers: { authorization: `Bearer ${token}` },
+            });
+            assertActive();
+            return scoped;
+          },
+          async withAttributionForRequest(request: RequestLike) {
+            assertActive();
+            const scoped = await context.withAttributionForRequest(request);
+            assertActive();
+            return scoped;
+          },
+          async shutdown(options?: { waitForSync?: boolean }) {
+            await client.shutdown(options);
+            closed = true;
+            await context.shutdown();
+          },
         },
-        get session(): PublicSession | null {
-          return client.session;
-        },
-        async forRequest(request: RequestLike) {
-          assertActive();
-          const scoped = await context.forRequest(request);
-          assertActive();
-          return scoped;
-        },
-        async forAccount(requestAccount: AccountHandle) {
-          assertActive();
-          if (accountRegistry(requestAccount) !== registry)
-            throw new Error("Account application mismatch");
-          if (getBackendAuth(requestAccount, registry))
-            throw new Error("Request scopes require a user account");
-          const token = await accountToken(requestAccount, registry);
-          // Re-verify bearer and core liveness through the same request admission path.
-          const scoped = await context.forRequest({
-            headers: { authorization: `Bearer ${token}` },
-          });
-          assertActive();
-          return scoped;
-        },
-        async withAttribution(requestAccount: AccountHandle) {
-          assertActive();
-          if (accountRegistry(requestAccount) !== registry)
-            throw new Error("Account application mismatch");
-          if (getBackendAuth(requestAccount, registry))
-            throw new Error("Attribution requires a user account");
-          const token = await accountToken(requestAccount, registry);
-          const scoped = await context.withAttributionForRequest({
-            headers: { authorization: `Bearer ${token}` },
-          });
-          assertActive();
-          return scoped;
-        },
-        async withAttributionForRequest(request: RequestLike) {
-          assertActive();
-          const scoped = await context.withAttributionForRequest(request);
-          assertActive();
-          return scoped;
-        },
-        async shutdown(options?: { waitForSync?: boolean }) {
-          await client.shutdown(options);
-          closed = true;
-          await context.shutdown();
-        },
-      };
+        getSubscriptionStore(client),
+      );
     },
   });
 }

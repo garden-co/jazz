@@ -3027,11 +3027,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (typeof attribution !== "string") {
       throw new Error("backend attribution must be a canonical author subject string");
     }
-    const author = parsePublicCanonicalAuthor(attribution);
+    const author = parseCanonicalAuthorSubject(attribution);
     if (!author) {
       throw new Error("backend attribution must be a canonical author subject string");
     }
-    return authorBytesForSession(author);
+    // Parse the whole context so reserved provenance requires its exact
+    // verified-session capability; backend authority alone does not admit it.
+    const session = sessionFromWriteContext(writeContext);
+    if (!session) throw new Error("backend attribution requires a valid author");
+    return session.identity;
   }
 
   private stagedRowForWriteMerge(
@@ -4534,8 +4538,11 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     }
     const attributedAuthor =
       typeof parsed.attribution === "string"
-        ? parsePublicCanonicalAuthor(parsed.attribution)
+        ? parseCanonicalAuthorSubject(parsed.attribution)
         : null;
+    if (attributedAuthor?.issuer === SYSTEM_SESSION_ISSUER) {
+      throw new Error("Native runtime public session uses reserved issuer");
+    }
     const userId =
       attributedAuthor?.user_id ??
       (typeof parsed.user_id === "string"
@@ -4592,14 +4599,6 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     }
     return null;
   }
-}
-
-function parsePublicCanonicalAuthor(value: string) {
-  const parsed = parseCanonicalAuthorSubject(value);
-  if (parsed && isReservedJazzIssuer(parsed.issuer)) {
-    throw new Error("Native runtime public session uses reserved issuer");
-  }
-  return parsed;
 }
 
 function assertPublicSessionIssuer(
