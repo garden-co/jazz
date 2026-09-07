@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,5 +62,33 @@ describe("broker worker packaging", () => {
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("worker output is sealed for concurrent tests"),
     });
+  });
+
+  it("does not let an ambient sealed WASM path steer an ordinary worker bundle", async () => {
+    const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const bundleScript = fileURLToPath(
+      new URL("../../scripts/bundle-broker-worker.mjs", import.meta.url),
+    );
+    const outputDir = await mkdtemp(join(tmpdir(), "jazz-broker-worker-normal-"));
+    const fakeSealedPackage = await mkdtemp(join(tmpdir(), "jazz-broker-worker-sealed-"));
+    try {
+      await writeFile(
+        join(fakeSealedPackage, "jazz_wasm.js"),
+        'throw new Error("ordinary bundle used ambient sealed WASM path");\n',
+      );
+      await execFileAsync(process.execPath, [bundleScript, "--out-dir", outputDir], {
+        cwd: packageRoot,
+        env: {
+          ...process.env,
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "0",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: fakeSealedPackage,
+        },
+      });
+      await expect(access(join(outputDir, "jazz-broker-worker.js"))).resolves.toBeUndefined();
+      await expect(access(join(outputDir, "jazz_wasm_bg.wasm"))).resolves.toBeUndefined();
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+      await rm(fakeSealedPackage, { recursive: true, force: true });
+    }
   });
 });

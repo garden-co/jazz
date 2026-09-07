@@ -16,7 +16,7 @@
     "build:vercel-docs": "pnpm --filter docs build",
     "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-wasm --only",
-    "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=./packages/** --filter=jazz-napi --only",
+    "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm --only && turbo run build --filter=jazz-napi --only && node dev/artifacts/stage-native-fingerprints.mjs --workspace && turbo run build --filter=./packages/** --only && node dev/artifacts/verify-starter-e2e-artifacts.mjs",
     "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
     "build:correctness-artifacts": "node dev/gates/build-test-artifacts.mjs",
     "test:typescript-consumers": "node dev/gates/run-ts-consumers.mjs",

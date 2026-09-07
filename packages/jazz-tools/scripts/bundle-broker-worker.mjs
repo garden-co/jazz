@@ -7,22 +7,18 @@ import { copyFile, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertWasmGlueInstantiates } from "../../../dev/artifacts/wasm-glue-abi.mjs";
-import { readCorrectnessArtifactSnapshot } from "../../../dev/artifacts/test-artifact-store.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const entry = fileURLToPath(new URL("../src/worker/jazz-broker-worker.ts", import.meta.url));
 const canonicalOutputDir = fileURLToPath(new URL("../dist/worker", import.meta.url));
+const correctnessArtifactRun = process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1";
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
-const snapshot = sealedWasmPackage
-  ? null
-  : readCorrectnessArtifactSnapshot(fileURLToPath(new URL("../../..", import.meta.url)));
-if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+if (correctnessArtifactRun && !sealedWasmPackage)
   throw new Error("sealed correctness consumer is missing its admitted WASM package");
-const wasmSource = sealedWasmPackage
-  ? resolve(sealedWasmPackage, "jazz_wasm_bg.wasm")
-  : snapshot
-    ? resolve(snapshot.wasmPackage, "jazz_wasm_bg.wasm")
-    : fileURLToPath(new URL("../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm", import.meta.url));
+const correctnessWasmPackage = correctnessArtifactRun ? sealedWasmPackage : undefined;
+const wasmSource = correctnessWasmPackage
+  ? resolve(correctnessWasmPackage, "jazz_wasm_bg.wasm")
+  : fileURLToPath(new URL("../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm", import.meta.url));
 
 export function brokerWorkerOutputDir(args = process.argv.slice(2)) {
   if (args.length === 0) return canonicalOutputDir;
@@ -62,7 +58,9 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir) {
       // Correctness consumers pin both wasm-bindgen glue and the binary.  A
       // binary-only override would still let esbuild follow a mutable package
       // pointer for the JS half of the ABI pair.
-      alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+      alias: correctnessWasmPackage
+        ? { "jazz-wasm": resolve(correctnessWasmPackage, "jazz_wasm.js") }
+        : {},
       bundle: true,
       format: "esm",
       platform: "browser",
