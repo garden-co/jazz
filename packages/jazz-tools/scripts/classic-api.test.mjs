@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { build } from "esbuild";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import ts from "typescript";
 import { compile, compileModule } from "svelte/compiler";
 
@@ -220,7 +220,10 @@ for (const [file, bundler] of [
   ["classic-svelte-api.typecheck.ts", true],
 ]) {
   test(`published ${bundler ? "Svelte" : "Node"} declarations reject Classic use and accept Jazz 2`, () => {
-    const fixtureDir = mkdtempSync(join(packageDir, ".classic-api-types-"));
+    // Parallel CI consumers verify source identity; scratch inputs must be ignored.
+    const scratchDir = join(packageDir, ".test-tmp");
+    mkdirSync(scratchDir, { recursive: true });
+    const fixtureDir = mkdtempSync(join(scratchDir, "classic-api-types-"));
     const fixture = join(fixtureDir, "consumer.tsx");
     try {
       copyFileSync(new URL("../tests/public-api/" + file, import.meta.url), fixture);
