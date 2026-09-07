@@ -2,7 +2,9 @@ import { createServer, type Server } from "node:http";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
+import { WORKOS_CLIENT_ID } from "../../constants.js";
 import { TEST_ADMIN_SECRET, TEST_APP_ID } from "./test-constants.js";
+import { TEST_WORKOS_JWT_ISSUER } from "./jwt.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -42,6 +44,8 @@ export async function setup(): Promise<void> {
     port: jazzPort,
     adminSecret: TEST_ADMIN_SECRET,
     jwksUrl,
+    jwtIssuer: TEST_WORKOS_JWT_ISSUER,
+    jwtAudience: WORKOS_CLIENT_ID,
   });
 
   const handle = await jazzServer;

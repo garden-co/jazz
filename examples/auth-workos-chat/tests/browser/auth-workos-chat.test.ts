@@ -48,32 +48,72 @@ async function makeClient(jwt?: string): Promise<JazzClient> {
   return client;
 }
 
-async function send(client: JazzClient, chat_id: string, text: string): Promise<void> {
+async function send(client: JazzClient, chat_id: string, text: string): Promise<string> {
   const handle = await client.db.insert(app.messages, {
     author_name: "Tester",
     chat_id,
     text,
     sent_at: new Date(),
   });
-  await handle.wait({ tier: "edge" });
+  return (await handle.wait({ tier: "edge" })).id;
+}
+
+async function update(
+  client: JazzClient,
+  messageId: string,
+  patch: { text?: string; chat_id?: string },
+) {
+  await client.db.update(app.messages, messageId, patch).wait({ tier: "edge" });
+}
+
+async function remove(client: JazzClient, messageId: string): Promise<void> {
+  await client.db.delete(app.messages, messageId).wait({ tier: "edge" });
 }
 
 describe("auth-workos-chat permissions", () => {
   it("admin JWT can post to Announcements and General", async () => {
     const client = await makeClient(__ADMIN_JWT__);
-    await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "admin-ann")).resolves.toBeUndefined();
-    await expect(send(client, CHAT_ID, "admin-gen")).resolves.toBeUndefined();
+    await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "admin-ann")).resolves.toEqual(
+      expect.any(String),
+    );
+    await expect(send(client, CHAT_ID, "admin-gen")).resolves.toEqual(expect.any(String));
   });
 
   it("member JWT is denied for Announcements but allowed for General", async () => {
     const client = await makeClient(__MEMBER_JWT__);
     await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "member-ann")).rejects.toThrow();
-    await expect(send(client, CHAT_ID, "member-gen")).resolves.toBeUndefined();
+    await expect(send(client, CHAT_ID, "member-gen")).resolves.toEqual(expect.any(String));
   });
 
   it("anonymous (no JWT) is denied for both chats", async () => {
     const client = await makeClient();
     await expect(send(client, ANNOUNCEMENTS_CHAT_ID, "anon-ann")).rejects.toThrow();
     await expect(send(client, CHAT_ID, "anon-gen")).rejects.toThrow();
+  });
+
+  it("keeps edits in their original chat while retaining admin and creator authority", async () => {
+    const admin = await makeClient(__ADMIN_JWT__);
+    const member = await makeClient(__MEMBER_JWT__);
+
+    const announcementId = await send(admin, ANNOUNCEMENTS_CHAT_ID, "admin-ann");
+    const adminGenericId = await send(admin, CHAT_ID, "admin-gen");
+    const genericId = await send(member, CHAT_ID, "member-gen");
+
+    await expect(
+      update(admin, announcementId, { text: "admin-ann-edited" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      update(admin, adminGenericId, { text: "admin-gen-edited" }),
+    ).resolves.toBeUndefined();
+    await expect(update(member, genericId, { text: "member-gen-edited" })).resolves.toBeUndefined();
+    await expect(update(member, adminGenericId, { text: "member-other-edited" })).rejects.toThrow();
+
+    await expect(update(member, genericId, { chat_id: ANNOUNCEMENTS_CHAT_ID })).rejects.toThrow();
+    await expect(update(admin, announcementId, { chat_id: CHAT_ID })).rejects.toThrow();
+    await expect(
+      update(admin, adminGenericId, { chat_id: ANNOUNCEMENTS_CHAT_ID }),
+    ).rejects.toThrow();
+    await expect(remove(member, genericId)).resolves.toBeUndefined();
+    await expect(remove(admin, announcementId)).resolves.toBeUndefined();
   });
 });
