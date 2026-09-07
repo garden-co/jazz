@@ -1,4 +1,5 @@
 import type { Browser, BrowserContext, Page } from "playwright";
+import { evaluateHarnessOperation } from "./evaluate-harness.mjs";
 import type {
   RemoteBrowserDbCreateInput,
   RemoteBrowserDbWaitForTitleInput,
@@ -247,17 +248,7 @@ async function evaluateHarness<TArgs, TResult>(
   moduleMethod: string,
   args: TArgs,
 ): Promise<TResult> {
-  return page.evaluate(
-    async ({ moduleMethod, args, modulePath }) => {
-      const harness = await import(/* @vite-ignore */ modulePath);
-      const method = (harness as Record<string, (value: TArgs) => Promise<TResult>>)[moduleMethod];
-      if (typeof method !== "function") {
-        throw new Error(`Remote browser harness method "${moduleMethod}" is unavailable`);
-      }
-      return method(args);
-    },
-    { moduleMethod, args, modulePath: remoteHarnessModulePath },
-  );
+  return evaluateHarnessOperation<TResult>(page, remoteHarnessModulePath, moduleMethod, args);
 }
 
 export async function createRemoteBrowserDb(
