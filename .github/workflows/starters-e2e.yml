@@ -150,6 +150,10 @@ jobs:
           - ts-betterauth
           - ts-localfirst
           - ts-hybrid
+        cancel_reopen_subscription_probe: [false]
+        include:
+          - starter: ts-betterauth
+            cancel_reopen_subscription_probe: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -209,7 +213,7 @@ jobs:
         # `prepare` instead of running `pnpm pack` (which would need build:core
         # to have run in this job). `--keep` retains the scaffolded project so
         # the artifact-upload step below can grab Playwright traces on failure.
-        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose --keep
+        run: pnpm --filter create-jazz-e2e exec tsx src/cli.ts ${{ matrix.starter }} --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose --keep ${{ matrix.cancel_reopen_subscription_probe && '--cancel-reopen-subscription-probe' || '' }}
 
       - name: Upload Playwright traces on failure
         if: failure() && steps.filter.outputs.skip != '1'

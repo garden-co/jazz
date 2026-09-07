@@ -9,7 +9,8 @@
     "check": "tsc --noEmit",
     "test": "tsx --test src/run-starter.test.ts",
     "e2e": "tsx src/cli.ts",
-    "e2e:all": "tsx src/cli.ts --all"
+    "e2e:all": "tsx src/cli.ts --all",
+    "e2e:cancel-reopen-subscription": "tsx src/cli.ts ts-betterauth --cancel-reopen-subscription-probe"
   },
   "dependencies": {
     "create-jazz": "workspace:*",

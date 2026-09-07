@@ -50,6 +50,11 @@ export interface RunStarterOptions {
    * them across the matrix without rebuilding the workspace each time.
    */
   tarballDir?: string;
+  /**
+   * Exercise a test-only generated-app probe that disposes a public
+   * subscription before its initial callback, then opens the real one.
+   */
+  cancelReopenSubscriptionProbe?: boolean;
 }
 
 export interface PhaseTiming {
@@ -419,6 +424,40 @@ function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, stri
   fs.writeFileSync(path.join(appDir, "pnpm-workspace.yaml"), yaml, "utf-8");
 }
 
+function replaceExactly(
+  source: string,
+  expected: string,
+  replacement: string,
+  file: string,
+): string {
+  const matches = source.split(expected).length - 1;
+  if (matches !== 1) {
+    throw new Error(
+      `Cancel/reopen probe expected exactly one ${JSON.stringify(expected)} in ${file}, found ${matches}`,
+    );
+  }
+  return source.replace(expected, replacement);
+}
+
+/**
+ * The production template intentionally remains untouched. This test-only
+ * generated-app mutation reproduces cancellation after native subscription
+ * readiness but before its first public callback.
+ */
+function injectTsBetterAuthCancelReopenSubscriptionProbe(appDir: string): void {
+  const file = path.join(appDir, "src", "todo-widget.ts");
+  let source = fs.readFileSync(file, "utf-8");
+  source = replaceExactly(
+    source,
+    `    callback: (rows: T[]) => void,`,
+    `    callback:\n      | ((rows: T[]) => void)\n      | { onUpdate(rows: T[]): void; onError(error: Error): void },`,
+    file,
+  );
+  const expected = `  return db.subscribe(app.todos, (todos) => {\n    // The simplest possible approach: rebuild the whole list on every tick.\n    // It's fine here — the list is small and there's no DOM state to preserve\n    // (no inline editing, no focused inputs inside rows).\n    //\n    renderTodos(todos);\n  });\n}`;
+  const replacement = `  const cancelledOpening = db.subscribe(app.todos, {\n    onUpdate: () => undefined,\n    onError: (error) => {\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n  cancelledOpening();\n\n  return db.subscribe(app.todos, {\n    onUpdate: (todos) => {\n      // The simplest possible approach: rebuild the whole list on every tick.\n      // It's fine here — the list is small and there's no DOM state to preserve\n      // (no inline editing, no focused inputs inside rows).\n      //\n      renderTodos(todos);\n    },\n    onError: (error) => {\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n}`;
+  fs.writeFileSync(file, replaceExactly(source, expected, replacement, file), "utf-8");
+}
+
 function writeEnvFile(
   appDir: string,
   starter: StarterName,
@@ -512,6 +551,15 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
         { cwd: workDir, env, verbose, description: `create-jazz ${opts.starter}` },
       );
     });
+
+    if (opts.cancelReopenSubscriptionProbe) {
+      if (opts.starter !== "ts-betterauth") {
+        throw new Error("The cancel/reopen subscription probe is only defined for ts-betterauth");
+      }
+      await recordPhase("inject cancel/reopen subscription probe", async () => {
+        injectTsBetterAuthCancelReopenSubscriptionProbe(appDir);
+      });
+    }
 
     removeStaleAppLocalJazzWasm(appDir);
     assertNoAppLocalJazzWasm(appDir);

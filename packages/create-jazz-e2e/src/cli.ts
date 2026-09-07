@@ -30,7 +30,7 @@ function printResult(r: RunStarterResult): void {
 
 function usage(): never {
   console.error(
-    "Usage: tsx src/cli.ts <starter> [<starter>...] [--verbose] [--skip-e2e] [--keep] [--tarball-dir <dir>]",
+    "Usage: tsx src/cli.ts <starter> [<starter>...] [--verbose] [--skip-e2e] [--keep] [--cancel-reopen-subscription-probe] [--tarball-dir <dir>]",
   );
   console.error(
     "       tsx src/cli.ts --all [--verbose] [--skip-e2e] [--keep] [--tarball-dir <dir>]",
@@ -57,6 +57,7 @@ async function main(): Promise<void> {
   const verbose = args.includes("--verbose") || args.includes("-v");
   const skipE2E = args.includes("--skip-e2e");
   const keepTempDir = args.includes("--keep");
+  const cancelReopenSubscriptionProbe = args.includes("--cancel-reopen-subscription-probe");
   const positional = args.filter((a) => !a.startsWith("-"));
 
   let targets: StarterName[];
@@ -75,11 +76,23 @@ async function main(): Promise<void> {
   }
 
   const repoRoot = findRepoRoot();
+  if (cancelReopenSubscriptionProbe && (targets.length !== 1 || targets[0] !== "ts-betterauth")) {
+    console.error(pc.red("--cancel-reopen-subscription-probe requires only ts-betterauth"));
+    usage();
+  }
   const results: RunStarterResult[] = [];
 
   for (const starter of targets) {
     console.log(pc.bold(`\n▶ ${starter}`));
-    const r = await runStarter({ starter, repoRoot, verbose, skipE2E, keepTempDir, tarballDir });
+    const r = await runStarter({
+      starter,
+      repoRoot,
+      verbose,
+      skipE2E,
+      keepTempDir,
+      tarballDir,
+      cancelReopenSubscriptionProbe,
+    });
     results.push(r);
     printResult(r);
   }
