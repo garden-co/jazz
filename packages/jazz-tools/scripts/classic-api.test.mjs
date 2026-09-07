@@ -223,7 +223,7 @@ for (const [file, bundler] of [
     const fixtureDir = mkdtempSync(join(packageDir, ".classic-api-types-"));
     const fixture = join(fixtureDir, "consumer.tsx");
     try {
-      copyFileSync(new URL("../src/" + file, import.meta.url), fixture);
+      copyFileSync(new URL("../tests/public-api/" + file, import.meta.url), fixture);
       const program = ts.createProgram([fixture], {
         noEmit: true,
         strict: true,
