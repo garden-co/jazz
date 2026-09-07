@@ -24,18 +24,24 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
   assert.doesNotMatch(failure, /secret-device-token|linked-abi-admission/);
 });
 
-test("Android post-commit wake failure retains only fixed bridge stages", () => {
+test("Android post-commit wake failure retains only allowlisted B bridge stages after its epoch", () => {
   const output = [
+    "08-29 22:52:21.493  4268  4288 E JazzForegroundWake: requested",
     "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
     "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: requested",
-    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: delivered",
-    "08-29 22:52:21.497  4268  4288 E JazzForegroundWake: requested-secret",
-    "08-29 22:52:21.498  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
+    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: scheduled",
+    "08-29 22:52:21.497  4268  4288 E JazzForegroundWake: delivered",
+    "08-29 22:52:21.498  4268  4288 E JazzForegroundWake: callback-invoked",
+    "08-29 22:52:21.499  4268  4288 E JazzForegroundWake: requested-secret",
+    "08-29 22:52:21.500  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
   ].join("\n");
-  assert.equal(androidForegroundWakeDiagnostic(output), "requested,delivered");
+  assert.equal(
+    androidForegroundWakeDiagnostic(output),
+    "requested,scheduled,delivered,callback-invoked",
+  );
   assert.match(
     androidAcceptanceFailure("timeout", "seed", output),
-    /foreground wake: requested,delivered/,
+    /foreground wake: requested,scheduled,delivered,callback-invoked/,
   );
 });
 

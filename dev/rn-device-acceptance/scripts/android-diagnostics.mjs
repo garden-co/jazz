@@ -10,7 +10,7 @@ const WRITER_READ_DETAIL =
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 const THREADTIME_FOREGROUND_WAKE =
-  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(armed|requested|delivered)\s*$/;
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(armed|requested|scheduled|delivered|callback-invoked)\s*$/;
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =

@@ -241,6 +241,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // Retire already-delivered initial-settlement notifications before A's
       // write establishes the post-commit wake epoch.
     }
+    // B alone traces the post-commit bridge path. The native flag defaults to
+    // off so all other foreground aliases and production callbacks are quiet.
+    setWakeTraceBestEffort(openedB, true);
     wakeTiming.onPostCommitWakeArmed?.();
 
     markFailure("same-runtime-write-failed");
@@ -337,8 +340,15 @@ export async function proveSameJsiRuntimeWriteSubscription(
       `foreground B did not observe foreground A's committed row after ${wakeTurns} turns and ${Math.round(wakeTiming.now() - wakeStartedAt)}ms without a post-commit native wake`,
     );
   } finally {
-    a.close();
-    b.close();
+    try {
+      setWakeTraceBestEffort(openedB, false);
+    } finally {
+      try {
+        a.close();
+      } finally {
+        b.close();
+      }
+    }
   }
 }
 
@@ -499,7 +509,18 @@ export async function proveForegroundScopeIsolation(
 type ScopeForeground = {
   runtime: NativeForegroundRuntime;
   consumeWake: () => boolean;
+  setWakeTrace?: (enabled: boolean) => void;
 };
+
+// An unavailable or already-torn-down private diagnostic hook must never
+// replace the receipt's native behavior or its primary failure.
+function setWakeTraceBestEffort(foreground: ScopeForeground, enabled: boolean): void {
+  try {
+    foreground.setWakeTrace?.(enabled);
+  } catch {
+    // The receipt still owns normal foreground progress and cleanup.
+  }
+}
 
 type ScopeReadObservation = {
   last: "none" | "pending" | "subscription" | "rejected" | "closed" | "rows";
@@ -527,6 +548,7 @@ function openScopeForeground(
   });
   return {
     runtime: foreground,
+    setWakeTrace: foreground.setWakeTrace,
     consumeWake() {
       if (pendingWakes === 0) return false;
       pendingWakes -= 1;

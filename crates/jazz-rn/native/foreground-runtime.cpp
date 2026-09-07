@@ -84,6 +84,15 @@ class ForegroundWakeRegistration final
         lease, foreground_, &ForegroundWakeRegistration::wakeFromOwner, this);
   }
 
+  // This is a bounded device-receipt diagnostic, not part of the foreground
+  // wake contract. It is off unless the one receipt alias explicitly enables
+  // it, and the same mutex that protects the coalescer makes toggling safe
+  // against owner-thread wake delivery.
+  void setTraceEnabled(bool enabled) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    traceEnabled_ = enabled;
+  }
+
   /** Clear the Rust scheduler synchronously before this callback context can
    * be destroyed. This never touches JSI, so platform invalidation may call it
    * while a runtime is already being torn down. */
@@ -108,29 +117,40 @@ class ForegroundWakeRegistration final
 
   void requestWake(uint64_t foreground, uint8_t kind, uint64_t delayMs) noexcept {
     std::shared_ptr<facebook::react::CallInvoker> invoker;
+    bool traceRequested = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (foreground != foreground_) return;
+      if (!active_) return;
+      // Record bridge entry before coalescing can return for an already
+      // scheduled wake. The fixed marker intentionally carries no identity or
+      // payload data.
+      traceRequested = traceEnabled_;
       if (kind == kWakeCancelled) {
         active_ = false;
         pending_ = false;
-        return;
+      } else {
+        mergeWakeLocked(kind, delayMs);
+        if (!scheduled_ && callInvoker_) {
+          scheduled_ = true;
+          invoker = callInvoker_;
+        }
       }
-      if (!active_) return;
-      mergeWakeLocked(kind, delayMs);
-      if (scheduled_ || !callInvoker_) return;
-      scheduled_ = true;
-      invoker = callInvoker_;
     }
-    // Fixed pipeline marker: Rust's owner queue flushed a live foreground
-    // wake into the platform bridge. It contains no handle, query, or data.
-    traceForegroundWake("requested");
+    if (traceRequested) traceForegroundWake("requested");
+    if (!invoker) return;
     schedule(std::move(invoker));
   }
 
   void schedule(std::shared_ptr<facebook::react::CallInvoker> invoker) noexcept {
     try {
       auto self = shared_from_this();
+      bool traceScheduled = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        traceScheduled = traceEnabled_;
+      }
+      if (traceScheduled) traceForegroundWake("scheduled");
       invoker->invokeAsync([self = std::move(self)](Runtime &runtime) {
         self->deliver(runtime);
       });
@@ -146,6 +166,7 @@ class ForegroundWakeRegistration final
   void deliver(Runtime &runtime) {
     uint8_t kind = kWakeDeferred;
     uint64_t delayMs = 0;
+    bool traceDelivery = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       scheduled_ = false;
@@ -154,9 +175,9 @@ class ForegroundWakeRegistration final
       delivering_ = true;
       kind = kind_;
       delayMs = delayMs_;
+      traceDelivery = traceEnabled_;
     }
-    // The CallInvoker reached this JSI runtime.
-    traceForegroundWake("delivered");
+    if (traceDelivery) traceForegroundWake("delivered");
 
     try {
       auto callbacks = runtime.global().getProperty(runtime, kWakeCallbacksGlobal);
@@ -165,6 +186,8 @@ class ForegroundWakeRegistration final
         if (callback.isObject() && callback.asObject(runtime).isFunction(runtime)) {
           auto urgency = String::createFromUtf8(runtime, urgencyFor(kind, delayMs));
           callback.asObject(runtime).asFunction(runtime).call(runtime, Value(std::move(urgency)));
+          // This marker means the JSI callback returned to the native bridge.
+          if (traceDelivery) traceForegroundWake("callback-invoked");
         }
       }
     } catch (const JSError &) {
@@ -218,6 +241,7 @@ class ForegroundWakeRegistration final
   bool pending_{false};
   bool scheduled_{false};
   bool delivering_{false};
+  bool traceEnabled_{false};
   uint8_t kind_{kWakeDeferred};
   uint64_t delayMs_{0};
 };
@@ -510,6 +534,24 @@ class ForegroundHandle final : public HostObject,
             return Value::undefined();
           });
     }
+    if (property == "setWakeTrace") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "setWakeTrace"), 1,
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (self->closed_) {
+              throw JSError(runtime, "Jazz native foreground runtime is closed");
+            }
+            if (count != 1 || !args[0].isBool()) {
+              throw JSError(runtime, "Jazz native foreground wake trace requires a boolean");
+            }
+            auto lease_lock = self->lease_->lockIfActive();
+            if (!lease_lock.owns_lock()) {
+              throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
+            }
+            self->wake_->setTraceEnabled(args[0].getBool());
+            return Value::undefined();
+          });
+    }
     if (property == "execute") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "execute"), 1,
@@ -540,12 +582,13 @@ class ForegroundHandle final : public HostObject,
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(5);
+    names.reserve(6);
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));
     names.emplace_back(PropNameID::forAscii(runtime, "execute"));
     names.emplace_back(PropNameID::forAscii(runtime, "setTickScheduler"));
+    names.emplace_back(PropNameID::forAscii(runtime, "setWakeTrace"));
     return names;
   }
 

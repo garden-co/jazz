@@ -788,6 +788,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   let postCommitWakeAfterBTicks = 0;
   let pendingPostCommitWake = false;
   const schedulers: Array<((urgency: string) => void) | undefined> = [];
+  const wakeTraceToggles: boolean[][] = [[], []];
   const ticks = [0, 0];
   const factory = {
     abiVersion: NATIVE_RELAY_ABI_V1,
@@ -881,6 +882,9 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         setTickScheduler(callback: (urgency: string) => void) {
           schedulers[peer] = callback;
         },
+        setWakeTrace(enabled: boolean) {
+          wakeTraceToggles[peer]!.push(enabled);
+        },
         close: () => true,
       };
     },
@@ -920,6 +924,53 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "same-runtime-delta-row-id-failed",
     "same-runtime-unsubscribe-failed",
   ]);
+  assert.deepEqual(
+    wakeTraceToggles,
+    [[], [true, false]],
+    "only B enables the default-off bridge trace and disables it during cleanup",
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  const unavailableTraceToggles: boolean[] = [];
+  const unavailableTraceCloses: number[] = [];
+  let unavailableTraceOpened = 0;
+  const unavailableTrace = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = unavailableTraceOpened++;
+      return {
+        ...foreground,
+        setWakeTrace(enabled: boolean) {
+          unavailableTraceToggles.push(enabled);
+          throw new Error("private wake trace unavailable");
+        },
+        close() {
+          unavailableTraceCloses.push(peer);
+          return foreground.close();
+        },
+      };
+    },
+  };
+  await proveSameJsiRuntimeWriteSubscription(
+    unavailableTrace,
+    capability,
+    command,
+    subscriptionRowId,
+  );
+  assert.deepEqual(
+    unavailableTraceToggles,
+    [true, false],
+    "a failing B-only trace toggle cannot replace the successful subscription receipt",
+  );
+  assert.deepEqual(
+    unavailableTraceCloses,
+    [0, 1],
+    "a failing trace disable still closes both foreground aliases",
+  );
 
   // Android's CallInvoker may need more than the former 96 zero-delay turns
   // after a release build. The receipt still waits for B's actual scheduler

@@ -762,6 +762,33 @@ test("foreground wake lifecycle clears native callbacks before close or runtime 
   assert.match(foregroundRuntime, /wake_->removeCallback\(runtime\);/);
 });
 
+test("post-commit wake tracing is private, default-off, and enabled only for B", () => {
+  const foregroundRuntime = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/native/foreground-runtime.cpp"),
+    "utf8",
+  );
+  const relayAdapter = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/src/relay.ts"),
+    "utf8",
+  );
+  const receipt = read("src/foreground-byte-abi.ts");
+
+  assert.match(foregroundRuntime, /bool traceEnabled_\{false\};/);
+  assert.match(foregroundRuntime, /void setTraceEnabled\(bool enabled\) noexcept/);
+  assert.match(foregroundRuntime, /if \(property == "setWakeTrace"\)/);
+  assert.match(relayAdapter, /setWakeTrace\?\(enabled: boolean\): void;/);
+  assert.match(relayAdapter, /typeof foreground\.setWakeTrace === "function"/);
+  assert.match(
+    receipt,
+    /while \(openedB\.consumeWake\(\)\)[\s\S]*setWakeTraceBestEffort\(openedB, true\);[\s\S]*onPostCommitWakeArmed/,
+  );
+  assert.match(
+    receipt,
+    /finally \{\s+try \{\s+setWakeTraceBestEffort\(openedB, false\);[\s\S]*a\.close\(\);[\s\S]*b\.close\(\);/,
+  );
+  assert.doesNotMatch(receipt, /openedA\.setWakeTrace/);
+});
+
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
   const plugin = read("plugins/with-jazz-device-fixture.cjs");
   assert.doesNotMatch(plugin, /JAZZ_DEVICE_SCHEMA_JSON/);

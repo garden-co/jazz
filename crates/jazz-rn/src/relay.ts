@@ -73,6 +73,8 @@ export type NativeForegroundRuntime = {
    * runtime; this is not an application callback API.
    */
   setTickScheduler?(callback: (urgency: string) => void): void;
+  /** @internal Bounded Android acceptance diagnostic; disabled by default. */
+  setWakeTrace?(enabled: boolean): void;
   close(): boolean;
 };
 
@@ -315,6 +317,15 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
       ) {
         throw foregroundRuntimeInstallationError();
       }
+      const setWakeTrace =
+        typeof foreground.setWakeTrace === "function"
+          ? (enabled: boolean): void => {
+              if (typeof enabled !== "boolean") {
+                throw new Error("Jazz native foreground wake trace requires a boolean");
+              }
+              foreground.setWakeTrace!(enabled);
+            }
+          : undefined;
       return {
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
@@ -337,6 +348,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
           }
           foreground.setTickScheduler(callback);
         },
+        setWakeTrace,
         close(): boolean {
           return foreground.close!();
         },
