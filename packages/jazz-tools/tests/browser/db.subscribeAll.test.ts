@@ -189,7 +189,7 @@ function makeQuery<T>(
 async function waitForCondition(
   check: () => boolean,
   timeoutMs: number,
-  errorMessage: string,
+  errorMessage: string | (() => string),
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -198,11 +198,28 @@ async function waitForCondition(
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(errorMessage);
+  throw new Error(typeof errorMessage === "function" ? errorMessage() : errorMessage);
 }
 
 function hasChangeForId<T>(delta: SubscriptionDelta<T>, kind: 0 | 1 | 2, id: string): boolean {
   return delta.delta.some((change) => change.kind === kind && change.id === id);
+}
+
+function describeSubscriptionHistory<T extends { id: string }>(deltas: SubscriptionDelta<T>[]) {
+  const maxFrames = 16;
+  const maxIdsPerFrame = 8;
+  return {
+    frameCount: deltas.length,
+    frames: deltas.slice(-maxFrames).map((delta) => ({
+      reset: delta.reset === true,
+      changeCount: delta.delta.length,
+      changes: delta.delta
+        .slice(0, maxIdsPerFrame)
+        .map((change) => ({ kind: change.kind, id: change.id })),
+      resultCount: delta.all.length,
+      resultIds: delta.all.slice(0, maxIdsPerFrame).map((row) => row.id),
+    })),
+  };
 }
 
 describe("internal subscription delta browser integration", () => {
@@ -488,7 +505,9 @@ describe("internal subscription delta browser integration", () => {
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 0, value.id)),
       4000,
-      "expected the live subscription to observe the subsequent write",
+      () =>
+        "expected the live subscription to observe the subsequent write; " +
+        `history=${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
     expect(deltas[0]?.all).toEqual([]);
     expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
