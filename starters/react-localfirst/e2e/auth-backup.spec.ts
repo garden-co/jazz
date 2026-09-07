@@ -58,6 +58,7 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible({ timeout: TIMEOUT });
+  await waitForApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
   // Clear local storage → a fresh anonymous identity is generated, todo vanishes.
