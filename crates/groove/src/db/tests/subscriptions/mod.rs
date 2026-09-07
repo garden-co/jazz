@@ -2526,19 +2526,25 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
         database.has_pending_progress(),
         "checksum must park an incremental evaluation"
     );
-    let checksum_node = database
+    let checksum_nodes = database
         .ivm_runtime
         .graph()
         .nodes()
         .values()
-        .find(|node| {
+        .filter(|node| {
             matches!(
                 node.descriptor.operator,
                 crate::ivm::OpType::StreamingChecksum(_)
             )
         })
-        .expect("subscription installed a checksum node")
-        .id;
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        checksum_nodes.len(),
+        1,
+        "one subscription owns one checksum node"
+    );
+    let checksum_node = checksum_nodes[0];
 
     assert!(database.unsubscribe(old.id()));
     assert!(
@@ -2548,4 +2554,8 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
     ready.set(true);
     database.drive_progress().await.unwrap();
     assert!(!database.has_pending_progress());
+    assert!(
+        database.ivm_runtime.graph().node(checksum_node).is_none(),
+        "the checksum node is reclaimed once its parked evaluation drains"
+    );
 }
