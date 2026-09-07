@@ -24,6 +24,8 @@ export declare class NapiDb {
   requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  /** Admit a verified local-first account for this backend runtime only. */
+  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
@@ -111,7 +113,6 @@ export declare class NapiDb {
    * map is shared per author; concurrent delegated requests must instead
    * capture claims with prepareQueryAsync/prepareRelationQueryAsync.
    */
-  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
    * Materialize a prepared relation snapshot, optionally through an open
