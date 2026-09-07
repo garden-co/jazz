@@ -108,7 +108,7 @@ test("Classic co and z named imports lead to migration guidance, not a linking e
   `);
 });
 
-test("Classic namespaces and classes reject reads, calls, construction and subclassing", () => {
+test("Classic namespaces and classes reject reads, calls, construction and subclass construction", () => {
   runConsumer(`
     import assert from "node:assert/strict";
     import * as jazz from "jazz-tools";
@@ -125,7 +125,9 @@ test("Classic namespaces and classes reject reads, calls, construction and subcl
     check(() => jazz.Group.create(), "Group.create");
     check(() => jazz.CoMap(), "CoMap");
     check(() => new jazz.CoMap(), "CoMap");
-    check(() => class Task extends jazz.CoMap {}, "CoMap");
+    class Task extends jazz.CoMap {}
+    check(() => new Task(), "CoMap");
+    check(() => Task.create(), "CoMap.create");
   `);
 });
 

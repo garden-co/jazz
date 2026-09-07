@@ -51,6 +51,13 @@ does not throw; a Classic provider throws when rendered, not when its React
 element is created. Existing platform/peer-dependency requirements still apply.
 Other unsupported exports and historical subpaths retain normal import errors.
 
+Standard function metadata (`prototype`, `name`, and `length`) remains readable
+so tooling such as Next.js Fast Refresh can inspect exports without breaking
+valid Jazz 2 imports. TypeScript still rejects extending a Classic value. In
+JavaScript, declaring a subclass may be inert; calling its inherited constructor
+or accessing Classic static operations raises the diagnostic. A constructor that
+deliberately bypasses the Classic base does not execute that base's diagnostic.
+
 Svelte's `JazzSvelteProvider` and Vue's `JazzProvider` are still supported Jazz 2
 components, and Svelte's `getJazzContext` remains supported. These providers take
 `config`, not Classic `sync` or `AccountSchema` props. Supplying those old props

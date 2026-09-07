@@ -35,10 +35,13 @@ function classicFunction(name: string) {
 }
 
 function classicNamespace(name: string): JazzClassicApiRemoved {
-  // A constructable target also catches `new CoMap()` and `extends CoMap`.
-  // Calls/construction reach the throwing function; property reads fail here.
+  // Framework export inspection must be inert, including Fast Refresh.
+  // Classic calls/construction and domain-member reads still fail.
   return new Proxy(classicFunction(name), {
-    get(_target, property) {
+    get(target, property) {
+      if (property === "prototype" || property === "name" || property === "length") {
+        return Reflect.get(target, property);
+      }
       return failClassicApi(`${name}.${String(property)}`);
     },
   }) as unknown as JazzClassicApiRemoved;
