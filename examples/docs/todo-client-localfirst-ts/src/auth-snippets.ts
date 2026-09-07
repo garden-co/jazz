@@ -1,30 +1,30 @@
-import {
-  createAccountManager,
-  createDb,
-  exportLocalFirstSecret,
-  type AccountHandle,
-} from "jazz-tools";
+import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
-type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
+import { createJazzSession, type JazzSessionActions } from "jazz-tools/client";
 
 // #region auth-localfirst-ts
-export async function createLocalFirstDb() {
-  const config = { appId: "my-app", serverUrl: "https://core.example" };
-  const accounts = await createAccountManager(config);
-  const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-  return createDb({ ...config, account });
+export async function createLocalFirstSession() {
+  return createJazzSession({
+    appId: "my-app",
+    serverUrl: "https://core.example",
+    initial: "local-first",
+  });
 }
 // #endregion auth-localfirst-ts
 
 // #region auth-jwt-ts
-export async function createJwtDb(getToken: () => Promise<string>) {
-  const config = { appId: "my-app", serverUrl: "https://core.example" };
-  const accounts = await createAccountManager(config);
-  // Existing identity: login. A signup flow explicitly calls registerJWT instead.
-  const account = await accounts.loginJWT({ getToken });
-  return createDb({ ...config, account });
+export async function createJwtSession(getToken: () => Promise<string>) {
+  const session = await createJazzSession({ appId: "my-app", serverUrl: "https://core.example" });
+  try {
+    // Existing identity: login. A signup flow explicitly calls registerJWT instead.
+    await session.loginJWT({ getToken });
+    return session;
+  } catch (error) {
+    await session.close();
+    throw error;
+  }
 }
 // #endregion auth-jwt-ts
 
@@ -35,10 +35,11 @@ export function getRecoveryPhrase(account: AccountHandle): string {
 // #endregion auth-localfirst-ts-backup
 
 // #region auth-localfirst-ts-restore
-// Call after the old context's normal shutdown({ waitForSync: true }).
-// Use the returned handle to create the next context.
-export function restoreFromRecoveryPhrase(accounts: Accounts, userInput: string): AccountHandle {
-  return accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+export function restoreFromRecoveryPhrase(
+  session: JazzSessionActions,
+  userInput: string,
+): Promise<void> {
+  return session.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-ts-restore
 
@@ -55,8 +56,7 @@ export async function backupToPasskey(account: AccountHandle, displayName: strin
 // #endregion auth-localfirst-ts-passkey-backup
 
 // #region auth-localfirst-ts-passkey-restore
-// Restore outside any context, after its ordinary graceful shutdown.
-export async function restoreFromPasskey(accounts: Accounts): Promise<AccountHandle> {
-  return accounts.restoreLocalFirst(await passkeyBackup.restore());
+export async function restoreFromPasskey(session: JazzSessionActions): Promise<void> {
+  return session.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-ts-passkey-restore

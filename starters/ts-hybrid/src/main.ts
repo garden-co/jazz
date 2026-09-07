@@ -1,9 +1,7 @@
-import { createDb } from "jazz-tools";
-import { mountApp, type AppHandle } from "./app.js";
-import { accounts as prepareAccounts } from "./accounts.js";
+import { createJazzSession } from "jazz-tools/client";
+import { mountApp } from "./app.js";
 import { authClient } from "./auth-client.js";
 import { getToken } from "./accounts.js";
-import { JazzLifecycle } from "./jazz-lifecycle.js";
 import "./app.css";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
@@ -15,27 +13,35 @@ async function boot() {
   if (!APP_ID || !SERVER_URL)
     throw new Error("VITE_JAZZ_APP_ID and VITE_JAZZ_SERVER_URL must be set");
 
-  const accounts = await prepareAccounts();
-  const lifecycle = new JazzLifecycle(accounts, (account) =>
-    createDb({ appId: APP_ID, serverUrl: SERVER_URL, account }),
-  );
-  let providerLinkError: Error | undefined;
-  await lifecycle.attach(async () => {
-    const session = await authClient.getSession();
-    if (session.data?.session) {
-      const retained = accounts.getLoggedIn();
-      try {
-        await accounts.loginJWT({ getToken });
-      } catch (cause) {
-        if (retained?.identity.issuer !== "urn:jazz:local-first") throw cause;
-        providerLinkError = cause instanceof Error ? cause : new Error(String(cause));
-      }
-    } else if (!accounts.getLoggedIn()) accounts.createLocalFirst();
+  const session = await createJazzSession({
+    appId: APP_ID,
+    serverUrl: SERVER_URL,
+    initial: "local-first",
   });
-  const app: AppHandle = mountApp(root, lifecycle.getClient(), lifecycle, providerLinkError);
-  lifecycle.onClientChange((next) => {
-    app.setDb(next);
+  let providerLinkError: Error | undefined;
+  try {
+    const auth = await authClient.getSession();
+    if (auth.data?.session) await session.loginJWT({ getToken });
+  } catch (cause) {
+    if (session.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") {
+      await session.close();
+      throw cause;
+    }
+    providerLinkError = cause instanceof Error ? cause : new Error(String(cause));
+  }
+  const client = session.getSnapshot().client;
+  if (!client) throw session.getSnapshot().error ?? new Error("Jazz client is unavailable");
+  const app = mountApp(root, client.db, session, providerLinkError);
+  const unsubscribe = session.subscribe(() => app.setDb(session.getSnapshot().client?.db));
+  window.addEventListener("pagehide", (event) => {
+    if (event.persisted) return;
+    unsubscribe();
+    app.destroy();
+    void session.close().catch(console.error);
   });
 }
 
-void boot();
+void boot().catch((error: unknown) => {
+  const root = document.getElementById("root");
+  if (root) root.textContent = error instanceof Error ? error.message : String(error);
+});

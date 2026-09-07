@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { exportLocalFirstSecret } from "jazz-tools";
-import { accounts } from "./accounts";
-import { useJazzLifecycle } from "./main";
+import { useJazzSession } from "jazz-tools/react";
 
 type Status =
   | { kind: "idle" }
@@ -20,7 +19,7 @@ export function AuthBackup({
   redirectAfterRestore?: string;
   mode?: "full" | "restore-only";
 } = {}) {
-  const lifecycle = useJazzLifecycle();
+  const lifecycle = useJazzSession();
 
   function navigate() {
     if (redirectAfterRestore) location.assign(redirectAfterRestore);
@@ -34,7 +33,7 @@ export function AuthBackup({
     setStatus({ kind: "idle" });
     setBusy(true);
     try {
-      const account = (await accounts()).getLoggedIn();
+      const account = lifecycle.account;
       if (!account) {
         setStatus({ kind: "error", message: "No local secret to reveal yet." });
         return;
@@ -68,7 +67,7 @@ export function AuthBackup({
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+      await lifecycle.restoreLocalFirst(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
@@ -81,7 +80,7 @@ export function AuthBackup({
     setStatus({ kind: "idle" });
     setBusy(true);
     try {
-      const account = (await accounts()).getLoggedIn();
+      const account = lifecycle.account;
       if (!account) {
         setStatus({ kind: "error", message: "No local secret to back up yet." });
         return;
@@ -110,7 +109,7 @@ export function AuthBackup({
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+      await lifecycle.restoreLocalFirst(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });

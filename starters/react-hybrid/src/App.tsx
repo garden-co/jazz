@@ -4,23 +4,21 @@ import { AuthBackup } from "./auth-backup";
 import { SignInForm } from "./sign-in-form";
 import { SignUpForm } from "./sign-up-form";
 import { TodoWidget } from "./todo-widget";
-import { useJazzLifecycle } from "./main";
+import { useJazzSession } from "jazz-tools/react";
 
 type View = "dashboard" | "signin" | "signup";
 
 export function App() {
-  const lifecycle = useJazzLifecycle();
+  const lifecycle = useJazzSession();
   const { data: session, isPending } = useSession();
   const [view, setView] = useState<View>("dashboard");
 
   if (isPending) return <div>Loading…</div>;
 
   async function handleSignOut() {
-    await lifecycle.transition(async (manager) => {
-      await authClient.signOut();
-      manager.logout();
-      manager.createLocalFirst();
-    });
+    await lifecycle.logout();
+    await authClient.signOut();
+    await lifecycle.createLocalFirst();
     setView("dashboard");
   }
 

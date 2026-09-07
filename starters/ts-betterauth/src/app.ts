@@ -2,7 +2,8 @@ import type { Db } from "jazz-tools";
 import { authClient, type AuthSession } from "./auth-client.js";
 import { mountTodoWidget } from "./todo-widget.js";
 import { mountSignInForm } from "./sign-in-form.js";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 import { getToken } from "./accounts.js";
 
 export interface AppHandle {
@@ -17,10 +18,10 @@ export type Authenticate = (
 
 export function mountApp(
   root: HTMLElement,
-  lifecycle: JazzLifecycle,
+  jazz: Session,
   initialRegistrationError?: Error,
 ): AppHandle {
-  let db: Db | null = lifecycle.getClient() ?? null;
+  let db: Db | null = jazz.getSnapshot().client?.db ?? null;
   let registrationError = initialRegistrationError;
   let recovery: "login" | "register" = initialRegistrationError ? "login" : "register";
   let actionError: Error | undefined;
@@ -39,15 +40,7 @@ export function mountApp(
     handledSession = key;
     admittedSession = null;
     const version = ++sessionVersion;
-    void lifecycle
-      .transition(
-        async (manager) => {
-          if (key) await manager.loginJWT({ getToken });
-          else manager.logout();
-        },
-        () => !explicitAuth && version === sessionVersion,
-        false,
-      )
+    void (key ? jazz.loginJWT({ getToken }) : jazz.logout())
       .then(() => {
         if (version === sessionVersion) {
           registrationError = undefined;
@@ -72,10 +65,8 @@ export function mountApp(
         throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
       const current = await authClient.getSession();
       handledSession = sessionKey({ data: current.data });
-      await lifecycle.transition(
-        (manager) => (enroll ? manager.registerJWT({ getToken }) : manager.loginJWT({ getToken })),
-        () => explicitAuth && version === sessionVersion,
-      );
+      if (version !== sessionVersion) return;
+      await (enroll ? jazz.registerJWT({ getToken }) : jazz.loginJWT({ getToken }));
       registrationError = undefined;
       admittedSession = handledSession;
     } catch (cause) {
@@ -93,10 +84,8 @@ export function mountApp(
 
   async function handleSignOut() {
     try {
-      await lifecycle.transition(async (manager) => {
-        await authClient.signOut();
-        manager.logout();
-      });
+      await jazz.logout();
+      await authClient.signOut();
       location.assign("/");
     } catch (cause) {
       actionError = cause instanceof Error ? cause : new Error(String(cause));
@@ -108,14 +97,11 @@ export function mountApp(
     const version = ++sessionVersion;
     const recoveryKey = sessionKey(session);
     try {
-      await lifecycle.transition(
-        (manager) =>
-          recovery === "login" ? manager.loginJWT({ getToken }) : manager.registerJWT({ getToken }),
-        () => version === sessionVersion && sessionKey(session) === recoveryKey,
-        recovery !== "login",
-      );
-      if (version === sessionVersion && sessionKey(session) === recoveryKey)
+      await (recovery === "login" ? jazz.loginJWT({ getToken }) : jazz.registerJWT({ getToken }));
+      if (version === sessionVersion && sessionKey(session) === recoveryKey) {
         registrationError = undefined;
+        admittedSession = recoveryKey;
+      }
     } catch (cause) {
       if (version === sessionVersion && sessionKey(session) === recoveryKey)
         registrationError = cause instanceof Error ? cause : new Error(String(cause));

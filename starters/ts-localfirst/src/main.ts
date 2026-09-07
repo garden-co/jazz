@@ -1,7 +1,5 @@
-import { createAccountManager } from "jazz-tools";
-import { createJazzClient } from "jazz-tools/client";
+import { createJazzSession } from "jazz-tools/client";
 import { mountApp } from "./app.js";
-import { shutdownOnDispose } from "./client-lifecycle.js";
 import "./app.css";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
@@ -23,82 +21,44 @@ async function boot() {
   if (!root) throw new Error("#root not found");
   const config = buildConfig();
   let disposed = false;
-  let client: Awaited<ReturnType<typeof createJazzClient>> | undefined;
-  const shutdownClients = new WeakSet<Awaited<ReturnType<typeof createJazzClient>>>();
-  const gracefulShutdowns = new WeakMap<
-    Awaited<ReturnType<typeof createJazzClient>>,
-    Promise<void>
-  >();
-  let restoreQueue = Promise.resolve();
-  const dispose = () => {
-    disposed = true;
-    const active = client;
-    client = undefined;
-    if (active) shutdownOnDispose(active, gracefulShutdowns, shutdownClients);
-  };
+  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let unsubscribe = () => {};
+  let unmount = () => {};
   const onPageHide = (event: PageTransitionEvent) => {
     if (event.persisted) return;
+    disposed = true;
     window.removeEventListener("pagehide", onPageHide);
-    dispose();
+    unsubscribe();
+    unmount();
+    void session?.close().catch(console.error);
   };
   window.addEventListener("pagehide", onPageHide);
-
-  const accounts = await createAccountManager(config);
-  if (disposed) return;
-  let account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-  client = await createJazzClient({ ...config, account });
-  if (disposed) {
-    if (!shutdownClients.has(client)) {
-      shutdownClients.add(client);
-      await client.shutdown();
-    }
-    return;
+  try {
+    session = await createJazzSession({ ...config, initial: "local-first" });
+    if (disposed) return await session.close();
+    const activeSession = session;
+    const render = () => {
+      unmount();
+      unmount = () => {};
+      const { status, client, account, error } = activeSession.getSnapshot();
+      if (status === "ready" && client && account) {
+        unmount = mountApp(root, client.db, account, activeSession.restoreLocalFirst);
+      } else {
+        root.textContent = error?.message ?? "Loading...";
+        if (error) {
+          const retry = document.createElement("button");
+          retry.textContent = "Retry";
+          retry.onclick = () => void activeSession.retry().catch(() => {});
+          root.append(retry);
+        }
+      }
+    };
+    unsubscribe = session.subscribe(render);
+    render();
+  } catch (error) {
+    window.removeEventListener("pagehide", onPageHide);
+    throw error;
   }
-  const mount = () =>
-    mountApp(root, client!.db, account, (secret) => {
-      const transition = restoreQueue.then(async () => {
-        const active = client;
-        if (!active) throw new Error("Jazz client is unavailable");
-
-        // A failed sync barrier leaves the current client and UI usable.
-        shutdownClients.add(active);
-        const graceful = active.shutdown({ waitForSync: true });
-        gracefulShutdowns.set(active, graceful);
-        try {
-          await graceful;
-        } catch (error) {
-          shutdownClients.delete(active);
-          gracefulShutdowns.delete(active);
-          throw error;
-        }
-        gracefulShutdowns.delete(active);
-        client = undefined;
-
-        let recoveryError: unknown;
-        try {
-          accounts.restoreLocalFirst(secret);
-        } catch (error) {
-          recoveryError = error;
-        } finally {
-          // Reopen even after a rejected restore and for the same account.
-          account = accounts.getLoggedIn() ?? account;
-          const next = await createJazzClient({ ...config, account });
-          if (disposed) {
-            if (!shutdownClients.has(next)) {
-              shutdownClients.add(next);
-              await next.shutdown();
-            }
-          } else {
-            client = next;
-            mount();
-          }
-        }
-        if (recoveryError) throw recoveryError;
-      });
-      restoreQueue = transition.catch(() => undefined);
-      return transition;
-    });
-  mount();
 }
 
 boot().catch((error: unknown) => {

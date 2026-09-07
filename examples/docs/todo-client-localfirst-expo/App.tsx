@@ -1,6 +1,5 @@
 import * as React from "react";
-import { JazzProvider, type JazzClientConfig } from "jazz-tools/react-native";
-import { createAccountManager } from "jazz-tools/expo";
+import { JazzSessionProvider, type JazzSessionConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -30,15 +29,6 @@ const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
 const appId = envAppId ?? defaultAppId;
 const serverUrl = envServerUrl ?? defaultServerUrl;
-let prepared: Promise<JazzClientConfig> | undefined;
-function prepareConfig() {
-  return (prepared ??= createAccountManager({ appId, serverUrl }).then((accounts) => ({
-    appId,
-    serverUrl,
-    account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
-  })));
-}
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -77,32 +67,17 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: JazzClientConfig;
+  config?: JazzSessionConfig;
   fallback?: React.ReactNode;
 };
 
 // #region context-setup-expo
 export default function App({ config, fallback }: AppProps = {}) {
-  const [resolved, setResolved] = React.useState<JazzClientConfig | undefined>(config);
-  const [error, setError] = React.useState<Error>();
-  React.useEffect(() => {
-    let active = true;
-    void (config ? Promise.resolve(config) : prepareConfig()).then(
-      (next) => {
-        if (active) setResolved(next);
-      },
-      (cause) => {
-        if (active) setError(cause instanceof Error ? cause : new Error(String(cause)));
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [config]);
-  if (error) return <Text accessibilityRole="alert">{error.message}</Text>;
-  if (!resolved) return fallback ?? defaultFallback;
   return (
-    <JazzProvider config={resolved} fallback={fallback ?? defaultFallback}>
+    <JazzSessionProvider
+      config={config ?? { appId, serverUrl, initial: "local-first" }}
+      fallback={fallback ?? defaultFallback}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -110,7 +85,7 @@ export default function App({ config, fallback }: AppProps = {}) {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion context-setup-expo

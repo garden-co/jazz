@@ -1,6 +1,6 @@
 import { exportLocalFirstSecret } from "jazz-tools";
-import { accounts } from "./accounts.js";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
 // In production, pin this to your deployed hostname so passkeys remain usable
 // across preview deployments. Leaving it undefined falls back to location.hostname.
@@ -14,7 +14,7 @@ export interface AuthBackupOptions {
 
 export function mountAuthBackup(
   parent: HTMLElement,
-  lifecycle: JazzLifecycle,
+  session: Session,
   options: AuthBackupOptions = {},
 ): void {
   const { redirectAfterRestore, mode = "full" } = options;
@@ -135,7 +135,7 @@ export function mountAuthBackup(
 
     if (action === "reveal" && phraseInput && phraseSlot) {
       await withBusy(async () => {
-        const account = (await accounts()).getLoggedIn();
+        const account = session.getSnapshot().account;
         if (!account) {
           setStatus("error", "No local secret to reveal yet.");
           return;
@@ -159,7 +159,7 @@ export function mountAuthBackup(
 
     if (action === "passkey-backup") {
       await withBusy(async () => {
-        const account = (await accounts()).getLoggedIn();
+        const account = session.getSnapshot().account;
         if (!account) {
           setStatus("error", "No local secret to back up yet.");
           return;
@@ -183,7 +183,7 @@ export function mountAuthBackup(
           appHostname: PASSKEY_APP_HOSTNAME,
         });
         const secret = await pb.restore();
-        await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+        await session.restoreLocalFirst(secret);
         navigate();
       });
     }
@@ -194,7 +194,7 @@ export function mountAuthBackup(
     await withBusy(async () => {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.value.trim());
-      await lifecycle.transition((manager) => manager.restoreLocalFirst(secret));
+      await session.restoreLocalFirst(secret);
       navigate();
     });
   });

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type JazzSession = Awaited<ReturnType<typeof createJazzSession>>;
 
 type Session = {
   isPending: boolean;
@@ -52,9 +53,10 @@ describe("mountApp", () => {
   it("renders the real sign-in form when session subscription notifies synchronously", () => {
     const root = document.createElement("div");
     const lifecycle = {
-      getClient: () => null,
-      transition: vi.fn(),
-    } as unknown as JazzLifecycle;
+      getSnapshot: () => ({}),
+      loginJWT: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+    } as unknown as JazzSession;
 
     const app = mountApp(root, lifecycle);
 
@@ -69,9 +71,10 @@ describe("mountApp", () => {
     };
     const root = document.createElement("div");
     const lifecycle = {
-      getClient: () => ({}),
-      transition: vi.fn(),
-    } as unknown as JazzLifecycle;
+      getSnapshot: () => ({ client: { db: {} } }),
+      loginJWT: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+    } as unknown as JazzSession;
 
     const app = mountApp(root, lifecycle);
 
@@ -86,9 +89,10 @@ describe("mountApp", () => {
     };
     const root = document.createElement("div");
     const lifecycle = {
-      getClient: () => ({}),
-      transition: vi.fn(),
-    } as unknown as JazzLifecycle;
+      getSnapshot: () => ({ client: { db: {} } }),
+      loginJWT: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+    } as unknown as JazzSession;
 
     const app = mountApp(root, lifecycle);
     session.data = {

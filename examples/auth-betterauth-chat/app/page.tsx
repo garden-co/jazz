@@ -1,15 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { createAccountManager } from "jazz-tools";
-import { createJazzClient } from "jazz-tools/client";
-import { JazzClientProvider, useAuthState } from "jazz-tools/react";
+import { JazzSessionProvider, useJazzSession, useAuthState } from "jazz-tools/react";
 import { ChatPanel } from "../src/ChatPanel";
 import { AuthCard } from "../src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
-type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
-type Client = Awaited<ReturnType<typeof createJazzClient>>;
 type Credentials = (email: string, password: string) => Promise<void>;
 
 function ChatShell({
@@ -71,150 +67,79 @@ async function getToken(): Promise<string> {
   return token;
 }
 
-export default function Page(): React.JSX.Element {
-  const [client, setClient] = React.useState<Client>();
-  const [error, setError] = React.useState<string>();
-  const accounts = React.useRef<Accounts | undefined>(undefined);
-  const active = React.useRef<Client | undefined>(undefined);
-  const transitioning = React.useRef(false);
-  const mounted = React.useRef(false);
+// Track provider restoration per session, including StrictMode's replacement session.
+const restored = new WeakSet<() => Promise<void>>();
 
+export default function Page() {
+  return (
+    <JazzSessionProvider
+      config={{ ...config, initial: "local-first" }}
+      fallback={<SessionScreen />}
+    >
+      <SessionScreen />
+    </JazzSessionProvider>
+  );
+}
+
+function SessionScreen() {
+  const session = useJazzSession();
+  const {
+    account,
+    status,
+    error,
+    loginJWT,
+    linkJWT,
+    registerJWT,
+    logout,
+    createLocalFirst,
+    retry,
+  } = session;
   React.useEffect(() => {
-    let cancelled = false;
-    mounted.current = true;
-    let owned: Client | undefined;
-    void (async () => {
-      const manager = await createAccountManager(config);
-      if (cancelled) return;
-      accounts.current = manager;
-      const token = await getJwtFromBetterAuth();
-      if (cancelled) return;
-      // Restoring provider login never implicitly registers or links an identity.
-      let account = manager.getLoggedIn();
-      if (token) {
-        try {
-          account = await manager.loginJWT({ getToken });
-        } catch (cause) {
-          // A failed link can leave a valid provider session and a retained
-          // local account. Keep that account available and offer link retry.
-          if (!account) throw cause;
-          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-        }
-      } else account ??= manager.createLocalFirst();
-      if (cancelled) return;
-      owned = await createJazzClient({ ...config, account });
-      if (cancelled) {
-        await owned.shutdown();
-        return;
-      }
-      active.current = owned;
-      setClient(owned);
-    })().catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-    });
-    return () => {
-      cancelled = true;
-      mounted.current = false;
-      const current = active.current ?? owned;
-      active.current = undefined;
-      void current?.shutdown();
-    };
-  }, []);
-
-  async function transition(action: (manager: Accounts) => Promise<void>) {
-    if (transitioning.current) throw new Error("An account operation is already running");
-    const manager = accounts.current;
-    if (!manager) throw new Error("Account manager is not ready");
-    transitioning.current = true;
-    setError(undefined);
-    try {
-      // Linking runs outside contexts. A failed sync barrier leaves the old
-      // context usable and prevents the account operation from starting.
-      await active.current?.shutdown({ waitForSync: true });
-      active.current = undefined;
-      setClient(undefined);
-      try {
-        await action(manager);
-      } finally {
-        const account = manager.getLoggedIn();
-        if (account && mounted.current) {
-          const next = await createJazzClient({ ...config, account });
-          if (!mounted.current) {
-            await next.shutdown();
-          } else {
-            active.current = next;
-            setClient(next);
-          }
-        }
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      throw cause;
-    } finally {
-      transitioning.current = false;
-    }
-  }
+    if (status !== "ready" || restored.has(logout)) return;
+    restored.add(logout);
+    void getJwtFromBetterAuth()
+      .then((token) => (token ? loginJWT({ getToken }) : undefined))
+      .catch(() => {});
+  }, [status, loginJWT, logout]);
 
   async function signIn(email: string, password: string) {
     const result = await authClient.signIn.email({ email, password });
     if (result.error) throw new Error(result.error.message);
-    await transition(async (manager) => {
-      await manager.loginJWT({ getToken });
-    });
+    await loginJWT({ getToken });
   }
-
   async function signUp(email: string, password: string) {
     const result = await authClient.signUp.email({ email, name: email, password });
     if (result.error) throw new Error(result.error.message);
-    // A fresh provider identity joins the existing Jazz account. Better Auth
-    // keeps its own subject; account-owned data retains the same owner.
-    await transition(async (manager) => {
-      await manager.linkJWT({ getToken });
-    });
+    await linkJWT({ getToken });
   }
-
   async function signOut() {
-    await transition(async (manager) => {
-      await authClient.signOut();
-      manager.logout();
-      manager.createLocalFirst();
-    });
+    await logout();
+    await authClient.signOut();
+    // This demo deliberately returns to a fresh local-first account.
+    await createLocalFirst();
   }
-
   async function registerProvider() {
-    await transition(async (manager) => {
-      if (manager.getLoggedIn()?.identity.issuer === "urn:jazz:local-first") {
-        await manager.linkJWT({ getToken });
-      } else await manager.registerJWT({ getToken });
-    });
+    if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
+    else await registerJWT({ getToken });
   }
 
   return (
     <>
       {error && (
         <div role="alert">
-          <p>{error}</p>
-          <p>
-            You can link a fresh provider identity to your retained local account. Linking does not
-            merge accounts.
-          </p>
-          <button
-            onClick={() => {
-              void registerProvider().catch(() => undefined);
-            }}
-          >
-            {accounts.current?.getLoggedIn()?.identity.issuer === "urn:jazz:local-first"
+          <p>{error.message}</p>
+          <button onClick={() => void registerProvider().catch(() => {})}>
+            {account?.identity.issuer === "urn:jazz:local-first"
               ? "Link provider identity to this account"
-              : "Register provider identity as a new Jazz account"}
+              : "Create a new Jazz account for this provider identity"}
           </button>
+          <button onClick={() => void retry().catch(() => {})}>Retry</button>
         </div>
       )}
-      {client ? (
-        <JazzClientProvider client={client}>
-          <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
-        </JazzClientProvider>
+      {status === "ready" ? (
+        <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
       ) : (
-        <p className="loading-state">Preparing account…</p>
+        <p>Preparing account…</p>
       )}
     </>
   );

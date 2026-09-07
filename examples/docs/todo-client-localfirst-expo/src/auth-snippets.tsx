@@ -1,40 +1,23 @@
 import { Text, View } from "react-native";
-import {
-  JazzProvider,
-  exportLocalFirstSecret,
-  useAccountState,
-  type AccountHandle,
-} from "jazz-tools/react-native";
-import { createAccountManager } from "jazz-tools/expo";
+import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools/react-native";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
-type Accounts = Awaited<ReturnType<typeof createAccountManager>>;
 function TodoApp() {
   return null;
 }
 
 // #region auth-localfirst-expo
-// Prepare once during bootstrap; native crypto/storage need no Jazz context.
-export async function prepareAccounts() {
-  const accounts = await createAccountManager({
-    appId: "my-app",
-    serverUrl: "https://your-core.example",
-  });
-  if (!accounts.getLoggedIn()) accounts.createLocalFirst();
-  return accounts;
-}
-
-export function LocalFirstAuthExpoApp({ accounts }: { accounts: Accounts }) {
-  const { account, error } = useAccountState(accounts);
-  if (error) return <Text accessibilityRole="alert">{error.message}</Text>;
-  if (!account) return null;
+export function LocalFirstAuthExpoApp() {
   return (
-    <JazzProvider config={{ appId: "my-app", account }}>
+    <JazzSessionProvider
+      config={{ appId: "my-app", serverUrl: "https://your-core.example", initial: "local-first" }}
+    >
       <View>
         <Text>My App</Text>
         <TodoApp />
       </View>
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion auth-localfirst-expo
@@ -46,9 +29,8 @@ export function getRecoveryPhrase(account: AccountHandle): string {
 // #endregion auth-localfirst-expo-backup
 
 // #region auth-localfirst-expo-restore
-// Restore before creating a context. If switching an existing context, first
-// await client.shutdown({ waitForSync: true }); then restore and open a new one.
-export function restoreRecoveryPhrase(accounts: Accounts, userInput: string): AccountHandle {
-  return accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+export function useRestoreRecoveryPhrase() {
+  const { restoreLocalFirst } = useJazzSession();
+  return (userInput: string) => restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-expo-restore

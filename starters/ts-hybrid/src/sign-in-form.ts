@@ -1,12 +1,9 @@
 import { authClient } from "./auth-client.js";
 import { getToken } from "./accounts.js";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
-export function mountSignInForm(
-  parent: HTMLElement,
-  lifecycle: JazzLifecycle,
-  onToggle: () => void,
-): void {
+export function mountSignInForm(parent: HTMLElement, session: Session, onToggle: () => void): void {
   parent.innerHTML = `
     <div class="card">
       <h1>Sign in</h1>
@@ -56,7 +53,7 @@ export function mountSignInForm(
       return;
     }
     try {
-      await lifecycle.transition((manager) => manager.loginJWT({ getToken }));
+      await session.loginJWT({ getToken });
     } catch (cause) {
       errorEl.textContent = cause instanceof Error ? cause.message : "Sign-in failed";
       errorEl.hidden = false;

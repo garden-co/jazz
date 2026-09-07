@@ -1,10 +1,11 @@
 import { authClient } from "./auth-client.js";
 import { getToken } from "./accounts.js";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
 export function mountSignUpForm(
   parent: HTMLElement,
-  lifecycle: JazzLifecycle,
+  session: Session,
   onToggle: () => void,
   reportLinkFailure: (cause: unknown) => void,
 ): void {
@@ -68,7 +69,7 @@ export function mountSignUpForm(
       return;
     }
     try {
-      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+      await session.linkJWT({ getToken });
     } catch (cause) {
       reportLinkFailure(cause);
       errorEl.textContent = cause instanceof Error ? cause.message : "Sign-up failed";

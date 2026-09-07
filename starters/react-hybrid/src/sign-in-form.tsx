@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
 import { getToken } from "./accounts";
-import { useJazzLifecycle } from "./main";
+import { useJazzSession } from "jazz-tools/react";
 
 export function SignInForm({ onToggle }: { onToggle: () => void }) {
-  const lifecycle = useJazzLifecycle();
+  const lifecycle = useJazzSession();
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
 
@@ -25,7 +25,7 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
       return;
     }
     try {
-      await lifecycle.transition((manager) => manager.loginJWT({ getToken }));
+      await lifecycle.loginJWT({ getToken });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed");
     } finally {

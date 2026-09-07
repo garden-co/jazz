@@ -4,7 +4,8 @@ import { mountTodoWidget } from "./todo-widget.js";
 import { mountAuthBackup } from "./auth-backup.js";
 import { mountSignInForm } from "./sign-in-form.js";
 import { mountSignUpForm } from "./sign-up-form.js";
-import type { JazzLifecycle } from "./jazz-lifecycle.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 import { getToken } from "./accounts.js";
 
 type View = "dashboard" | "signin" | "signup";
@@ -17,7 +18,7 @@ export interface AppHandle {
 export function mountApp(
   root: HTMLElement,
   initialDb: Db,
-  lifecycle: JazzLifecycle,
+  jazz: Session,
   initialProviderLinkError?: Error,
 ): AppHandle {
   let db: Db | undefined = initialDb;
@@ -38,11 +39,9 @@ export function mountApp(
   }
 
   async function handleSignOut() {
-    await lifecycle.transition(async (manager) => {
-      await authClient.signOut();
-      manager.logout();
-      manager.createLocalFirst();
-    });
+    await jazz.logout();
+    await authClient.signOut();
+    await jazz.createLocalFirst();
     setView("dashboard");
   }
 
@@ -53,7 +52,7 @@ export function mountApp(
 
   async function retryLink() {
     try {
-      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+      await jazz.linkJWT({ getToken });
       providerLinkError = undefined;
     } catch (cause) {
       providerLinkError = cause instanceof Error ? cause : new Error(String(cause));
@@ -86,7 +85,7 @@ export function mountApp(
       `;
       mountSignUpForm(
         root.querySelector<HTMLElement>('[data-slot="signup"]')!,
-        lifecycle,
+        jazz,
         () => setView("signin"),
         reportProviderLinkFailure,
       );
@@ -100,7 +99,7 @@ export function mountApp(
           <div data-slot="signin"></div>
         </main>
       `;
-      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!, lifecycle, () =>
+      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!, jazz, () =>
         setView("signup"),
       );
       return;
@@ -149,7 +148,7 @@ export function mountApp(
     unsubscribeTodos = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
 
     const authBackupSlot = root.querySelector<HTMLElement>('[data-slot="auth-backup"]');
-    if (authBackupSlot) mountAuthBackup(authBackupSlot, lifecycle);
+    if (authBackupSlot) mountAuthBackup(authBackupSlot, jazz);
   }
 
   render();

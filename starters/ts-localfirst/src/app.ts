@@ -7,7 +7,7 @@ export function mountApp(
   db: TodoDb,
   account: AccountHandle,
   onRestore: (secret: string) => Promise<void>,
-): void {
+): () => void {
   root.innerHTML = `
     <main class="dashboard">
       <header>
@@ -17,9 +17,10 @@ export function mountApp(
       <section data-slot="auth-backup"></section>
     </main>
   `;
-  mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
+  const unsubscribe = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
   mountAuthBackup(root.querySelector<HTMLElement>('[data-slot="auth-backup"]')!, {
     account,
     onRestore,
   });
+  return unsubscribe;
 }

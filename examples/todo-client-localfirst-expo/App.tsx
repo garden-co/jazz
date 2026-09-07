@@ -1,5 +1,5 @@
 import * as React from "react";
-import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react-native";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Pressable,
@@ -9,8 +9,6 @@ import {
   Text,
   View,
 } from "react-native";
-import { createAccountManager } from "jazz-tools/expo";
-import { createResettablePromise, loadSecret, SecretLoadError } from "./src/secret-promise-cache";
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
@@ -19,18 +17,6 @@ declare const process: { env: Record<string, string | undefined> };
 
 const appId = process.env.EXPO_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!;
-const authSecret = createResettablePromise(() =>
-  loadSecret(async () => {
-    if (!appId || !serverUrl)
-      throw new Error("Set EXPO_PUBLIC_JAZZ_APP_ID and EXPO_PUBLIC_JAZZ_SERVER_URL");
-    const accounts = await createAccountManager({
-      appId,
-      serverUrl,
-    });
-    return accounts.getLoggedIn() ?? accounts.createLocalFirst();
-  }),
-);
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -75,90 +61,41 @@ const styles = StyleSheet.create({
   },
 });
 
-const authFallback = (
-  <SafeAreaView style={styles.container}>
-    <View style={styles.loadingContainer}>
-      <ActivityIndicator size="small" />
-      <Text style={styles.loadingText}>Loading secure credentials...</Text>
-    </View>
-  </SafeAreaView>
-);
-
-const runtimeFallback = (
-  <SafeAreaView style={styles.container}>
-    <View style={styles.loadingContainer}>
-      <ActivityIndicator size="small" />
-      <Text style={styles.loadingText}>Loading Jazz runtime...</Text>
-    </View>
-  </SafeAreaView>
-);
-
-class SecretLoadErrorBoundary extends React.Component<
-  React.PropsWithChildren,
-  { failed: boolean }
-> {
-  state = { failed: false };
-
-  static getDerivedStateFromError(error: unknown) {
-    if (!(error instanceof SecretLoadError)) {
-      throw error;
-    }
-    return { failed: true };
-  }
-
-  private retry = () => {
-    authSecret.reset();
-    this.setState({ failed: false });
-  };
-
-  render() {
-    if (this.state.failed) {
-      return (
-        <SafeAreaView style={styles.container}>
-          <View style={styles.loadingContainer}>
-            <Text style={styles.errorText}>Could not load secure credentials.</Text>
-            <Pressable accessibilityRole="button" onPress={this.retry} style={styles.retryButton}>
+function SessionFallback() {
+  const { error, retry } = useJazzSession();
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.loadingContainer}>
+        {error ? (
+          <>
+            <Text style={styles.errorText}>{error.message}</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void retry().catch(() => {})}
+              style={styles.retryButton}
+            >
               <Text style={styles.retryButtonText}>Try again</Text>
             </Pressable>
-          </View>
-        </SafeAreaView>
-      );
-    }
-
-    return this.props.children;
-  }
+          </>
+        ) : (
+          <>
+            <ActivityIndicator size="small" />
+            <Text style={styles.loadingText}>Loading secure credentials and Jazz runtime...</Text>
+          </>
+        )}
+      </View>
+    </SafeAreaView>
+  );
 }
 
 export function App() {
-  const account = React.use(authSecret.get());
-  const [client, setClient] = React.useState<JazzClient>();
-  const [error, setError] = React.useState<Error>();
-  React.useEffect(() => {
-    let cancelled = false;
-    let active: JazzClient | undefined;
-    void createJazzClient({ appId, serverUrl, env: "dev", account })
-      .then(async (opened) => {
-        if (cancelled) {
-          await opened.shutdown();
-          return;
-        }
-        active = opened;
-        setClient(opened);
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
-      });
-    return () => {
-      cancelled = true;
-      setClient(undefined);
-      void active?.shutdown().catch(console.error);
-    };
-  }, [account]);
-  if (error) throw error;
-  if (!client) return runtimeFallback;
-
+  if (!appId || !serverUrl)
+    throw new Error("Set EXPO_PUBLIC_JAZZ_APP_ID and EXPO_PUBLIC_JAZZ_SERVER_URL");
   return (
-    <JazzClientProvider client={client}>
+    <JazzSessionProvider
+      config={{ appId, serverUrl, env: "dev", initial: "local-first" }}
+      fallback={<SessionFallback />}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -166,16 +103,8 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzClientProvider>
+    </JazzSessionProvider>
   );
 }
 
-export default function AppRoot() {
-  return (
-    <SecretLoadErrorBoundary>
-      <React.Suspense fallback={authFallback}>
-        <App />
-      </React.Suspense>
-    </SecretLoadErrorBoundary>
-  );
-}
+export default App;

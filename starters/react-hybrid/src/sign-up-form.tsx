@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
 import { getToken } from "./accounts";
-import { useJazzLifecycle } from "./main";
+import { useJazzSession } from "jazz-tools/react";
 
 export function SignUpForm({ onToggle }: { onToggle: () => void }) {
-  const lifecycle = useJazzLifecycle();
+  const lifecycle = useJazzSession();
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
 
@@ -30,9 +30,8 @@ export function SignUpForm({ onToggle }: { onToggle: () => void }) {
       return;
     }
     try {
-      await lifecycle.transition((manager) => manager.linkJWT({ getToken }));
+      await lifecycle.linkJWT({ getToken });
     } catch (cause) {
-      lifecycle.reportLinkFailure(cause);
       setError(cause instanceof Error ? cause.message : "Sign-up failed");
     } finally {
       setIsPending(false);

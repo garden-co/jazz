@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from "vitest";
 
-const createAccountManager = vi.hoisted(() => vi.fn());
-vi.mock("jazz-tools", () => ({ createAccountManager }));
-vi.mock("jazz-tools/client", () => ({ createJazzClient: vi.fn() }));
+const createJazzSession = vi.hoisted(() => vi.fn());
+vi.mock("jazz-tools/client", () => ({ createJazzSession }));
 vi.mock("./app.js", () => ({ mountApp: vi.fn() }));
 
 afterEach(() => {
@@ -26,6 +25,6 @@ test.each(["VITE_JAZZ_APP_ID", "VITE_JAZZ_SERVER_URL"])(
     expect(document.getElementById("root")?.textContent).toContain(
       "in production, set them explicitly",
     );
-    expect(createAccountManager).not.toHaveBeenCalled();
+    expect(createJazzSession).not.toHaveBeenCalled();
   },
 );

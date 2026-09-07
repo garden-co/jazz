@@ -1,6 +1,4 @@
-import { useEffect, useState } from "react";
-import { createAccountManager, type AccountHandle } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
 import { authClient } from "../lib/auth-client";
 
 function YourApp() {
@@ -8,37 +6,39 @@ function YourApp() {
 }
 
 // #region betterauth-jazz-react
-// Mount after provider sign-in. Login requires a previously registered/linked
-// identity; registration is a separate explicit application action.
 export function App() {
-  const [account, setAccount] = useState<AccountHandle>();
-  const [error, setError] = useState<string>();
-  const config = { appId: "my-app", serverUrl: "wss://your-jazz-server.example.com" };
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const accounts = await createAccountManager(config);
-      const handle = await accounts.loginJWT({
-        getToken: async () => {
-          const result = await authClient.token();
-          if (result.error) throw new Error(result.error.message);
-          return result.data.token;
-        },
-      });
-      if (!cancelled) setAccount(handle);
-    })().catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  if (error) return <p role="alert">{error}</p>;
-  if (!account) return <p>Resolving account…</p>;
   return (
-    <JazzProvider config={{ ...config, account }}>
+    <JazzSessionProvider
+      config={{ appId: "my-app", serverUrl: "wss://your-jazz-server.example.com" }}
+      fallback={<ConnectAccount />}
+    >
       <YourApp />
-    </JazzProvider>
+    </JazzSessionProvider>
+  );
+}
+
+function ConnectAccount() {
+  const { loginJWT, error, status } = useJazzSession();
+  // Provider sign-in happens first. Login requires an already registered or
+  // linked identity; it never silently creates an account.
+  return (
+    <>
+      {error && <p role="alert">{error.message}</p>}
+      <button
+        disabled={status === "transitioning"}
+        onClick={() =>
+          void loginJWT({
+            getToken: async () => {
+              const result = await authClient.token();
+              if (result.error) throw new Error(result.error.message);
+              return result.data.token;
+            },
+          }).catch(() => {})
+        }
+      >
+        Connect signed-in account
+      </button>
+    </>
   );
 }
 // #endregion betterauth-jazz-react
