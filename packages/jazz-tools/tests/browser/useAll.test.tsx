@@ -179,6 +179,7 @@ async function waitForCondition(
   check: () => boolean,
   timeoutMs: number,
   errorMessage: string,
+  diagnostic?: () => string,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -187,7 +188,7 @@ async function waitForCondition(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(errorMessage);
+  throw new Error(diagnostic ? `${errorMessage}; ${diagnostic()}` : errorMessage);
 }
 
 function UseAllProbe<T extends { id: string }>({
@@ -418,6 +419,7 @@ describe("useAll browser integration", () => {
       await createBrowserTestJazzClient({
         appId: uniqueId("order"),
         driver: { type: "persistent", dbName: uniqueId("order") },
+        devMode: true,
       }),
     );
 
@@ -427,35 +429,74 @@ describe("useAll browser integration", () => {
       limit: 1,
     });
 
-    render(
-      <JazzProvider client={client}>
-        <UseAllProbe query={query} pick={(row) => row.title} />
-      </JazzProvider>,
-    );
-
-    await client.db.insert(todos, {
-      title: "p1",
-      done: false,
-      priority: 1,
-      owner_id: undefined,
-      tags: ["x"],
-    });
-    await client.db.insert(todos, {
-      title: "p2",
-      done: false,
-      priority: 2,
-      owner_id: undefined,
-      tags: ["x"],
-    });
-    await client.db.insert(todos, {
-      title: "p3",
-      done: false,
-      priority: 3,
-      owner_id: undefined,
-      tags: ["x"],
+    // This query has previously timed out only under the aggregate browser
+    // workload. Keep a failure receipt local to this test: it distinguishes a
+    // hook that never settled from a settled-but-wrong page, and records
+    // whether the public maintained subscription was ever registered.
+    let hookState = "not rendered";
+    const subscriptionHistory: string[] = [];
+    const stopSubscriptionTrace = client.db.onActiveQuerySubscriptionsChange((traces) => {
+      if (subscriptionHistory.length === 16) subscriptionHistory.shift();
+      subscriptionHistory.push(
+        traces
+          .map(({ id, table, tier, propagation }) => `${id}:${table}:${tier}:${propagation}`)
+          .join("|") || "none",
+      );
     });
 
-    await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
+    function PaginationProbe() {
+      const result = useAll(query);
+      hookState = result.error
+        ? `error:${result.error.message}`
+        : result.data
+          ? `fulfilled:${result.data.map((row) => row.title).join("|")}`
+          : result.isLoading
+            ? "pending"
+            : "no result";
+      return (
+        <div data-testid="rows">{result.data?.map((row) => row.title).join("|") ?? hookState}</div>
+      );
+    }
+
+    try {
+      render(
+        <JazzProvider client={client}>
+          <PaginationProbe />
+        </JazzProvider>,
+      );
+
+      await client.db.insert(todos, {
+        title: "p1",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+      await client.db.insert(todos, {
+        title: "p2",
+        done: false,
+        priority: 2,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+      await client.db.insert(todos, {
+        title: "p3",
+        done: false,
+        priority: 3,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+
+      await waitForCondition(
+        () => getText("rows") === "p2",
+        5000,
+        "expected p2 in paginated useAll",
+        () =>
+          `final DOM=${container?.innerHTML ?? "missing"}; hook=${hookState}; subscriptions=${subscriptionHistory.join(" -> ")}`,
+      );
+    } finally {
+      stopSubscriptionTrace();
+    }
   });
 
   it("accepts core-supported QueryOptions for component subscriptions", async () => {
