@@ -107,8 +107,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     return true
   }
 
-  /** An acknowledged, asynchronous boundary: synchronous React methods are
-   * not exported by every installed runtime configuration. */
+  /** The trace boundary must be acknowledged before the receipt starts its
+   * post-commit epoch; an unobserved marker cannot diagnose that epoch. */
   @ReactMethod fun recordSameRuntimeWakeBoundary(promise: Promise) {
     Log.e("JazzForegroundWake", "armed")
     promise.resolve(null)

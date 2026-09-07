@@ -201,8 +201,8 @@ RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:
   resolve(nil);
 }
 
-/** This receipt boundary is asynchronous on both platforms: RN can omit
- * blocking synchronous exports in an installed release runtime. */
+/** This boundary is acknowledged before the post-commit epoch, so a missing
+ * marker is diagnosed explicitly rather than being mistaken for no wake. */
 RCT_REMAP_METHOD(recordSameRuntimeWakeBoundary, recordSameRuntimeWakeBoundaryWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSLog(@"JazzForegroundWake armed");
   resolve(nil);

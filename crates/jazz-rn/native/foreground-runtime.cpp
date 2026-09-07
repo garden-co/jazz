@@ -15,12 +15,19 @@
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
+#ifdef __APPLE__
+#include <os/log.h>
+#endif
 
 namespace jazz::rn {
 
 void traceForegroundWake(const char *stage) noexcept {
 #ifdef __ANDROID__
   __android_log_print(ANDROID_LOG_ERROR, "JazzForegroundWake", "%s", stage);
+#elif defined(__APPLE__)
+  // The iOS driver reads only this app process's bounded unified-log tail.
+  // Every stage is a fixed literal selected in this translation unit.
+  os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, "JazzForegroundWake %{public}s", stage);
 #else
   (void)stage;
 #endif
