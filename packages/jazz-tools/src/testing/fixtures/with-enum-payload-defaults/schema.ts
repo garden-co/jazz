@@ -11,8 +11,14 @@ const generatedApp = defineApp({
           note: col.string().optional().default(null),
         },
       })
-      .default({ type: "ready", count: 7, label: "live", note: null }),
+      .default({ type: "ready", count: 7, label: "live", note: "unused" }),
   },
 });
+
+const stateColumn = generatedApp.wasmSchema.records.columns[0]!;
+if (stateColumn.default?.type !== "Enum") {
+  throw new Error("Expected generated payload enum default.");
+}
+stateColumn.default.value.values[2] = { type: "Null" };
 
 export const app = { wasmSchema: generatedApp.wasmSchema };
