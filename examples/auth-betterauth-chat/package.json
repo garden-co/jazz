@@ -7,7 +7,9 @@
     "dev": "next dev",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
     "start": "next start",
-    "test": "vitest run --config vitest.config.browser.ts"
+    "test": "pnpm test:server && pnpm test:browser",
+    "test:server": "vitest run --config vitest.config.server.ts",
+    "test:browser": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
     "better-auth": "1.7.1",

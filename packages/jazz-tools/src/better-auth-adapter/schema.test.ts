@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { BetterAuthDBSchema } from "better-auth/db";
+import { jwt } from "better-auth/plugins";
+import { getAuthTables, type BetterAuthDBSchema } from "better-auth/db";
 import {
   buildJazzSchemaSourceText,
   buildJazzSchemaSourceTextFromTables,
@@ -7,6 +8,20 @@ import {
 } from "./schema.js";
 
 describe("better-auth schema helpers", () => {
+  it("retains the installed JWT plugin signing-key metadata", () => {
+    const tables = getAuthTables({ plugins: [jwt()] });
+    const schema = buildJazzSchemaFromTables({ tables });
+    const source = buildJazzSchemaSourceTextFromTables({ tables });
+    for (const name of ["alg", "crv"]) {
+      expect(schema.jwks?.columns).toContainEqual({
+        name,
+        column_type: { type: "Text" },
+        nullable: true,
+      });
+      expect(source).toContain(`${name}: s.string().optional()`);
+    }
+  });
+
   it("builds a Jazz schema from Better Auth tables using transformed names", () => {
     const tables = {
       user: {

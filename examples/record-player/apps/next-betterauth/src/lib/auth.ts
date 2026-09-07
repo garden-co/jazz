@@ -19,7 +19,6 @@ export const auth = betterAuth({
   database: jazzAdapter({ db: async () => (await authJazzClient()).db, schema: app.wasmSchema }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 8 },
   plugins: [
-    nextCookies(),
     bearer(),
     jwt({
       jwks: { keyPairConfig: { alg: "ES256" } },
@@ -29,5 +28,6 @@ export const auth = betterAuth({
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },
     }),
+    nextCookies(),
   ],
 });

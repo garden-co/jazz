@@ -24,7 +24,6 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
       requireEmailVerification: false,
     },
     plugins: [
-      nextCookies(),
       admin({
         adminRoles: ["admin"],
         defaultRole: "member",
@@ -48,6 +47,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
           getSubject: ({ user }: { user: { id: string } }) => user.id,
         },
       }),
+      nextCookies(),
     ],
   });
 

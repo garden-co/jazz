@@ -23,7 +23,6 @@ export const auth = betterAuth({
     requireEmailVerification: false,
   },
   plugins: [
-    nextCookies(),
     bearer(),
     jwt({
       jwks: { keyPairConfig: { alg: "ES256" } },
@@ -33,5 +32,6 @@ export const auth = betterAuth({
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },
     }),
+    nextCookies(),
   ],
 });
