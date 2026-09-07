@@ -3,7 +3,7 @@ import { requestAccountRegistry } from "../accounts/registry-client.js";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
-import { createJazzContext, type JazzContext } from "../backend/index.js";
+import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
   startTestJwtIssuer,

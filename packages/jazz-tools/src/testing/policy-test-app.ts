@@ -1,4 +1,5 @@
-import { createJazzContext, Db, type JazzContext } from "../backend/index.js";
+import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
+import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { ANONYMOUS_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";

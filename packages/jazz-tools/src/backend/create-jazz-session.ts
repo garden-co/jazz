@@ -14,7 +14,7 @@ import { authorBytesForSession } from "../runtime/author-id.js";
 import { JazzClient as RuntimeClient, type RequestLike } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { AppContext, PublicSession } from "../runtime/context.js";
-import type { Db, DbConfig } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
 import {
   getTrustedReservedSession,
   setTrustedReservedSession,
@@ -56,6 +56,9 @@ export interface JazzClient extends SharedJazzClient {
   forRequest(request: RequestLike): Promise<Db>;
   /** Use an admitted account without switching the shared session. Backend clients only. */
   forAccount(account: AccountHandle): Promise<Db>;
+  /** Keep backend permissions while recording verified user provenance. */
+  withAttribution(account: AccountHandle): Promise<Db>;
+  withAttributionForRequest(request: RequestLike): Promise<Db>;
 }
 
 function uuidBytes(uuid: string): Uint8Array {
@@ -74,9 +77,8 @@ function backendNodeId(config: JazzSessionConfig): string {
 /** Each selected user opens an ordinary native client, never a backend facade. */
 class NodeUserRuntimeSource extends RuntimeSource {
   override readonly supportsPolicyBypass = false;
-  private runtime?: NativeRuntimeAdapter;
   flush(): void {
-    this.runtime?.flush();
+    // Native writes already cross the local durability boundary when committed.
   }
   constructor(
     private readonly host: JazzSessionConfig,
@@ -112,7 +114,6 @@ class NodeUserRuntimeSource extends RuntimeSource {
         readAuthorizationHost: "client-local",
       },
     );
-    this.runtime = runtime;
     const context: AppContext = { ...config, schema, tier: "local" };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
@@ -194,6 +195,12 @@ export async function createJazzSession(
           async forAccount(): Promise<Db> {
             throw new Error("Account scopes require a backend account");
           },
+          async withAttribution(): Promise<Db> {
+            throw new Error("Attribution requires a backend account");
+          },
+          async withAttributionForRequest(): Promise<Db> {
+            throw new Error("Attribution requires a backend account");
+          },
         });
       }
       // The class remains internal; only a validated opaque account can reach it.
@@ -240,6 +247,25 @@ export async function createJazzSession(
           const scoped = await context.forRequest({
             headers: { authorization: `Bearer ${token}` },
           });
+          assertActive();
+          return scoped;
+        },
+        async withAttribution(requestAccount: AccountHandle) {
+          assertActive();
+          if (accountRegistry(requestAccount) !== registry)
+            throw new Error("Account application mismatch");
+          if (getBackendAuth(requestAccount, registry))
+            throw new Error("Attribution requires a user account");
+          const token = await accountToken(requestAccount, registry);
+          const scoped = await context.withAttributionForRequest({
+            headers: { authorization: `Bearer ${token}` },
+          });
+          assertActive();
+          return scoped;
+        },
+        async withAttributionForRequest(request: RequestLike) {
+          assertActive();
+          const scoped = await context.withAttributionForRequest(request);
           assertActive();
           return scoped;
         },
