@@ -59,6 +59,11 @@ overrides:
   react: 19.2.4
   react-dom: 19.2.4
 
+patchedDependencies:
+  playwright-core@1.58.2:
+    hash: adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5
+    path: patches/playwright-core@1.58.2.patch
+
 importers:
 
   .:
@@ -24637,11 +24642,11 @@ snapshots:
       exsolve: 1.1.0
       pathe: 2.0.3
 
-  playwright-core@1.58.2: {}
+  playwright-core@1.58.2(patch_hash=adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5): {}
 
   playwright@1.58.2:
     dependencies:
-      playwright-core: 1.58.2
+      playwright-core: 1.58.2(patch_hash=adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5)
     optionalDependencies:
       fsevents: 2.3.2
 
