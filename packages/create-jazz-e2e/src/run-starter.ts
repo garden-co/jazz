@@ -385,7 +385,24 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
-    server = await startLocalJazzServer({ inMemory: true, allowLocalFirstAuth: true });
+    // Better Auth starters enroll the provider's external JWT identity at the
+    // account registry. Point the local registry at the starter's JWKS endpoint
+    // and require the exact origin as issuer and audience, matching production
+    // JWT admission. The endpoint is fetched lazily when the browser enrolls,
+    // after the starter's production server has started.
+    const usesExternalJwt =
+      opts.starter.endsWith("-betterauth") || opts.starter.endsWith("-hybrid");
+    server = await startLocalJazzServer({
+      inMemory: true,
+      allowLocalFirstAuth: true,
+      ...(usesExternalJwt
+        ? {
+            jwksUrl: `${config.appOrigin}/api/auth/jwks`,
+            jwtIssuer: config.appOrigin,
+            jwtAudience: config.appOrigin,
+          }
+        : {}),
+    });
     writeEnvFile(appDir, opts.starter, server, config);
 
     await recordPhase("build", () =>
