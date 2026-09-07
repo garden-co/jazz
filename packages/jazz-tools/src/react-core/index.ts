@@ -23,3 +23,5 @@ export {
   type ConfiguredJazzSessionProviderProps,
   type UseJazzSessionResult,
 } from "./session.js";
+
+export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";

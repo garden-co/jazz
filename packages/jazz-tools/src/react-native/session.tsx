@@ -28,3 +28,10 @@ export function JazzSessionProvider(props: JazzSessionProviderProps) {
     <ConfiguredJazzSessionProvider {...props} createJazzSession={createJazzSession} />
   );
 }
+
+import { useJazzSessionOwner as useCoreJazzSessionOwner } from "../react-core/session.js";
+export type { JazzSessionOwnerResult } from "../react-core/session.js";
+/** Capture configuration once and retain the owner across authentication UI transitions. */
+export function useJazzSessionOwner(config: JazzSessionConfig) {
+  return useCoreJazzSessionOwner(config, createJazzSession);
+}

@@ -41,27 +41,35 @@ export function JazzSessionProvider<Client extends CoreJazzClient>({
     session.getSnapshot,
     session.getSnapshot,
   );
-  const lease = useRef<ReturnType<typeof attachJazzSessionConsumer> | null>(null);
+  const consumer = useMemo(
+    () => ({
+      lease: undefined as ReturnType<typeof attachJazzSessionConsumer> | undefined,
+      epoch: 0,
+    }),
+    [session],
+  );
   useLayoutEffect(() => {
-    const attached = attachJazzSessionConsumer(session);
-    lease.current = attached;
-    return () => {
-      lease.current = null;
-    };
-  }, [session]);
+    // Suspense hides and replays layout effects without removing passive query
+    // subscriptions. Keep the same lease until a real passive cleanup commits.
+    consumer.lease ??= attachJazzSessionConsumer(session);
+  }, [session, consumer]);
   useEffect(() => {
-    const attached = lease.current;
-    // Releasing in passive cleanup, then a microtask, also covers full unmount:
-    // all descendant passive query cleanups complete before shutdown resumes.
+    ++consumer.epoch;
     return () => {
-      queueMicrotask(() => attached?.release());
+      const epoch = ++consumer.epoch;
+      // StrictMode immediately replays passive setup and cancels this release.
+      // A real unmount releases after all descendant passive query cleanups.
+      queueMicrotask(() => {
+        if (consumer.epoch !== epoch) return;
+        consumer.lease?.release();
+        consumer.lease = undefined;
+      });
     };
-  }, [session]);
+  }, [consumer]);
   useEffect(() => {
-    // React has now committed the fallback AND run the removed subtree's
-    // passive cleanups (including useSyncExternalStore query subscriptions).
-    lease.current?.acknowledge(snapshot);
-  }, [session, snapshot]);
+    // The fallback is committed and removed query subscriptions have detached.
+    consumer.lease?.acknowledge(snapshot);
+  }, [consumer, snapshot]);
   const value = useMemo(() => ({ ...session, ...snapshot }), [session, snapshot]);
   return (
     <SessionContext.Provider value={value}>
@@ -90,6 +98,40 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
 }: ConfiguredJazzSessionProviderProps<Config> & {
   createJazzSession: (config: Config) => Promise<JazzSession<Client>>;
 }) {
+  const { session, error, retry: start } = useJazzSessionOwner(config, createJazzSession);
+  const startup = useMemo<UseJazzSessionResult<Client>>(() => {
+    const unavailable = async () => {
+      throw new Error("Jazz session is not ready; retry initialization first");
+    };
+    return {
+      status: error ? "error" : "transitioning",
+      ...(error ? { error } : {}),
+      createLocalFirst: unavailable,
+      restoreLocalFirst: unavailable,
+      registerJWT: unavailable,
+      loginJWT: unavailable,
+      linkJWT: unavailable,
+      logout: unavailable,
+      close: unavailable,
+      retry: start,
+    };
+  }, [error, start]);
+  if (session)
+    return (
+      <JazzSessionProvider session={session} fallback={fallback}>
+        {children}
+      </JazzSessionProvider>
+    );
+  return <SessionContext.Provider value={startup}>{fallback}</SessionContext.Provider>;
+}
+
+/** Own a session while keeping application authentication coordination mounted across transitions.
+ * Configuration is captured at mount; use a React key to replace it.
+ */
+export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
+  config: Config,
+  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
+): JazzSessionOwnerResult<Client> {
   const initial = useRef({ config, createJazzSession }).current;
   const owner = useRef<{
     active: boolean;
@@ -135,28 +177,10 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
       }, 0);
     };
   }, [owner, start]);
-  const startup = useMemo<UseJazzSessionResult<Client>>(() => {
-    const unavailable = async () => {
-      throw new Error("Jazz session is not ready; retry initialization first");
-    };
-    return {
-      status: error ? "error" : "transitioning",
-      ...(error ? { error } : {}),
-      createLocalFirst: unavailable,
-      restoreLocalFirst: unavailable,
-      registerJWT: unavailable,
-      loginJWT: unavailable,
-      linkJWT: unavailable,
-      logout: unavailable,
-      close: unavailable,
-      retry: start,
-    };
-  }, [error, start]);
-  if (session)
-    return (
-      <JazzSessionProvider session={session} fallback={fallback}>
-        {children}
-      </JazzSessionProvider>
-    );
-  return <SessionContext.Provider value={startup}>{fallback}</SessionContext.Provider>;
+  return { session, error, retry: start };
 }
+export type JazzSessionOwnerResult<Client> = {
+  session?: JazzSession<Client>;
+  error?: Error;
+  retry(): Promise<void>;
+};

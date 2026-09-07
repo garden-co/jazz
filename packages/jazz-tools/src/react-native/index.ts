@@ -58,3 +58,5 @@ export {
   type JazzSessionSnapshot,
   type JazzSessionActions,
 } from "./session.js";
+
+export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";

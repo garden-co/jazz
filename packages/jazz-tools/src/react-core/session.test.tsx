@@ -8,6 +8,7 @@ import {
   JazzSessionProvider,
   ConfiguredJazzSessionProvider,
   useJazzSession,
+  useJazzSessionOwner,
   type UseJazzSessionResult,
 } from "./session.js";
 import { useJazzClient } from "./provider.js";
@@ -245,4 +246,93 @@ describe("JazzSessionProvider", () => {
     ).toContain("transitioning");
     expect(factory).not.toHaveBeenCalled();
   });
+});
+
+it("Suspense hide and reveal does not leak a detach lease", async () => {
+  const { session } = await setup();
+  const never = new Promise<void>(() => {});
+  function Child({ suspended }: { suspended: boolean }) {
+    useJazzClient();
+    if (suspended) throw never;
+    return <Status />;
+  }
+  const tree = (suspended: boolean) => (
+    <React.Suspense fallback={<p>Suspended</p>}>
+      <JazzSessionProvider session={session} fallback={<Status />}>
+        <Child suspended={suspended} />
+      </JazzSessionProvider>
+    </React.Suspense>
+  );
+  const view = render(tree(false));
+  view.rerender(tree(true));
+  expect(view.container.textContent).toContain("Suspended");
+  view.rerender(tree(false));
+  expect(view.container.textContent).toBe("ready:");
+  let operation!: Promise<void>;
+  act(() => {
+    operation = session.logout();
+  });
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+  await waitFor(() => expect(session.getSnapshot().status).toBe("signed-out"), { timeout: 200 });
+  await operation;
+  view.unmount();
+  await session.close();
+});
+
+it("replaces external sessions and releases both views on unmount", async () => {
+  const first = await setup();
+  const second = await setup();
+  const view = render(
+    <JazzSessionProvider session={first.session}>
+      <Status />
+    </JazzSessionProvider>,
+  );
+  view.rerender(
+    <JazzSessionProvider session={second.session}>
+      <Status />
+    </JazzSessionProvider>,
+  );
+  await first.session.close();
+  expect(first.clients[0]!.shutdown).toHaveBeenCalledOnce();
+  expect(second.clients[0]!.shutdown).not.toHaveBeenCalled();
+  view.unmount();
+  await second.session.close();
+  expect(second.clients[0]!.shutdown).toHaveBeenCalledOnce();
+});
+
+it("the owner hook keeps auth coordination mounted across ready and fallback views", async () => {
+  const { session } = await setup();
+  const factory = vi.fn(async () => session);
+  const mounted = vi.fn();
+  const unmounted = vi.fn();
+  function Coordinator() {
+    const owner = useJazzSessionOwner({}, factory);
+    useEffect(() => {
+      mounted();
+      return unmounted;
+    }, []);
+    return owner.session ? (
+      <JazzSessionProvider session={owner.session} fallback={<Status />}>
+        <Status />
+      </JazzSessionProvider>
+    ) : null;
+  }
+  const view = render(<Coordinator />);
+  await waitFor(() => expect(view.container.textContent).toBe("ready:"));
+  let operation!: Promise<void>;
+  act(() => {
+    operation = session.logout();
+  });
+  await act(async () => {
+    await operation;
+  });
+  expect(view.container.textContent).toBe("signed-out:");
+  expect(mounted).toHaveBeenCalledOnce();
+  expect(unmounted).not.toHaveBeenCalled();
+  expect(factory).toHaveBeenCalledOnce();
+  view.unmount();
+  await waitFor(() => expect(session.getSnapshot().status).toBe("closed"));
+  expect(unmounted).toHaveBeenCalledOnce();
 });
