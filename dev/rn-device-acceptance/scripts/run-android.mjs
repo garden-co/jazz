@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
 import { captureAndroidFailure } from "./android-postmortem.mjs";
 import { androidAcceptanceFailure } from "./android-diagnostics.mjs";
+import { verifyAndroidOfflineRestarts } from "./android-offline-restarts.mjs";
 import { adb } from "./android-adb.mjs";
 import { verifyAndroidRelayStage } from "./android-relay-stage.mjs";
 import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
@@ -135,19 +136,39 @@ try {
         observedAt: new Date().toISOString(),
       }),
   );
-  // This must be a process boundary: no JSI alias or relay process can survive.
-  androidAdb(["shell", "am", "force-stop", "dev.jazz.rndeviceacceptance"]);
-  await localSession.stopForOfflineRestart();
-  console.log(
-    "JAZZ_DEVICE_REOPEN_PROVENANCE " +
-      JSON.stringify({
-        platform: "android",
-        runNonce,
-        upstream: "stopped-and-endpoint-refused",
-        scopeEndpoint: "unchanged",
-      }),
-  );
-  await launchAndAssert("verify");
+  // Build/install/seed once. Each of the three offline checks starts a new
+  // process and must pass independently against the same retained accounts.
+  await verifyAndroidOfflineRestarts({
+    stopApp: () => androidAdb(["shell", "am", "force-stop", "dev.jazz.rndeviceacceptance"]),
+    stopUpstream: async () => {
+      await localSession.stopForOfflineRestart();
+      console.log(
+        "JAZZ_DEVICE_REOPEN_PROVENANCE " +
+          JSON.stringify({
+            platform: "android",
+            runNonce,
+            upstream: "stopped-and-endpoint-refused",
+            scopeEndpoint: "unchanged",
+          }),
+      );
+    },
+    verify: async (iteration) => {
+      const results = await launchAndAssert("verify");
+      console.log(
+        "JAZZ_DEVICE_RESTART_RESULT " +
+          JSON.stringify({
+            platform: "android",
+            deviceIdentifier,
+            buildFingerprint,
+            runNonce,
+            iteration,
+            iterations: 3,
+            receipts: results.length,
+            observedAt: results[0].receipt.observedAt,
+          }),
+      );
+    },
+  });
 } finally {
   await localSession.terminate();
   await control?.close();
