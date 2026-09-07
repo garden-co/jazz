@@ -7,7 +7,7 @@ import {
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
-import { createJazzContext } from "jazz-tools/backend";
+import { createJazzSession } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
 
@@ -19,7 +19,7 @@ export default async function runServer({ port = TEST_PORT }: { port?: number } 
     backendSecret: "test",
   });
 
-  let context: ReturnType<typeof createJazzContext> | undefined;
+  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   try {
     await deploy({
       serverUrl: serverHandle.url,
@@ -29,17 +29,21 @@ export default async function runServer({ port = TEST_PORT }: { port?: number } 
       permissions,
     });
 
-    context = createJazzContext({
+    session = await createJazzSession({
       appId: serverHandle.appId,
       app: app,
       permissions,
       driver: { type: "memory" },
       serverUrl: serverHandle.url,
-      backendSecret: serverHandle.backendSecret,
+      initial: { backendSecret: serverHandle.backendSecret },
       defaultDurabilityTier: "global",
     });
 
-    const sessionedClient = context.asBackend();
+    const snapshot = session.getSnapshot();
+    if (snapshot.status !== "ready" || !snapshot.client) {
+      throw snapshot.error ?? new Error("Backend session is not ready");
+    }
+    const sessionedClient = snapshot.client.db;
 
     const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
     for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
@@ -57,12 +61,12 @@ export default async function runServer({ port = TEST_PORT }: { port?: number } 
       );
     }
 
-    await context.shutdown();
+    await session.close();
     return {
       serverHandle,
     };
   } catch (error) {
-    await Promise.all([context?.shutdown(), serverHandle.stop()]).catch((cleanupError) => {
+    await Promise.all([session?.close(), serverHandle.stop()]).catch((cleanupError) => {
       console.error("Inspector seed cleanup after setup failure failed", cleanupError);
     });
     throw error;
