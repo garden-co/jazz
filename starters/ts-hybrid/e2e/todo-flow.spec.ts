@@ -39,13 +39,29 @@ test("signup → add todo → reload → todo persists", async ({ page }) => {
   await waitForTodoApp(page);
   const localTodo = `Before signup ${runId}`;
   await addTodo(page, localTodo);
+  const linked = page.waitForResponse(
+    (response) =>
+      /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+      response.request().method() === "POST",
+  );
   await signUp(page, email, password, "Alice");
+  expect((await linked).ok()).toBe(true);
   await waitForTodoApp(page);
   await expect(page.getByText(localTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   await addTodo(page, todo);
 
   await page.reload();
   await waitForTodoApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  // Complete the session switch, then re-admit the provider identity. A provider
+  // session alone must not make a pending/failed Jazz link look successful.
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(0, { timeout: TIMEOUT });
+  await signIn(page, email, password);
+  await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
 
