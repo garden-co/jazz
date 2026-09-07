@@ -1851,11 +1851,11 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
     runner,
     /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth test:browser/,
   );
-  assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
-  assert.match(
-    runner,
-    /setsid bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/,
-  );
+  assert.match(runner, /set -m/);
+  assert.match(runner, /bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
+  assert.match(runner, /bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/);
+  assert.match(runner, /browser_tests_pid=\$!\nset \+m/);
+  assert.doesNotMatch(runner, /^setsid /m);
   assert.match(runner, /trap 'interrupt 130' INT/);
   assert.match(runner, /trap 'interrupt 143' TERM/);
   assert.match(runner, /kill -TERM -- "-\$\{child_pid\}"/);
