@@ -91,6 +91,59 @@ describe("BrowserWorkerTransportPump", () => {
     pump.close();
   });
 
+  it("keeps a retried peer live after pump setup fails and the runtime wakes again", async () => {
+    const listeners = new Set<() => void>();
+    const setupError = new Error("outbound scheduler setup failed");
+    const errors: unknown[] = [];
+    const delivered: Uint8Array[] = [];
+    let retry: BrowserWorkerTransportPump | undefined;
+    const peerRuntime = {
+      onPeerTransportWork: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async (peer: Transport) => {
+        peer.close();
+      },
+    };
+    const failPeer = (error: unknown) => {
+      errors.push(error);
+      retry?.close();
+    };
+    const failedTransport = transport({
+      setOutboundScheduler: () => {
+        throw setupError;
+      },
+      recvWireFrames: () => {
+        throw new Error("retired transport was used by a stale pump");
+      },
+    });
+    try {
+      expect(
+        () => new BrowserWorkerTransportPump(peerRuntime, failedTransport, vi.fn(), failPeer),
+      ).toThrow(setupError);
+      await peerRuntime.retirePeerTransport(failedTransport);
+      const outbound = [Uint8Array.of(1)];
+      retry = new BrowserWorkerTransportPump(
+        peerRuntime,
+        transport({ recvWireFrames: () => outbound.splice(0) }),
+        (frames) => delivered.push(...frames),
+        failPeer,
+      );
+      await retry.flush();
+
+      outbound.push(Uint8Array.of(2));
+      for (const listener of listeners) listener();
+      await retry.flush();
+      expect(errors).toEqual([]);
+      expect(delivered).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+    } finally {
+      retry?.close();
+      listeners.clear();
+    }
+  });
+
   it("does not send frames when closed during a suspended tick", async () => {
     let release!: () => void;
     const sendFrames = vi.fn();

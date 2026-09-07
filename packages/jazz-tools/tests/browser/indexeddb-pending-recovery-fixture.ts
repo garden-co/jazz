@@ -14,11 +14,10 @@ export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy })
   policy.items.allowInsert.always(),
 ]);
 
-export interface RecoveryConfig {
+export type RecoveryConfig = {
   appId: string;
   serverUrl: string;
-  jwtToken: string;
-}
+} & ({ jwtToken: string; secret?: never } | { secret: string; jwtToken?: never });
 
 export interface RecoveryRows {
   marker: number | undefined;

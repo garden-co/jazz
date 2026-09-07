@@ -1,5 +1,7 @@
+import { setImmediate as nextTask } from "node:timers/promises";
 import type { Mock } from "vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Transport } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
@@ -115,6 +117,7 @@ const mocks = vi.hoisted(() => {
       openBrowserWithSelfSignedProof.mockReset().mockImplementation(async () => createBrowserDb());
       fromDb.mockReset().mockImplementation(() => {
         const subscriber = {
+          close: vi.fn(() => true),
           setAuxiliaryTraceEnabled: vi.fn(),
           setOutboundScheduler: vi.fn(),
           clearOutboundScheduler: vi.fn(),
@@ -128,8 +131,10 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
-          retirePeerTransport: vi.fn(async () => undefined),
-          acceptPeerWhenIdle: vi.fn(async () => subscriber),
+          retirePeerTransport: vi.fn(async (transport: Transport) => {
+            transport.close();
+          }),
+          acceptPeer: vi.fn(async () => subscriber),
           connect: vi.fn(),
           disconnect: vi.fn(async () => undefined),
           updateAuth: vi.fn(async () => undefined),
@@ -375,6 +380,62 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function bounded<T>(promise: Promise<T>): Promise<T> {
+  // This is only a failure deadline, never a delay used to infer scheduling.
+  const timeout = deferred<never>();
+  const timer = setTimeout(
+    () => timeout.reject(new Error("Worker operation did not settle")),
+    1000,
+  );
+  try {
+    return await Promise.race([promise, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function createAdmissionTransport(initialFrames: Uint8Array[] = []) {
+  let closed = false;
+  let claims: Record<string, unknown> = {};
+  const outgoing = [...initialFrames];
+  return {
+    get closed() {
+      return closed;
+    },
+    close() {
+      closed = true;
+      return true;
+    },
+    tick() {
+      return 0;
+    },
+    recvWireFrames() {
+      return outgoing.splice(0);
+    },
+    sendWireFrame(frame: Uint8Array) {
+      outgoing.push(new TextEncoder().encode(JSON.stringify({ claims, frame: Array.from(frame) })));
+    },
+    async updateAuthenticatedClaims(nextClaims: Record<string, unknown>) {
+      claims = nextClaims;
+    },
+  } satisfies Transport & { readonly closed: boolean };
+}
+
+async function followerResult(
+  port: TestPort,
+  message: BrowserFollowerPortRequest & { id: number },
+): Promise<Extract<TestPortEvent, { type: "result" }>> {
+  const response = port.waitForEvent((event) => event.type === "result" && event.id === message.id);
+  port.emitMessage(message);
+  return (await bounded(response)) as Extract<TestPortEvent, { type: "result" }>;
+}
+
+async function subscriberResponses(port: TestPort): Promise<unknown[]> {
+  const event = await bounded(port.waitForEvent((event) => event.type === "frames"));
+  if (event.type !== "frames") throw new Error("Expected subscriber frames");
+  return event.frames.map((frame) => JSON.parse(new TextDecoder().decode(frame)));
+}
+
 function options(dbName: string): BrowserWorkerInitOptions {
   return {
     schema: {},
@@ -510,6 +571,281 @@ describe("broker worker context initialization", () => {
     vi.resetModules();
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
+  });
+
+  it("retires admission completed after close without publishing frames or an init result", async () => {
+    const initOptions = { ...options("close-pending-admission"), serverUrl: "ws://server.test" };
+    const first = await bounded(connect(initOptions, "first"));
+    const survivor = await bounded(connect(initOptions, "survivor"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = createAdmissionTransport([Uint8Array.of(9)]);
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    runtime.acceptPeer.mockImplementationOnce(() => {
+      entered.resolve();
+      return admission.promise;
+    });
+    try {
+      first.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
+      await bounded(entered.promise);
+      expect(await followerResult(first.port, { type: "close", id: 2 })).not.toHaveProperty(
+        "error",
+      );
+      admission.resolve(subscriber);
+      // A following transition proves that admission and retirement have drained.
+      expect(await followerResult(survivor.port, { type: "disconnect", id: 3 })).not.toHaveProperty(
+        "error",
+      );
+      expect(subscriber.closed).toBe(true);
+      expect(
+        first.port.hasEvent(
+          (event) =>
+            event.type === "frames" ||
+            event.type === "transport-state" ||
+            (event.type === "result" && event.id === 1),
+        ),
+      ).toBe(false);
+      expect(runtime.connect).not.toHaveBeenCalled();
+    } finally {
+      admission.resolve(subscriber);
+      first.port.emitMessage({ type: "close" });
+      survivor.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("retires a replaced peer's pending admission without attaching to either port", async () => {
+    const initOptions = options("replacement-pending-admission");
+    const first = await bounded(connect(initOptions, "same-tab"));
+    const control = new TestPort();
+    const replacement = new TestPort();
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = createAdmissionTransport([Uint8Array.of(9)]);
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    runtime.acceptPeer.mockImplementationOnce(() => {
+      entered.resolve();
+      return admission.promise;
+    });
+    try {
+      await followerResult(first.port, {
+        type: "open-inspector-control",
+        id: 1,
+        port: control as unknown as MessagePort,
+      });
+      first.port.emitMessage({ type: "init", id: 2, sessionClaims: {} });
+      await bounded(entered.promise);
+      const attached = control.waitForEvent((event) => event.type === "result" && event.id === 3);
+      control.emitMessage({
+        type: "attach-context",
+        id: 3,
+        contextKey: initOptions.dbName,
+        tabId: "same-tab",
+        port: replacement as unknown as MessagePort,
+      });
+      await bounded(attached);
+      admission.resolve(subscriber);
+      await followerResult(replacement, { type: "disconnect", id: 4 });
+      expect(subscriber.closed).toBe(true);
+      for (const port of [first.port, replacement]) {
+        expect(
+          port.hasEvent(
+            (event) => event.type === "frames" || (event.type === "result" && event.id === 2),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        await followerResult(replacement, { type: "init", id: 5, sessionClaims: {} }),
+      ).not.toHaveProperty("error");
+    } finally {
+      admission.resolve(subscriber);
+      first.port.emitMessage({ type: "close" });
+      replacement.emitMessage({ type: "close" });
+      control.emitMessage({ type: "close" });
+    }
+  });
+
+  it("revokes pending admission publication synchronously on storage invalidation", async () => {
+    const first = await bounded(connect(options("invalidated-pending-admission"), "first"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = createAdmissionTransport([Uint8Array.of(9)]);
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    const retired = deferred<void>();
+    const portClosed = deferred<void>();
+    let invalidated = false;
+    first.port.close.mockImplementation(() => portClosed.resolve());
+    runtime.acceptPeer.mockImplementationOnce(() => {
+      entered.resolve();
+      return admission.promise;
+    });
+    runtime.retirePeerTransport.mockImplementationOnce(async (transport: Transport) => {
+      transport.close();
+      retired.resolve();
+    });
+    try {
+      first.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
+      await bounded(entered.promise);
+      // Model IndexedDbPageStore invalidating all registered owners in one task.
+      for (const [invalidate] of mocks.pageStores[0]!.onInvalidated.mock.calls) invalidate();
+      invalidated = true;
+      admission.resolve(subscriber);
+      await bounded(retired.promise);
+      expect(subscriber.closed).toBe(true);
+      expect(
+        first.port.hasEvent(
+          (event) => event.type === "frames" || (event.type === "result" && event.id === 1),
+        ),
+      ).toBe(false);
+    } finally {
+      admission.resolve(subscriber);
+      // Observe the real invalidation close rather than guessing its timer delay.
+      if (invalidated) await bounded(portClosed.promise);
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("rejects a second init queued during admission and preserves pending frame order", async () => {
+    const first = await bounded(connect(options("duplicate-pending-admission"), "first"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = createAdmissionTransport();
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    runtime.acceptPeer.mockImplementationOnce(() => {
+      entered.resolve();
+      return admission.promise;
+    });
+    try {
+      const initialised = followerResult(first.port, { type: "init", id: 1, sessionClaims: {} });
+      await bounded(entered.promise);
+      const duplicate = followerResult(first.port, { type: "init", id: 2, sessionClaims: {} });
+      first.port.emitMessage({ type: "frames", frames: [Uint8Array.of(1)] });
+      first.port.emitMessage({ type: "frames", frames: [Uint8Array.of(2)] });
+      admission.resolve(subscriber);
+      expect(await initialised).not.toHaveProperty("error");
+      expect(await duplicate).toHaveProperty("error");
+      expect(await subscriberResponses(first.port)).toEqual([
+        { claims: {}, frame: [1] },
+        { claims: {}, frame: [2] },
+      ]);
+      first.port.emitMessage({ type: "frames", frames: [Uint8Array.of(3)] });
+      expect(await subscriberResponses(first.port)).toEqual([{ claims: {}, frame: [3] }]);
+    } finally {
+      admission.resolve(subscriber);
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("rebinds a newly admitted subscriber when auth refresh arrives during its admission", async () => {
+    const initOptions = { ...options("rebind-pending-admission"), serverUrl: "ws://server.test" };
+    const owner = await bounded(connect(initOptions, "owner"));
+    const joining = await bounded(connect(initOptions, "joining"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = createAdmissionTransport();
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    try {
+      await followerResult(owner.port, { type: "init", id: 1, sessionClaims: {} });
+      runtime.acceptPeer.mockImplementationOnce(() => {
+        entered.resolve();
+        return admission.promise;
+      });
+      const initialised = followerResult(joining.port, { type: "init", id: 2, sessionClaims: {} });
+      await bounded(entered.promise);
+      owner.port.emitMessage({
+        type: "update-auth",
+        authJson: "fresh",
+        sessionClaims: { role: "writer" },
+      });
+      // Exhaust this task's microtasks while admission remains held. An auth
+      // transition that overtakes init would now have published restoration.
+      await bounded(nextTask());
+      expect(owner.port.hasEvent((event) => event.type === "auth-restored")).toBe(false);
+      const restored = owner.port.waitForEvent((event) => event.type === "auth-restored");
+      admission.resolve(subscriber);
+      expect(await initialised).not.toHaveProperty("error");
+      await bounded(restored);
+      joining.port.emitMessage({ type: "frames", frames: [Uint8Array.of(7)] });
+      expect(await subscriberResponses(joining.port)).toEqual([
+        { claims: { role: "writer" }, frame: [7] },
+      ]);
+    } finally {
+      admission.resolve(subscriber);
+      owner.port.emitMessage({ type: "close" });
+      joining.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("keeps the transition queue usable after admission rejection", async () => {
+    const first = await bounded(connect(options("rejected-pending-admission"), "first"));
+    const runtime = mocks.runtimes[0]!;
+    const admission = deferred<Transport>();
+    const entered = deferred<void>();
+    const subscriber = createAdmissionTransport();
+    runtime.acceptPeer
+      .mockImplementationOnce(() => {
+        entered.resolve();
+        return admission.promise;
+      })
+      .mockResolvedValueOnce(subscriber);
+    try {
+      const rejected = followerResult(first.port, { type: "init", id: 1, sessionClaims: {} });
+      await bounded(entered.promise);
+      const next = followerResult(first.port, { type: "disconnect", id: 2 });
+      admission.reject(new Error("storage unavailable"));
+      expect(await rejected).toHaveProperty("error");
+      expect(await next).not.toHaveProperty("error");
+      expect(
+        await followerResult(first.port, { type: "init", id: 3, sessionClaims: {} }),
+      ).not.toHaveProperty("error");
+      first.port.emitMessage({ type: "frames", frames: [Uint8Array.of(4)] });
+      expect(await subscriberResponses(first.port)).toEqual([{ claims: {}, frame: [4] }]);
+    } finally {
+      admission.resolve(subscriber);
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("retires a transport after pump construction fails and permits init retry", async () => {
+    const first = await bounded(connect(options("failed-admission-install"), "first"));
+    const runtime = mocks.runtimes[0]!;
+    const failedSubscriber = createAdmissionTransport([Uint8Array.of(9)]);
+    const successor = createAdmissionTransport();
+    const retirement = deferred<void>();
+    const retiring = deferred<void>();
+    runtime.retirePeerTransport.mockImplementationOnce(async (transport: Transport) => {
+      retiring.resolve();
+      await retirement.promise;
+      transport.close();
+    });
+    runtime.acceptPeer.mockResolvedValueOnce(failedSubscriber).mockResolvedValueOnce(successor);
+    runtime.onPeerTransportWork.mockImplementationOnce(() => {
+      throw new Error("cannot register transport pump");
+    });
+    try {
+      first.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
+      await bounded(retiring.promise);
+      first.port.emitMessage({ type: "init", id: 2, sessionClaims: {} });
+      await bounded(nextTask());
+      expect(first.port.hasEvent((event) => event.type === "result")).toBe(false);
+      retirement.resolve();
+      expect(
+        await bounded(
+          first.port.waitForEvent((event) => event.type === "result" && event.id === 1),
+        ),
+      ).toHaveProperty("error");
+      expect(failedSubscriber.closed).toBe(true);
+      expect(first.port.hasEvent((event) => event.type === "frames")).toBe(false);
+      expect(
+        await bounded(
+          first.port.waitForEvent((event) => event.type === "result" && event.id === 2),
+        ),
+      ).not.toHaveProperty("error");
+      first.port.emitMessage({ type: "frames", frames: [Uint8Array.of(5)] });
+      expect(await subscriberResponses(first.port)).toEqual([{ claims: {}, frame: [5] }]);
+    } finally {
+      retirement.resolve();
+      first.port.emitMessage({ type: "close" });
+    }
   });
 
   it("marks only control-port attached followers as Inspector peers", async () => {
@@ -1572,7 +1908,7 @@ describe("broker worker context initialization", () => {
           "Browser tab claims differ from the persistent worker's authenticated upstream session",
       },
     });
-    expect(mocks.runtimes[0]?.acceptPeerWhenIdle).toHaveBeenCalledOnce();
+    expect(mocks.runtimes[0]?.acceptPeer).toHaveBeenCalledOnce();
   });
 
   it("keeps every tab attached after auth rejection so a sibling can refresh the session", async () => {
@@ -1719,7 +2055,7 @@ describe("broker worker context initialization", () => {
     });
     const ownerSubscriber = subscriber();
     const editorSubscriber = subscriber();
-    runtime.acceptPeerWhenIdle
+    runtime.acceptPeer
       .mockResolvedValueOnce(ownerSubscriber)
       .mockResolvedValueOnce(editorSubscriber);
     await initializeFollower(owner.port, 1);

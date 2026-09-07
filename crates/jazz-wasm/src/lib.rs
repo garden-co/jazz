@@ -774,25 +774,21 @@ impl Clone for WasmTransportInner {
 }
 
 impl WasmTransportInner {
-    fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
+    async fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
         match self {
-            Self::Memory { connection, .. } => jazz::db::block_on(async {
-                connection
-                    .as_ref()
-                    .expect("new transport has a connection")
-                    .lock()
-                    .await
-                    .io_pump()
-            }),
+            Self::Memory { connection, .. } => connection
+                .as_ref()
+                .expect("new transport has a connection")
+                .lock()
+                .await
+                .io_pump(),
             #[cfg(target_arch = "wasm32")]
-            Self::Browser { connection, .. } => jazz::db::block_on(async {
-                connection
-                    .as_ref()
-                    .expect("new transport has a connection")
-                    .lock()
-                    .await
-                    .io_pump()
-            }),
+            Self::Browser { connection, .. } => connection
+                .as_ref()
+                .expect("new transport has a connection")
+                .lock()
+                .await
+                .io_pump(),
         }
     }
 
@@ -2988,7 +2984,7 @@ impl WasmDb {
                 },
                 WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             };
-            let auxiliary_pump = inner.auxiliary_pump();
+            let auxiliary_pump = inner.auxiliary_pump().await;
             Ok(WasmTransport {
                 inner,
                 queues,
@@ -3054,7 +3050,7 @@ impl WasmDb {
                 },
                 WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             };
-            let auxiliary_pump = inner.auxiliary_pump();
+            let auxiliary_pump = inner.auxiliary_pump().await;
             Ok(WasmTransport {
                 inner,
                 queues,
@@ -3065,15 +3061,24 @@ impl WasmDb {
         }))
     }
 
+    /// Admit a subscriber after pending local writes have been recovered.
+    ///
+    /// Identity and claims validation is synchronous; storage-backed recovery
+    /// yields to the host and rejects the returned promise on startup failure.
     #[wasm_bindgen(js_name = acceptSubscriber)]
     pub fn accept_subscriber(
         &self,
         identity: Vec<u8>,
         claims: JsValue,
-    ) -> Result<WasmTransport, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
         let claims = claims_from_js(identity, claims)?;
-        self.accept_subscriber_with_admitted_identity(identity, claims)
+        let db_inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims)
+                .await
+                .map(JsValue::from)
+        }))
     }
 
     /// Attach a browser-local follower for a verified first-party identity.
@@ -3089,14 +3094,19 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
-    ) -> Result<WasmTransport, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
         let identity = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let claims = claims_from_js(identity, claims)?;
-        self.accept_subscriber_with_admitted_identity(identity, claims)
+        let db_inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims)
+                .await
+                .map(JsValue::from)
+        }))
     }
 
-    fn accept_subscriber_with_admitted_identity(
-        &self,
+    async fn accept_subscriber_with_admitted_identity(
+        db_inner: WasmDbInner,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Result<WasmTransport, JsValue> {
@@ -3113,24 +3123,27 @@ impl WasmDb {
                     | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             None,
         ));
-        let db_inner = self.open_inner()?;
         let inner = match &db_inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber_with_claims(
-                    transport,
-                    identity,
-                    claims.clone(),
-                )),
+                connection: Some(
+                    db.accept_subscriber_with_claims_async(transport, identity, claims)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber_with_claims(transport, identity, claims)),
+                connection: Some(
+                    db.accept_subscriber_with_claims_async(transport, identity, claims)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        let auxiliary_pump = inner.auxiliary_pump();
+        let auxiliary_pump = inner.auxiliary_pump().await;
         Ok(WasmTransport {
             inner,
             queues,
@@ -4612,9 +4625,7 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 #[cfg(test)]
 mod dynamic_schema_view_tests {
     use super::*;
-    use jazz::db::{DbConfig, DbIdentity};
-    #[cfg(not(target_arch = "wasm32"))]
-    use jazz::db::{ExclusiveTxOps, MergeableTxOps};
+    use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
@@ -5049,9 +5060,15 @@ mod dynamic_schema_view_tests {
             &serde_json::to_string(&("https://wasm.test", "subscriber")).unwrap(),
         )
         .unwrap();
-        let transport = binding
-            .accept_subscriber(subscriber.canonical().as_bytes().to_vec(), JsValue::NULL)
-            .expect("accept a real wasm subscriber transport");
+        // Keep the concrete Rust transport for pump injection; use the same
+        // admitted implementation as both Promise-returning exports.
+        let transport = WasmDb::accept_subscriber_with_admitted_identity(
+            binding.open_inner().expect("binding remains open"),
+            subscriber,
+            claims_from_js(subscriber, JsValue::NULL).expect("admit subscriber claims"),
+        )
+        .await
+        .expect("accept a real wasm subscriber transport");
 
         // Decode against the exact feature set carried by an auxiliary frame.
         // The pump strips compression bits because each auxiliary payload is an

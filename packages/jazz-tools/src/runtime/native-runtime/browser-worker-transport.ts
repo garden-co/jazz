@@ -53,8 +53,25 @@ export class BrowserWorkerTransportPump {
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
     this.removeWorkListener = runtime.onPeerTransportWork(this.handleRuntimeWork);
-    this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
-    this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
+    try {
+      this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
+      this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
+    } catch (error) {
+      // The caller still owns the transport until construction succeeds.
+      // Revoke this partial pump before undoing hooks: a queued callback must
+      // not later fail or close a successfully retried peer.
+      this.closed = true;
+      try {
+        this.removeWorkListener();
+      } finally {
+        try {
+          this.transport.clearOutboundScheduler?.();
+        } finally {
+          this.transport.setAuxiliaryTraceEnabled?.(false);
+        }
+      }
+      throw error;
+    }
     void this.watchAuxiliaryOutbound().catch((error) => {
       if (!this.closed) this.onError(error);
     });

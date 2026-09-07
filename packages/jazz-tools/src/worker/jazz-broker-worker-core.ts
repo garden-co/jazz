@@ -32,7 +32,10 @@ import {
 // identify the Rust call site before serializing them for the owning tab.
 (Error as ErrorConstructor & { stackTraceLimit?: number }).stackTraceLimit = 50;
 import { openConfig } from "../runtime/native-runtime/native-codec.js";
-import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import {
+  NativeRuntimeAdapter,
+  type Transport,
+} from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 
@@ -49,7 +52,7 @@ type TabPeer = {
   context: RuntimeContext;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
-  subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
+  subscriber: Transport | null;
   pendingFrames: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
@@ -1369,47 +1372,55 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "init") {
-      if (peer.inspectorAttachment || message.inspectorBinding)
-        assertInspectorBinding(peer, message.inspectorBinding);
-      if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
-      // A different tab can be publishing a newly admitted upstream session.
-      // Join its transition before checking the shared snapshot so an init
-      // cannot attach between upstream admission and the all-tab rebind.
-      await peer.context.transportTransition;
-      // One persistent worker has one authenticated upstream session. Do not
-      // admit a tab whose policy claims could be evaluated differently from
-      // that session once the worker forwards the subscription upstream.
-      assertWorkerSessionClaims(peer.context, message.sessionClaims);
-      // Peer admission mutates the connection registry. A running evaluator
-      // may hold that registry across storage suspension, so install only at
-      // the owner-wide evaluator boundary. Storage progress is independent of
-      // this new peer and therefore continues while admission waits.
-      const subscriber = await activeRuntime.acceptPeerWhenIdle(message.sessionClaims);
-      const pump = attachPeerTransport(peer, activeRuntime, subscriber);
-      recordWorkerLifecycle(
-        "peer-attached",
-        peer.context.options.dbName,
-        peer.context.options.authSessionKey,
-      );
-      if (peer.pendingFrames.length > 0) {
-        const pending = peer.pendingFrames.splice(0);
-        pump.receive(pending);
-      }
-      await enqueueTransportTransition(peer.context, () => {
-        if (peer.context.explicitlyDisconnected) {
-          post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
-        } else {
-          ensureServerConnection(peer.context);
+      await enqueueTransportTransition(peer.context, async () => {
+        const canPublishAdmission = () =>
+          peer.context.peers.get(peer.tabId) === peer &&
+          peer.context.runtime === activeRuntime &&
+          !peer.context.storageInvalidated &&
+          !peer.context.closing;
+        if (!canPublishAdmission()) return;
+        if (peer.inspectorAttachment || message.inspectorBinding)
+          assertInspectorBinding(peer, message.inspectorBinding);
+        if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
+        // Admission and installation share the auth transition queue: a rebind
+        // must include this subscriber, rather than overtake its storage wait.
+        assertWorkerSessionClaims(peer.context, message.sessionClaims);
+        let unownedSubscriber: Transport | null = null;
+        try {
+          unownedSubscriber = await activeRuntime.acceptPeer(message.sessionClaims);
+          // Close and storage invalidation revoke publication synchronously,
+          // without waiting for recovery to finish.
+          if (!canPublishAdmission()) return;
+          const pump = attachPeerTransport(peer, activeRuntime, unownedSubscriber);
+          unownedSubscriber = null;
+          recordWorkerLifecycle(
+            "peer-attached",
+            peer.context.options.dbName,
+            peer.context.options.authSessionKey,
+          );
+          if (peer.pendingFrames.length > 0) {
+            const pending = peer.pendingFrames.splice(0);
+            pump.receive(pending);
+          }
+          if (peer.context.explicitlyDisconnected) {
+            post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+          } else {
+            ensureServerConnection(peer.context);
+          }
+          result(
+            peer,
+            message.id,
+            undefined,
+            peer.inspectorAttachment
+              ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
+              : undefined,
+          );
+        } catch (error) {
+          if (canPublishAdmission()) throw error;
+        } finally {
+          if (unownedSubscriber) await activeRuntime.retirePeerTransport(unownedSubscriber);
         }
       });
-      result(
-        peer,
-        message.id,
-        undefined,
-        peer.inspectorAttachment
-          ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
-          : undefined,
-      );
       return;
     }
     if (message.type === "update-auth") {
@@ -1506,6 +1517,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     if (peer.transportWaitAbort.signal.aborted) return;
     result(peer, message.id);
   } catch (error) {
+    if (
+      message.type === "init" &&
+      (!peer.context.runtime || peer.context.storageInvalidated || peer.context.closing)
+    ) {
+      return;
+    }
     if ("id" in message) result(peer, message.id, asError(error));
     else failPeer(peer, asError(error));
   }
@@ -1886,10 +1903,9 @@ function acknowledgeReset(context: RuntimeContext, tabId: string): void {
 function attachPeerTransport(
   peer: TabPeer,
   activeRuntime: NativeRuntimeAdapter,
-  subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]>,
+  subscriber: Transport,
 ): BrowserWorkerTransportPump {
-  peer.subscriber = subscriber;
-  peer.pump = new BrowserWorkerTransportPump(
+  const pump = new BrowserWorkerTransportPump(
     activeRuntime,
     subscriber,
     (frames) => {
@@ -1909,7 +1925,9 @@ function attachPeerTransport(
         }
       : undefined,
   );
-  return peer.pump;
+  peer.subscriber = subscriber;
+  peer.pump = pump;
+  return pump;
 }
 
 function completeLocalFlush(peer: TabPeer): void {

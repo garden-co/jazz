@@ -441,13 +441,16 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
-  acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
+  acceptSubscriber?(
+    author: Uint8Array,
+    claims: Record<string, unknown>,
+  ): Transport | Promise<Transport>;
   acceptSubscriberWithSelfSignedProof?(
     claims: Record<string, unknown>,
     token: string,
     appId: string,
     claimedAuthor: string,
-  ): Transport;
+  ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
@@ -816,9 +819,11 @@ export class NativeRuntimeAdapter implements Runtime {
   // worker frame has arrived, scoped to the serving authorization context.
   private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
-  private coreTickRunning = false;
   private coreTickAgain = false;
-  private coreTickCompletion: Promise<void> | null = null;
+  private coreOperation: {
+    kind: "tick" | "admission";
+    completion: Promise<void>;
+  } | null = null;
   private readonly pendingTransportRetirements = new Map<
     Transport,
     Array<{ resolve: () => void; reject: (error: unknown) => void }>
@@ -1022,6 +1027,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
     const activityReadyForProcessing = this.peerTransportActivityEpoch;
     await this.runCoreTick();
+    if (this.closed) return;
     this.peerTransportProcessedActivityEpoch = Math.max(
       this.peerTransportProcessedActivityEpoch,
       activityReadyForProcessing,
@@ -1030,7 +1036,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   retirePeerTransport(transport: Transport): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
-    if (!this.coreTickRunning) {
+    if (!this.coreOperation) {
       transport.close();
       return Promise.resolve();
     }
@@ -1082,7 +1088,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async captureForegroundTxTimeHighWater(): Promise<bigint> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
-    await this.coreTickCompletion?.catch(() => undefined);
+    await this.coreOperation?.completion.catch(() => undefined);
     return this.foregroundTxTimeHighWater();
   }
 
@@ -1227,41 +1233,67 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  acceptPeer(claims: Record<string, unknown> = {}): Transport {
+  async acceptPeer(claims: Record<string, unknown> = {}): Promise<Transport> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
-    const proof = this.selfSignedClientProof;
-    if (proof) {
-      if (!this.db.acceptSubscriberWithSelfSignedProof) {
-        throw new Error(
-          "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
-        );
+    if (this.closed) throw new Error("Native runtime is closed");
+    return this.runWhenCoreIdle(async () => {
+      if (this.closed) throw new Error("Native runtime is closed");
+      // Reserve ownership before entering the binding: replay can suspend on
+      // storage while ticks, other admissions and transport retirement arrive.
+      let release!: () => void;
+      this.coreOperation = {
+        kind: "admission",
+        completion: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      try {
+        const proof = this.selfSignedClientProof;
+        let subscriber: Transport;
+        if (proof) {
+          if (!this.db.acceptSubscriberWithSelfSignedProof) {
+            throw new Error(
+              "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
+            );
+          }
+          subscriber = await this.db.acceptSubscriberWithSelfSignedProof(
+            claims,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+          );
+        } else {
+          if (!this.db.acceptSubscriber) {
+            throw new Error("Native runtime does not expose subscriber links");
+          }
+          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims);
+        }
+        if (this.closed) {
+          // We still own the slot. Awaiting gated retirement here would wait
+          // on this admission itself; the native future has already unwound.
+          subscriber.close();
+          throw new Error("Native runtime closed during subscriber admission");
+        }
+        return subscriber;
+      } finally {
+        this.drainTransportRetirements();
+        this.coreOperation = null;
+        // This is an ownership barrier, not the admission result. A failed
+        // page read must not poison queued work with its rejection.
+        release();
+        if (this.coreTickAgain && !this.closed) this.scheduleCoreTick();
       }
-      return this.db.acceptSubscriberWithSelfSignedProof(
-        claims,
-        proof.token,
-        proof.appId,
-        proof.claimedAuthor,
-      );
-    }
-    if (!this.db.acceptSubscriber) {
-      throw new Error("Native runtime does not expose subscriber links");
-    }
-    return this.db.acceptSubscriber(this.peerIdentity, claims);
+    });
   }
 
-  async acceptPeerWhenIdle(claims: Record<string, unknown> = {}): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeerWhenIdle(claims);
-    return this.runWhenCoreIdle(() => this.acceptPeer(claims));
-  }
-
-  private async runWhenCoreIdle<T>(operation: () => T): Promise<T> {
+  private async runWhenCoreIdle<T>(operation: () => T | Promise<T>): Promise<T> {
     const owner = this.ownerRuntime;
-    while (owner.coreTickRunning) {
-      await owner.coreTickCompletion;
+    while (owner.coreOperation) {
+      await owner.coreOperation.completion;
     }
     // Run in the same continuation as the final idle check. Returning an
-    // "idle" promise first would let a queued tick acquire the node before
-    // the caller's continuation performs its synchronous operation.
+    // "idle" promise first would let queued work acquire the node before the
+    // caller's operation runs or reserves its own asynchronous admission.
     return operation();
   }
 
@@ -1300,7 +1332,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
-    await this.coreTickCompletion?.catch(() => undefined);
+    await this.coreOperation?.completion.catch(() => undefined);
     this.closeRuntimeState(true);
     await this.db.close?.();
     // wasm-bindgen futures may retain this receiver after logical closure.
@@ -3548,7 +3580,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreTick(): void {
     if (this.closed) return;
-    if (this.coreTickRunning) {
+    if (this.coreOperation) {
       this.coreTickAgain = true;
       return;
     }
@@ -3573,18 +3605,22 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private runCoreTick(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.coreTickRunning) {
+    const operation = this.coreOperation;
+    if (operation) {
       this.coreTickAgain = true;
-      return this.coreTickCompletion ?? Promise.resolve();
+      // Admission completion is not an evaluator pass. Explicit progress
+      // waiters must join a real tick before marking ingress as processed.
+      return operation.kind === "tick"
+        ? operation.completion
+        : operation.completion.then(() => this.runCoreTick());
     }
-    this.coreTickRunning = true;
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
     const completion = new Promise<void>((onResolve, onReject) => {
       resolve = onResolve;
       reject = onReject;
     });
-    this.coreTickCompletion = completion;
+    this.coreOperation = { kind: "tick", completion };
     void this.driveCoreTicks().then(resolve, reject);
     return completion;
   }
@@ -3606,8 +3642,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     } finally {
       this.drainTransportRetirements();
-      this.coreTickRunning = false;
-      this.coreTickCompletion = null;
+      this.coreOperation = null;
     }
     if (yielded && !this.closed) {
       setTimeout(() => this.scheduleCoreTick(), 0);
