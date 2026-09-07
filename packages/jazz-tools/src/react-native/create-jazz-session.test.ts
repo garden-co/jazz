@@ -28,6 +28,9 @@ for (const [host, create, prepare] of [
         {
           createLocalFirst: vi.fn(() => replacement),
           restoreLocalFirst: () => replacement,
+          registerJWT: async () => replacement,
+          loginJWT: async () => replacement,
+          linkJWT: async () => replacement,
           logout: vi.fn(),
         },
         retained,
@@ -60,6 +63,10 @@ for (const [host, create, prepare] of [
     it("does not open a client without a retained selection or local-first policy", async () => {
       const accounts = new AccountManager({
         createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        registerJWT: async () => makeFakeAccount(),
+        loginJWT: async () => makeFakeAccount(),
+        linkJWT: async () => makeFakeAccount(),
         logout: vi.fn(),
       });
       prepare.mockResolvedValue(accounts);
