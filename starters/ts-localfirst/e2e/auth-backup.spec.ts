@@ -28,10 +28,11 @@ async function openBackup(page: Page) {
 async function restorePhrase(page: Page, phrase: string) {
   // The replacement client can render before the intentional document reload.
   // Observe navigation before submitting so the next step uses the final page.
-  const reload = page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame());
   await page.getByLabel("Restore from recovery phrase").fill(phrase);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
-  await reload;
+  await Promise.all([
+    page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()),
+    page.getByRole("button", { name: "Restore", exact: true }).click(),
+  ]);
   await waitForApp(page);
 }
 
