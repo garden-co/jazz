@@ -315,6 +315,29 @@ describe("jazzAdapter", () => {
       await server.stop();
     });
 
+    it("awaits backend admission lazily and recovers after an unavailable backend", async () => {
+      const db = context.asBackend(wasmSchemaExample);
+      const supplyDb = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Backend admission unavailable"))
+        .mockResolvedValue(db);
+      const asyncAdapter = jazzAdapter({ db: supplyDb, schema: wasmSchemaExample })({});
+      expect(supplyDb).not.toHaveBeenCalled();
+      const data = { name: "Async backend", email: "async@example.com", emailVerified: false };
+      await expect(asyncAdapter.create({ model: "user", data })).rejects.toThrow(
+        "Backend admission unavailable",
+      );
+      const created = await asyncAdapter.create({ model: "user", data });
+      const where = [{ field: "id", value: created.id }];
+      expect(await asyncAdapter.findOne({ model: "user", where })).toMatchObject(data);
+      await asyncAdapter.update({ model: "user", where, update: { name: "Updated" } });
+      expect(await asyncAdapter.findOne({ model: "user", where })).toMatchObject({
+        name: "Updated",
+      });
+      await asyncAdapter.delete({ model: "user", where });
+      expect(await asyncAdapter.findOne({ model: "user", where })).toBeNull();
+    });
+
     it("lowers supported result bounds into the Jazz query", async () => {
       const boundedDb = context.asBackend(wasmSchemaExample);
       const allSpy = vi.spyOn(boundedDb, "all");
