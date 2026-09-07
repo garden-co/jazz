@@ -40,10 +40,7 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-`src/main.ts` prepares an account manager, restores the selected opaque
-`AccountHandle` or creates a local-first account, then passes that handle to
-`createJazzClient`. The backup controls use the manager's export and restore
-APIs, so raw credentials never become application state.
+`createJazzSession` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
 
 Each widget receives the `Db` handle and wires its DOM straight to it:
 

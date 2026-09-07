@@ -10,19 +10,19 @@ A Next.js local-first todo starter with optional Better Auth accounts.
 
 Run `pnpm install` then `pnpm dev`, and set `BETTER_AUTH_SECRET` in `.env`.
 
-The client creates a browser account manager and passes its selected opaque account handle to Jazz. Each SSR request remains independent; no credential or account-manager state is created in a server module.
+The app configures one Jazz session with `initial: "local-first"`. It restores a usable saved account or creates a local-first account, which works offline and syncs when the server is available.
 
-New visitors use `getLoggedIn() ?? createLocalFirst()` and can work offline. Sign-up shuts down the old context after sync, then calls `linkJWT({ getToken })` outside it. Sign-in selects an existing external account with `loginJWT({ getToken })`. The resulting handle creates the next context. JWT refresh is supplied to the account manager as a credential callback rather than replacing a live context's identity.
+After Better Auth signup, the app calls `session.linkJWT({ getToken })`; sign-in calls `session.loginJWT({ getToken })`. The session detaches consumers, waits for sync, and replaces the client. A failed sync preserves the usable prior client and prevents enrollment. The credential callback supplies fresh tokens without changing a live client identity.
 
 The Better Auth memory adapter is only suitable for local development. Use a persistent adapter before deployment.
 
 ## Architecture
 
-The browser owns the account manager and each context receives its selected handle.
+The Jazz session owns account selection and its active client.
 
 ## How it works
 
-The manager performs enrollment and refresh; contexts remain identity-stable.
+Session commands own enrollment and replacement; clients remain identity-stable.
 
 ## Extending the schema
 

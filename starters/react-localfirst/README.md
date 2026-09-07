@@ -11,7 +11,7 @@ identity managed by an opaque account handle.
   plugin in `vite.config.ts`.
 - Row-level permissions wired through `$createdBy`, so every row is
   automatically scoped to the user who created it.
-- An account manager that restores the selected handle or creates a local-first account.
+- A session that restores the selected handle or creates a local-first account.
 
 ## Getting started
 
@@ -38,11 +38,7 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-On first load the account manager creates a local-first account; later loads
-restore its selected opaque `AccountHandle` from browser storage. The handle,
-rather than a serializable secret, is passed to `JazzProvider` and becomes the
-identity Jazz uses for subsequent writes. The backup panel can export a
-recovery phrase or passkey backup and restore either into the manager.
+`JazzSessionProvider` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the

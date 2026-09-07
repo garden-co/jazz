@@ -11,7 +11,7 @@ What it demonstrates:
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Resolving ordinary provider JWTs into opaque Jazz account handles
 - Linking a fresh provider identity to an offline account after graceful context shutdown
-- Refreshing same-identity credentials through the account manager
+- Refreshing same-identity credentials through the session
 - Creating local-first accounts when no provider session exists
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
@@ -146,20 +146,19 @@ base URL is required; Better Auth defaults to `/api/auth` in the browser.
 
 ### Client — `app/page.tsx`
 
-`Page` owns an account manager and an explicitly created Jazz client. Browser
-startup restores the retained local account or uses `loginJWT` for an existing
-provider session. Logging in never implicitly registers or links an identity.
+`Page` configures `JazzSessionProvider` once and uses `useJazzSession` commands.
+Startup restores the retained local account and uses `loginJWT` for an existing
+provider session. Login never implicitly registers or links an identity.
 
-Sign-up uses ordinary Better Auth, then gracefully shuts down the old Jazz client
-with `shutdown({ waitForSync: true })`, links the fresh JWT using `linkJWT`, and
-opens a new context with the returned account handle. Core verifies linking
-intent; Better Auth keeps its own user IDs and requires no custom proof claims.
-Account ownership remains stable while the acting issuer/subject changes.
+After Better Auth signup, `linkJWT({ getToken })` preserves the account that owns
+local data. The session detaches the old data view, waits for sync, performs the
+link, and opens the selected account. If sync fails, enrollment never starts and
+the prior client remains usable. If linking fails, the session reopens the
+retained account; the UI offers an explicit retry.
 
-If linking fails, the helper preserves account selection and the app reopens
-that account. Sign-out shuts down the client before clearing the provider
-session and selecting a new local-first account. JWT refresh uses the manager's
-`getToken` callback and cannot switch the context's identity.
+Sign-out calls `logout` before clearing the provider session, then explicitly
+creates a new local-first account. Token refresh remains a provider callback
+and cannot switch an existing client's identity.
 
 ## Tests
 

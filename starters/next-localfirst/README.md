@@ -36,7 +36,7 @@ app/
   page.tsx                     ← homepage (header + todo widget + backup UI)
   globals.css
 components/
-  jazz-provider.tsx            ← account manager + JazzProvider lifecycle
+  jazz-provider.tsx            ← JazzSessionProvider configuration
   todo-widget.tsx              ← Jazz-powered todo list
   auth-backup.tsx              ← recovery phrase + passkey backup/restore
 schema.ts                      ← Jazz app schema (todos table)
@@ -45,12 +45,7 @@ permissions.ts                 ← row-level access policy ($createdBy)
 
 ## How it works
 
-The client-side account manager restores the selected opaque `AccountHandle`
-or creates a local-first account on first load. `components/jazz-provider.tsx`
-observes that manager and passes its handle to `JazzProvider`; no credential is
-kept in a module global or rendered on the server. `components/auth-backup.tsx`
-exports recovery material only when the user requests it and restores it through
-the manager.
+`JazzSessionProvider` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the

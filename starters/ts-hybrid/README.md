@@ -10,19 +10,19 @@ A plain TypeScript + Vite local-first todo starter with optional Better Auth.
 
 Run `pnpm install` then `pnpm dev`; set `BETTER_AUTH_SECRET` in `.env`.
 
-Startup prepares an account manager and opens Jazz with `getLoggedIn() ?? createLocalFirst()`. The opaque account handle, rather than a secret or raw JWT, is the only credential passed to a Jazz context. This makes first use offline while permitting sync when the server is available.
+The app configures one Jazz session with `initial: "local-first"`. It restores a usable saved account or creates a local-first account, which works offline and syncs when the server is available.
 
-For account linking, the app first awaits `db.shutdown({ waitForSync: true })`, then invokes `linkJWT({ getToken })` outside the retired context and opens the next one from the selected handle. Existing accounts use `loginJWT`. The credential callback owns token refresh and never changes identity on an existing Db.
+After Better Auth signup, the app calls `session.linkJWT({ getToken })`; sign-in calls `session.loginJWT({ getToken })`. The session detaches consumers, waits for sync, and replaces the client. A failed sync preserves the usable prior client and prevents enrollment. The credential callback supplies fresh tokens without changing a live client identity.
 
 The Hono Better Auth server uses an in-memory adapter for local development; replace it with persistent storage for production.
 
 ## Architecture
 
-The browser owns the account manager and each context receives its selected handle.
+The Jazz session owns account selection and its active client.
 
 ## How it works
 
-The manager performs enrollment and refresh; contexts remain identity-stable.
+Session commands own enrollment and replacement; clients remain identity-stable.
 
 ## Extending the schema
 
