@@ -613,12 +613,13 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     assert_eq!(relay.applied_authority_result_generation(&alice_key), 1);
     assert_eq!(relay.applied_authority_result_generation(&bob_key), 1);
 
-    let pending = relay.take_pending_authoritative_resets();
+    let pending = relay.snapshot_pending_authoritative_resets();
     assert_eq!(
-        pending,
+        pending.keys().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([bob_key.clone()]),
         "Alice's progress marker has not installed a complete reset"
     );
+    let bob_reset_generation = pending[&bob_key];
     // Bob can defer a later publication while Alice's opening continues. That
     // deferred marker is also exact-policy state, not binding-view state.
     relay
@@ -628,13 +629,13 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     assert!(relay.publication_deferred_for_authority_result(&bob_key));
     assert!(!relay.publication_deferred_for_authority_result(&alice_key));
 
-    for authority_result_key in &pending {
-        relay.defer_authoritative_reset(authority_result_key);
-    }
     assert_eq!(
-        relay.take_pending_authoritative_resets(),
-        BTreeSet::from([bob_key.clone()]),
-        "Bob's exact reset can be deferred without manufacturing Alice's receipt"
+        relay
+            .snapshot_pending_authoritative_resets()
+            .get(&bob_key)
+            .copied(),
+        Some(bob_reset_generation),
+        "Bob's exact reset remains pending while publication is deferred"
     );
 
     relay
@@ -647,10 +648,18 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
         .unwrap();
     assert!(!relay.opening_pending_for_authority_result(&alice_key));
     assert!(!relay.publication_deferred_for_authority_result(&bob_key));
+    assert!(
+        relay.acknowledge_authoritative_reset(&bob_key, bob_reset_generation),
+        "Bob's reset is acknowledged only after the healthy completion"
+    );
     assert_eq!(
-        relay.take_pending_authoritative_resets(),
+        relay
+            .snapshot_pending_authoritative_resets()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from([alice_key.clone()]),
-        "Alice's completed closure now owns its independent reset"
+        "Alice's completed closure owns its independent reset"
     );
     assert!(
         relay.applied_authority_result_generation(&alice_key) > 1,
@@ -660,6 +669,128 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
         relay.applied_authority_result_generation(&bob_key) > 1,
         "Bob's deferred lifecycle keeps progressing independently"
     );
+}
+
+#[test]
+fn pending_authoritative_reset_acknowledgement_is_generation_checked() {
+    let (_dir, mut relay) = open_node();
+    let shape = Query::from("issues")
+        .validate(&relay.catalogue.schema)
+        .unwrap();
+    register_query_shape(&mut relay, &shape, RegisterShapeOptions::default());
+    let subscribe = Subscribe {
+        shape_id: shape.shape_id(),
+        subscription: SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([0xd4; 16])),
+            read_view: Default::default(),
+        },
+        values: Vec::new(),
+        known_state: None,
+        delegated_session: Some(DelegatedSessionBinding {
+            identity: author(4),
+            claims: BTreeMap::new(),
+        }),
+    };
+    relay
+        .apply_sync_message_settled(SyncMessage::Subscribe(subscribe.clone()))
+        .unwrap();
+    let authority_result_key = relay
+        .authority_result_key_for_subscription(subscribe.subscription)
+        .unwrap();
+    let complete_reset = |subscription| crate::node::ViewUpdateParts {
+        subscription,
+        settled_through: crate::time::GlobalTime(7),
+        defer_settlement: false,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: Some(3),
+        opening_pending: false,
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: vec![
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: crate::protocol::ProgramSourceId {
+                        table: "issues".to_owned().into(),
+                        path: vec![crate::protocol::ProgramSourceRole::Root],
+                    },
+                    complete: true,
+                },
+            ),
+            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: crate::protocol::ProgramSourceId {
+                        table: "users".to_owned().into(),
+                        path: vec![
+                            crate::protocol::ProgramSourceRole::Root,
+                            crate::protocol::ProgramSourceRole::Alias(
+                                "reference:assignee".to_owned(),
+                            ),
+                        ],
+                    },
+                    complete: true,
+                },
+            ),
+        ],
+        program_fact_removes: Vec::new(),
+    };
+
+    relay
+        .apply_view_update(complete_reset(subscribe.subscription))
+        .resolve()
+        .unwrap();
+    let first_generation = relay
+        .snapshot_pending_authoritative_resets()
+        .get(&authority_result_key)
+        .copied()
+        .expect("the first complete reset is pending");
+
+    assert!(
+        !relay.acknowledge_authoritative_reset(&authority_result_key, first_generation + 1),
+        "an unrelated generation cannot acknowledge the reset"
+    );
+    assert_eq!(
+        relay
+            .snapshot_pending_authoritative_resets()
+            .get(&authority_result_key)
+            .copied(),
+        Some(first_generation)
+    );
+
+    relay
+        .apply_view_update(complete_reset(subscribe.subscription))
+        .resolve()
+        .unwrap();
+    let second_generation = relay
+        .snapshot_pending_authoritative_resets()
+        .get(&authority_result_key)
+        .copied()
+        .expect("the newer complete reset is pending");
+    assert!(second_generation > first_generation);
+    assert!(
+        !relay.acknowledge_authoritative_reset(&authority_result_key, first_generation),
+        "a stale acknowledgement cannot clear a newer reset"
+    );
+    assert_eq!(
+        relay
+            .snapshot_pending_authoritative_resets()
+            .get(&authority_result_key)
+            .copied(),
+        Some(second_generation)
+    );
+
+    relay
+        .apply_sync_message_settled(SyncMessage::Unsubscribe {
+            subscription: subscribe.subscription,
+        })
+        .unwrap();
+    assert!(
+        !relay.acknowledge_authoritative_reset(&authority_result_key, second_generation),
+        "retired results reject acknowledgements without recreating state"
+    );
+    assert!(relay.snapshot_pending_authoritative_resets().is_empty());
 }
 
 /// Storage-backed scalar membership ships the exact deletion-register winner

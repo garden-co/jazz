@@ -943,6 +943,18 @@ where
             .get(authority_result_key)
             .map_or(0, |state| state.applied_view_update_generation)
     }
+    pub(crate) fn allocate_authoritative_reset_generation(&mut self) -> Result<u64, Error> {
+        let generation = self.next_authoritative_reset_generation;
+        if generation == 0 {
+            return Err(Error::InvalidStoredValue(
+                "authoritative reset generation exhausted",
+            ));
+        }
+        self.next_authoritative_reset_generation = generation.checked_add(1).ok_or(
+            Error::InvalidStoredValue("authoritative reset generation exhausted"),
+        )?;
+        Ok(generation)
+    }
 
     /// Generation of the exact authority-selected source frontier, if this
     /// usage site has claimed one. This is intentionally not the raw
@@ -971,29 +983,41 @@ where
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(std::cell::Cell::get)
     }
 
-    /// Drain exact authority receipts whose next publication must be a reset.
-    ///
-    /// A binding view is merely a local cache address. It cannot represent a
-    /// lifecycle event once different delegated sessions share that view.
-    pub(crate) fn take_pending_authoritative_resets(&mut self) -> BTreeSet<AuthorityResultKey> {
+    /// Snapshot exact authority receipts whose next publication must be a
+    /// reset. Snapshotting is intentionally non-destructive: an error or
+    /// cancellation leaves the same generation pending for the next refresh.
+    pub(crate) fn snapshot_pending_authoritative_resets(
+        &self,
+    ) -> BTreeMap<AuthorityResultKey, u64> {
         self.query
             .authority_results
-            .iter_mut()
+            .iter()
             .filter_map(|(key, state)| {
-                state.pending_authoritative_reset.then(|| {
-                    state.pending_authoritative_reset = false;
-                    key.clone()
-                })
+                state
+                    .pending_authoritative_reset
+                    .map(|generation| (key.clone(), generation))
             })
             .collect()
     }
 
-    pub(crate) fn defer_authoritative_reset(&mut self, authority_result_key: &AuthorityResultKey) {
-        self.query
-            .authority_results
-            .entry(authority_result_key.clone())
-            .or_default()
-            .pending_authoritative_reset = true;
+    /// Acknowledge one exact reset only if no newer reset superseded it.
+    ///
+    /// Never recreate a retired result: acknowledgement is a receipt for an
+    /// existing exact authority key, not an admission path.
+    pub(crate) fn acknowledge_authoritative_reset(
+        &mut self,
+        authority_result_key: &AuthorityResultKey,
+        generation: u64,
+    ) -> bool {
+        let Some(state) = self.query.authority_results.get_mut(authority_result_key) else {
+            return false;
+        };
+        if state.pending_authoritative_reset == Some(generation) {
+            state.pending_authoritative_reset = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn publication_deferred_for_authority_result(

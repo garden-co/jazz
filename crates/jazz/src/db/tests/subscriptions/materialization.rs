@@ -310,7 +310,7 @@ fn authoritative_reset_retries_after_refresh_error() {
     }))
     .unwrap();
 
-    seed(&server, "todos", cells("retry after error", false, owner));
+    let first = seed(&server, "todos", cells("retry after error", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -336,7 +336,7 @@ fn authoritative_reset_retries_after_refresh_error() {
             },
         })
     ));
-    seed(
+    let second = seed(
         &server,
         "todos",
         cells("second authoritative row", true, owner),
@@ -368,11 +368,34 @@ fn authoritative_reset_retries_after_refresh_error() {
     let retry = subscription
         .try_next_event()
         .expect("the authoritative reset remains pending after refresh error");
-    let SubscriptionEvent::Delta { reset, settled, .. } = retry else {
+    let SubscriptionEvent::Delta {
+        reset,
+        settled,
+        added,
+        updated,
+        removed,
+        ..
+    } = retry
+    else {
         panic!("expected retried authoritative reset");
     };
     assert!(reset);
     assert!(settled);
+    assert_eq!(
+        added
+            .iter()
+            .map(|row| (
+                row.row_uuid(),
+                row.test_cells_by_descriptor()["title"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (first, Value::String("retry after error".to_owned())),
+            (second, Value::String("second authoritative row".to_owned())),
+        ]
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 #[test]
@@ -397,7 +420,7 @@ fn authoritative_reset_retries_after_refresh_cancellation() {
     }))
     .unwrap();
 
-    seed(
+    let first = seed(
         &server,
         "todos",
         cells("retry after cancellation", false, owner),
@@ -427,7 +450,7 @@ fn authoritative_reset_retries_after_refresh_cancellation() {
             },
         })
     ));
-    seed(
+    let second = seed(
         &server,
         "todos",
         cells("second authoritative row", true, owner),
@@ -478,11 +501,34 @@ fn authoritative_reset_retries_after_refresh_cancellation() {
     let retry = subscription
         .try_next_event()
         .expect("the authoritative reset remains pending after cancellation");
-    let SubscriptionEvent::Delta { reset, settled, .. } = retry else {
+    let SubscriptionEvent::Delta {
+        reset,
+        settled,
+        added,
+        updated,
+        removed,
+        ..
+    } = retry
+    else {
         panic!("expected retried authoritative reset");
     };
     assert!(reset);
     assert!(settled);
+    assert_eq!(
+        added
+            .iter()
+            .map(|row| (
+                row.row_uuid(),
+                row.test_cells_by_descriptor()["title"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (first, Value::String("retry after cancellation".to_owned())),
+            (second, Value::String("second authoritative row".to_owned())),
+        ]
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 #[test]
