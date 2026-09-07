@@ -105,7 +105,13 @@ test("a separate account sees only its own todos", async ({ page, browser }) => 
     const other = await otherContext.newPage();
     await other.goto(page.url());
     await waitForTodoApp(other);
+    const otherLinked = other.waitForResponse(
+      (response) =>
+        /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+        response.request().method() === "POST",
+    );
     await signUp(other, `other-${runId}@example.com`, "s3cr3tpassword", "Other");
+    expect((await otherLinked).ok()).toBe(true);
     await waitForTodoApp(other);
     const otherTodo = `Private other todo ${runId}`;
     await addTodo(other, otherTodo);
