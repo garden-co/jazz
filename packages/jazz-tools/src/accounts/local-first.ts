@@ -38,6 +38,7 @@ export function localFirstFactory(options: {
   mintToken(secret: string, audience: string): string;
   retainSecret(secret: string): void | Promise<void>;
   generateSecret?(): string;
+  isSecretRetained?(secret: string): Promise<boolean>;
 }): LocalFirstAccountFactory {
   const restore = (secret: string) => {
     parseAuthSecret(secret);
@@ -52,7 +53,11 @@ export function localFirstFactory(options: {
     // Observe rejection immediately even if the app never opens a context.
     void retained.catch(() => {});
     const getToken = async () => {
-      await retained;
+      await retained.catch(async (failure) => {
+        // An explicit host persistence retry may have retained this exact root.
+        // Checking durability never changes selection or invents another handle.
+        if (!(await options.isSecretRetained?.(secret))) throw failure;
+      });
       return options.mintToken(secret, options.appId);
     };
     return {

@@ -77,6 +77,7 @@ export async function prepareAccountManager(options: {
       appId: options.appId,
       mintToken: options.mintToken,
       generateSecret: options.generateSecret,
+      isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
       retainSecret(secret) {
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
