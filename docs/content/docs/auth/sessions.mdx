@@ -111,9 +111,9 @@ Declaring those policies leaves update and delete denied until explicitly grante
 
 Backend request contexts have two distinct uses:
 
-- `await context.forRequest(request)` verifies the bearer and registry assignment, then evaluates the requester's row policies and stamps that requester as author.
-- `context.forSession(session)` is explicitly trusted backend impersonation. It evaluates that chosen session's policies and stamps its author.
-- `withAttribution*` changes the recorded author while retaining backend authority. Use it only in trusted backend code after the relevant authorization decision.
+- `await client.forRequest(request)` verifies the bearer and registry assignment, then evaluates the requester's row policies and stamps that requester as author.
+- `await client.forAccount(account)` verifies an opaque admitted user handle and returns the same immutable user policy scope without switching the shared owner.
+- `await client.withAttribution(account)` and `await client.withAttributionForRequest(request)` record verified user authorship while retaining backend authority. Use it only in trusted backend code after the relevant authorization decision.
 
 A copied account ID or provider claim is not authorization. Ordinary clients create contexts from opaque account handles; the server verifies their credentials independently.
 

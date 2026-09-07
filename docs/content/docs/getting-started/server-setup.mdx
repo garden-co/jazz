@@ -41,15 +41,17 @@ Edge mode is enabled by `--upstream-url`; when set, provide `--admin-secret` or 
 Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
 explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
 it contains. If your app uses a separate application session cookie, resolve it in your own app server
-and call `context.forSession(session)`, or pass a mirrored `cookieSession` to the browser client while
-the application cookie remains the transport credential.
+and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
+`forRequest` accepts bearer headers and does not parse application session cookies.
 
 If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
 It expects similar arguments as the CLI.
 
 ## Backend context setup
 
-Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/getting-started/client-setup).
+A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/backend`, with `appId`, `app`, `permissions`, `driver`, and `serverUrl` configured once. Select backend authority with `initial: { backendSecret }` or later with `await session.becomeBackend({ backendSecret })`. For authentication and account linking, see [Authentication](/docs/auth/authentication).
+
+Backend admission requires a reachable Jazz core: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after the core validates it. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -66,32 +68,20 @@ Every backend needs an app ID, typed schema, and usually a permissions bundle. I
 
 ## Backend identity pattern
 
-On the client side, queries automatically run as the logged-in user. On a server-connected backend, create the context once at startup, then choose whether work should run as the backend itself or as the caller.
+The ready snapshot exposes `client.db` for backend-owned work. Backend accounts use the reserved nil account UUID and identity `{ issuer: "urn:jazz:system", subject: nodeUUID }`, where `nodeUUID` is the actual originating native node. Copying that identity does not grant authority. The secret stays in private handle material and is never serialized into snapshots or account preferences.
 
-- `context.asBackend()` returns a `Db` opened in explicit backend mode. Its writes are authored as `jazz:system` unless you add explicit attribution; when this process talks to a Jazz server, `backendSecret` additionally authenticates sync/auth.
-- `await context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made the request, so permission policies apply to them rather than the process itself. Writes are also attributed to that user.
-- `context.forSession(session)` is the same idea when you already have a resolved Jazz session.
-- `context.withAttribution(issuer, userId)` keeps backend permissions, but stamps new writes and updates as that exact issuer/user pair.
-- `context.withAttributionForSession(session)` and `await context.withAttributionForRequest(req)` derive that authorship from a resolved session or authenticated request without impersonating the user for permission checks.
-- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth. On server-connected backends, prefer `context.asBackend()` or `await context.forRequest(req)`; on embedded or local-only setups, `context.db()` is the right choice.
+- `client.db` has backend permissions and records SYSTEM node provenance.
+- `await client.forRequest(req)` verifies the caller's bearer and active core account assignment, then returns an immutable database scope with that user's policies and authorship.
+- `await client.forAccount(account)` performs the same verification from an opaque admitted user account handle.
+- `await client.withAttribution(account)` and `await client.withAttributionForRequest(req)` keep backend permissions while recording the verified user's authorship. Use them after the application authorizes the operation.
 
-In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `await context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
+Request scopes do not change the shared session's selected account, so concurrent requests retain separate policy contexts. Do not switch the shared owner to serve individual requests. When the application deliberately transitions the owner from backend to a user account, the old client shuts down and the replacement opens an ordinary native runtime without backend privilege. The shared lifecycle handles detach, sync, shutdown, retry, and logout; logout invalidates every issued handle. Backend selection is ephemeral across process restarts, while retained local-first signing roots remain available.
 
-`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz local-first tokens; set `allowLocalFirstAuth: false` to disable those too. It does not currently accept anonymous bearer tokens.
-
-For cookie-based auth on your own backend, resolve the cookie with your framework or auth provider
-first, then call `context.forSession(session)` once you have a Jazz `Session`. `forRequest(...)`
-does not parse application cookies by itself.
-
-<Callout type="info">
-  For embedded or local-only runtime setups where your backend is not connected to a server, use
-  `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
-  database directly, without permissions being evaluated.
-</Callout>
+`forRequest` reads standard HTTP headers from Express, Hono, Fastify, or a Web Fetch API `Request`. Configure `jwksUrl` or `jwtPublicKey` on `createJazzSession(...)` for external IdP tokens, but not both. Without either, it accepts only Jazz local-first tokens; `allowLocalFirstAuth: false` disables those too. Application cookies must first be resolved to an admitted account by your auth integration.
 
 ### Attribution without impersonation
 
-Use `withAttribution(...)`, `withAttributionForSession(...)`, or `await context.withAttributionForRequest(...)` when backend code should keep backend-level access but stamp row edit metadata with a user's identity. See [Sessions &gt; Attribution without impersonation](/docs/auth/sessions#attribution-without-impersonation) for details and examples.
+Use `await client.withAttribution(account)` or `await client.withAttributionForRequest(req)` to retain backend access while recording verified user provenance. Raw session objects and issuer/subject strings are not public authority inputs. See [Sessions &gt; Attribution without impersonation](/docs/auth/sessions#attribution-without-impersonation).
 
 ### Per-request user-scoped client
 

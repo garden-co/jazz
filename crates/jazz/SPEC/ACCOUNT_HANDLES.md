@@ -236,22 +236,43 @@ binding. Structured author records contribute their native descriptor and
 payload to that comparison encoding; process-local intern IDs never enter it.
 This introduces no generic record-valued durable key or migration-lens default.
 
-## Trusted backend impersonation
+## Backend account selection and request scopes
 
-Public `forRequest` verifies the original bearer and resolves its active account
-through the core registry before creating a policy session. External JWT claims
-cannot choose an account, and resolving a request never registers an external
-identity. Local-first founding remains the explicit key-bound exception.
+The Node `jazz-tools/backend` factory composes the shared session owner with
+`initial: { backendSecret }` and `session.becomeBackend({ backendSecret })`.
+Application/schema, driver and core URL are configured once. Admission sends
+`POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the core's existing
+backend-secret validation must succeed before the host issues an opaque handle.
+A reachable core is required, including for memory-driver initialization.
+Browser and React Native hosts reject backend selection through their absent
+backend admission adapter.
 
-A configured backend secret is independently privileged server authority.
-`forSession` and `withAttributionForSession` may deliberately choose an exact
-principal, account, and claims without public registry admission. This is trusted
-impersonation: the resulting session still evaluates row policies as that chosen
-author and never gains unrestricted backend policy trust. Transport credential
-class and policy trust are separate dimensions. Impersonated sessions retain
-session relay eligibility and per-principal connection caps, but public registry
-liveness checks apply only to public credentials. Missing or incorrect backend
-secrets cannot enter the impersonation path.
+Backend handles use the nil SYSTEM account UUID and exact identity
+`{ issuer: "urn:jazz:system", subject: originatingNodeUUID }`. Native runtime
+construction uses that same node UUID. Backend credential material lives in a
+private WeakMap; it never enters snapshots or persisted account preferences.
+Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
+registration, login, linking, and token extraction cannot mint or use backend
+handles. Logout fences late admissions and invalidates all issued handles.
+
+The ready backend client's `db` already carries backend authority. Public
+`forRequest` verifies the original bearer and resolves its active account
+through the core registry before creating an immutable policy scope. External
+JWT claims cannot choose an account, and request resolution never registers an
+external identity. Local-first founding remains the key-bound exception.
+`forAccount` requires an opaque admitted user handle and re-verifies its proof.
+These operations do not switch the shared owner to serve concurrent requests.
+`withAttribution(account)` and `withAttributionForRequest(request)` retain
+backend permissions with verified user authorship. Raw session objects and
+arbitrary issuer/subject arguments are not public impersonation capabilities.
+
+Backend selection follows the same detach, sync, shutdown, retry and logout
+lifecycle as other accounts. Transitioning to a user opens an ordinary native
+runtime without backend policy bypass, rather than relabeling a privileged
+runtime. Selection is ephemeral; persistence clears the selected local-root
+index while retaining all local signing roots. No row, storage, or query-wire
+encoding changes are introduced by this account selection capability. Native
+SYSTEM authorship and backend admission remain Rust-owned.
 
 ## Expo account selection
 

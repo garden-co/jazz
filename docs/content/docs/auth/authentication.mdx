@@ -75,6 +75,8 @@ Provider claims remain under `session.claims`. They cannot override `session.use
 
 ## Backend request contexts
 
-`createJazzContext(...).forRequest(request)` verifies the original bearer and resolves its active account through the core before opening a requester context. Configure `serverUrl` as well as JWT verification. External identities must already be registered; local-first proofs can establish their deterministic founding account.
+Create a Node owner with `await createJazzSession({ appId, app, driver, serverUrl, initial: { backendSecret } })` from `jazz-tools/backend`. Backend admission requires a live core check; the secret is private, ephemeral handle material. The ready snapshot's `client.db` performs backend work.
 
-`forSession(session)` is explicit, trusted backend impersonation. A backend may supply an account and principal itself, and row policies evaluate that chosen session. Use it only after making the relevant authorization decision in trusted server code.
+`await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. External identities must already be registered; local-first proofs can establish their deterministic founding account.
+
+`await client.forAccount(account)` accepts an opaque admitted user handle and re-verifies its credential. Neither method switches the shared owner. Raw session objects cannot select an arbitrary principal or account. `await client.withAttribution(account)` retains backend permissions while recording verified user authorship.
