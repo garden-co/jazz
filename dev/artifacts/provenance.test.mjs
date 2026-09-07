@@ -14,8 +14,8 @@ import {
 } from "./provenance.mjs";
 import { stageNapiManifests } from "./stage-napi-manifests.mjs";
 
-function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "jazz-artifact-provenance-"));
+function fixture(parent = tmpdir()) {
+  const root = mkdtempSync(join(parent, "jazz-artifact-provenance-"));
   for (const dir of [
     ".cargo",
     "crates/jazz-wasm/pkg",
@@ -161,6 +161,16 @@ test("dirty source changes invalidate the manifest", () => {
     verifyManifest(root, "wasm", "release"),
     /packageInputs differs|git.dirtyDiff differs/,
   );
+});
+
+test("nested non-Git fixtures retain their physical provenance inputs", () => {
+  const parent = mkdtempSync(join(tmpdir(), "jazz-artifact-provenance-parent-"));
+  git(parent, ["init", "--quiet"]);
+  const root = fixture(parent);
+  writeManifest(root, "wasm", "release");
+  writeFileSync(join(root, "crates/jazz-wasm/src/lib.rs"), "// changed\n");
+  assert.match(verifyManifest(root, "wasm", "release"), /packageInputs differs/);
+  rmSync(parent, { recursive: true, force: true });
 });
 
 test("WASM provenance ignores local generated fingerprints but not tracked source changes", () =>
@@ -324,6 +334,25 @@ test("NAPI fingerprint ignores an ignored nested generated index.js", () =>
       before,
       "ignored generated output below a workspace package must not alter the ABI fingerprint",
     );
+    rmSync(root, { recursive: true, force: true });
+  }));
+
+test("native provenance accepts a symlinked checkout root", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const alias = `${root}-alias`;
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+    symlinkSync(root, alias);
+
+    assert.equal(
+      nativeArtifactFingerprint(alias, "napi", "release"),
+      nativeArtifactFingerprint(root, "napi", "release"),
+    );
+    rmSync(alias);
     rmSync(root, { recursive: true, force: true });
   }));
 
