@@ -948,32 +948,41 @@ describe("RecordPlayer authenticated playlist topology", () => {
           {
             name: "exercise metadata and window queries used by the rendered screens",
             run: async () => {
-              const windowAlbum = await owner
-                .insert(app.albums, { title: "Window catalogue", artist: "Jazz" })
-                .wait({ tier: "edge" });
               const windowEntries: Array<{ id: string; trackId: string; position: number }> = [];
-              for (
-                let position = 0;
-                position < PLAYLIST_WINDOW_OFFSET + PLAYLIST_WINDOW_LIMIT + 1;
-                position += 1
-              ) {
-                const track = await owner
-                  .insert(app.tracks, {
-                    album_id: windowAlbum.id,
-                    title: `Window ${position}`,
-                    ordinal: position,
-                    duration_ms: position + 1,
-                  })
-                  .wait({ tier: "edge" });
-                const entry = await owner
-                  .insert(app.playlist_entries, {
-                    playlist_id: playlist.id,
-                    track_id: track.id,
-                    position,
-                  })
-                  .wait({ tier: "edge" });
-                windowEntries.push({ id: entry.id, trackId: track.id, position });
-              }
+              const windowPositions = Array.from(
+                { length: PLAYLIST_WINDOW_OFFSET + PLAYLIST_WINDOW_LIMIT + 1 },
+                (_, position) => position,
+              );
+              const windowRows = await (
+                await owner.transaction((tx) => {
+                  const album = tx.insert(app.albums, {
+                    title: "Window catalogue",
+                    artist: "Jazz",
+                  });
+                  const entries = windowPositions.map((position) => {
+                    const track = tx.insert(app.tracks, {
+                      album_id: album.id,
+                      title: `Window ${position}`,
+                      ordinal: position,
+                      duration_ms: position + 1,
+                    });
+                    const entry = tx.insert(app.playlist_entries, {
+                      playlist_id: playlist.id,
+                      track_id: track.id,
+                      position,
+                    });
+                    return { entry, position, track };
+                  });
+                  return { album, entries };
+                })
+              ).wait({ tier: "edge" });
+              windowEntries.push(
+                ...windowRows.entries.map(({ entry, position, track }) => ({
+                  id: entry.id,
+                  trackId: track.id,
+                  position,
+                })),
+              );
               belowWindowEntryId = windowEntries[0]!.id;
 
               // Keep this query structurally identical to RecordPlayerClient's

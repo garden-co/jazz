@@ -2544,7 +2544,13 @@ where
             }
         }
         let versions = versions.into_values().collect::<Vec<_>>();
-        let scope = if usize::try_from(n_total_writes).ok() == Some(versions.len()) {
+        // A relay may only retain the selected fragment of an upstream
+        // view-scoped bundle. Its stored cardinality then describes that
+        // fragment, so matching it to the selected versions does not prove
+        // that the complete transaction is known.
+        let scope = if !stored_tx.view_scoped_cardinality
+            && usize::try_from(n_total_writes).ok() == Some(versions.len())
+        {
             crate::protocol::VersionBundleScope::CompleteTransaction
         } else {
             crate::protocol::VersionBundleScope::ViewScoped
