@@ -55,7 +55,8 @@ async function observeTrustedAdmissionLifecycleInner(
   // retained app data from an old install unable to satisfy this run's reopen
   // assertion.
   markFailure("fixture-metadata-failed");
-  const receipt = await deviceReceiptContext();
+  const receipt = await deviceReceiptContext(markFailure);
+  markFailure("fixture-phase-failed");
   const phase = await nativeAcceptancePhase();
   if (phase === "verify") {
     // This is intentionally a new JS and native process. The row was committed

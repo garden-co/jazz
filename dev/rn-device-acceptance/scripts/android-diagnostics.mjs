@@ -16,6 +16,19 @@ const THREADTIME_FOREGROUND_WAKE =
 const THREADTIME_CORE_OBSERVATION =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzCoreObservation\s*:\s*(request-started|request-sent|promise-resolved|js-(?:before-core-await|core-await-returned|before-unsubscribe|after-unsubscribe|before-shutdown|after-shutdown)|http-status-(?:[1-5]\d{2}|invalid)|failure-(?:setup|request|response|promise)-(?:timeout|connection|dns|tls|protocol|io|state|other))\s*$/;
 
+// Separate from the JS stage: its final retry must not hide native causality.
+const THREADTIME_FIXTURE_METADATA =
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzFixtureMetadata\s*:\s*(receipt-started|package-hash-started|receipt-resolved|receipt-failed-(?:activity|nonce|package-hash|device-identity|resolve)|phase-started|phase-activity-unavailable|phase-seed-resolved|phase-verify-resolved|phase-failed)\s*$/;
+
+export function androidFixtureMetadataDiagnostic(output) {
+  const codes = new Set();
+  for (const line of String(output).split(/\r?\n/)) {
+    const code = THREADTIME_FIXTURE_METADATA.exec(line)?.[1];
+    if (code) codes.add(code);
+  }
+  return codes.size ? [...codes].join(",") : undefined;
+}
+
 export function androidCoreObservationDiagnostic(output) {
   const codes = new Set();
   for (const line of String(output).split(/\r?\n/)) {
@@ -70,9 +83,11 @@ export function androidAcceptanceFailure(kind, phase, output) {
         : undefined;
   if (!summary) throw new Error("invalid Android acceptance failure kind");
   const diagnostic = androidDeviceDiagnostic(output);
+  const metadata = androidFixtureMetadataDiagnostic(output);
+  const metadataSummary = metadata ? `${summary}; fixture metadata: ${metadata}` : summary;
   const stage = diagnostic
-    ? `${summary}; device stage: ${diagnostic}`
-    : `${summary}; no device stage`;
+    ? `${metadataSummary}; device stage: ${diagnostic}`
+    : `${metadataSummary}; no device stage`;
   const coreObservation = androidCoreObservationDiagnostic(output);
   const writerRead =
     diagnostic === "scope-isolation-writer-read-failed"

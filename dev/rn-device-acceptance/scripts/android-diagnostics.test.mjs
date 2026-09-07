@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   androidAcceptanceFailure,
+  androidFixtureMetadataDiagnostic,
   androidDeviceDiagnostic,
   androidCoreObservationDiagnostic,
   androidScopeWriterReadDiagnostic,
@@ -170,4 +171,41 @@ test("synchronous seed boundaries survive alongside native acknowledgement witho
     line("js-before-unsubscribe", "ReactNativeJS"),
   ].join("\n");
   assert.equal(androidCoreObservationDiagnostic(output), codes.join(","));
+});
+
+test("metadata causality survives JS retry and rejects secret-bearing near matches", () => {
+  const line = (code, tag = "JazzFixtureMetadata") =>
+    `08-29 22:52:21.495  4268  4288 E ${tag}: ${code}`;
+  const output = [
+    line("receipt-started"),
+    line("receipt-failed-activity"),
+    line("fixture-receipt-call-failed", "JazzDeviceAcceptance"),
+    line("receipt-failed-nonce secret-token"),
+    line("receipt-failed-secret-token"),
+    line("phase-verify-resolved", "ReactNativeJS"),
+    line("phase-verify-resolved", "OtherNativeTag"),
+  ].join("\n");
+  assert.equal(androidFixtureMetadataDiagnostic(output), "receipt-started,receipt-failed-activity");
+  const failure = androidAcceptanceFailure("timeout", "verify", output);
+  assert.match(failure, /fixture metadata: receipt-started,receipt-failed-activity/);
+  assert.match(failure, /device stage: fixture-receipt-call-failed/);
+  assert.doesNotMatch(failure, /secret-token|phase-verify-resolved/);
+});
+
+test("metadata distinguishes an unresolved package hash from resolved native metadata", () => {
+  const line = (code) => `08-29 22:52:21.495  4268  4288 E JazzFixtureMetadata: ${code}`;
+  for (const codes of [
+    ["receipt-started", "package-hash-started"],
+    ["receipt-started", "package-hash-started", "receipt-failed-package-hash"],
+    [
+      "receipt-started",
+      "package-hash-started",
+      "receipt-resolved",
+      "phase-started",
+      "phase-activity-unavailable",
+      "phase-seed-resolved",
+    ],
+    ["phase-started", "phase-failed"],
+  ])
+    assert.equal(androidFixtureMetadataDiagnostic(codes.map(line).join("\n")), codes.join(","));
 });

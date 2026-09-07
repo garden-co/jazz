@@ -1536,3 +1536,19 @@ test("both platforms use the shared Rust-generated schema through account admiss
   ])
     assert.doesNotMatch(read(file), /JAZZ_DEVICE_SCHEMA_JSON|NSString \*schema/);
 });
+
+test("Android metadata diagnostics survive host filtering and generated source copies", () => {
+  const fixture = read("native/android/JazzDeviceFixtureModule.kt");
+  assert.equal(
+    fixture,
+    read("android/app/src/main/java/dev/jazz/rndeviceacceptance/JazzDeviceFixtureModule.kt"),
+  );
+  assert.match(read("scripts/run-android.mjs"), /"JazzFixtureMetadata:E"/);
+  const metadata = fixture.slice(
+    fixture.indexOf("@ReactMethod fun receiptContext"),
+    fixture.indexOf("private fun sha256File"),
+  );
+  assert.doesNotMatch(metadata, /Log\.e\([^\n]*(?:error|nonce|intent|buildFingerprint)/);
+  assert.doesNotMatch(metadata, /promise\.reject\([^\n]*error/);
+  assert.match(metadata, /receipt-failed-\$stage/);
+});

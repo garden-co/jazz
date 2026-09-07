@@ -125,8 +125,12 @@ export async function switchNativeRelayAuthScope(): Promise<AdmittedRelay> {
 }
 
 /** Trusted package/launch identity used solely to bind observed device receipts. */
-export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
+export async function deviceReceiptContext(
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+): Promise<DeviceReceiptContext> {
+  markFailure("fixture-receipt-call-failed");
   const context = await fixtureModule().receiptContext();
+  markFailure("fixture-receipt-validation-failed");
   if (
     !(["android", "ios"] as const).includes(context.platform) ||
     !context.deviceIdentifier ||

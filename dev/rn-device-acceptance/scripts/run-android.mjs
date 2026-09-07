@@ -37,6 +37,7 @@ const acceptanceLogcat = () =>
     "JazzScopeWriterRead:E",
     "JazzForegroundWake:E",
     "JazzCoreObservation:E",
+    "JazzFixtureMetadata:E",
     "*:S",
   ]);
 const startedAt = Date.now();

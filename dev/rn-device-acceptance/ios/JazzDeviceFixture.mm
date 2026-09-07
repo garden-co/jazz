@@ -24,6 +24,9 @@ static NSURL *JazzDeviceDiagnosticURL(void) {
 static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
   return [NSSet setWithArray:@[
     @"fixture-metadata-failed",
+    @"fixture-receipt-call-failed",
+    @"fixture-receipt-validation-failed",
+    @"fixture-phase-failed",
     @"native-admission-failed",
     @"relay-command-abi-failed",
     @"relay-open-failed",

@@ -1,5 +1,8 @@
 export const DEVICE_DIAGNOSTIC_CODES = [
   "fixture-metadata-failed",
+  "fixture-receipt-call-failed",
+  "fixture-receipt-validation-failed",
+  "fixture-phase-failed",
   "native-admission-failed",
   "relay-command-abi-failed",
   "relay-open-failed",

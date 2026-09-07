@@ -23,6 +23,9 @@ import org.json.JSONObject
 class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private val diagnosticCodes = setOf(
     "fixture-metadata-failed",
+    "fixture-receipt-call-failed",
+    "fixture-receipt-validation-failed",
+    "fixture-phase-failed",
     "native-admission-failed",
     "relay-command-abi-failed",
     "relay-open-failed",
@@ -181,33 +184,51 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   }
 
   @ReactMethod fun receiptContext(promise: Promise) {
+    var stage = "activity"
+    Log.e("JazzFixtureMetadata", "receipt-started")
     try {
       val activity = reactApplicationContext.currentActivity
         ?: error("acceptance activity is unavailable")
+      stage = "nonce"
       val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
         ?: error("acceptance launch did not include a run nonce")
       // Hash the installed package itself, rather than echoing an adb extra.
+      stage = "package-hash"
+      Log.e("JazzFixtureMetadata", "package-hash-started")
       val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
+      stage = "device-identity"
       val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
         ?: error("Android build fingerprint is unavailable")
+      stage = "resolve"
       promise.resolve(Arguments.createMap().apply {
         putString("platform", "android")
         putString("deviceIdentifier", deviceIdentifier)
         putString("buildFingerprint", buildFingerprint)
         putString("runNonce", nonce)
       })
-    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
+      Log.e("JazzFixtureMetadata", "receipt-resolved")
+    } catch (_: Throwable) {
+      // Fixed internal stages only; never log intent data or exception text.
+      Log.e("JazzFixtureMetadata", "receipt-failed-$stage")
+      promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture receipt metadata unavailable")
+    }
   }
 
   /** Only the host's bounded acceptance phase crosses this boundary.  It
    * cannot select a relay scope, identity, or filesystem path. */
   @ReactMethod fun acceptancePhase(promise: Promise) {
+    Log.e("JazzFixtureMetadata", "phase-started")
     try {
-      val phase = reactApplicationContext.currentActivity
-        ?.intent?.getStringExtra("jazzDeviceAcceptancePhase") ?: "seed"
+      val activity = reactApplicationContext.currentActivity
+      if (activity == null) Log.e("JazzFixtureMetadata", "phase-activity-unavailable")
+      val phase = activity?.intent?.getStringExtra("jazzDeviceAcceptancePhase") ?: "seed"
       require(phase == "seed" || phase == "verify") { "invalid acceptance phase" }
       promise.resolve(phase)
-    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+      Log.e("JazzFixtureMetadata", if (phase == "seed") "phase-seed-resolved" else "phase-verify-resolved")
+    } catch (_: Throwable) {
+      Log.e("JazzFixtureMetadata", "phase-failed")
+      promise.reject("E_JAZZ_DEVICE_FIXTURE", "Fixture acceptance phase unavailable")
+    }
   }
 
   private fun sha256File(path: String): String {
