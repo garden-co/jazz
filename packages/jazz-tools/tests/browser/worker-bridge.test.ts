@@ -3999,7 +3999,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
     try {
-      await db.all(allTodos, { tier: "local" });
+      const knownAliceRow = await db
+        .insert(todos, { title: "known Alice local row", done: false })
+        .wait({ tier: "edge" });
+      // Establish default local follower coverage while the worker still owns
+      // Alice's principal. The rejected Bob update below must not require a
+      // new worker frame before returning this already covered local row.
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([knownAliceRow]);
       const aliceState = db.getAuthState();
       expect(aliceState.session?.user).toBeDefined();
 
@@ -4010,7 +4016,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         "Changing auth principal on a live client is not supported. Recreate the Db.",
       );
       expect(db.getAuthState()).toEqual(aliceState);
-      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([knownAliceRow]);
     } finally {
       await db.shutdown();
       untrack(db);
