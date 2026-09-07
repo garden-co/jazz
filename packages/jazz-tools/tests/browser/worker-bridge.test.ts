@@ -4019,21 +4019,37 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
       const aliceState = freshFollower.getAuthState();
       expect(aliceState.session?.user).toBeDefined();
-      expect(() => freshFollower.updateAuthToken(bobJwt)).toThrow(
-        "Changing auth principal on a live client is not supported. Recreate the Db.",
-      );
-      expect(freshFollower.getAuthState()).toEqual(aliceState);
+      const followerRuntime = (
+        freshFollower as unknown as {
+          getClient(schema: typeof todos._schema): {
+            getRuntime(): { notifyPeerTransportActivity(): void };
+          };
+        }
+      )
+        .getClient(todos._schema)
+        .getRuntime();
+      // Model the relevant terminal condition: Bob's rejected update cannot
+      // yield a future worker acknowledgement. The local attachment still
+      // receives the persistent owner's already covered row.
+      const suppressFuturePeerActivity = vi
+        .spyOn(followerRuntime, "notifyPeerTransportActivity")
+        .mockImplementation(() => undefined);
+      try {
+        expect(() => freshFollower.updateAuthToken(bobJwt)).toThrow(
+          "Changing auth principal on a live client is not supported. Recreate the Db.",
+        );
+        expect(freshFollower.getAuthState()).toEqual(aliceState);
 
-      // The rejected update sends no new worker frame. A local reattachment
-      // still settles from the existing local attachment coverage instead of
-      // waiting for peer freshness that can no longer arrive.
-      await expect(
-        withTimeout(
-          freshFollower.all(allTodos, { tier: "local" }),
-          3_000,
-          "Local read waited for a peer frame after principal rejection",
-        ),
-      ).resolves.toEqual([knownOwnerRow]);
+        await expect(
+          withTimeout(
+            freshFollower.all(allTodos, { tier: "local" }),
+            3_000,
+            "Local read waited for a peer frame after principal rejection",
+          ),
+        ).resolves.toEqual([knownOwnerRow]);
+      } finally {
+        suppressFuturePeerActivity.mockRestore();
+      }
     } finally {
       await follower?.shutdown().catch(() => undefined);
       if (follower) untrack(follower);
