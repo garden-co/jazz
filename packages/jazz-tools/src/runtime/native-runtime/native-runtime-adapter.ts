@@ -3158,6 +3158,7 @@ export class NativeRuntimeAdapter implements Runtime {
       const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
       const requiresFreshPeerConfirmation =
         this.nonDurableClient &&
+        tier !== "local" &&
         readPropagationIsFull(optionsJson) &&
         confirmedPeerActivityEpoch != null;
       // A prior confirmation can recover a reattachment only if no newer worker
