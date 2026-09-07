@@ -18,9 +18,25 @@ use crate::time::TxTime;
 #[cfg(test)]
 #[derive(Clone)]
 pub(super) struct SubscriptionRefreshDetachPause {
+    token: Rc<()>,
     entered: Rc<Cell<bool>>,
     released: Rc<Cell<bool>>,
     waker: Rc<RefCell<Option<Waker>>>,
+}
+
+#[cfg(test)]
+impl Drop for SubscriptionRefreshDetachPause {
+    fn drop(&mut self) {
+        SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| {
+            if slot
+                .borrow()
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(&current.token, &self.token))
+            {
+                slot.borrow_mut().take();
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +61,7 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn pause_subscription_refresh_after_detach_for_test() -> SubscriptionRefreshDetachPause {
     let pause = SubscriptionRefreshDetachPause {
+        token: Rc::new(()),
         entered: Rc::new(Cell::new(false)),
         released: Rc::new(Cell::new(false)),
         waker: Rc::new(RefCell::new(None)),

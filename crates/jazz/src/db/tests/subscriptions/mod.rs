@@ -45,6 +45,18 @@ fn cancelling_a_detached_subscription_does_not_reject_its_replacement() {
         replacement.try_next_event().is_none(),
         "replacement was not rejected"
     );
+    block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("after cancellation", false),
+        Default::default(),
+    ))
+    .expect("write after cancellation");
+    let SubscriptionEvent::Delta { added, .. } =
+        block_on(replacement.next_raw()).expect("replacement receives later write")
+    else {
+        panic!("expected replacement delta after cancellation");
+    };
+    assert_eq!(added.len(), 1, "replacement stays live for later writes");
 }
 
 /// Internal because deterministic cancellation needs to pause a public
