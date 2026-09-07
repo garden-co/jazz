@@ -152,9 +152,17 @@ function expectedNativeArtifactFingerprint(packageDir: string): string {
 function installedJazzNapiDirs(appDir: string): string[] {
   const installedDirs: string[] = [];
   const visited = new Set<string>();
+  const installed = new Set<string>();
   function walk(dir: string, depth = 0): void {
-    if (depth > 8 || visited.has(dir) || !fs.existsSync(dir)) return;
-    visited.add(dir);
+    if (depth > 8 || !fs.existsSync(dir)) return;
+    let realDir: string;
+    try {
+      realDir = fs.realpathSync(dir);
+    } catch {
+      return;
+    }
+    if (visited.has(realDir)) return;
+    visited.add(realDir);
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -162,9 +170,28 @@ function installedJazzNapiDirs(appDir: string): string[] {
       return;
     }
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
       const child = path.join(dir, e.name);
-      if (e.name === "jazz-napi") installedDirs.push(child);
+      let childIsDirectory = e.isDirectory();
+      if (e.isSymbolicLink()) {
+        try {
+          childIsDirectory = fs.statSync(child).isDirectory();
+        } catch {
+          childIsDirectory = false;
+        }
+      }
+      if (!childIsDirectory) continue;
+      if (e.name === "jazz-napi") {
+        try {
+          const realChild = fs.realpathSync(child);
+          if (!installed.has(realChild)) {
+            installed.add(realChild);
+            installedDirs.push(child);
+          }
+        } catch {
+          // A broken package symlink cannot be a runnable dependency. Leave it
+          // to pnpm/the starter import to report the broken installation.
+        }
+      }
       walk(child, depth + 1);
     }
   }

@@ -25,6 +25,12 @@ function writeNapiFingerprint(packageDir: string, fingerprint: string): void {
   );
 }
 
+function linkPnpmJazzNapi(root: string, packageDir: string): void {
+  const link = path.join(root, "app", "node_modules", "jazz-napi");
+  fs.mkdirSync(path.dirname(link), { recursive: true });
+  fs.symlinkSync(packageDir, link, "dir");
+}
+
 test("rejects a candidate whose matching workspace metadata disagrees with the loaded harness", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-mismatch-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -61,6 +67,19 @@ test("accepts a packed NAPI candidate with the loaded harness fingerprint", (t) 
   writeNapiFingerprint(path.join(root, "app", "node_modules", "jazz-napi"), fingerprint);
 
   assert.doesNotThrow(() => assertInstalledJazzNapiMatchesHarness(path.join(root, "app")));
+});
+
+test("rejects a mismatched NAPI candidate reached through pnpm's package symlink", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-symlink-mismatch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const packageDir = path.join(root, "store", "jazz-napi");
+  writeNapiFingerprint(packageDir, "b".repeat(64));
+  linkPnpmJazzNapi(root, packageDir);
+
+  assert.throws(
+    () => assertInstalledJazzNapiMatchesHarness(path.join(root, "app"), "a".repeat(64)),
+    /Packed Jazz NAPI fingerprint b{64} does not match this harness's native binding a{64}/,
+  );
 });
 
 test("rejects a stale repair binary even when candidate metadata matches the harness", () => {
@@ -122,6 +141,21 @@ test("copies a workspace NAPI binary only after its actual binding matches", (t)
 
   patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, () => fingerprint);
   assert.equal(fs.existsSync(path.join(candidateDir, path.basename(source))), true);
+});
+
+test("repairs a NAPI candidate reached through pnpm's package symlink", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-symlink-repair-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "e".repeat(64);
+  const source = path.join(root, "crates", "jazz-napi", "jazz-napi.fake.node");
+  const packageDir = path.join(root, "store", "jazz-napi");
+  writeNapiFingerprint(packageDir, fingerprint);
+  linkPnpmJazzNapi(root, packageDir);
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "fixture");
+
+  patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, () => fingerprint);
+  assert.equal(fs.existsSync(path.join(packageDir, path.basename(source))), true);
 });
 
 test("cleanup preserves a caller-provided work directory", async (t) => {
