@@ -1375,6 +1375,136 @@ fn pending_writes_barrier_waits_for_global_authority_timestamp() {
     }
 }
 
+/// Internal fate injection separates durability from authority time while the
+/// public backend open/attributed write/reopen exercise the host boundary.
+#[test]
+fn backend_pending_writes_barrier_includes_recovered_attributed_writes() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let column_families = schema.column_families();
+    let names = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&names);
+    let retained = storage.clone();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc2; 16]),
+        author,
+    };
+    // SAFETY: this fixture represents host-admitted backend authority.
+    let client = block_on(unsafe {
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage,
+            identity,
+            id_source: Some(Box::new(SeededRowIdSource::new(0xc2))),
+        })
+    })
+    .unwrap();
+    let tx_id = client
+        .insert_with_id_attributed(
+            AuthorSubject::for_test_bytes([0xd3; 16]),
+            "todos",
+            row(0xd3),
+            cells("graceful attributed handoff", false, author),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(client.close()).unwrap();
+    drop(client);
+    let storage = block_on(retained.reopen(column_families)).unwrap();
+    let client = block_on(unsafe {
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage,
+            identity,
+            id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+        })
+    })
+    .unwrap();
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "reopening must restore user-attributed backend uploads"
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let mut barrier = std::pin::pin!(client.wait_for_pending_writes(DurabilityTier::Global));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    // Let asynchronous storage and the normal scheduler run before deciding
+    // this is a receipt wait, rather than merely an unfinished index read.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        client.tick().unwrap();
+        assert!(
+            std::future::Future::poll(barrier.as_mut(), &mut context).is_pending(),
+            "Global durability without authority time must not permit context handoff"
+        );
+        if client
+            .node
+            .write_state_waiters
+            .borrow()
+            .contains_key(&tx_id)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "barrier must reach the transaction receipt wait"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(8)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    // This direct node injection bypasses PeerConnection's ordinary receipt
+    // notification. Deliver that wake explicitly; the barrier still owns and
+    // evaluates the actual transaction completion predicate.
+    if let Some(waiters) = client.node.write_state_waiters.borrow_mut().remove(&tx_id) {
+        for waiter in waiters {
+            let crate::db::WriteStateWaiterNotify::Future(sender) = waiter.notify;
+            let _ = sender.send(());
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        client.tick().unwrap();
+        if let std::task::Poll::Ready(result) =
+            std::future::Future::poll(barrier.as_mut(), &mut context)
+        {
+            result.expect("complete authority receipt releases the handoff");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "complete authority receipt must release the handoff"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();

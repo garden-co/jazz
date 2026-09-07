@@ -858,6 +858,22 @@ where
         Ok(())
     }
 
+    pub(super) async fn restore_backend_pending_uploads(
+        &self,
+        node_id: NodeUuid,
+    ) -> Result<(), Error> {
+        let pending = self
+            .node
+            .lock()
+            .await
+            .synchronizing_transaction_ids_for_node(node_id)
+            .await?;
+        for tx_id in pending {
+            self.queue_pending_upload(tx_id, None);
+        }
+        Ok(())
+    }
+
     pub(super) fn restore_browser_relay_pending_uploads(
         &self,
         author: AuthorSubject,

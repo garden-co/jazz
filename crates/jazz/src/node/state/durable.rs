@@ -499,6 +499,16 @@ where
         self.below_global_transaction_ids(Some(author), false, true).await
     }
 
+    /// A trusted backend owns every author scope created by its node. Restrict
+    /// this scan by transaction origin, never by its SYSTEM display identity.
+    pub(crate) async fn synchronizing_transaction_ids_for_node(
+        &mut self,
+        node: NodeUuid,
+    ) -> Result<Vec<TxId>, Error> {
+        Ok(self.below_global_transaction_ids(None, false, true).await?
+            .into_iter().filter(|tx| tx.node == node).collect())
+    }
+
     /// Edge-host recovery includes accepted writes from every originating
     /// client, plus edge-generated merges; it is not local-author recovery.
     #[cfg(any(test, feature = "runtime"))]

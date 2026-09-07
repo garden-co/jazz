@@ -195,6 +195,9 @@ where
     pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
         let mut db = Self::open(config).await?;
         db.backend_attribution = true;
+        db.node
+            .restore_backend_pending_uploads(db.identity.node)
+            .await?;
         Ok(db)
     }
 
@@ -292,6 +295,9 @@ where
     ) -> Result<Self, Error> {
         let mut db = Self::open_history_complete(config).await?;
         db.backend_attribution = true;
+        db.node
+            .restore_backend_pending_uploads(db.identity.node)
+            .await?;
         Ok(db)
     }
 
@@ -847,6 +853,7 @@ where
     }
 
     /// Wait for this author's pending writes, including recovered durable writes.
+    /// Trusted backends include every author scope originating on their own node.
     ///
     /// This snapshots after settling already-queued local mutations. Callers
     /// performing graceful shutdown must stop admitting new mutations first.
@@ -855,8 +862,13 @@ where
         self.node.settle_local_publications().await?;
         let pending = {
             let mut node = self.node.node.lock().await;
-            node.synchronizing_transaction_ids_for_author(self.identity.author)
-                .await?
+            if self.backend_attribution {
+                node.synchronizing_transaction_ids_for_node(self.identity.node)
+                    .await?
+            } else {
+                node.synchronizing_transaction_ids_for_author(self.identity.author)
+                    .await?
+            }
         };
         for tx_id in pending {
             self.wait_for_transaction(tx_id, tier).await?;
