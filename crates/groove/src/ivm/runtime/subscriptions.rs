@@ -3660,8 +3660,8 @@ impl IvmRuntime {
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
-            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
@@ -3688,8 +3688,8 @@ impl IvmRuntime {
     {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
-            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
@@ -3742,9 +3742,7 @@ impl IvmRuntime {
                 &Retainer::PreparedShape(shape_id.retainer_key()),
             );
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
+        self.collect_unretained_ephemeral_nodes();
         Ok(())
     }
 
@@ -4286,9 +4284,7 @@ impl IvmRuntime {
                 &Retainer::PreparedShape(shape_id.retainer_key()),
             );
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
+        self.collect_unretained_ephemeral_nodes();
     }
 }
 
