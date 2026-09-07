@@ -74,7 +74,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
 
   const wakes: string[] = [];
   db.setTickScheduler((urgency) => wakes.push(String(urgency)));
-  const query = db.prepareQuery(Uint8Array.of(1));
+  const query = db.prepareQuery(Uint8Array.of(1), "query");
   const pendingRows = db.all(query, { tier: "local" });
   expect(typeof pendingRows).toBe("object");
   expect("poll" in pendingRows && pendingRows.poll()).toEqual(Uint8Array.of(9));

@@ -8,6 +8,10 @@ export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
   const isMemberOrAdmin = session.where({ "claims.role": { in: ["admin", "member"] } });
   const canMutateGenericChat = anyOf([{ $createdBy: session.user }, isAdmin]);
+  const canMutateMessage = anyOf([
+    allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]),
+    allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]),
+  ]);
 
   policy.messages.allowRead.where({ chat_id: ANNOUNCEMENTS_CHAT_ID });
   policy.messages.allowRead.where(allOf([{ chat_id: CHAT_ID }, isMemberOrAdmin]));
@@ -15,12 +19,7 @@ export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.messages.allowInsert.where(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]));
   policy.messages.allowInsert.where(allOf([{ chat_id: CHAT_ID }, isMemberOrAdmin]));
 
-  policy.messages.allowUpdate
-    .whereOld(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]))
-    .whereNew({ chat_id: ANNOUNCEMENTS_CHAT_ID });
-  policy.messages.allowUpdate
-    .whereOld(allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]))
-    .whereNew({ chat_id: CHAT_ID });
+  policy.messages.allowUpdate.where(canMutateMessage);
 
   policy.messages.allowDelete.where(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]));
   policy.messages.allowDelete.where(allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]));

@@ -18,7 +18,7 @@ type ChatShellProps = {
 
 function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
   const db = useDb();
-  const { authMode, claims, userId } = useAuthState();
+  const { authMode, claims, user: userId } = useAuthState();
   const role = typeof claims.role === "string" ? claims.role : null;
 
   async function handleSignIn(email: string, password: string) {

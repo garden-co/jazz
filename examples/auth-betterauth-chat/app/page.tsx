@@ -9,7 +9,7 @@ import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
 function ChatShell(): React.JSX.Element {
   const db = useDb();
-  const { claims, authMode, userId } = useAuthState();
+  const { claims, authMode, user: userId } = useAuthState();
   const isAuthenticated = authMode === "external";
   const role = typeof claims.role === "string" ? claims.role : null;
   const canPostAnnouncements = isAuthenticated && role === "admin";
