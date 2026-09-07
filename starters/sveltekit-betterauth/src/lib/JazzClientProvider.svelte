@@ -24,6 +24,7 @@
   let ready = $state(false);
   let explicitAuth = $state(false);
   let handledSession: string | null | undefined;
+  let recoverySession: string | undefined;
   let observedSession: string | null | undefined;
   let reconcileRequested = false;
   let reconciliation = $state.raw<Promise<void>>();
@@ -41,7 +42,10 @@
     const key = sessionKey(current.data);
     // A failed explicit signup must remain registration recovery, never an
     // implicit login triggered by the provider finally publishing its session.
-    if (setupError && recovery === "register" && key) return;
+    if (setupError && recovery === "register" && key) {
+      recoverySession ??= key;
+      if (key === recoverySession) return;
+    }
     if (key === handledSession) return;
     handledSession = key;
     admittedSession = null;
@@ -107,6 +111,7 @@
     async authenticate(enroll, request) {
       const owner = await beginExplicit();
       let authenticated = false;
+      recoverySession = undefined;
       try {
         const result = await request();
         if (result.error) throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
@@ -117,6 +122,7 @@
         const key = sessionKey(current.data);
         if (!key) throw new Error("Provider did not establish a session");
         handledSession = key;
+        recoverySession = key;
         admittedSession = null;
         if (enroll) await owner.registerJWT({ getToken: credential });
         else await owner.loginJWT({ getToken: credential });

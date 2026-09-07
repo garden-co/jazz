@@ -267,3 +267,23 @@ it("keeps a successful provider request with a failed session read actionable", 
   await unmount(component);
   await settle();
 });
+
+it("does not let failed signup recovery suppress a genuinely newer provider account", async () => {
+  const { owner, target, events, component } = await setupNotifications();
+  const signup = controls.actions.authenticate(true, async () => {
+    controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
+    controls.auth.set({ data: controls.current });
+    return {};
+  });
+  await expect(signup).rejects.toThrow("unexpected registration");
+  await settle();
+  expect(target.textContent).not.toContain("PRIVATE DATA");
+  controls.current = { session: { id: "session-c" }, user: { id: "principal-c" } };
+  controls.auth.set({ data: controls.current });
+  await settle();
+  expect(events).toEqual(["login:principal-a", "login:principal-c"]);
+  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-c");
+  expect(target.textContent).toContain("PRIVATE DATA");
+  await unmount(component);
+  await settle();
+});
