@@ -28,6 +28,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "catalog:default",
     "concurrently": "^9.1.0",
+    "happy-dom": "^20.8.4",
     "tsx": "^4.19.4",
     "typescript": "catalog:default",
     "vite": "catalog:default",

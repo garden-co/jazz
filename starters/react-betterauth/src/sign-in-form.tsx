@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
-import { useJazzLifecycle } from "./main";
+import { useAuthActions } from "./main";
 
 export function SignInForm() {
-  const lifecycle = useJazzLifecycle();
+  const actions = useAuthActions();
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -18,7 +18,7 @@ export function SignInForm() {
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
     try {
-      await lifecycle.authenticate(mode === "signup", () =>
+      await actions.authenticate(mode === "signup", () =>
         mode === "signup"
           ? authClient.signUp.email({
               name: (form.elements.namedItem("name") as HTMLInputElement).value,

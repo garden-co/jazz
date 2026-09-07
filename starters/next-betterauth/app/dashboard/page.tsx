@@ -3,22 +3,18 @@
 import Image from "next/image";
 import { authClient } from "@/lib/auth-client";
 import { TodoWidget } from "@/components/todo-widget";
-import { useJazzLifecycle } from "@/components/jazz-provider";
+import { useAuthActions } from "@/components/jazz-provider";
 
 export default function DashboardPage() {
-  const lifecycle = useJazzLifecycle();
+  const actions = useAuthActions();
   const { data: session } = authClient.useSession();
   if (!session) return null;
 
   async function handleSignOut() {
     try {
-      await lifecycle.transition(async (accounts) => {
-        await authClient.signOut();
-        accounts.logout();
-      });
-      window.location.assign("/");
+      await actions.signOut();
     } catch (cause) {
-      lifecycle.reportFailure(cause);
+      actions.reportFailure(cause);
     }
   }
 

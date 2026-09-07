@@ -1,250 +1,216 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import {
+  useJazzSessionOwner,
+  JazzSessionProvider,
+  type JazzSession,
+  type JazzClient,
+} from "jazz-tools/react";
 import { createRoot } from "react-dom/client";
-import { createAccountManager } from "jazz-tools";
-import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
-import { accounts as prepareAccounts, getToken } from "./accounts";
-import { authClient } from "./auth-client";
-import { JazzLifecycle } from "./jazz-lifecycle";
 import { App } from "./App";
 import "./App.css";
-
+import { getToken } from "./accounts";
+import { authClient } from "./auth-client";
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL as string | undefined;
+function SessionOwner({ children }: React.PropsWithChildren) {
+  const {
+    session: jazz,
+    error,
+    retry,
+  } = useJazzSessionOwner({ appId: APP_ID!, serverUrl: SERVER_URL! });
+  if (error)
+    return (
+      <section>
+        <p role="alert">{error.message}</p>
+        <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </section>
+    );
+  if (!jazz) return <p>Loading...</p>;
+  return <AccountContext jazz={jazz}>{children}</AccountContext>;
+}
 type AuthResult = { error?: { message?: string | null } | null };
-interface JazzLifecycleApi {
-  transition: JazzLifecycle["transition"];
+interface AuthActions {
   authenticate(enroll: boolean, request: () => Promise<AuthResult>): Promise<void>;
+  signOut(): Promise<void>;
   reportFailure(cause: unknown): void;
 }
-const LifecycleContext = createContext<JazzLifecycleApi | null>(null);
-
-export function useJazzLifecycle() {
-  const lifecycle = useContext(LifecycleContext);
-  if (!lifecycle) throw new Error("Jazz lifecycle is not ready");
-  return lifecycle;
-}
-
-function BetterAuthProvider({ children }: React.PropsWithChildren) {
-  const [manager, setManager] = useState<Awaited<ReturnType<typeof createAccountManager>>>();
-  const [error, setError] = useState<Error>();
-  useEffect(() => {
-    let cancelled = false;
-    void prepareAccounts()
-      .then((next) => {
-        if (!cancelled) setManager(next);
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(toError(cause));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  if (error) return <p role="alert">{error.message}</p>;
-  if (!manager || !APP_ID || !SERVER_URL) return <p>Loading...</p>;
-  return (
-    <AccountContext manager={manager} appId={APP_ID} serverUrl={SERVER_URL}>
-      {children}
-    </AccountContext>
-  );
+const AuthActionsContext = createContext<AuthActions | null>(null);
+export function useAuthActions() {
+  const actions = useContext(AuthActionsContext);
+  if (!actions) throw new Error("Authentication is not ready");
+  return actions;
 }
 
 function AccountContext({
-  manager,
-  appId,
-  serverUrl,
+  jazz,
   children,
-}: React.PropsWithChildren<{
-  manager: Awaited<ReturnType<typeof createAccountManager>>;
-  appId: string;
-  serverUrl: string;
-}>) {
-  const { data: session, isPending } = authClient.useSession();
-  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>>>();
-  const [setupError, setSetupError] = useState<Error>();
-  const [recovery, setRecovery] = useState<"login" | "register">("register");
-  const [admittedSession, setAdmittedSession] = useState<string | null>(null);
-  const [reconcileGeneration, rerunSessionSelection] = useState(0);
-  const lifecycleRef = useRef<JazzLifecycle | undefined>(undefined);
-  const booted = useRef(false);
-  const explicitAuth = useRef(false);
-  const sessionVersion = useRef(0);
-  const sessionKeyRef = useRef<string | null>(null);
-  const handledSession = useRef<string | null | undefined>(undefined);
-  if (!lifecycleRef.current) {
-    lifecycleRef.current = new JazzLifecycle(
-      manager,
-      (account) => createJazzClient({ appId, serverUrl, account }),
-      setClient,
-    );
-  }
-  const lifecycle = lifecycleRef.current;
-  const key = sessionKey(session);
-  sessionKeyRef.current = key;
+}: React.PropsWithChildren<{ jazz: JazzSession<JazzClient> }>) {
+  const { data: auth, isPending } = authClient.useSession();
+  const snapshot = useSyncExternalStore(jazz.subscribe, jazz.getSnapshot, jazz.getSnapshot);
+  const key = auth?.session.id ?? null;
+  const currentKey = useRef(key);
+  currentKey.current = key;
+  const attempted = useRef<string | null | undefined>(undefined);
+  const working = useRef(false);
+  const [revision, reconcile] = useState(0);
+  const [admitted, setAdmitted] = useState<string | null>(null);
+  const [error, setError] = useState<Error>();
+  const [recovery, setRecovery] = useState<"login" | "register">("login");
 
   useEffect(() => {
-    if (isPending) return;
-    if (!booted.current) {
-      booted.current = true;
-      handledSession.current = key;
-      const version = ++sessionVersion.current;
-      void lifecycle
-        .attach(async () => {
-          if (key) await manager.loginJWT({ getToken });
-        })
-        .then(() => {
-          if (version === sessionVersion.current) setAdmittedSession(key);
-        })
-        .catch((cause) => {
-          if (version === sessionVersion.current) {
-            setRecovery("login");
-            setSetupError(toError(cause));
+    if (isPending || working.current || attempted.current === key) return;
+    attempted.current = key;
+    working.current = true;
+    setAdmitted(null);
+    void (key ? jazz.loginJWT({ getToken }) : jazz.logout())
+      .then(
+        () => {
+          if (currentKey.current === key) {
+            setAdmitted(key);
+            setError(undefined);
           }
-        });
-      return;
-    }
-    if (explicitAuth.current) return;
-    if (key === handledSession.current) {
-      void lifecycle.attach(async () => {}).catch((cause) => setSetupError(toError(cause)));
-      return;
-    }
-    handledSession.current = key;
-    setAdmittedSession(null);
-    const version = ++sessionVersion.current;
-    void lifecycle
-      .transition(
-        async (accounts) => {
-          if (key) await accounts.loginJWT({ getToken });
-          else accounts.logout();
         },
-        () => !explicitAuth.current && version === sessionVersion.current,
-        false,
+        (cause) => {
+          if (currentKey.current === key) {
+            setRecovery("login");
+            setError(toError(cause));
+          }
+        },
       )
-      .then(() => {
-        if (version === sessionVersion.current) {
-          setSetupError(undefined);
-          setAdmittedSession(key);
-        }
-      })
-      .catch((cause) => {
-        if (version === sessionVersion.current) {
-          setRecovery("login");
-          setSetupError(toError(cause));
-        }
+      .finally(() => {
+        working.current = false;
+        reconcile((value) => value + 1);
       });
-  }, [isPending, key, lifecycle, manager, reconcileGeneration]);
+  }, [isPending, key, jazz, revision]);
 
-  useEffect(
-    () => () => {
-      void lifecycle.close().catch((cause) => console.error("Jazz client shutdown failed", cause));
-    },
-    [lifecycle],
-  );
-
-  const authenticate = useCallback(
-    async (enroll: boolean, request: () => Promise<AuthResult>) => {
-      explicitAuth.current = true;
-      const version = ++sessionVersion.current;
+  const actions: AuthActions = {
+    async authenticate(enroll, request) {
+      if (working.current) throw new Error("An authentication request is already pending");
+      working.current = true;
+      setAdmitted(null);
+      let authenticatedKey: string | null = null;
       try {
         const result = await request();
-        if (result.error)
-          throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
+        if (result.error) throw new Error(result.error.message ?? "Authentication failed");
         const current = await authClient.getSession();
-        handledSession.current = sessionKey(current.data);
-        await lifecycle.transition(
-          (accounts) =>
-            enroll ? accounts.registerJWT({ getToken }) : accounts.loginJWT({ getToken }),
-          () => explicitAuth.current && version === sessionVersion.current,
-        );
-        setSetupError(undefined);
-        setAdmittedSession(handledSession.current ?? null);
+        authenticatedKey = current.data?.session.id ?? null;
+        if (!authenticatedKey) throw new Error("Better Auth did not establish a session");
+        attempted.current = authenticatedKey;
+        await (enroll ? jazz.registerJWT({ getToken }) : jazz.loginJWT({ getToken }));
+        setAdmitted(authenticatedKey);
+        setError(undefined);
       } catch (cause) {
-        const error = toError(cause);
-        if (sessionKey((await authClient.getSession()).data)) {
+        if (authenticatedKey) {
           setRecovery(enroll ? "register" : "login");
-          setSetupError(error);
+          setError(toError(cause));
         }
-        throw error;
+        throw cause;
       } finally {
-        explicitAuth.current = false;
-        rerunSessionSelection((value) => value + 1);
+        working.current = false;
+        reconcile((value) => value + 1);
       }
     },
-    [lifecycle],
-  );
-
-  const api: JazzLifecycleApi = {
-    transition: lifecycle.transition.bind(lifecycle),
-    authenticate,
+    async signOut() {
+      if (working.current) throw new Error("An authentication request is already pending");
+      working.current = true;
+      try {
+        // Jazz syncs and detaches data consumers before the auth provider revokes credentials.
+        await jazz.logout();
+        const result = await authClient.signOut();
+        if (result.error) throw new Error(result.error.message ?? "Sign out failed");
+        window.location.assign("/");
+      } finally {
+        working.current = false;
+        reconcile((value) => value + 1);
+      }
+    },
     reportFailure(cause) {
-      setSetupError(toError(cause));
+      setError(toError(cause));
     },
   };
-  const recover = () => {
-    const version = ++sessionVersion.current;
-    const recoveryKey = key;
-    void lifecycle
-      .transition(
-        (accounts) =>
-          recovery === "login"
-            ? accounts.loginJWT({ getToken })
-            : accounts.registerJWT({ getToken }),
-        () => version === sessionVersion.current && sessionKeyRef.current === recoveryKey,
-        recovery !== "login",
-      )
-      .then(() => {
-        if (version === sessionVersion.current && sessionKeyRef.current === recoveryKey) {
-          setSetupError(undefined);
-          setAdmittedSession(recoveryKey);
-        }
-      })
-      .catch((cause) => {
-        if (version === sessionVersion.current && sessionKeyRef.current === recoveryKey)
-          setSetupError(toError(cause));
-      });
-  };
-  return (
-    <LifecycleContext.Provider value={api}>
-      {client && admittedSession === key ? (
-        <JazzClientProvider client={client}>
-          {setupError && (
-            <aside className="alert-error" role="alert">
-              {setupError.message}
-            </aside>
-          )}
-          {children}
-        </JazzClientProvider>
-      ) : setupError ? (
-        <main className="page-center">
-          <div className="card">
-            <p className="alert-error" role="alert">
-              {setupError.message}
-            </p>
-            <button type="button" className="btn-primary" onClick={recover}>
-              {recovery === "login" ? "Retry sign in" : "Complete account setup"}
-            </button>
-          </div>
-        </main>
-      ) : session ? (
-        <p>Loading...</p>
-      ) : (
-        children
-      )}
-    </LifecycleContext.Provider>
+  async function recover() {
+    if (working.current) return;
+    working.current = true;
+    const recoveringKey = key;
+    try {
+      // A successful registry action can leave a selected account whose client
+      // failed to open. Retry startup instead of repeating registration.
+      if (snapshot.status === "error" && snapshot.account?.identity.subject === auth?.user.id) {
+        await jazz.retry();
+      } else if (recovery === "register") {
+        await jazz.registerJWT({ getToken });
+      } else {
+        await jazz.loginJWT({ getToken });
+      }
+      if (currentKey.current === recoveringKey) {
+        setAdmitted(recoveringKey);
+        setError(undefined);
+      }
+    } catch (cause) {
+      if (currentKey.current === recoveringKey) setError(toError(cause));
+    } finally {
+      working.current = false;
+      reconcile((value) => value + 1);
+    }
+  }
+  const failure = error ?? snapshot.error;
+  const ready =
+    snapshot.status === "ready" &&
+    admitted === key &&
+    snapshot.account?.identity.subject === auth?.user.id;
+  const fallback = failure ? (
+    <main className="page-center">
+      <div className="card">
+        <p className="alert-error" role="alert">
+          {failure.message}
+        </p>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => void recover()}
+          disabled={snapshot.status === "transitioning"}
+        >
+          {recovery === "login" ? "Retry sign in" : "Complete account setup"}
+        </button>
+      </div>
+    </main>
+  ) : isPending || auth ? (
+    <p>Loading...</p>
+  ) : (
+    children
   );
-}
-
-function sessionKey(
-  session: { session?: { id?: string } | null; user?: { id?: string } | null } | null | undefined,
-) {
-  return session?.session?.id ?? session?.user?.id ?? null;
+  return (
+    <AuthActionsContext.Provider value={actions}>
+      <JazzSessionProvider session={jazz} fallback={fallback}>
+        {ready ? (
+          <>
+            {failure && (
+              <aside className="alert-error" role="alert">
+                {failure.message}
+              </aside>
+            )}
+            {children}
+          </>
+        ) : (
+          fallback
+        )}
+      </JazzSessionProvider>
+    </AuthActionsContext.Provider>
+  );
 }
 function toError(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
 createRoot(document.getElementById("root")!).render(
-  <BetterAuthProvider>
+  <SessionOwner>
     <App />
-  </BetterAuthProvider>,
+  </SessionOwner>,
 );

@@ -2,17 +2,17 @@
 
 import { useState, useActionState } from "react";
 import { authClient } from "@/lib/auth-client";
-import { useJazzLifecycle } from "@/components/jazz-provider";
+import { useAuthActions } from "@/components/jazz-provider";
 
 export function SignInForm() {
-  const lifecycle = useJazzLifecycle();
+  const actions = useAuthActions();
   const [isSignUp, setIsSignUp] = useState(false);
   async function action(previous: string | null, formData: FormData) {
     const email = formData.get("email") as string;
     const password = formData.get("password") as string;
     const name = formData.get("name") as string | null;
     try {
-      await lifecycle.authenticate(isSignUp, () =>
+      await actions.authenticate(isSignUp, () =>
         isSignUp
           ? authClient.signUp.email({ name: name!, email, password })
           : authClient.signIn.email({ email, password }),
