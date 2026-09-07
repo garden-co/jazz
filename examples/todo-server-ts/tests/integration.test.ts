@@ -401,6 +401,10 @@ describe("Todo Server Integration", () => {
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
+        // The suite shares one deployed upstream, so use an identity that has
+        // no earlier todos rather than assuming a fresh local server implies a
+        // fresh remote account view.
+        const sseIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-primary");
         const otherIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
@@ -415,7 +419,7 @@ describe("Todo Server Integration", () => {
         const foreignTodo: Todo = await foreignCreate.json();
 
         // Connect to SSE endpoint
-        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`);
+        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`, {}, sseIdentity);
         expect(res.status).toBe(200);
         expect(res.headers.get("content-type")).toBe("text/event-stream");
 
@@ -449,11 +453,15 @@ describe("Todo Server Integration", () => {
         expect(initial).toEqual([]);
 
         // 2. Create a todo - should see it in next event
-        const createRes = await authenticatedFetch(`${sseBaseUrl}/todos`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: "SSE Test Todo" }),
-        });
+        const createRes = await authenticatedFetch(
+          `${sseBaseUrl}/todos`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "SSE Test Todo" }),
+          },
+          sseIdentity,
+        );
         expect(createRes.status).toBe(201);
         const createdTodo: Todo = await createRes.json();
 
@@ -463,20 +471,26 @@ describe("Todo Server Integration", () => {
         expect(afterCreate[0].title).toBe("SSE Test Todo");
 
         // 3. Update the todo - should see updated state
-        await authenticatedFetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ done: true }),
-        });
+        await authenticatedFetch(
+          `${sseBaseUrl}/todos/${createdTodo.id}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ done: true }),
+          },
+          sseIdentity,
+        );
 
         const afterUpdate = await readEvent();
         expect(afterUpdate.length).toBe(1);
         expect(afterUpdate[0].done).toBe(true);
 
         // 4. Delete the todo - should see empty list again
-        await authenticatedFetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
-          method: "DELETE",
-        });
+        await authenticatedFetch(
+          `${sseBaseUrl}/todos/${createdTodo.id}`,
+          { method: "DELETE" },
+          sseIdentity,
+        );
 
         const afterDelete = await readEvent();
         expect(afterDelete).toEqual([]);
