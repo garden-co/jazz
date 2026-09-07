@@ -352,6 +352,9 @@ describe("Todo Server Integration", () => {
       await stopServer(server2);
     });
 
+    // The 256 revision receipt intentionally authenticates every HTTP write
+    // through the remote account registry before proving cold-restart state.
+    // Keep its timeout scoped: ordinary routes retain the suite's 60s bound.
     it("returns the current value after dense update history and a restart", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
       const dbPath = join(dataDir, "jazz.db");
@@ -391,7 +394,7 @@ describe("Todo Server Integration", () => {
       } finally {
         await stopServer(server2);
       }
-    });
+    }, 120_000);
   });
 
   describe("SSE Live Endpoint", () => {
