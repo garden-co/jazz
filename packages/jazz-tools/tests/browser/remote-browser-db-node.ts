@@ -20,12 +20,41 @@ const STORAGE_INVALIDATION_RELOAD_MARKER = "jazz:indexeddb-invalidation-reload";
 const remoteBrowserDbs = new Map<string, RemoteBrowserDbHandle>();
 const remoteHarnessModulePath = "/tests/browser/remote-db-harness.ts";
 
+interface CdpFrameEvent {
+  frameId?: string;
+  frame?: { id?: string; parentId?: string; url?: string };
+  url?: string;
+  reason?: string;
+}
+
+interface CdpExecutionContextEvent {
+  executionContextId?: number;
+  context?: { id?: number; auxData?: { frameId?: string; isDefault?: boolean } };
+}
+
 function recordRemoteBrowserDbLifecycle(lifecycle: string[], event: string): void {
   lifecycle.push(event);
   // A failing page can emit an unbounded stream of browser console messages.
   // Keep the receipt deterministic and bounded while preserving its causal
   // lifecycle order.
   if (lifecycle.length > 32) lifecycle.splice(0, lifecycle.length - 32);
+}
+
+function urlWithoutQuery(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "unavailable";
+  }
+}
+
+function hasSameHost(first: string, second: string): boolean {
+  try {
+    return new URL(first).host === new URL(second).host;
+  } catch {
+    return false;
+  }
 }
 
 function boundedRemoteBrowserDbErrorReceipt(error: unknown): string {
@@ -42,18 +71,131 @@ function boundedRemoteBrowserDbErrorReceipt(error: unknown): string {
   ].join(" ");
 }
 
-function observeRemoteBrowserDbPage(page: Page, lifecycle: string[], tabIndex: number): void {
+async function observeRemoteBrowserDbPage(
+  page: Page,
+  lifecycle: string[],
+  tabIndex: number,
+): Promise<void> {
   const label = `tab=${tabIndex}`;
+  let mainFrame = page.mainFrame();
   page.on("framenavigated", (frame) => {
     if (frame !== page.mainFrame()) return;
-    recordRemoteBrowserDbLifecycle(lifecycle, `${label} navigated url=${frame.url()}`);
+    mainFrame = frame;
+    recordRemoteBrowserDbLifecycle(
+      lifecycle,
+      `${label} navigated url=${urlWithoutQuery(frame.url())} at=${Date.now()}`,
+    );
   });
+  page.on("request", (request) => {
+    if (!request.isNavigationRequest() || request.frame() !== mainFrame) return;
+    recordRemoteBrowserDbLifecycle(
+      lifecycle,
+      `${label} navigation-request url=${urlWithoutQuery(request.url())} at=${Date.now()}`,
+    );
+  });
+  page.on("frameattached", (frame) =>
+    recordRemoteBrowserDbLifecycle(
+      lifecycle,
+      `${label} frame-attached main=${frame === page.mainFrame()} at=${Date.now()}`,
+    ),
+  );
+  page.on("framedetached", (frame) =>
+    recordRemoteBrowserDbLifecycle(
+      lifecycle,
+      `${label} frame-detached main=${frame === mainFrame} at=${Date.now()}`,
+    ),
+  );
+  page.on("domcontentloaded", () =>
+    recordRemoteBrowserDbLifecycle(lifecycle, `${label} domcontentloaded at=${Date.now()}`),
+  );
+  page.on("load", () =>
+    recordRemoteBrowserDbLifecycle(lifecycle, `${label} load at=${Date.now()}`),
+  );
   page.on("close", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} closed`));
   page.on("crash", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} crashed`));
   page.on("pageerror", () => recordRemoteBrowserDbLifecycle(lifecycle, `${label} pageerror`));
   page.on("console", (message) =>
     recordRemoteBrowserDbLifecycle(lifecycle, `${label} console=${message.type()}`),
   );
+
+  page.on("websocket", (socket) => {
+    if (!hasSameHost(socket.url(), page.url())) return;
+    socket.on("framereceived", (frame) => {
+      if (typeof frame.payload !== "string") return;
+      try {
+        const type = (JSON.parse(frame.payload) as { type?: unknown }).type;
+        if (type === "full-reload" || type === "update") {
+          recordRemoteBrowserDbLifecycle(lifecycle, `${label} vite-hmr=${type} at=${Date.now()}`);
+        }
+      } catch {
+        // Never record websocket payloads: sync traffic may carry application data.
+      }
+    });
+  });
+
+  const browser = page.context().browser();
+  if (browser?.browserType().name() !== "chromium") return;
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    let mainFrameId: string | undefined;
+    const mainExecutionContextIds = new Set<number>();
+    cdp.on("Page.frameNavigated", (event: CdpFrameEvent) => {
+      if (!event.frame || event.frame.parentId) return;
+      mainFrameId = event.frame.id;
+      recordRemoteBrowserDbLifecycle(
+        lifecycle,
+        `${label} cdp-main-navigated url=${urlWithoutQuery(event.frame.url ?? "")} at=${Date.now()}`,
+      );
+    });
+    cdp.on("Page.frameStartedLoading", (event: CdpFrameEvent) => {
+      if (mainFrameId && event.frameId !== mainFrameId) return;
+      recordRemoteBrowserDbLifecycle(lifecycle, `${label} cdp-main-loading at=${Date.now()}`);
+    });
+    cdp.on("Page.frameRequestedNavigation", (event: CdpFrameEvent) => {
+      if (mainFrameId && event.frameId !== mainFrameId) return;
+      recordRemoteBrowserDbLifecycle(
+        lifecycle,
+        `${label} cdp-navigation-requested reason=${event.reason ?? "unknown"} url=${urlWithoutQuery(event.url ?? "")} at=${Date.now()}`,
+      );
+    });
+    cdp.on("Page.frameScheduledNavigation", (event: CdpFrameEvent) => {
+      if (mainFrameId && event.frameId !== mainFrameId) return;
+      recordRemoteBrowserDbLifecycle(
+        lifecycle,
+        `${label} cdp-navigation-scheduled reason=${event.reason ?? "unknown"} url=${urlWithoutQuery(event.url ?? "")} at=${Date.now()}`,
+      );
+    });
+    cdp.on("Runtime.executionContextCreated", (event: CdpExecutionContextEvent) => {
+      if (
+        event.context?.auxData?.frameId !== mainFrameId ||
+        !event.context.auxData.isDefault ||
+        event.context.id === undefined
+      ) {
+        return;
+      }
+      mainExecutionContextIds.add(event.context.id);
+      recordRemoteBrowserDbLifecycle(
+        lifecycle,
+        `${label} cdp-main-context-created at=${Date.now()}`,
+      );
+    });
+    cdp.on("Runtime.executionContextDestroyed", (event: CdpExecutionContextEvent) => {
+      if (!event.executionContextId || !mainExecutionContextIds.delete(event.executionContextId))
+        return;
+      recordRemoteBrowserDbLifecycle(
+        lifecycle,
+        `${label} cdp-main-context-destroyed at=${Date.now()}`,
+      );
+    });
+    cdp.on("Runtime.executionContextsCleared", () => {
+      mainExecutionContextIds.clear();
+      recordRemoteBrowserDbLifecycle(lifecycle, `${label} cdp-contexts-cleared at=${Date.now()}`);
+    });
+    await Promise.all([cdp.send("Page.enable"), cdp.send("Runtime.enable")]);
+  } catch {
+    // CDP is diagnostic-only: an unavailable session must not change fixture behavior.
+    recordRemoteBrowserDbLifecycle(lifecycle, `${label} cdp-unavailable at=${Date.now()}`);
+  }
 }
 
 async function remoteBrowserDbLifecycleReceipt(handle: RemoteBrowserDbHandle): Promise<string> {
@@ -159,7 +301,7 @@ export async function createRemoteBrowserDb(
   const pages: Page[] = [];
   for (let index = 0; index < (resolvedInput.tabCount ?? 1); index += 1) {
     const page = await remoteContext.newPage();
-    observeRemoteBrowserDbPage(page, lifecycle, index);
+    await observeRemoteBrowserDbPage(page, lifecycle, index);
     await page.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
     await evaluateHarness(page, "createRemoteBrowserDb", {
       ...resolvedInput,
@@ -250,8 +392,10 @@ export async function waitForRemoteBrowserDbTitle(
   try {
     return await evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
   } catch (error) {
-    const receipt = await remoteBrowserDbLifecycleReceipt(handle);
     const underlying = boundedRemoteBrowserDbErrorReceipt(error);
+    const receipt = await remoteBrowserDbLifecycleReceipt(handle).catch(
+      () => "remote-lifecycle-receipt=unavailable",
+    );
     throw new Error(
       `Remote browser db title wait failed: ${receipt} underlying-error=${underlying}`,
       { cause: error },
