@@ -550,12 +550,31 @@ describe("Db disconnect/reconnect", () => {
 
       await db.disconnect();
 
-      const localWait = db
-        .insert(todos, { title: "local wait", done: false })
-        .wait({ tier: "local" });
+      const write = db.insert(todos, { title: "local wait", done: false });
+      const localWait = write.wait({ tier: "local" });
+      // #2639: distinguish submission from the worker's Local acknowledgement
+      // if this intermittently stalls, without logging identifiers or rows.
+      const phase = { transactionId: "pending", localWait: "pending" };
+      void write.txId.then(
+        () => {
+          phase.transactionId = "fulfilled";
+        },
+        () => {
+          phase.transactionId = "rejected";
+        },
+      );
+      void localWait.then(
+        () => {
+          phase.localWait = "fulfilled";
+        },
+        () => {
+          phase.localWait = "rejected";
+        },
+      );
       await withWorkerOperationTimeout(
         localWait,
         "worker mode: local wait should resolve while disconnected",
+        () => phase,
       );
 
       const edgeWait = db.insert(todos, { title: "edge wait", done: false }).wait({ tier: "edge" });
@@ -781,11 +800,20 @@ async function expectStillPending<T>(
   throw new Error(`${label} ${result.state}${reason}`);
 }
 
-async function withWorkerOperationTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+async function withWorkerOperationTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  failurePhase?: () => { transactionId: string; localWait: string },
+): Promise<T> {
   const startedAt = performance.now();
   let softDeadlineExceeded = false;
+  let softDeadlineDelayMs: number | null = null;
   const softDeadline = setTimeout(() => {
     softDeadlineExceeded = true;
+    softDeadlineDelayMs = Math.max(
+      0,
+      Math.round(performance.now() - startedAt - LOCAL_OPERATION_TIMEOUT_MS),
+    );
   }, LOCAL_OPERATION_TIMEOUT_MS);
 
   try {
@@ -796,6 +824,15 @@ async function withWorkerOperationTimeout<T>(promise: Promise<T>, label: string)
       );
     }
     return result;
+  } catch (error) {
+    if (failurePhase) {
+      console.warn("JAZZ_LOCAL_WAIT_FAILURE", {
+        ...failurePhase(),
+        elapsedMs: Math.round(performance.now() - startedAt),
+        softDeadlineDelayMs,
+      });
+    }
+    throw error;
   } finally {
     clearTimeout(softDeadline);
   }
