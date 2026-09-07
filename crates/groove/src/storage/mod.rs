@@ -127,6 +127,16 @@ pub enum ScanBounds {
     Range { start: Vec<u8>, end: Vec<u8> },
 }
 
+impl ScanBounds {
+    /// Return whether this finite range contains no keys.
+    ///
+    /// Prefix bounds are always potentially non-empty. A range with equal or
+    /// reversed bounds is the empty half-open interval.
+    pub fn is_empty_range(&self) -> bool {
+        matches!(self, Self::Range { start, end } if start >= end)
+    }
+}
+
 /// Canonical key order for an ordered scan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScanDirection {

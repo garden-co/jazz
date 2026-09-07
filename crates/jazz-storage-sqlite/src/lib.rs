@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use groove::storage::{
-    Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
-    ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor, StorageEpochManifest,
-    StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor, ReopenableStorage,
+    ScanBounds, ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor,
+    StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
     validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -735,6 +735,7 @@ impl OrderedKvStorage for SqliteStorage {
                 direction,
                 max_items,
             } = request;
+            let empty_range = bounds.is_empty_range();
             let (start, end) = match bounds {
                 ScanBounds::Prefix(prefix) => {
                     let end = groove::storage::prefix_successor(&prefix);
@@ -742,6 +743,10 @@ impl OrderedKvStorage for SqliteStorage {
                 }
                 ScanBounds::Range { start, end } => (start, Some(end)),
             };
+            if empty_range {
+                self.cf_id(&cf)?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
             let values = self.scan_rows(
                 cf,
                 start,

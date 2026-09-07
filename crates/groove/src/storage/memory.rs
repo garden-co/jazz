@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{
-    ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
-    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
+    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value,
+    WriteManyOutcome,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -442,6 +443,9 @@ impl OrderedKvStorage for MemoryStorage {
             // Validate eagerly so even a zero-item request reports a missing
             // column family, while the cursor itself remains lazy.
             self.with_cf(&cf, |_| ())?;
+            if bounds.is_empty_range() {
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
             Ok(Box::new(MemoryStorageCursor {
                 storage: self.clone(),
                 cf,

@@ -378,7 +378,7 @@ where
                 direction,
                 max_items,
             } = request;
-            if max_items == Some(0) {
+            if max_items == Some(0) || bounds.is_empty_range() {
                 self.encoded_key(&cf, &[])?;
                 return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
             }
