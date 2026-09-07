@@ -120,6 +120,8 @@
   }
 </script>
 
+{#if $jazz.error}<p class="alert-error" role="alert">{$jazz.error.message}</p>{/if}
+
 <details class="auth-backup" bind:open>
   <summary>Back up or restore your local-only account</summary>
   <p class="auth-backup-hint">

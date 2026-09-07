@@ -1,18 +1,16 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { getJazzSession } from "jazz-tools/svelte";
+  import { getAuthActions } from "$lib/auth-actions";
   import TodoWidget from "$lib/TodoWidget.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
-  const jazz = getJazzSession();
+  const auth = getAuthActions();
 
   async function handleSignOut() {
-    await jazz.logout();
-    await authClient.signOut();
-    await jazz.createLocalFirst();
-    await goto("/");
+    try { await auth.signOut(); await goto("/"); }
+    catch { /* The persistent provider displays sign-out failure and retry. */ }
   }
 </script>
 

@@ -4,10 +4,26 @@
   import { credential } from "$lib/accounts";
   import { authClient } from "$lib/auth-client";
   import { env } from "$env/dynamic/public";
+  import { setAuthActions } from "$lib/auth-actions";
   import AccountStatus from "$lib/AccountStatus.svelte";
   let { children: pageChildren }: { children?: Snippet } = $props();
   let jazz = $state.raw<JazzSession<JazzClient>>();
   let error = $state<Error>();
+  let authError = $state<Error>();
+  async function signOut() {
+    if (!jazz) return;
+    try {
+      await jazz.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await jazz.createLocalFirst();
+      authError = undefined;
+    } catch (cause) {
+      authError = cause instanceof Error ? cause : new Error(String(cause));
+      throw cause;
+    }
+  }
+  setAuthActions({ signOut });
   onMount(() => {
     const appId = env.PUBLIC_JAZZ_APP_ID;
     const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
@@ -31,6 +47,7 @@
 
 {#if error}<p role="alert">{error.message}</p>
 {:else if jazz}
+  {#if authError}<p role="alert">{authError.message}</p><button onclick={() => signOut().catch(() => {})}>Retry sign out</button>{/if}
   <JazzSessionProvider session={jazz}>
     {#snippet children()}<AccountStatus />{@render pageChildren?.()}{/snippet}
     {#snippet fallback()}<p>Loading...</p>{/snippet}
