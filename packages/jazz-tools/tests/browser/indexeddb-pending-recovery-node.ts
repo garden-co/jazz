@@ -19,17 +19,28 @@ export async function recoverPendingIndexedDbWrites(
   const url = new URL("/tests/browser/remote-db-harness.html", currentPage.url()).toString();
   let context: BrowserContext | undefined;
   let serverStopped = false;
+  let phase = "online startup";
 
   async function call<T>(page: Page, method: string): Promise<T> {
     // Keep the deadline outside the recovering worker and retain the operation
     // in its owning page rather than passing a long-lived promise through CDP.
-    return evaluateHarnessOperation<T>(
-      page,
-      "/tests/browser/indexeddb-pending-recovery-fixture.ts",
-      method,
-      config,
-      30_000,
-    );
+    try {
+      return await evaluateHarnessOperation<T>(
+        page,
+        "/tests/browser/indexeddb-pending-recovery-fixture.ts",
+        method,
+        config,
+        30_000,
+      );
+    } catch (error) {
+      const context = `[pending-write recovery: ${phase}; method=${method}; serverStopped=${serverStopped}]`;
+      if (error instanceof Error) {
+        error.message = `${context} ${error.message}`;
+        error.stack = `${context}\n${error.stack ?? error.message}`;
+        throw error;
+      }
+      throw new Error(context, { cause: error });
+    }
   }
 
   async function launch(): Promise<Page> {
@@ -42,11 +53,15 @@ export async function recoverPendingIndexedDbWrites(
 
   try {
     const page = await launch();
+    phase = "online seed";
     await call(page, "seed");
+    phase = "online initial read";
     assert.deepEqual(await call<RecoveryRows>(page, "read"), { marker: 0, versions: [] });
     await stopJazzServerByUrl(config.serverUrl);
     serverStopped = true;
+    phase = "offline pending write";
     await call(page, "writePending");
+    phase = "offline same-session read";
     assert.deepEqual(await call<RecoveryRows>(page, "read"), {
       marker: 1,
       versions: Array.from({ length: 500 }, (_, index) => index),
@@ -59,7 +74,9 @@ export async function recoverPendingIndexedDbWrites(
     // Unlike closing tabs and sleeping, this cannot retain a warm worker realm.
     await context!.close();
     context = undefined;
+    phase = "offline cold startup";
     const reopened = await launch();
+    phase = "offline recovered read";
     console.info("[pending-write recovery] browser reopened offline; reading recovered rows");
     return await call<RecoveryRows>(reopened, "read");
   } finally {

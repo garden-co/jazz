@@ -78,9 +78,24 @@ export async function open(config: RecoveryConfig): Promise<void> {
   });
 }
 
+async function atPhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof Error) {
+      error.message = `[${phase}] ${error.message}`;
+      error.stack = `[${phase}]\n${error.stack ?? error.message}`;
+      throw error;
+    }
+    throw new Error(`[${phase}]`, { cause: error });
+  }
+}
+
 export async function seed(): Promise<void> {
-  await db.insert(recoveryApp.headers, { version: 0 }, { id: markerId }).wait({ tier: "edge" });
-  await db.all(recoveryApp.items, { tier: "local-first" });
+  await atPhase("seed header edge acknowledgement", () =>
+    db.insert(recoveryApp.headers, { version: 0 }, { id: markerId }).wait({ tier: "edge" }),
+  );
+  await atPhase("items local-first read", () => db.all(recoveryApp.items, { tier: "local-first" }));
 }
 
 export async function writePending(): Promise<void> {
@@ -96,8 +111,12 @@ export async function writePending(): Promise<void> {
 export async function read(): Promise<RecoveryRows> {
   // Keep this first query on the public LocalFirst path: admission must finish
   // before either it or the marker read can observe the recovered transaction.
-  const rows = await db.all(recoveryApp.items, { tier: "local-first" });
-  const marker = await db.one(recoveryApp.headers.where({ id: markerId }), { tier: "local-first" });
+  const rows = await atPhase("items local-first read", () =>
+    db.all(recoveryApp.items, { tier: "local-first" }),
+  );
+  const marker = await atPhase("header local-first read", () =>
+    db.one(recoveryApp.headers.where({ id: markerId }), { tier: "local-first" }),
+  );
   return {
     marker: marker?.version,
     versions: rows.map((row) => row.version).sort((a, b) => a - b),
