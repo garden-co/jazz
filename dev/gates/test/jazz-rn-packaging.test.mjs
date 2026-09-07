@@ -2183,7 +2183,10 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   assert.match(runtime, /wakeFromOwner\([^)]*\) noexcept/);
   assert.match(runtime, /void schedule\([^)]*\) noexcept/);
   assert.match(runtime, /catch \(\.\.\.\)[\s\S]*scheduled_ = false;/);
-  assert.match(runtime, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+  assert.match(
+    runtime,
+    /if \(!scheduled_ && callInvoker_\) \{\s+scheduled_ = true;\s+invoker = callInvoker_;/,
+  );
   assert.match(runtime, /deactivateAndClear/);
   assert.match(runtime, /kWakeCancelled/);
   const openAttached = runtime.match(
@@ -2197,11 +2200,8 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   );
   assert.throws(
     () => {
-      const broken = runtime.replace(
-        "if (scheduled_ || !callInvoker_) return;",
-        "if (!callInvoker_) return;",
-      );
-      assert.match(broken, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+      const broken = runtime.replace("if (!scheduled_ && callInvoker_) {", "if (callInvoker_) {");
+      assert.match(broken, /if \(!scheduled_ && callInvoker_\) \{/);
     },
     /scheduled_/,
     "the receipt is sensitive to removing per-runtime wake coalescing",
