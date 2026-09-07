@@ -3,6 +3,7 @@ import {
   defineComponent,
   h,
   inject,
+  onBeforeUpdate,
   onMounted,
   onUnmounted,
   provide,
@@ -19,6 +20,7 @@ import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
@@ -136,7 +138,9 @@ export const LegacyJazzProvider = defineComponent({
       default: true,
     },
   },
-  setup(props, { slots }) {
+  setup(props, { slots, attrs }) {
+    assertNoClassicProviderProps("JazzProvider", attrs);
+    onBeforeUpdate(() => assertNoClassicProviderProps("JazzProvider", attrs));
     const clientRef = shallowRef<CreatedJazzClient | null>(null);
     const errorRef = shallowRef<Error | null>(null);
     let activeClient: CreatedJazzClient | null = null;
@@ -164,11 +168,18 @@ export const LegacyJazzProvider = defineComponent({
                 await previousClient.shutdown();
               }
               if (activeRunId !== runId) return;
+              assertNoClassicProviderProps("JazzProvider", attrs);
 
               const client = await createJazzClient(configSnapshot);
               if (activeRunId !== runId) {
                 await client.shutdown();
                 return;
+              }
+              try {
+                assertNoClassicProviderProps("JazzProvider", attrs);
+              } catch (reason) {
+                await client.shutdown();
+                throw reason;
               }
 
               activeClient = client;

@@ -1,3 +1,10 @@
+export {
+  useCoState,
+  useAccount,
+  useAccountOrGuest,
+  useJazzContext,
+  useAcceptInvite,
+} from "../classic-api.js";
 export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzClientProvider,

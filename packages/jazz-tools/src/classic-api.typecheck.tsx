@@ -11,6 +11,15 @@ import {
 import { useCoState as coreCoState } from "jazz-tools/react-core";
 import { useCoState as nativeCoState, JazzReactNativeProvider } from "jazz-tools/react-native";
 import { useCoState as expoCoState, JazzExpoProvider } from "jazz-tools/expo";
+import {
+  useCoState as vueCoState,
+  useAccount as vueAccount,
+  useAccountOrGuest,
+  useJazzContext,
+  useAcceptInvite,
+  type JazzProviderProps as VueProviderProps,
+} from "jazz-tools/vue";
+import type { JazzProviderProps as SolidProviderProps } from "jazz-tools/solid";
 
 // These imports must resolve against emitted declarations, never tsconfig src aliases.
 // @ts-expect-error Classic members must not become valid schema builders.
@@ -45,6 +54,29 @@ const oldReact = <JazzReactProvider />;
 const oldNative = <JazzReactNativeProvider />;
 // @ts-expect-error Classic Expo providers are not valid JSX components.
 const oldExpo = <JazzExpoProvider />;
+
+// @ts-expect-error Vue Classic composables are not callable.
+vueCoState();
+// @ts-expect-error Vue Classic account loading remains invalid.
+vueAccount();
+// @ts-expect-error Vue Classic guest account loading remains invalid.
+useAccountOrGuest();
+// @ts-expect-error Vue Classic context is not the Jazz 2 client context.
+useJazzContext();
+// @ts-expect-error Vue Classic invites remain invalid.
+useAcceptInvite();
+
+const oldVueProps: VueProviderProps = {
+  config: { appId: "classic-vue-types" },
+  // @ts-expect-error Diagnostics must not make Classic props supported.
+  AccountSchema: undefined,
+};
+const currentVueProps: VueProviderProps = { config: { appId: "current-vue-types" } };
+const currentSolidProps: SolidProviderProps = {
+  config: { appId: "current-solid-types" },
+  children: "Jazz 2",
+};
+void [oldVueProps, currentVueProps, currentSolidProps];
 
 // Positive consumers prevent unrelated module/type-resolution failures from hiding
 // accidental rejection of the supported Jazz 2 schema, query and React interfaces.

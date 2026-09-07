@@ -8,6 +8,7 @@ serialises shutdown before starting a replacement.
 	import type { AccountDbConfig as DbConfig } from '../accounts/context.js';
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
 	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
+	import { assertNoClassicProviderProps } from '../classic-api.js';
 
 	interface Props {
 		config: DbConfig;
@@ -16,7 +17,13 @@ serialises shutdown before starting a replacement.
 		autoAttachDevTools?: boolean;
 	}
 
-	let { config, children, fallback, autoAttachDevTools = true }: Props = $props();
+	let { config, children, fallback, autoAttachDevTools = true, ...otherProps }: Props = $props();
+
+	function validateClassicProps() {
+		assertNoClassicProviderProps('JazzSvelteProvider', otherProps);
+	}
+
+	validateClassicProps();
 
 	let error = $state<Error | null>(null);
 	let client = $state<JazzClient | null>(null);
@@ -24,6 +31,7 @@ serialises shutdown before starting a replacement.
 	let handover = Promise.resolve();
 
 	$effect(() => {
+		validateClassicProps();
 		let cancelled = false;
 		const nextConfig = config;
 
@@ -36,10 +44,17 @@ serialises shutdown before starting a replacement.
 					return;
 				}
 
+				validateClassicProps();
 				const createdClient = await createJazzClient(nextConfig);
 				if (cancelled) {
 					await createdClient.shutdown();
 					return;
+				}
+				try {
+					validateClassicProps();
+				} catch (reason) {
+					await createdClient.shutdown();
+					throw reason;
 				}
 
 				activeClient = createdClient;

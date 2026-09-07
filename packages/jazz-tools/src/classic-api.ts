@@ -16,6 +16,17 @@ function failClassicApi(operation: string): never {
   throw Object.assign(error, { code: "JAZZ_CLASSIC_API_REMOVED" });
 }
 
+const classicProviderProps = ["sync", "AccountSchema", "accountSchema", "account-schema"] as const;
+
+/** @internal Reused provider names must reject Classic configuration, not valid Jazz 2 usage. */
+export function assertNoClassicProviderProps(provider: string, props: object): void {
+  for (const property of classicProviderProps) {
+    if (Object.hasOwn(props, property)) {
+      failClassicApi(`${provider}.${property}`);
+    }
+  }
+}
+
 function classicFunction(name: string) {
   // Keep ordinary function metadata: React may inspect it before rendering.
   return function removedClassicApi(): never {
@@ -83,4 +94,25 @@ export const JazzReactNativeProvider: JazzClassicApiRemoved = classicFunction(
 /** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
 export const JazzExpoProvider: JazzClassicApiRemoved = classicFunction(
   "JazzExpoProvider",
+) as unknown as JazzClassicApiRemoved;
+
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const CoState: JazzClassicApiRemoved = classicNamespace("CoState");
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const AccountCoState: JazzClassicApiRemoved = classicNamespace("AccountCoState");
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const InviteListener: JazzClassicApiRemoved = classicNamespace("InviteListener");
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const SyncConnectionStatus: JazzClassicApiRemoved = classicNamespace("SyncConnectionStatus");
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const useAccountOrGuest: JazzClassicApiRemoved = classicFunction(
+  "useAccountOrGuest",
+) as unknown as JazzClassicApiRemoved;
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const useJazzContext: JazzClassicApiRemoved = classicFunction(
+  "useJazzContext",
+) as unknown as JazzClassicApiRemoved;
+/** @deprecated Jazz Classic (0.x), unsupported in Jazz 2. Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt. */
+export const useAcceptInvite: JazzClassicApiRemoved = classicFunction(
+  "useAcceptInvite",
 ) as unknown as JazzClassicApiRemoved;

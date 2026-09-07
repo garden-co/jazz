@@ -1,22 +1,93 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { build } from "esbuild";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import ts from "typescript";
+import { compile, compileModule } from "svelte/compiler";
 
 const packageDir =
   process.env.JAZZ_CLASSIC_CONSUMER_DIR ?? fileURLToPath(new URL("..", import.meta.url));
 
-function runConsumer(source) {
-  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
+function runConsumer(source, { browser = false } = {}) {
+  const args = [];
+  if (browser) {
+    const require = createRequire(join(packageDir, "package.json"));
+    const setup = `
+      import { JSDOM } from ${JSON.stringify(pathToFileURL(require.resolve("jsdom")).href)};
+      const dom = new JSDOM('<div id="app"></div>', { url: "https://jazz.test", pretendToBeVisual: true });
+      for (const name of [
+        "window", "document", "navigator", "HTMLElement", "Element", "Node", "Text", "Comment",
+        "Event", "CustomEvent", "SVGElement", "MutationObserver",
+      ]) Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true });
+      globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
+      globalThis.cancelAnimationFrame = dom.window.cancelAnimationFrame.bind(dom.window);
+    `;
+    args.push(
+      "--conditions=browser",
+      "--import",
+      "data:text/javascript," + encodeURIComponent(setup),
+    );
+  }
+  args.push("--input-type=module", "--eval", source);
+  const result = spawnSync(process.execPath, args, {
     cwd: packageDir,
     encoding: "utf8",
+    timeout: 30_000,
   });
   assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+}
+
+async function runFrameworkConsumer(source, { browser = false, controlledFactory = false } = {}) {
+  const require = createRequire(join(packageDir, "package.json"));
+  const manifest = require("jazz-tools/package.json");
+  const generate = browser ? "client" : "server";
+  const result = await build({
+    stdin: {
+      contents: compileModule(source, { filename: "consumer.svelte.js", generate }).js.code,
+      resolveDir: packageDir,
+    },
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    conditions: browser ? ["browser"] : ["node"],
+    external: Object.keys({
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+      ...manifest.peerDependencies,
+    }),
+    write: false,
+    plugins: [
+      {
+        name: "compiled-public-svelte",
+        setup(build) {
+          // Race tests control only the existing client-factory dependency. The
+          // public provider, renderer and scheduler still execute their real code.
+          if (controlledFactory) {
+            build.onLoad(
+              { filter: /[\\/]dist[\\/](svelte|vue)[\\/]create-jazz-client\.js$/ },
+              () => ({
+                contents:
+                  "export const createJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
+                loader: "js",
+              }),
+            );
+          }
+          build.onLoad({ filter: /\.svelte(\.js)?$/ }, ({ path }) => ({
+            contents: (path.endsWith(".svelte") ? compile : compileModule)(
+              readFileSync(path, "utf8"),
+              { filename: path, generate },
+            ).js.code,
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  });
+  runConsumer(result.outputFiles[0].text, { browser });
 }
 
 test("Classic co and z named imports lead to migration guidance, not a linking error", () => {
@@ -101,7 +172,21 @@ for (const [entrypoint, provider] of [
         assert.throws(() => renderToString(element), error =>
           error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes(provider));
       }
-      assert.equal(renderToString(createElement("p", {}, "Jazz 2")), "<p>Jazz 2</p>");
+      if (${JSON.stringify(entrypoint)} === "expo") {
+        function CurrentAuth() {
+          const auth = binding.useLocalFirstAuth({ appId: "classic-coexistence" });
+          return createElement("p", {}, auth.isLoading ? "loading" : "ready");
+        }
+        assert.equal(renderToString(createElement(CurrentAuth)), "<p>loading</p>");
+      } else {
+        const current = createElement(binding.JazzProvider, {
+          config: { appId: "classic-coexistence" },
+          fallback: createElement("p", {}, "loading"),
+          autoAttachDevTools: false,
+          ...(${JSON.stringify(entrypoint)} === "react-core" ? { createJazzClient: binding.createJazzClient } : {}),
+        }, "ready");
+        assert.equal(renderToString(current), "<p>loading</p>");
+      }
     `);
   });
 }
@@ -130,46 +215,43 @@ test("ordinary production tree shaking preserves Classic failure side effects", 
   }
 });
 
-test("unselected Classic names retain ordinary missing-export errors", () => {
-  const result = spawnSync(
-    process.execPath,
-    ["--input-type=module", "--eval", 'import { Inbox } from "jazz-tools";'],
-    { cwd: packageDir, encoding: "utf8" },
-  );
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /does not provide an export named 'Inbox'/);
-});
-
-test("published declarations reject Classic use and accept Jazz 2 schemas and React", () => {
-  const fixtureDir = mkdtempSync(join(packageDir, ".classic-api-types-"));
-  const fixture = join(fixtureDir, "consumer.tsx");
-  try {
-    copyFileSync(new URL("../src/classic-api.typecheck.tsx", import.meta.url), fixture);
-    const program = ts.createProgram([fixture], {
-      noEmit: true,
-      strict: true,
-      skipLibCheck: true,
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.NodeNext,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      jsx: ts.JsxEmit.ReactJSX,
-      esModuleInterop: true,
-      types: ["node", "react"],
-    });
-    const diagnostics = ts.getPreEmitDiagnostics(program);
-    assert.equal(
-      diagnostics.length,
-      0,
-      ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-        getCanonicalFileName: (file) => file,
-        getCurrentDirectory: () => packageDir,
-        getNewLine: () => "\n",
-      }),
-    );
-  } finally {
-    rmSync(fixtureDir, { recursive: true, force: true });
-  }
-});
+for (const [file, bundler] of [
+  ["classic-api.typecheck.tsx", false],
+  ["classic-svelte-api.typecheck.ts", true],
+]) {
+  test(`published ${bundler ? "Svelte" : "Node"} declarations reject Classic use and accept Jazz 2`, () => {
+    const fixtureDir = mkdtempSync(join(packageDir, ".classic-api-types-"));
+    const fixture = join(fixtureDir, "consumer.tsx");
+    try {
+      copyFileSync(new URL("../src/" + file, import.meta.url), fixture);
+      const program = ts.createProgram([fixture], {
+        noEmit: true,
+        strict: true,
+        skipLibCheck: true,
+        target: ts.ScriptTarget.ES2022,
+        module: bundler ? ts.ModuleKind.ESNext : ts.ModuleKind.NodeNext,
+        moduleResolution: bundler
+          ? ts.ModuleResolutionKind.Bundler
+          : ts.ModuleResolutionKind.NodeNext,
+        jsx: ts.JsxEmit.ReactJSX,
+        esModuleInterop: true,
+        types: ["node", "react"],
+      });
+      const diagnostics = ts.getPreEmitDiagnostics(program);
+      assert.equal(
+        diagnostics.length,
+        0,
+        ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+          getCanonicalFileName: (file) => file,
+          getCurrentDirectory: () => packageDir,
+          getNewLine: () => "\n",
+        }),
+      );
+    } finally {
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("Vue rejects Classic provider configuration instead of silently ignoring it", () => {
   runConsumer(`
@@ -182,9 +264,267 @@ test("Vue rejects Classic provider configuration instead of silently ignoring it
       render: () => h(JazzProvider, {
         config: { appId: "classic-vue-props" },
         sync: { peer: "wss://classic.invalid" },
-      }, { fallback: () => h("p", "loading") }),
+      }, {
+        fallback: () => h("p", "invalid-fallback"),
+        default: () => h("p", "invalid-child"),
+      }),
     });
-    await assert.rejects(renderToString(app), error =>
-      error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes("JazzProvider.sync"));
+    const failures = [];
+    app.config.errorHandler = error => failures.push(error);
+    const html = await renderToString(app);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].code, "JAZZ_CLASSIC_API_REMOVED");
+    assert.ok(failures[0].message.includes("JazzProvider.sync"));
+    assert.ok(!html.includes("invalid-fallback") && !html.includes("invalid-child"));
+    const valid = await renderToString(createSSRApp({
+      render: () => h(JazzProvider, { config: { appId: "current-vue-props" } },
+        { fallback: () => h("p", "valid-fallback") }),
+    }));
+    assert.ok(valid.includes("<p>valid-fallback</p>"));
   `);
 });
+
+test("Svelte Classic classes and Vue Classic composables reject through public exports", async () => {
+  await runFrameworkConsumer(`
+    import assert from "node:assert/strict";
+    import { CoState, AccountCoState, InviteListener, SyncConnectionStatus } from "jazz-tools/svelte";
+    import { useCoState, useAccount, useAccountOrGuest, useJazzContext, useAcceptInvite } from "jazz-tools/vue";
+    for (const [name, value] of Object.entries({ CoState, AccountCoState, InviteListener, SyncConnectionStatus })) {
+      assert.throws(() => new value(), error =>
+        error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes(name));
+    }
+    for (const [name, value] of Object.entries({ useCoState, useAccount, useAccountOrGuest, useJazzContext, useAcceptInvite })) {
+      assert.throws(() => value(), error =>
+        error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes(name));
+    }
+  `);
+});
+
+test("reused Svelte and Vue providers reject present Classic props but preserve valid SSR", async () => {
+  await runFrameworkConsumer(`
+    import assert from "node:assert/strict";
+    import { createRawSnippet } from "svelte";
+    import { render } from "svelte/server";
+    import { JazzSvelteProvider } from "jazz-tools/svelte";
+    import { createSSRApp, h } from "vue";
+    import { renderToString } from "@vue/server-renderer";
+    import { JazzProvider } from "jazz-tools/vue";
+    const config = { appId: "classic-props-presence" };
+    const fallback = createRawSnippet(() => ({ render: () => "<p>loading</p>" }));
+    for (const legacy of [{sync: undefined}, {AccountSchema: class Account {}}, {"account-schema": undefined}]) {
+      assert.throws(() => render(JazzSvelteProvider, {
+        props: { config, children: fallback, fallback, ...legacy },
+      }).body, error => error.code === "JAZZ_CLASSIC_API_REMOVED" &&
+        error.message.includes("JazzSvelteProvider." + Object.keys(legacy)[0]));
+      const app = createSSRApp({
+        render: () => h(JazzProvider, { config, ...legacy }, {
+          fallback: () => h("p", "invalid-fallback"), default: () => h("p", "invalid-child"),
+        }),
+      });
+      const failures = [];
+      app.config.errorHandler = error => failures.push(error);
+      const html = await renderToString(app);
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0].code, "JAZZ_CLASSIC_API_REMOVED");
+      assert.ok(failures[0].message.includes("JazzProvider." + Object.keys(legacy)[0]));
+      assert.ok(!html.includes("invalid-fallback") && !html.includes("invalid-child"));
+    }
+    const svelte = render(JazzSvelteProvider, {
+      props: { config, children: fallback, fallback, "data-extra": "allowed" },
+    });
+    assert.ok(svelte.body.includes("<p>loading</p>"));
+    const vue = await renderToString(createSSRApp({
+      render: () => h(JazzProvider, { config, "data-extra": "allowed" }, { fallback: () => h("p", "loading") }),
+    }));
+    assert.ok(vue.includes("<p>loading</p>"));
+  `);
+});
+
+test("Svelte notices newly introduced Classic props even when config is unchanged", async () => {
+  await runFrameworkConsumer(
+    `
+    import assert from "node:assert/strict";
+    import { createRawSnippet, mount, unmount, flushSync } from "svelte";
+    import { JazzSvelteProvider } from "jazz-tools/svelte";
+    const snippet = createRawSnippet(() => ({ render: () => "<p>loading</p>" }));
+    const props = $state({
+      config: { appId: "svelte-prop-transition", driver: { type: "memory" } },
+      children: snippet, fallback: snippet,
+    });
+    const instance = mount(JazzSvelteProvider, { target: document.getElementById("app"), props });
+    flushSync();
+    assert.equal(document.querySelector("p").textContent, "loading");
+    props.sync = undefined;
+    assert.throws(() => flushSync(), error =>
+      error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes("JazzSvelteProvider.sync"));
+    await unmount(instance);
+  `,
+    { browser: true },
+  );
+});
+
+test("Vue notices newly introduced Classic attrs even when config is unchanged", async () => {
+  await runFrameworkConsumer(
+    `
+    import assert from "node:assert/strict";
+    import { createApp, h, reactive, nextTick } from "vue";
+    import { JazzProvider } from "jazz-tools/vue";
+    const props = reactive({ config: { appId: "vue-prop-transition", driver: { type: "memory" } } });
+    const failures = [];
+    const app = createApp({
+      render: () => h(JazzProvider, props, { fallback: () => h("p", "loading") }),
+    });
+    app.config.errorHandler = error => failures.push(error);
+    app.mount(document.getElementById("app"));
+    assert.equal(document.querySelector("p").textContent, "loading");
+    props.AccountSchema = undefined;
+    await nextTick();
+    assert.ok(failures.some(error => error.code === "JAZZ_CLASSIC_API_REMOVED" &&
+      error.message.includes("JazzProvider.AccountSchema")));
+    app.unmount();
+  `,
+    { browser: true },
+  );
+});
+
+test("Solid's supported provider still renders through its Node export", async () => {
+  await runFrameworkConsumer(`
+    import assert from "node:assert/strict";
+    import { createComponent } from "solid-js";
+    import { renderToString } from "solid-js/web";
+    import { JazzProvider } from "jazz-tools/solid";
+    const html = renderToString(() => createComponent(JazzProvider, {
+      config: { appId: "solid-coexistence" },
+      fallback: "loading", children: "ready", autoAttachDevTools: false,
+    }));
+    assert.ok(html.includes("loading"));
+  `);
+});
+
+test("Solid's supported provider still mounts through its browser export", async () => {
+  await runFrameworkConsumer(
+    `
+    import assert from "node:assert/strict";
+    import { createComponent } from "solid-js";
+    import { render } from "solid-js/web";
+    import { JazzProvider } from "jazz-tools/solid";
+    const target = document.getElementById("app");
+    const dispose = render(() => createComponent(JazzProvider, {
+      config: { appId: "solid-coexistence", driver: { type: "memory" } },
+      fallback: "loading", children: "ready", autoAttachDevTools: false,
+    }), target);
+    assert.equal(target.textContent, "loading");
+    dispose();
+  `,
+    { browser: true },
+  );
+});
+
+test("Vue refuses replacement when Classic attrs arrive during prior-client shutdown", async () => {
+  await runFrameworkConsumer(
+    `
+    import assert from "node:assert/strict";
+    import { setImmediate } from "node:timers/promises";
+    import { createApp, h, reactive, nextTick } from "vue";
+    import { JazzProvider } from "jazz-tools/vue";
+    let finishShutdown, startedShutdown;
+    const stopping = new Promise(resolve => { startedShutdown = resolve; });
+    const stopped = new Promise(resolve => { finishShutdown = resolve; });
+    const resources = [];
+    globalThis.__classicClientFactory = async () => {
+      const resource = { closed: false };
+      resources.push(resource);
+      return {
+        db: { onAuthChanged: () => () => {} }, session: null,
+        async shutdown() { startedShutdown(); await stopped; resource.closed = true; },
+      };
+    };
+    const props = reactive({ config: { appId: "first" }, autoAttachDevTools: false });
+    const failures = [];
+    const app = createApp({ render: () => h(JazzProvider, props, {
+      default: () => h("p", "ready"), fallback: () => h("p", "loading"),
+    }) });
+    app.config.errorHandler = error => failures.push(error);
+    app.mount(document.getElementById("app"));
+    await setImmediate();
+    assert.equal(document.querySelector("p").textContent, "ready");
+    props.config = { appId: "second" };
+    await stopping;
+    props.sync = undefined;
+    await nextTick();
+    finishShutdown();
+    await setImmediate();
+    assert.equal(resources.length, 1, "invalid replacement must not acquire another resource");
+    assert.equal(resources[0].closed, true);
+    assert.ok(failures.some(error => error.code === "JAZZ_CLASSIC_API_REMOVED"));
+    app.unmount();
+  `,
+    { browser: true, controlledFactory: true },
+  );
+});
+
+for (const framework of ["svelte", "vue"]) {
+  test(`${framework} disposes an in-flight client invalidated before publication`, async () => {
+    await runFrameworkConsumer(
+      `
+      import assert from "node:assert/strict";
+      import { setImmediate } from "node:timers/promises";
+      import { mount, unmount, flushSync, createRawSnippet } from "svelte";
+      import { JazzSvelteProvider } from "jazz-tools/svelte";
+      import { createApp, h, reactive, nextTick } from "vue";
+      import { JazzProvider } from "jazz-tools/vue";
+      let finishCreation, startedCreation;
+      const started = new Promise(resolve => { startedCreation = resolve; });
+      const pending = new Promise(resolve => { finishCreation = resolve; });
+      let closed = false;
+      const client = {
+        db: {
+          onAuthChanged: () => () => {},
+          read() { if (closed) throw new Error("resource closed"); return "usable"; },
+        },
+        session: null,
+        async shutdown() { closed = true; },
+      };
+      globalThis.__classicClientFactory = () => { startedCreation(); return pending; };
+      const failures = [];
+      const capture = error => {
+        if (error.code !== "JAZZ_CLASSIC_API_REMOVED") throw error;
+        failures.push(error);
+      };
+      const target = document.getElementById("app");
+      const config = { appId: "pending-create" };
+      let props, dispose;
+      if (${JSON.stringify(framework)} === "svelte") {
+        // Non-reactive caller props force the post-await admission check, rather
+        // than letting an effect rerun cancel creation on our behalf.
+        props = { config, autoAttachDevTools: false,
+          children: createRawSnippet(() => ({ render: () => "<p>ready</p>" })),
+          fallback: createRawSnippet(() => ({ render: () => "<p>loading</p>" })),
+        };
+        process.on("uncaughtException", capture);
+        const instance = mount(JazzSvelteProvider, { target, props });
+        flushSync();
+        dispose = () => unmount(instance);
+      } else {
+        props = reactive({ config, autoAttachDevTools: false });
+        const app = createApp({ render: () => h(JazzProvider, props, {
+          default: () => h("p", "ready"), fallback: () => h("p", "loading"),
+        }) });
+        app.config.errorHandler = capture;
+        app.mount(target);
+        dispose = () => app.unmount();
+      }
+      await started;
+      props.AccountSchema = undefined;
+      await nextTick();
+      finishCreation(client);
+      await setImmediate();
+      assert.throws(() => client.db.read(), /resource closed/);
+      assert.ok(!target.textContent.includes("ready"), "rejected resource must not reach children");
+      assert.ok(failures.some(error => error.code === "JAZZ_CLASSIC_API_REMOVED"));
+      await dispose();
+    `,
+      { browser: true, controlledFactory: true },
+    );
+  });
+}

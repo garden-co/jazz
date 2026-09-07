@@ -24,8 +24,9 @@ export const app = s.defineApp({
 });
 ```
 
-Use `db.insert`, `db.all` and `db.subscribeAll` for writes and queries, and
-`useAll` / `useOne` from `jazz-tools/react` for reactive React reads.
+Use `db.insert`, `db.all` and `db.subscribeAll` for writes and queries.
+React, Vue and Solid expose reactive reads through `useAll` / `useOne` in their
+respective entrypoints; Svelte uses `QuerySubscription` / `QuerySubscriptionOne`.
 Model access through row-level permission policies, not Classic `Group` objects.
 See [client setup](https://jazz.tools/docs/getting-started/client-setup) for creating
 the database and configuring authentication.
@@ -40,6 +41,8 @@ provide actionable errors**, not compatibility:
 | `jazz-tools/react-core`   | `useCoState`, `useAccount`, `useSuspenseCoState`, `useSuspenseAccount`                                           |
 | `jazz-tools/react-native` | The same four hooks and `JazzReactNativeProvider`                                                                |
 | `jazz-tools/expo`         | The same four hooks and `JazzExpoProvider`                                                                       |
+| `jazz-tools/svelte`       | `CoState`, `AccountCoState`, `InviteListener`, `SyncConnectionStatus`                                            |
+| `jazz-tools/vue`          | `useCoState`, `useAccount`, `useAccountOrGuest`, `useJazzContext`, `useAcceptInvite`                             |
 
 These declarations reject Classic usage in TypeScript. In JavaScript or
 transpile-only builds, Classic operations throw synchronously with migration
@@ -47,6 +50,26 @@ guidance in development and production. Merely importing a diagnostic export
 does not throw; a Classic provider throws when rendered, not when its React
 element is created. Existing platform/peer-dependency requirements still apply.
 Other unsupported exports and historical subpaths retain normal import errors.
+
+Svelte's `JazzSvelteProvider` and Vue's `JazzProvider` are still supported Jazz 2
+components, and Svelte's `getJazzContext` remains supported. These providers take
+`config`, not Classic `sync` or `AccountSchema` props. Supplying those old props
+(including `accountSchema` / `account-schema` spellings, even with an undefined
+value) produces the same diagnostic, including when introduced during an update.
+Do not rename the provider or treat this as a mechanical prop migration: read the
+Jazz 2 setup guide. The providers' supported prop types remain unchanged.
+Framework error handlers and boundaries may intercept the exception. In particular,
+Vue's production default logs component errors rather than rejecting the SSR
+render promise; `app.config.errorHandler` receives the diagnostic. Rejected
+provider setup does not render its fallback or descendants or create a client.
+
+Solid's current binding remains supported; no speculative Classic Solid exports
+are added. Next.js, SvelteKit and Nuxt use their underlying React, Svelte and Vue
+bindings respectively.
+
+These diagnostics apply when using the installed Jazz 2 package. They cannot
+intercept separate legacy packages such as `jazz-vue`, `jazz-svelte` or
+`jazz-react` that bring their own Classic dependencies.
 
 ## Usage
 
