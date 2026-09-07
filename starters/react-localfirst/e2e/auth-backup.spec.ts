@@ -24,6 +24,15 @@ async function openBackup(page: Page) {
   await expect(restoreInput).toBeVisible({ timeout: TIMEOUT });
 }
 
+async function restorePhrase(page: Page, phrase: string) {
+  const outgoingInput = await page.getByLabel(TODO_INPUT_LABEL).elementHandle();
+  if (!outgoingInput) throw new Error("The active client did not render its todo input");
+  await page.getByLabel("Restore from recovery phrase").fill(phrase);
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await page.waitForFunction((input) => !input.isConnected, outgoingInput);
+  await waitForApp(page);
+}
+
 test("recovery phrase round-trips the local-first identity", async ({ page }) => {
   const runId = Date.now();
   const todo = `Backup todo ${runId}`;
@@ -41,17 +50,14 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   expect(phrase.trim().split(/\s+/).length).toBe(24);
 
   // Reopening the same account must still replace the client cleanly.
-  await page.getByLabel("Restore from recovery phrase").fill(phrase);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
-  await waitForApp(page);
+  await restorePhrase(page, phrase);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
-  // A rejected recovery still leaves a fresh client for the selected account.
+  // Invalid phrases are rejected before account recovery; the active data remains available.
   await openBackup(page);
   await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible({ timeout: TIMEOUT });
-  await waitForApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
   // Clear local storage → a fresh anonymous identity is generated, todo vanishes.
@@ -62,10 +68,6 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
 
   // Restore the phrase.
   await openBackup(page);
-  await page.getByLabel("Restore from recovery phrase").fill(phrase);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
-
-  // Page reloads; the original todo should reappear.
-  await waitForApp(page);
+  await restorePhrase(page, phrase);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
