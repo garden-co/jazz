@@ -32,9 +32,10 @@ function runConsumer(source, { browser = false } = {}) {
       "data:text/javascript," + encodeURIComponent(setup),
     );
   }
-  args.push("--input-type=module", "--eval", source);
+  args.push("--input-type=module");
   const result = spawnSync(process.execPath, args, {
     cwd: packageDir,
+    input: source,
     encoding: "utf8",
     timeout: 30_000,
   });
@@ -125,6 +126,27 @@ test("Classic namespaces and classes reject reads, calls, construction and subcl
     check(() => jazz.CoMap(), "CoMap");
     check(() => new jazz.CoMap(), "CoMap");
     check(() => class Task extends jazz.CoMap {}, "CoMap");
+  `);
+});
+
+test("Next Fast Refresh can inspect unused Classic exports without treating them as components", () => {
+  runConsumer(`
+    import assert from "node:assert/strict";
+    import { createRequire } from "node:module";
+    import * as jazz from "jazz-tools";
+    // Fast Refresh is development-only, even when the outer suite tests production.
+    process.env.NODE_ENV = "development";
+    const require = createRequire(import.meta.url);
+    const refresh = require("next/dist/compiled/react-refresh/runtime");
+    const helpers = require("next/dist/compiled/@next/react-refresh-utils/dist/internal/helpers").default;
+    helpers.registerExportsForReactRefresh(jazz, "classic-diagnostic-consumer");
+    for (const name of [
+      "co", "z", "CoMap", "CoList", "CoFeed", "CoPlainText", "CoRichText",
+      "FileStream", "Account", "Group", "Profile",
+    ]) {
+      assert.equal(refresh.isLikelyComponentType(jazz[name]), false, name);
+    }
+    assert.equal(helpers.isReactRefreshBoundary(jazz), false);
   `);
 });
 
