@@ -10,7 +10,11 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     conditions: ["browser"],
-    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+    alias: {
+      ...(sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {}),
+      $lib: resolve("../../starters/sveltekit-betterauth/src/lib"),
+      "$env/dynamic/public": resolve("tests/svelte/starter-env.ts"),
+    },
   },
   test: {
     environment: "jsdom",

@@ -162,11 +162,17 @@ it("provider signout failure remains visible after Jazz detaches", async () => {
     logout: vi.fn(async () => {
       app.setDb(null);
     }),
+    loginJWT: vi.fn(async () => {
+      app.setDb({} as never);
+    }),
   } as unknown as JazzSession;
   app = mountApp(root, jazz);
   root.querySelector<HTMLButtonElement>('[data-action="signout"]')!.click();
   await vi.waitFor(() => expect(authClient.signOut).toHaveBeenCalled());
   await vi.waitFor(() => expect(root.textContent).toContain("provider signout unavailable"));
   expect(root.querySelector('[data-action="register"]')?.textContent).toBe("Retry sign in");
+  root.querySelector<HTMLButtonElement>('[data-action="register"]')!.click();
+  await vi.waitFor(() => expect(root.textContent).toContain("Hello, Ada"));
+  expect(root.textContent).not.toContain("provider signout unavailable");
   app.destroy();
 });

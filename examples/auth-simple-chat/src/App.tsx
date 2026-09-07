@@ -99,7 +99,7 @@ function SessionScreen({
   reportError,
 }: {
   providerError?: Error;
-  reportError(error: Error | undefined): void;
+  reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
 }) {
   const session = useJazzSession();
   const {
@@ -114,16 +114,20 @@ function SessionScreen({
     retry,
   } = session;
   const error = sessionError ?? providerError;
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
 
   async function signIn(email: string, password: string) {
     const auth = await requestSignIn(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, auth);
     await loginJWT({ getToken: async () => auth.token });
+    clearProviderError();
   }
   async function signUp(email: string, password: string) {
     const auth = await requestSignUp(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, auth);
     await linkJWT({ getToken: async () => auth.token });
+    clearProviderError();
   }
   async function signOut() {
     reportError(undefined);
@@ -149,12 +153,26 @@ function SessionScreen({
       {error && (
         <div role="alert">
           <p>{error.message}</p>
-          <button onClick={() => void registerProvider().catch(() => {})}>
+          <button
+            onClick={() =>
+              void registerProvider()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
             {account?.identity.issuer === "urn:jazz:local-first"
               ? "Link provider identity to this account"
               : "Create a new Jazz account for this provider identity"}
           </button>
-          <button onClick={() => void retry().catch(() => {})}>Retry</button>
+          <button
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry
+          </button>
         </div>
       )}
       {status === "ready" ? (
@@ -169,13 +187,31 @@ function SessionScreen({
                   if (!saved) throw new Error("Sign in to the provider first");
                   return saved.token;
                 },
-              }).catch(() => {})
+              })
+                .then(clearProviderError)
+                .catch(() => {})
             }
           >
             Retry sign in
           </button>
-          <button onClick={() => void createLocalFirst().catch(() => {})}>Continue locally</button>
-          <button onClick={() => void signOut().catch(() => {})}>Retry sign out</button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
+          <button
+            onClick={() =>
+              void signOut()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign out
+          </button>
         </div>
       ) : (
         <p>Preparing account…</p>

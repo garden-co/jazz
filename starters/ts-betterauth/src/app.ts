@@ -98,11 +98,13 @@ export function mountApp(
   async function register() {
     const version = ++sessionVersion;
     const recoveryKey = sessionKey(session);
+    const failedAction = actionError;
     try {
       await (recovery === "login" ? jazz.loginJWT({ getToken }) : jazz.registerJWT({ getToken }));
       if (version === sessionVersion && sessionKey(session) === recoveryKey) {
         registrationError = undefined;
         admittedSession = recoveryKey;
+        if (actionError === failedAction) actionError = undefined;
       }
     } catch (cause) {
       if (version === sessionVersion && sessionKey(session) === recoveryKey)

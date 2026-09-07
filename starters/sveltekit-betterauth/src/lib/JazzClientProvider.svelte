@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { JazzSessionProvider, createJazzSession, type JazzSession, type JazzClient } from "jazz-tools/svelte";
+  import { JazzSessionProvider, createJazzSession, type JazzSession, type JazzSessionSnapshot, type JazzClient } from "jazz-tools/svelte";
   import { env } from "$env/dynamic/public";
   import { credential } from "$lib/accounts";
   import { authClient } from "$lib/auth-client";
@@ -15,6 +15,12 @@
   let recovery = $state<"login" | "register" | "logout">("register");
   let admittedSession = $state<string | null>(null);
   let jazz = $state.raw<JazzSession<JazzClient>>();
+  let snapshot = $state.raw<JazzSessionSnapshot<JazzClient>>();
+  $effect(() => {
+    if (!jazz) return;
+    snapshot = jazz.getSnapshot();
+    return jazz.subscribe(() => { snapshot = jazz!.getSnapshot(); });
+  });
   let ready = $state(false);
   let explicitAuth = false;
   let version = 0;
@@ -73,7 +79,9 @@
         await jazz.logout();
         const result = await authClient.signOut();
         if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
-      } else if (jazz.getSnapshot().status === "error") await jazz.retry();
+      } else if (jazz.getSnapshot().status === "error" &&
+        jazz.getSnapshot().account?.identity.subject === $session.data?.user.id &&
+        jazz.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") await jazz.retry();
       else if (recovery === "login") await jazz.loginJWT({ getToken: credential });
       else await jazz.registerJWT({ getToken: credential });
     })()
@@ -124,7 +132,7 @@
 {#if jazz}
   <JazzSessionProvider session={jazz}>
     {#snippet children()}
-      {#if admittedSession === sessionKey($session.data)}
+      {#if admittedSession === sessionKey($session.data) && snapshot?.account?.identity.subject === $session.data?.user.id && snapshot?.account?.identity.issuer !== "urn:jazz:local-first"}
         {#if setupError}<aside class="alert-error" role="alert">{setupError.message}</aside>{/if}
         {@render pageChildren?.()}
       {:else if setupError}

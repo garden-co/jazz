@@ -68,6 +68,13 @@ export function mountApp(
     render();
   }
 
+  async function recover(operation: () => Promise<void>) {
+    const failed = providerError;
+    await operation();
+    if (providerError === failed) providerError = undefined;
+    render();
+  }
+
   function render() {
     unsubscribeTodos?.();
     unsubscribeTodos = null;
@@ -83,13 +90,13 @@ export function mountApp(
         ? `<p role="alert">${escapeHtml(sessionError.message)}</p><button data-action="retry-session">Retry Jazz startup</button><button data-action="retry-login">Retry sign in</button><button data-action="continue-local">Continue locally</button>`
         : `<div>Loading…</div>`;
       root.querySelector('[data-action="retry-login"]')?.addEventListener("click", () => {
-        void jazz.loginJWT({ getToken }).catch(() => {});
+        void recover(() => jazz.loginJWT({ getToken })).catch(() => {});
       });
       root.querySelector('[data-action="continue-local"]')?.addEventListener("click", () => {
-        void jazz.createLocalFirst().catch(() => {});
+        void recover(jazz.createLocalFirst).catch(() => {});
       });
       root.querySelector('[data-action="retry-session"]')?.addEventListener("click", () => {
-        void jazz.retry().catch(() => {});
+        void recover(jazz.retry).catch(() => {});
       });
       return;
     }

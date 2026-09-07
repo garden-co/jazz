@@ -7,7 +7,9 @@ import { App } from "./App";
 import "./App.css";
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID;
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL;
-const ProviderErrorContext = createContext<(error: Error | undefined) => void>(() => {});
+const ProviderErrorContext = createContext<React.Dispatch<React.SetStateAction<Error | undefined>>>(
+  () => {},
+);
 export const useProviderError = () => useContext(ProviderErrorContext);
 
 function SessionContent({
@@ -23,15 +25,33 @@ function SessionContent({
     retry,
   } = useJazzSession();
   const error = sessionError ?? providerError;
+  const reportError = useProviderError();
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
+
   return (
     <>
       {error && (
         <aside className="alert-error" role="alert">
           {error.message}
-          <button type="button" onClick={() => void linkJWT({ getToken }).catch(() => {})}>
+          <button
+            type="button"
+            onClick={() =>
+              void linkJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
             Retry linking
           </button>
-          <button type="button" onClick={() => void retry().catch(() => {})}>
+          <button
+            type="button"
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
             Retry account preparation
           </button>
         </aside>
@@ -40,8 +60,24 @@ function SessionContent({
         children
       ) : status === "signed-out" ? (
         <div>
-          <button onClick={() => void loginJWT({ getToken }).catch(() => {})}>Retry sign in</button>
-          <button onClick={() => void createLocalFirst().catch(() => {})}>Continue locally</button>
+          <button
+            onClick={() =>
+              void loginJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
         </div>
       ) : (
         <p>Loading...</p>
