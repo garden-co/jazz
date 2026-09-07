@@ -613,9 +613,7 @@ export class JazzContext {
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
     if (!this.config.serverUrl) {
-      throw new Error(
-        "forRequest requires a configured core serverUrl for account admission; use forSession only for explicitly trusted backend sessions",
-      );
+      throw new Error("forRequest requires a configured core serverUrl for account admission");
     }
     return await resolveRequestSession(request, {
       appId: this.config.appId,

@@ -76,6 +76,44 @@ describe("Node shared backend session", () => {
     }
   });
 
+  it("keeps the original backend usable after a real sync authentication failure", async () => {
+    const appId = randomUUID();
+    const backendSecret = "recoverable-service-secret";
+    let server = await startLocalJazzServer({ appId, backendSecret });
+    const owner = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: { backendSecret },
+    });
+    try {
+      const backend = owner.getSnapshot().client!;
+      const originalAccount = owner.getSnapshot().account;
+      await backend.db.disconnect();
+      await backend.db
+        .insert(app.posts, { text: "pending before auth failure" })
+        .wait({ tier: "local" });
+      const port = server.port;
+      await server.stop();
+      server = await startLocalJazzServer({ appId, port, backendSecret: "rotated-service-secret" });
+      await backend.db.reconnect();
+      await expect(owner.createLocalFirst()).rejects.toThrow(/sync/i);
+      expect(owner.getSnapshot().status).toBe("ready");
+      expect(owner.getSnapshot().account).toBe(originalAccount);
+      expect(owner.getSnapshot().client).toBe(backend);
+      await backend.db
+        .insert(app.posts, { text: "usable after auth failure" })
+        .wait({ tier: "local" });
+    } finally {
+      // Authentication remains rejected; explicitly close without a sync wait.
+      await owner.getSnapshot().client?.db.shutdown();
+      await owner.close();
+      await server.stop();
+    }
+  }, 30_000);
+
   it("keeps unsynced scoped writes fenced until reconnect allows transition", async () => {
     const appId = randomUUID();
     const backendSecret = "pending-service-secret";

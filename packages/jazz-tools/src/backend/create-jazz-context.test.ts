@@ -144,6 +144,7 @@ vi.mock("../runtime/client.js", async () => {
 
 vi.mock("./request-auth.js", () => ({
   resolveRequestSession: mocks.resolveRequestSession,
+  verifiedLocalFirstRequestProof: () => undefined,
 }));
 
 const SCHEMA_A: WasmSchema = {};
