@@ -80,7 +80,12 @@ describe("Todo Server Integration", () => {
   let upstream: LocalJazzServerHandle;
 
   beforeAll(async () => {
-    [jwtIssuer, upstream] = await Promise.all([startTestJwtIssuer(), startLocalJazzServer()]);
+    jwtIssuer = await startTestJwtIssuer();
+    upstream = await startLocalJazzServer({
+      jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: EXTERNAL_ISSUER,
+      jwtAudience: jwtIssuer.audience,
+    });
     await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
