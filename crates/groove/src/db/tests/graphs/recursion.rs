@@ -6,6 +6,113 @@ use idb_tree::{BoxFuture, Commit, Metadata, PageStore};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
+#[futures_test::test]
+async fn recursive_policy_join_hydration_uses_declared_comparison() {
+    let schema = DatabaseSchema::new([
+        TableSchema::new(
+            "seed_left",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("key", ColumnType::U32),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "seed_right",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("key", ColumnType::I64.nullable()),
+                ColumnSchema::new("dst", ColumnType::U32),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::I64.nullable()),
+                ColumnSchema::new("dst", ColumnType::U32),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]);
+    let storage = MemoryStorage::new(&["seed_left", "seed_right", "edges"]).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+
+    let output = RecordDescriptor::new([
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U32.clone()),
+    ]);
+    let seed = GraphBuilder::policy_join(
+        GraphBuilder::table("seed_left"),
+        GraphBuilder::table("seed_right"),
+        ["key"],
+        ["key"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    let frontier = GraphBuilder::frontier_source("frontier", output);
+    let step = GraphBuilder::policy_join(frontier, GraphBuilder::table("edges"), ["dst"], ["src"])
+        .project_fields([
+            ProjectField::renamed("left.src", "src"),
+            ProjectField::renamed("right.dst", "dst"),
+        ]);
+    let graph = GraphBuilder::recursive(seed, step, "frontier", 16);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "seed_left",
+        vec![Value::U64(1), Value::U64(100), Value::U32(7)],
+    );
+    batch.insert(
+        "seed_right",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::I64(7)))),
+            Value::U32(8),
+        ],
+    );
+    batch.insert(
+        "edges",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::I64(8)))),
+            Value::U32(9),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        initial,
+        vec![
+            (vec![Value::U64(100), Value::U32(8)], 1),
+            (vec![Value::U64(100), Value::U32(9)], 1),
+        ],
+        "recursive hydration must use Policy comparison for seed and step joins",
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "edges",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(Value::I64(9)))),
+            Value::U32(10),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(100), Value::U32(10)], 1)],
+        "affected recursive frontiers must use the Join comparison",
+    );
+}
 
 #[derive(Clone, Default)]
 struct YieldingPageStore(idb_tree::MemoryPageStore);
