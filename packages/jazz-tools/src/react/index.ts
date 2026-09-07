@@ -32,3 +32,15 @@ export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "../accou
 export type { AccountStore } from "../accounts/persistence.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
+
+export {
+  createJazzSession,
+  JazzSessionProvider,
+  useJazzSession,
+  type JazzSessionConfig,
+  type JazzSessionProviderProps,
+  type UseJazzSessionResult,
+  type JazzSession,
+  type JazzSessionSnapshot,
+  type JazzSessionActions,
+} from "./session.js";

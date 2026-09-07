@@ -21,7 +21,7 @@ type CoreJazzDb = {
   onAuthChanged(listener: (state: AuthState) => void): () => void;
 };
 
-type CoreJazzClient = {
+export type CoreJazzClient = {
   db: CoreJazzDb;
   session?: PublicSession | null;
   shutdown(options?: import("../runtime/db.js").ShutdownOptions): Promise<void>;
