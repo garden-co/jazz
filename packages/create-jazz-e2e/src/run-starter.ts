@@ -441,8 +441,8 @@ function replaceExactly(
 
 /**
  * The production template intentionally remains untouched. This test-only
- * generated-app mutation reproduces cancellation after native subscription
- * readiness but before its first public callback.
+ * generated-app mutation exercises the user-visible case where a public
+ * subscription is cancelled immediately before its replacement begins.
  */
 function injectTsBetterAuthCancelReopenSubscriptionProbe(appDir: string): void {
   const widgetFile = path.join(appDir, "src", "todo-widget.ts");
