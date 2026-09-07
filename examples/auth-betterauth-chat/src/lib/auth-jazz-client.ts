@@ -32,6 +32,7 @@ export async function authJazzClient(): Promise<JazzClient> {
     const session = await pending;
     const snapshot = session.getSnapshot();
     if (snapshot.status !== "ready" || !snapshot.client) {
+      await session.close();
       throw snapshot.error ?? new Error("Backend session is not ready");
     }
     return snapshot.client;
