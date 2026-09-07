@@ -16,6 +16,14 @@ async function addTodo(page: Page, title: string) {
   await expect(page.getByRole("status")).toHaveText("Saved locally", { timeout: TIMEOUT });
 }
 
+async function openBackup(page: Page) {
+  const restoreInput = page.getByLabel("Restore from recovery phrase");
+  if (!(await restoreInput.isVisible())) {
+    await page.getByText("Back up or restore your local-only account").click();
+  }
+  await expect(restoreInput).toBeVisible({ timeout: TIMEOUT });
+}
+
 test("recovery phrase round-trips the local-first identity", async ({ page }) => {
   const runId = Date.now();
   const todo = `Backup todo ${runId}`;
@@ -25,7 +33,7 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await addTodo(page, todo);
 
   // Reveal the phrase.
-  await page.getByText("Back up or restore your local-only account").click();
+  await openBackup(page);
   await page.getByRole("button", { name: "Show recovery phrase" }).click();
   const phraseTextarea = page.getByLabel("Recovery phrase", { exact: true });
   await expect(phraseTextarea).not.toHaveValue("", { timeout: TIMEOUT });
@@ -39,9 +47,10 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
   // A rejected recovery still leaves a fresh client for the selected account.
-  await page.getByText("Back up or restore your local-only account").click();
+  await openBackup(page);
   await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: TIMEOUT });
   await waitForApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
@@ -52,7 +61,7 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await expect(page.getByText(todo)).toHaveCount(0, { timeout: TIMEOUT });
 
   // Restore the phrase.
-  await page.getByText("Back up or restore your local-only account").click();
+  await openBackup(page);
   await page.getByLabel("Restore from recovery phrase").fill(phrase);
   await page.getByRole("button", { name: "Restore", exact: true }).click();
 
