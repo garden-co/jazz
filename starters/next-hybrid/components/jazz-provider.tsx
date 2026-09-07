@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
 import { getToken } from "@/lib/accounts";
@@ -10,14 +10,18 @@ const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const restored = new WeakSet<() => Promise<void>>();
 
 function SessionContent({ children }: React.PropsWithChildren) {
-  const { status, error, logout, loginJWT, linkJWT, retry } = useJazzSession();
+  const { status, error: sessionError, logout, loginJWT, linkJWT, retry } = useJazzSession();
+  const [providerError, setProviderError] = useState<Error>();
+  const error = sessionError ?? providerError;
   useEffect(() => {
     if (status !== "ready" || restored.has(logout)) return;
     restored.add(logout);
     void authClient
       .getSession()
       .then((auth) => (auth.data?.session ? loginJWT({ getToken }) : undefined))
-      .catch(() => {});
+      .catch((cause) =>
+        setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+      );
   }, [status, loginJWT, logout]);
   return (
     <>

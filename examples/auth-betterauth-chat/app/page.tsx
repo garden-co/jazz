@@ -86,7 +86,7 @@ function SessionScreen() {
   const {
     account,
     status,
-    error,
+    error: sessionError,
     loginJWT,
     linkJWT,
     registerJWT,
@@ -94,12 +94,16 @@ function SessionScreen() {
     createLocalFirst,
     retry,
   } = session;
+  const [providerError, setProviderError] = React.useState<Error>();
+  const error = sessionError ?? providerError;
   React.useEffect(() => {
     if (status !== "ready" || restored.has(logout)) return;
     restored.add(logout);
     void getJwtFromBetterAuth()
       .then((token) => (token ? loginJWT({ getToken }) : undefined))
-      .catch(() => {});
+      .catch((cause) =>
+        setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+      );
   }, [status, loginJWT, logout]);
 
   async function signIn(email: string, password: string) {
