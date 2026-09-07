@@ -4542,6 +4542,7 @@ where
                                         pending_initial_subscribers: BTreeSet::new(),
                                         pending_initial_update: None,
                                         pending_incremental_updates: VecDeque::new(),
+                                        publication_runtime_token: None,
                                         pending_claim_refresh_revision: None,
                                         initialized: false,
                                         authority_result_subscription,
@@ -5113,6 +5114,19 @@ where
                 {
                     let mut serve_again = false;
                     for (coverage, group) in coverage_groups.iter_mut() {
+                        let runtime_token = self.node.borrow().groove_runtime_token();
+                        if group.publication_runtime_token.is_some_and(|saved| saved != runtime_token)
+                            && (group.pending_initial_update.is_some() || !group.pending_incremental_updates.is_empty())
+                        {
+                            // INV-SYNC-13/14: these envelopes never crossed transport
+                            // acceptance. A policy revision must reauthorize them, not
+                            // treat their cached row bytes as previously delivered copies.
+                            group.pending_initial_update = None;
+                            group.pending_incremental_updates.clear();
+                            group.pending_initial_subscribers = group.subscribers.clone();
+                            group.initialized = false;
+                        }
+                        group.publication_runtime_token = Some(runtime_token);
                         let group_subscription = coverage_group_subscription_key(coverage);
                         peer.set_subscription_policy_binding(
                             group_subscription,

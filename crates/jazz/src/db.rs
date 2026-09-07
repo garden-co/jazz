@@ -2180,6 +2180,9 @@ struct CoverageGroup {
     pending_initial_update: Option<(SubscriptionKey, SyncMessage)>,
     /// Remaining recipients of one generated incremental publication.
     pending_incremental_updates: VecDeque<(SubscriptionKey, SyncMessage)>,
+    /// Query runtime token governing the unaccepted publications above.
+    /// Unlike catalogue lineage sequence, it changes for same-version policy edits.
+    publication_runtime_token: Option<u64>,
     /// Claim revision whose replacement opening reset is currently being
     /// delivered. A retry of that same revision resumes this per-subscriber
     /// cursor; a newer admission revision starts every live usage over.

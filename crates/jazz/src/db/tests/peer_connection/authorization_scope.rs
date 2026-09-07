@@ -495,6 +495,196 @@ fn incremental_local_update_retries_after_transport_backpressure() {
     foreground.detach_query(attachment);
 }
 
+/// Alice must not receive Bob's never-accepted opening after policy revocation.
+/// Bob --opening/backpressure--> policy False --> fresh denied reset --> Alice.
+/// Internal transport control is needed to distinguish unaccepted bytes from
+/// previously delivered copies under INV-SYNC-13/14 (#2653).
+#[test]
+fn retained_initial_opening_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(false);
+}
+
+/// Alice's established subscription must not receive a retained forbidden delta.
+/// The old local copy may remain, but the future settled view must become empty.
+#[test]
+fn retained_incremental_update_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(true);
+}
+
+fn assert_retained_publication_policy_revocation(incremental: bool) {
+    struct PolicyBoundaryTransport {
+        inner: Box<dyn Transport>,
+        reject_at: usize,
+        sent_views: usize,
+        rejected: Rc<RefCell<Option<SyncMessage>>>,
+        revoked: Rc<Cell<bool>>,
+        after_revocation: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+    impl Transport for PolicyBoundaryTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if let SyncMessage::ViewUpdate(update) = &message {
+                if self.sent_views + 1 == self.reject_at && self.rejected.borrow().is_none() {
+                    *self.rejected.borrow_mut() = Some(message);
+                    return Err(TransportError::Backpressure);
+                }
+                if self.revoked.get() {
+                    assert!(
+                        update.version_carriers.is_empty(),
+                        "never-accepted version carriers must not leak after policy revocation"
+                    );
+                    assert!(
+                        update.result_member_adds.is_empty(),
+                        "forbidden result members must not be published after revocation"
+                    );
+                    assert!(
+                        !update.program_fact_adds.iter().any(|fact| matches!(
+                            fact,
+                            crate::protocol::ProgramFactEntry::CoveredInput(_)
+                        )),
+                        "forbidden CoveredInput additions must not survive in the saved envelope"
+                    );
+                    self.after_revocation.borrow_mut().push(message.clone());
+                }
+                self.sent_views += 1;
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = owner_read_schema();
+    let author = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let authority = open_core(0x7b, AuthorSubject::SYSTEM, &schema);
+    let claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(author.test_uuid()))]);
+    let first = row(0x7c);
+    authority
+        .insert_with_id("todos", first, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x7d, author, &schema);
+    foreground.set_test_provider_claims(author, claims.clone());
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(RefCell::new(None));
+    let revoked = Rc::new(Cell::new(false));
+    let after_revocation = Rc::new(RefCell::new(Vec::new()));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = authority.accept_subscriber_with_claims(
+        Box::new(PolicyBoundaryTransport {
+            inner: down,
+            reject_at: if incremental { 2 } else { 1 },
+            sent_views: 0,
+            rejected: rejected.clone(),
+            revoked: revoked.clone(),
+            after_revocation: after_revocation.clone(),
+        }),
+        author,
+        claims.clone(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let attachment = foreground
+        .attach_query_with_opts(&query, global_subscribe_opts())
+        .unwrap();
+    if incremental {
+        for _ in 0..16 {
+            foreground.tick().unwrap();
+            authority.tick().unwrap();
+        }
+        assert!(foreground.query_attachment_is_covered(&attachment));
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, global_subscribe_opts())).unwrap()),
+            vec![first]
+        );
+        authority
+            .insert_with_id("todos", row(0x7e), cells("unsent", false, author))
+            .unwrap();
+    }
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        authority.tick().unwrap();
+        if rejected.borrow().is_some() {
+            break;
+        }
+    }
+    {
+        let rejected = rejected.borrow();
+        let Some(SyncMessage::ViewUpdate(update)) = rejected.as_ref() else {
+            panic!("fixture must retain a real publication");
+        };
+        assert!(
+            !update.version_carriers.is_empty(),
+            "blocked publication must contain sensitive row bytes"
+        );
+        assert!(
+            update
+                .program_fact_adds
+                .iter()
+                .any(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_))),
+            "blocked publication must contain an authorized input fact"
+        );
+    }
+    let denied_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::False)),
+        ),
+    );
+    assert_eq!(schema.version_id(), denied_schema.version_id());
+    let catalogue_seq = authority.server.node().borrow().active_catalogue_seq();
+    authority
+        .publish_schema(SchemaVersion::new(denied_schema))
+        .unwrap();
+    assert_eq!(
+        authority.server.node().borrow().active_catalogue_seq(),
+        catalogue_seq,
+        "same-version policy activation is not a lineage-sequence change"
+    );
+    revoked.set(true);
+
+    // A fresh subscriber independently proves that the governing policy is
+    // active before the old connection is allowed to retry its saved payload.
+    let fresh = open_db(0x7f, author, &schema);
+    fresh.set_test_provider_claims(author, claims.clone());
+    let (up, down) = duplex();
+    let _fresh_upstream = block_on(fresh.connect_upstream(up));
+    let fresh_subscriber = authority.accept_subscriber_with_claims(down, author, claims);
+    let fresh_query = prepared(&fresh, &Query::from("todos"));
+    let fresh_attachment = fresh
+        .attach_query_with_opts(&fresh_query, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..16 {
+        fresh.tick().unwrap();
+        fresh_subscriber.borrow_mut().tick().unwrap();
+    }
+    assert!(fresh.query_attachment_is_covered(&fresh_attachment));
+    assert!(
+        block_on(fresh.all(&fresh_query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    fresh.detach_query(fresh_attachment);
+
+    for _ in 0..16 {
+        authority.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(foreground.all(&query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(after_revocation.borrow().iter().any(|message| matches!(message,
+        SyncMessage::ViewUpdate(update) if update.reset_result_set && !update.peer_payload_inventory.opening_pending
+            && update.program_fact_adds.iter().any(|fact| matches!(fact,
+                crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete)))),
+        "replacement must carry a complete, truthful empty coverage opening");
+    foreground.detach_query(attachment);
+}
+
 /// Alice's fresh foreground cannot treat its empty memory as the persistent
 /// owner's answer. Initial local delivery must work without any authority.
 /// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
