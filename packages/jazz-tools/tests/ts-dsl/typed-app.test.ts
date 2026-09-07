@@ -123,6 +123,16 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it("allows a table-inferred variable to be reassigned to a refined query", () => {
+    let query = app.todos;
+
+    query = query.where({ done: true });
+
+    expect(JSON.parse(query._build()).conditions).toEqual([
+      { column: "done", op: "eq", value: true },
+    ]);
+  });
+
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
       table: "todos",

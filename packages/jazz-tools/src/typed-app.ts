@@ -1359,6 +1359,11 @@ export interface Query<
   TSchema extends SchemaLike = SchemaLike,
   TRequired extends boolean = false,
 > extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
+  /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
+  readonly _largeValueUpdateType: TableLargeValueUpdate<
+    TSchema,
+    Extract<TTable, TableName<TSchema>>
+  >;
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
@@ -1406,13 +1411,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {
-  /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
-  readonly _largeValueUpdateType: TableLargeValueUpdate<
-    TSchema,
-    Extract<TTable, TableName<TSchema>>
-  >;
-}
+> {}
 
 export type QueryHandle<
   TTable extends string,
