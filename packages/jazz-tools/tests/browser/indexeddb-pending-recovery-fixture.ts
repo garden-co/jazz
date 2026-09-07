@@ -1,6 +1,7 @@
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
-import { createDb as createInternalDb } from "../../src/runtime/testing/create-internal-db.js";
+import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
+import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { Db } from "../../src/runtime/db.js";
 
@@ -19,7 +20,10 @@ export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy })
 export type RecoveryConfig = {
   appId: string;
   serverUrl: string;
-} & ({ jwtToken: string; secret?: never } | { secret: string; jwtToken?: never });
+} & (
+  | { jwtToken: string; registryLoginResponse: unknown; secret?: never }
+  | { secret: string; jwtToken?: never; registryLoginResponse?: never }
+);
 
 export interface RecoveryRows {
   marker: number | undefined;
@@ -44,13 +48,33 @@ export async function open(config: RecoveryConfig): Promise<void> {
     });
     return;
   }
-  // External handles are neither persisted nor restorable without the account
-  // registry. This branch tests the internal subscriber protocol using the
-  // identity genuinely enrolled before the server stops. It does not
-  // claim public external-account offline login support.
-  db = await createInternalDb({
-    ...config,
+  // Internal registry-stub protocol regression: replay only the genuine login
+  // response captured after online enrollment. External offline login is not a
+  // public contract. Native transport still contacts the real, stopped server.
+  const registry = accountRegistryUrl(config.serverUrl, config.appId);
+  const accounts = createAccountManagerWithRuntime({
+    registry,
+    localFirst: {
+      create() {
+        throw new Error("External recovery must not create a local-first account");
+      },
+    },
+    fetch: async (input, init) => {
+      if (
+        input !== `${registry}/login` ||
+        init?.method !== "POST" ||
+        new Headers(init.headers).get("Authorization") !== `Bearer ${config.jwtToken}`
+      ) {
+        throw new Error("Unexpected registry request in external recovery fixture");
+      }
+      return Response.json(config.registryLoginResponse);
+    },
+  });
+  db = await createDb({
+    appId: config.appId,
+    serverUrl: config.serverUrl,
     driver,
+    account: await accounts.loginJWT(config.jwtToken!),
   });
 }
 
