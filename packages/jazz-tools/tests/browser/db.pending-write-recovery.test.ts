@@ -18,15 +18,15 @@ it("recovers external-identity protocol writes after an offline cold browser res
   await deploy({ ...info, schema: recoveryApp.wasmSchema, permissions: recoveryPermissions });
   const jwtToken = await getJazzServerJwtForUser(crypto.randomUUID(), undefined, info.appId);
   const accounts = await createAccountManager({ appId: info.appId, serverUrl: info.serverUrl });
-  const account = await accounts.registerJWT(jwtToken);
-  // The remote protocol fixture receives the genuine assignment, not a copied
-  // public handle. External public login requires the registry to be online.
+  await accounts.registerJWT(jwtToken);
+  // The remote protocol fixture uses the genuinely enrolled JWT identity,
+  // never a copied handle/account configuration. Public external login needs
+  // the registry online.
   const recovery = commands as unknown as RecoveryCommands;
   const rows = await recovery.recoverPendingIndexedDbWrites({
     appId: info.appId,
     serverUrl: info.serverUrl,
     jwtToken,
-    accountId: account.id,
   });
   expect(rows).toEqual({
     marker: 1,

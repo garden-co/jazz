@@ -1,7 +1,6 @@
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { createDb as createInternalDb } from "../../src/runtime/testing/create-internal-db.js";
-import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { Db } from "../../src/runtime/db.js";
 
@@ -20,10 +19,7 @@ export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy })
 export type RecoveryConfig = {
   appId: string;
   serverUrl: string;
-} & (
-  | { jwtToken: string; accountId: string; secret?: never }
-  | { secret: string; jwtToken?: never; accountId?: never }
-);
+} & ({ jwtToken: string; secret?: never } | { secret: string; jwtToken?: never });
 
 export interface RecoveryRows {
   marker: number | undefined;
@@ -50,12 +46,11 @@ export async function open(config: RecoveryConfig): Promise<void> {
   }
   // External handles are neither persisted nor restorable without the account
   // registry. This branch tests the internal subscriber protocol using the
-  // identity/account genuinely enrolled before the server stops. It does not
+  // identity genuinely enrolled before the server stops. It does not
   // claim public external-account offline login support.
   db = await createInternalDb({
     ...config,
     driver,
-    accountRegistryAuthority: accountRegistryUrl(config.serverUrl, config.appId),
   });
 }
 

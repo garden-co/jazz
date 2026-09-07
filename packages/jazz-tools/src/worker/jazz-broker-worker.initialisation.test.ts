@@ -654,7 +654,17 @@ describe("broker worker context initialization", () => {
         ).toBe(false);
       }
       expect(
-        await followerResult(replacement, { type: "init", id: 5, sessionClaims: {} }),
+        await followerResult(replacement, {
+          type: "init",
+          id: 5,
+          sessionClaims: {},
+          inspectorBinding: {
+            appId: initOptions.appId,
+            physicalDbName: initOptions.dbName,
+            authSessionKey: initOptions.authSessionKey,
+            storageOwner: initOptions.storageOwner,
+          },
+        }),
       ).not.toHaveProperty("error");
     } finally {
       admission.resolve(subscriber);
