@@ -780,7 +780,7 @@ test("post-commit wake tracing is private, default-off, and enabled only for B",
   assert.match(relayAdapter, /typeof foreground\.setWakeTrace === "function"/);
   assert.match(
     receipt,
-    /while \(openedB\.consumeWake\(\)\)[\s\S]*setWakeTraceBestEffort\(openedB, true\);[\s\S]*onPostCommitWakeArmed/,
+    /onPostCommitWakeArmed[\s\S]*openScopeForeground\(factory, capability\)[\s\S]*while \(openedB\.consumeWake\(\)\)[\s\S]*setWakeTraceBestEffort\(openedB, true\);[\s\S]*markFailure\("same-runtime-write-failed"\)/,
   );
   assert.match(
     receipt,

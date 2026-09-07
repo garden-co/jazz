@@ -195,6 +195,11 @@ export async function proveSameJsiRuntimeWriteSubscription(
   wakeTiming: PostCommitWakeTiming = DEVICE_POST_COMMIT_WAKE_TIMING,
 ): Promise<void> {
   if (rowId.byteLength !== 16) throw new Error("subscription fixture row id must be 16 bytes");
+  // Acknowledging the opt-in diagnostic bridge may resume through the JS event
+  // loop. Do it before creating either foreground, while tracing is disabled,
+  // so no B subscription callback can enter the post-commit epoch through the
+  // acknowledgement.
+  await wakeTiming.onPostCommitWakeArmed?.();
   markFailure("same-runtime-open-failed");
   const openedA = openScopeForeground(factory, capability);
   const openedB = openScopeForeground(factory, capability);
@@ -244,11 +249,6 @@ export async function proveSameJsiRuntimeWriteSubscription(
     // B alone traces the post-commit bridge path. The native flag defaults to
     // off so all other foreground aliases and production callbacks are quiet.
     setWakeTraceBestEffort(openedB, true);
-    await wakeTiming.onPostCommitWakeArmed?.();
-    while (openedB.consumeWake()) {
-      // The acknowledged trace boundary can yield to JS. Retire callbacks
-      // delivered in that interval before A establishes the commit epoch.
-    }
 
     markFailure("same-runtime-write-failed");
     markFailure("same-runtime-transaction-open-failed");

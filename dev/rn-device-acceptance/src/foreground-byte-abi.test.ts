@@ -1275,6 +1275,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  wakeTraceToggles[0]!.length = 0;
+  wakeTraceToggles[1]!.length = 0;
   emitCommitWake = false;
   await assert.rejects(
     async () =>
@@ -1289,13 +1291,15 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     /did not observe foreground A's committed row after \d+ turns and \d+ms without a post-commit native wake/,
   );
 
-  // Plant an initial-settlement callback in the asynchronous trace-boundary
-  // gap. It must be retired before A commits, rather than satisfying the
-  // post-commit proof when the real commit wake is suppressed.
+  // The diagnostic acknowledgement precedes foreground creation and trace
+  // enable. It cannot reach B's scheduler before A commits when the real
+  // commit wake is suppressed.
   committed = false;
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  wakeTraceToggles[0]!.length = 0;
+  wakeTraceToggles[1]!.length = 0;
   emitCommitWake = false;
   await assert.rejects(
     async () =>
@@ -1307,7 +1311,27 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         undefined,
         {
           ...shortPostCommitWakeTiming(),
-          onPostCommitWakeArmed: () => schedulers[1]?.("immediate"),
+          onPostCommitWakeArmed: () =>
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                assert.deepEqual(
+                  wakeTraceToggles,
+                  [[], []],
+                  "the acknowledged diagnostic boundary precedes B trace enable",
+                );
+                assert.equal(
+                  opened,
+                  0,
+                  "the acknowledged diagnostic boundary precedes foreground creation",
+                );
+                assert.equal(
+                  schedulers[1],
+                  undefined,
+                  "the acknowledged diagnostic boundary precedes foreground creation",
+                );
+                resolve();
+              }, 0);
+            }),
         },
       ),
     /without a post-commit native wake/,
