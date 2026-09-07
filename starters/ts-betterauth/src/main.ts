@@ -1,8 +1,9 @@
 import { createDb } from "jazz-tools";
-import { authClient, type AuthSession } from "./auth-client.js";
+import { authClient } from "./auth-client.js";
 import { accounts, getToken } from "./accounts.js";
 import { JazzLifecycle } from "./jazz-lifecycle.js";
 import { mountApp } from "./app.js";
+import { waitForInitialSession } from "./session-ready.js";
 import "./app.css";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
@@ -16,16 +17,7 @@ async function boot() {
     createDb({ appId: APP_ID, serverUrl: SERVER_URL, account }),
   );
   const sessionAtom = authClient.useSession;
-  if (sessionAtom.get().isPending) {
-    await new Promise<void>((resolve) => {
-      const off = sessionAtom.subscribe((next: AuthSession) => {
-        if (!next.isPending) {
-          off();
-          resolve();
-        }
-      });
-    });
-  }
+  await waitForInitialSession(sessionAtom);
   let registrationError: Error | undefined;
   try {
     await lifecycle.attach(async () => {
