@@ -106,6 +106,23 @@ jobs:
             packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
             packages/jazz-tools/bin/native/jazz-tools-linux-x64
 
+      # Match alpha releases: the inspector is private and must be embedded in
+      # jazz-tools before publishing a self-contained consumer package.
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Verify packed inspector overlay assets
+        run: |
+          PACK_DIRECTORY=$(mktemp -d)
+          trap 'rm -rf "${PACK_DIRECTORY}"' EXIT
+          pnpm --filter jazz-tools pack --pack-destination "${PACK_DIRECTORY}"
+          TARBALLS=("${PACK_DIRECTORY}"/jazz-tools-*.tgz)
+          test "${#TARBALLS[@]}" -eq 1
+          tar -tf "${TARBALLS[0]}" > "${PACK_DIRECTORY}/contents.txt"
+          grep -Fxq 'package/dist/dev/inspector-overlay/embedded/embedded.html' "${PACK_DIRECTORY}/contents.txt"
+
       - name: Bind create-jazz preview to this immutable commit
         env:
           PREVIEW_COMMIT: ${{ github.event.pull_request.head.sha }}
