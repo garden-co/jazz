@@ -34,7 +34,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
-use jazz::query::Query;
+use jazz::query::{Query, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::time::TxTime;
@@ -363,10 +363,8 @@ pub enum RelayCommandResponse {
 /// A caller can carry an opaque foreground handle only after capability-only
 /// admission; it can never smuggle an open configuration through this codec.
 ///
-/// Query bytes are the canonical postcard [`Query`] bytes already produced by
-/// the shared JS query codec.  This is intentionally *not* a second RN query
-/// AST. The original All/Subscribe commands retain local-first defaults;
-/// additive WithOptions commands use the shared native binding option spelling.
+/// Query bytes use the canonical query or relation carrier already produced by
+/// the shared JS codecs. This is intentionally *not* a second RN query AST.
 ///
 /// This is the settled V1 command vocabulary. Future incompatible changes
 /// require a new relay ABI, while a command's established payload is immutable.
@@ -379,14 +377,18 @@ pub enum ForegroundDbCommandRequest {
     /// Compile and retain a canonical query in this foreground DB.
     PrepareQuery {
         query: Vec<u8>,
+        kind: ForegroundQueryKind,
     },
     /// Materialize the current local-first result for a retained query.
     All {
         query: u64,
+        options_json: String,
+        transaction: Option<u64>,
     },
     /// Open a local-first subscription for a retained query.
     Subscribe {
         query: u64,
+        options_json: String,
     },
     /// Drain currently publishable events without waiting. Each delta is
     /// encoded through `jazz::binding_codec`, exactly like NAPI and WASM.
@@ -458,22 +460,6 @@ pub enum ForegroundDbCommandRequest {
     WaitForCoreTransaction {
         tx_id: [u8; 16],
     },
-    /// Canonical native read options, with an optional foreground transaction.
-    AllWithOptions {
-        query: u64,
-        options_json: String,
-        transaction: Option<u64>,
-    },
-    /// Relation snapshot using the same native read options and transaction.
-    AllRelationSnapshotWithOptions {
-        query: u64,
-        options_json: String,
-        transaction: Option<u64>,
-    },
-    SubscribeWithOptions {
-        query: u64,
-        options_json: String,
-    },
     WaitForTransaction {
         tx_id: [u8; 16],
         tier: String,
@@ -514,10 +500,6 @@ pub enum ForegroundDbCommandRequest {
     AbortStreamingMutation {
         upload: u64,
     },
-    AllRelationQuery {
-        query_bytes: Vec<u8>,
-        options_json: String,
-    },
     LocalCurrentRow {
         table: String,
         row_id: [u8; 16],
@@ -534,10 +516,6 @@ pub enum ForegroundDbCommandRequest {
         table: String,
         row_id: Option<[u8; 16]>,
         cells: Vec<u8>,
-        options_json: String,
-    },
-    SubscribeRelationQuery {
-        query_bytes: Vec<u8>,
         options_json: String,
     },
     PermissionAdvice {
@@ -593,6 +571,12 @@ pub enum ForegroundMutationKind {
 pub enum ForegroundTransactionKind {
     Mergeable,
     Exclusive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundQueryKind {
+    Query,
+    Relation,
 }
 
 /// Response for [`ForegroundDbCommandRequest`].
@@ -2640,27 +2624,17 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             Ok(()) => ForegroundDbCommandResponse::Ticked,
             Err(status) => return status,
         },
-        ForegroundDbCommandRequest::PrepareQuery { query } => {
+        ForegroundDbCommandRequest::PrepareQuery { query, kind } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
                 Err(status) => return status,
             };
-            match client.prepare_foreground_query(query) {
+            match client.prepare_foreground_query(query, kind) {
                 Ok(query) => ForegroundDbCommandResponse::PreparedQuery { query },
                 Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
             }
         }
-        ForegroundDbCommandRequest::All { query } => {
-            let client = match host.foreground_client(foreground) {
-                Ok(client) => client,
-                Err(status) => return status,
-            };
-            match client.start_foreground_read(query) {
-                Ok(poll) => foreground_operation_response(poll),
-                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-            }
-        }
-        ForegroundDbCommandRequest::AllWithOptions {
+        ForegroundDbCommandRequest::All {
             query,
             options_json,
             transaction,
@@ -2669,42 +2643,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Ok(client) => client,
                 Err(status) => return status,
             };
-            match client.start_foreground_read_with_options(query, options_json, transaction, false)
-            {
-                Ok(poll) => foreground_operation_response(poll),
-                Err(error) => match foreground_command_error(error) {
-                    Ok(response) => response,
-                    Err(status) => return status,
-                },
-            }
-        }
-        ForegroundDbCommandRequest::AllRelationSnapshotWithOptions {
-            query,
-            options_json,
-            transaction,
-        } => {
-            let client = match host.foreground_client(foreground) {
-                Ok(client) => client,
-                Err(status) => return status,
-            };
-            match client.start_foreground_read_with_options(query, options_json, transaction, true)
-            {
-                Ok(poll) => foreground_operation_response(poll),
-                Err(error) => match foreground_command_error(error) {
-                    Ok(response) => response,
-                    Err(status) => return status,
-                },
-            }
-        }
-        ForegroundDbCommandRequest::AllRelationQuery {
-            query_bytes,
-            options_json,
-        } => {
-            let client = match host.foreground_client(foreground) {
-                Ok(client) => client,
-                Err(status) => return status,
-            };
-            match client.start_foreground_relation_read(query_bytes, options_json) {
+            match client.start_foreground_read(query, options_json, transaction) {
                 Ok(poll) => foreground_operation_response(poll),
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
@@ -2725,17 +2664,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
-        ForegroundDbCommandRequest::Subscribe { query } => {
-            let client = match host.foreground_client(foreground) {
-                Ok(client) => client,
-                Err(status) => return status,
-            };
-            match client.subscribe_foreground_query(query) {
-                Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
-                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-            }
-        }
-        ForegroundDbCommandRequest::SubscribeWithOptions {
+        ForegroundDbCommandRequest::Subscribe {
             query,
             options_json,
         } => {
@@ -2746,22 +2675,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             match foreground_read_opts_from_json(&options_json)
                 .and_then(|opts| client.subscribe_foreground_query_with_options(query, opts))
             {
-                Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
-                Err(error) => match foreground_command_error(error) {
-                    Ok(response) => response,
-                    Err(status) => return status,
-                },
-            }
-        }
-        ForegroundDbCommandRequest::SubscribeRelationQuery {
-            query_bytes,
-            options_json,
-        } => {
-            let client = match host.foreground_client(foreground) {
-                Ok(client) => client,
-                Err(status) => return status,
-            };
-            match client.subscribe_foreground_relation_query(query_bytes, options_json) {
                 Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
@@ -3314,10 +3227,14 @@ impl NativeRelayClient {
         self.wire.clone()
     }
 
-    fn prepare_foreground_query(&self, query: Vec<u8>) -> Result<u64, RelayError> {
+    fn prepare_foreground_query(
+        &self,
+        query: Vec<u8>,
+        kind: ForegroundQueryKind,
+    ) -> Result<u64, RelayError> {
         let id = self.id;
         self.relay
-            .run(move |worker| worker.prepare_foreground_query(id, query))
+            .run(move |worker| worker.prepare_foreground_query(id, query, kind))
     }
 
     fn request_foreground_permission_advice(
@@ -3329,39 +3246,15 @@ impl NativeRelayClient {
             .run(move |worker| worker.request_foreground_permission_advice(id, action))
     }
 
-    fn start_foreground_read(&self, query: u64) -> Result<ForegroundOperationPoll, RelayError> {
-        let id = self.id;
-        self.relay
-            .run(move |worker| worker.start_foreground_read(id, query))
-    }
-
-    fn start_foreground_read_with_options(
+    fn start_foreground_read(
         &self,
         query: u64,
         options_json: String,
         transaction: Option<u64>,
-        structured: bool,
-    ) -> Result<ForegroundOperationPoll, RelayError> {
-        let id = self.id;
-        self.relay.run(move |worker| {
-            worker.start_foreground_read_with_options(
-                id,
-                query,
-                options_json,
-                transaction,
-                structured,
-            )
-        })
-    }
-
-    fn start_foreground_relation_read(
-        &self,
-        query_bytes: Vec<u8>,
-        options_json: String,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
         self.relay
-            .run(move |worker| worker.start_foreground_relation_read(id, query_bytes, options_json))
+            .run(move |worker| worker.start_foreground_read(id, query, options_json, transaction))
     }
 
     fn local_current_foreground_row(
@@ -3395,12 +3288,6 @@ impl NativeRelayClient {
         })
     }
 
-    fn subscribe_foreground_query(&self, query: u64) -> Result<u64, RelayError> {
-        let id = self.id;
-        self.relay
-            .run(move |worker| worker.subscribe_foreground_query(id, query))
-    }
-
     fn subscribe_foreground_query_with_options(
         &self,
         query: u64,
@@ -3409,17 +3296,6 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
-    }
-
-    fn subscribe_foreground_relation_query(
-        &self,
-        query_bytes: Vec<u8>,
-        options_json: String,
-    ) -> Result<u64, RelayError> {
-        let id = self.id;
-        self.relay.run(move |worker| {
-            worker.subscribe_foreground_relation_query(id, query_bytes, options_json)
-        })
     }
 
     fn wait_for_foreground_transaction(
@@ -4569,9 +4445,13 @@ fn duplex(
     )
 }
 
-type ForegroundPreparedQuery = futures::future::Shared<
-    futures::future::LocalBoxFuture<'static, Result<PreparedQuery, jazz::db::Error>>,
->;
+#[derive(Clone)]
+struct ForegroundPreparedQuery {
+    prepared: futures::future::Shared<
+        futures::future::LocalBoxFuture<'static, Result<PreparedQuery, jazz::db::Error>>,
+    >,
+    is_relation: bool,
+}
 type ForegroundSubscriptionOpen =
     Pin<Box<dyn Future<Output = Result<SubscriptionStream, RelayError>>>>;
 
@@ -5366,16 +5246,37 @@ impl RelayWorker {
         Ok(handle)
     }
 
-    fn prepare_foreground_query(&mut self, client: u64, query: Vec<u8>) -> Result<u64, RelayError> {
-        let query = jazz::wire::decode_postcard_exact::<Query>(&query).map_err(|error| {
-            RelayError::ForegroundCommand(format!("decode canonical query: {error}"))
-        })?;
+    fn prepare_foreground_query(
+        &mut self,
+        client: u64,
+        query: Vec<u8>,
+        kind: ForegroundQueryKind,
+    ) -> Result<u64, RelayError> {
+        enum Input {
+            Query(Box<Query>),
+            Relation(RelationQuery),
+        }
+        let input = match kind {
+            ForegroundQueryKind::Query => Input::Query(Box::new(
+                jazz::wire::decode_postcard_exact(&query).map_err(|error| {
+                    RelayError::ForegroundCommand(format!("decode canonical query: {error}"))
+                })?,
+            )),
+            ForegroundQueryKind::Relation => {
+                Input::Relation(foreground_relation_query_from_bytes(&query)?)
+            }
+        };
         let waker = Waker::from(Arc::clone(&self.wake));
         let client = self.foreground_client_mut(client)?;
         let db = Rc::clone(&client.db);
-        let prepared = async move { db.prepare_query_async(&query).await }
-            .boxed_local()
-            .shared();
+        let prepared = async move {
+            match input {
+                Input::Query(query) => db.prepare_query_async(&query).await,
+                Input::Relation(query) => db.prepare_relation_query_async(&query).await,
+            }
+        }
+        .boxed_local()
+        .shared();
         // Retain preparation behind the existing synchronous query handle.
         // An available owner still reports validation failures immediately.
         if let Poll::Ready(result) = prepared
@@ -5385,7 +5286,13 @@ impl RelayWorker {
             result.map_err(RelayError::Db)?;
         }
         let handle = Self::next_foreground_handle(client)?;
-        client.prepared_queries.insert(handle, prepared);
+        client.prepared_queries.insert(
+            handle,
+            ForegroundPreparedQuery {
+                prepared,
+                is_relation: kind == ForegroundQueryKind::Relation,
+            },
+        );
         Ok(handle)
     }
 
@@ -5393,40 +5300,8 @@ impl RelayWorker {
         &mut self,
         client: u64,
         query: u64,
-    ) -> Result<ForegroundOperationPoll, RelayError> {
-        // Preserve request 3's established immediate local materialization.
-        // Request 18/19 separately opt into owner/authority coverage receipts.
-        let (db, prepared) = {
-            let client = self.foreground_client(client)?;
-            let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
-                RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
-            })?;
-            (Rc::clone(&client.db), prepared.clone())
-        };
-        let future: ForegroundOperationFuture = Box::pin(async move {
-            let prepared = prepared.await.map_err(RelayError::Db)?;
-            let mut rows = db
-                .all(&prepared, ReadOpts::default())
-                .await
-                .map_err(RelayError::Db)?;
-            db.hydrate_rows_for_binding(&mut rows)
-                .await
-                .map_err(RelayError::Db)?;
-            let rows = jazz::binding_codec::encode_rows(&rows).map_err(|error| {
-                RelayError::ForegroundCommand(format!("encode row payload: {error}"))
-            })?;
-            Ok(ForegroundOperationResult::Rows(rows))
-        });
-        self.start_foreground_operation(client, None, future)
-    }
-
-    fn start_foreground_read_with_options(
-        &mut self,
-        client: u64,
-        query: u64,
         options_json: String,
         transaction: Option<u64>,
-        structured: bool,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let cleanups = {
             let client = self.foreground_client(client)?;
@@ -5455,9 +5330,22 @@ impl RelayWorker {
             })?;
             (Rc::clone(&client.db), prepared.clone())
         };
+        if prepared.is_relation && open_tx.is_some() {
+            return Err(RelayError::ForegroundCommand(
+                "Native runtime does not support relation reads inside a transaction".to_owned(),
+            ));
+        }
+        if prepared.is_relation && !opts.read_view.is_default() {
+            return Err(RelayError::ForegroundCommand(
+                "relation reads require the current/default read_view".to_owned(),
+            ));
+        }
+        let is_relation = prepared.is_relation;
+        let prepared = prepared.prepared;
         let owner = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
             let prepared = prepared.await.map_err(RelayError::Db)?;
+            let structured = !is_relation && !prepared.shape().query().array_subqueries.is_empty();
             foreground_read_future(owner, prepared, opts, open_tx, structured, cleanups).await
         });
         // Admit at command arrival, before a later commit can retire the open
@@ -5486,45 +5374,6 @@ impl RelayWorker {
         self.start_foreground_operation(client, None, future)
     }
 
-    fn start_foreground_relation_read(
-        &mut self,
-        client: u64,
-        query_bytes: Vec<u8>,
-        options_json: String,
-    ) -> Result<ForegroundOperationPoll, RelayError> {
-        let opts = foreground_read_opts_from_json(&options_json)?;
-        if !opts.read_view.is_default() {
-            return Err(RelayError::ForegroundCommand(
-                "relation reads require the current/default read_view".to_owned(),
-            ));
-        }
-        let relation = foreground_relation_query_from_bytes(&query_bytes)?;
-        let state = self.foreground_client(client)?;
-        if state.read_cleanups.borrow().len()
-            + usize::from(state.read_cleanup.is_some())
-            + state.pending_operations.len()
-            >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
-        {
-            return Err(RelayError::ForegroundCommand(
-                "foreground read cleanup capacity exceeded".to_owned(),
-            ));
-        }
-        let db = Rc::clone(&state.db);
-        let cleanups = Rc::clone(&state.read_cleanups);
-        let future: ForegroundOperationFuture = Box::pin(async move {
-            let prepared = db
-                .prepare_relation_query_async(&relation)
-                .await
-                .map_err(RelayError::Db)?;
-            foreground_read_future(db, prepared, opts, None, false, cleanups).await
-        });
-        self.start_foreground_operation(client, None, future)
-    }
-
-    fn subscribe_foreground_query(&mut self, client: u64, query: u64) -> Result<u64, RelayError> {
-        self.subscribe_foreground_query_with_options(client, query, ReadOpts::default())
-    }
-
     fn subscribe_foreground_query_with_options(
         &mut self,
         client: u64,
@@ -5540,36 +5389,18 @@ impl RelayWorker {
                 RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
             })?
             .clone();
+        if prepared.is_relation && !opts.read_view.is_default() {
+            return Err(RelayError::ForegroundCommand(
+                "relation subscriptions require the current/default read_view".to_owned(),
+            ));
+        }
+        let prepared = prepared.prepared;
         let db = Rc::clone(&client.db);
         let opener: ForegroundSubscriptionOpen = Box::pin(async move {
             let prepared = prepared.await.map_err(RelayError::Db)?;
             db.subscribe(&prepared, opts).await.map_err(RelayError::Db)
         });
         self.start_foreground_subscription(client_id, opener)
-    }
-
-    fn subscribe_foreground_relation_query(
-        &mut self,
-        client: u64,
-        query_bytes: Vec<u8>,
-        options_json: String,
-    ) -> Result<u64, RelayError> {
-        let opts = foreground_read_opts_from_json(&options_json)?;
-        if !opts.read_view.is_default() {
-            return Err(RelayError::ForegroundCommand(
-                "relation subscriptions require the current/default read_view".to_owned(),
-            ));
-        }
-        let relation = foreground_relation_query_from_bytes(&query_bytes)?;
-        let db = Rc::clone(&self.foreground_client(client)?.db);
-        let opener: ForegroundSubscriptionOpen = Box::pin(async move {
-            let prepared = db
-                .prepare_relation_query_async(&relation)
-                .await
-                .map_err(RelayError::Db)?;
-            db.subscribe(&prepared, opts).await.map_err(RelayError::Db)
-        });
-        self.start_foreground_subscription(client, opener)
     }
 
     fn start_foreground_subscription(
@@ -7456,21 +7287,33 @@ mod tests {
                 foreground,
                 ForegroundDbCommandRequest::PrepareQuery {
                     query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                    kind: ForegroundQueryKind::Query,
                 },
             ) else {
                 panic!("foreground query preparation must return a handle");
             };
 
-            let ForegroundDbCommandResponse::Subscribed { .. } =
-                self.execute(foreground, ForegroundDbCommandRequest::Subscribe { query })
-            else {
+            let ForegroundDbCommandResponse::Subscribed { .. } = self.execute(
+                foreground,
+                ForegroundDbCommandRequest::Subscribe {
+                    query,
+                    options_json: "{}".into(),
+                },
+            ) else {
                 panic!("foreground subscription preparation must return a handle");
             };
 
             for _ in 0..120 {
                 self.tick(foreground);
                 std::thread::sleep(Duration::from_millis(25));
-                match self.execute(foreground, ForegroundDbCommandRequest::All { query }) {
+                match self.execute(
+                    foreground,
+                    ForegroundDbCommandRequest::All {
+                        query,
+                        options_json: "{}".into(),
+                        transaction: None,
+                    },
+                ) {
                     ForegroundDbCommandResponse::Rows { rows } => return rows,
                     ForegroundDbCommandResponse::Pending { operation } => {
                         self.tick(foreground);
@@ -7751,6 +7594,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::PrepareQuery {
                 query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                kind: ForegroundQueryKind::Query,
             },
         )
         else {
@@ -7758,7 +7602,7 @@ mod tests {
         };
         let mut remote = fixture.execute(
             foreground,
-            ForegroundDbCommandRequest::AllWithOptions {
+            ForegroundDbCommandRequest::All {
                 query: remote_query,
                 options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
                 transaction: None,
@@ -7806,13 +7650,14 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::PrepareQuery {
                 query: postcard::to_allocvec(&Query::from("todos").limit(1)).unwrap(),
+                kind: ForegroundQueryKind::Query,
             },
         ) else {
             panic!("query prepares");
         };
         let mut read = fixture.execute(
             foreground,
-            ForegroundDbCommandRequest::AllWithOptions {
+            ForegroundDbCommandRequest::All {
                 query,
                 options_json: r#"{"tier":"local","local_updates":"deferred"}"#.into(),
                 transaction: Some(transaction),
@@ -9579,9 +9424,14 @@ mod tests {
         assert_eq!(batches[0].rows.len(), 1);
         assert_eq!(batches[0].rows[0].row_id, row_id);
         let query = client
-            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .prepare_foreground_query(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ForegroundQueryKind::Query,
+            )
             .unwrap();
-        let mut read = client.start_foreground_read(query).unwrap();
+        let mut read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
         for _ in 0..100 {
             let ForegroundOperationPoll::Pending { operation } = read else {
                 break;
@@ -9616,7 +9466,10 @@ mod tests {
                 .unwrap();
             let id = client.id;
             let query = client
-                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .prepare_foreground_query(
+                    postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                    ForegroundQueryKind::Query,
+                )
                 .unwrap();
             let holder = relay
                 .run(move |worker| {
@@ -9654,7 +9507,7 @@ mod tests {
                 )
                 .unwrap();
             let mut read = client
-                .start_foreground_read_with_options(query, "{}".into(), Some(transaction), false)
+                .start_foreground_read(query, "{}".into(), Some(transaction))
                 .unwrap();
             assert!(matches!(read, ForegroundOperationPoll::Pending { .. }));
             client
@@ -9692,7 +9545,9 @@ mod tests {
                 wait,
                 ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
             ));
-            let mut committed = client.start_foreground_read(query).unwrap();
+            let mut committed = client
+                .start_foreground_read(query, "{}".into(), None)
+                .unwrap();
             for _ in 0..100 {
                 let ForegroundOperationPoll::Pending { operation } = committed else {
                     break;
@@ -9727,7 +9582,10 @@ mod tests {
                 .unwrap();
             let id = client.id;
             let query = client
-                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .prepare_foreground_query(
+                    postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                    ForegroundQueryKind::Query,
+                )
                 .unwrap();
             let holder = relay
                 .run(move |worker| {
@@ -9757,7 +9615,7 @@ mod tests {
                 )
                 .unwrap();
             let read = client
-                .start_foreground_read_with_options(query, "{}".into(), Some(tx), false)
+                .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             let ForegroundOperationPoll::Pending { operation: read } = read else {
                 unreachable!()
@@ -9791,7 +9649,9 @@ mod tests {
                     ))
                 ));
             }
-            let mut read = client.start_foreground_read(query).unwrap();
+            let mut read = client
+                .start_foreground_read(query, "{}".into(), None)
+                .unwrap();
             for _ in 0..100 {
                 let ForegroundOperationPoll::Pending { operation } = read else {
                     break;
@@ -9857,7 +9717,10 @@ mod tests {
                 })
                 .unwrap();
             let query = client
-                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .prepare_foreground_query(
+                    postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                    ForegroundQueryKind::Query,
+                )
                 .unwrap();
             let tx = client
                 .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
@@ -9871,7 +9734,7 @@ mod tests {
                 )
                 .unwrap();
             let pending = client
-                .start_foreground_read_with_options(query, "{}".into(), Some(tx), false)
+                .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
             thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
@@ -9917,9 +9780,14 @@ mod tests {
                 )
                 .unwrap();
             let query = sibling
-                .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+                .prepare_foreground_query(
+                    postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                    ForegroundQueryKind::Query,
+                )
                 .unwrap();
-            let mut read = sibling.start_foreground_read(query).unwrap();
+            let mut read = sibling
+                .start_foreground_read(query, "{}".into(), None)
+                .unwrap();
             for _ in 0..100 {
                 let ForegroundOperationPoll::Pending { operation } = read else {
                     break;
@@ -10245,10 +10113,13 @@ mod tests {
             )
             .unwrap();
         let query = client
-            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .prepare_foreground_query(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ForegroundQueryKind::Query,
+            )
             .unwrap();
         let read = match client
-            .start_foreground_read_with_options(query, "{\"tier\":\"edge\"}".into(), None, false)
+            .start_foreground_read(query, "{\"tier\":\"edge\"}".into(), None)
             .unwrap()
         {
             ForegroundOperationPoll::Pending { operation } => operation,
@@ -10505,7 +10376,7 @@ mod tests {
             JazzNativeRelayStatus::LifecycleFailure
         );
         assert!(
-            matches!(client.prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap()), Err(RelayError::Db(error)) if error.message == "admission was rejected")
+            matches!(client.prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap(), ForegroundQueryKind::Query), Err(RelayError::Db(error)) if error.message == "admission was rejected")
         );
         assert_eq!(
             fixture.tick_status(failed),
@@ -10561,16 +10432,14 @@ mod tests {
                 .clone()
         };
         let query = client
-            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .prepare_foreground_query(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ForegroundQueryKind::Query,
+            )
             .unwrap();
         for _ in 0..7 {
             let ForegroundOperationPoll::Pending { operation } = client
-                .start_foreground_read_with_options(
-                    query,
-                    "{\"tier\":\"edge\"}".into(),
-                    None,
-                    false,
-                )
+                .start_foreground_read(query, "{\"tier\":\"edge\"}".into(), None)
                 .unwrap()
             else {
                 panic!("remote read without an authority remains pending");
@@ -10870,10 +10739,13 @@ mod tests {
                     .nested(ArraySubquery::new("notesViaTask", "notes", "task_id", "id")),
             );
             let prepared = client
-                .prepare_foreground_query(postcard::to_allocvec(&query).unwrap())
+                .prepare_foreground_query(
+                    postcard::to_allocvec(&query).unwrap(),
+                    ForegroundQueryKind::Query,
+                )
                 .unwrap();
             let mut response = client
-                .start_foreground_read_with_options(prepared, "{}".into(), None, true)
+                .start_foreground_read(prepared, "{}".into(), None)
                 .unwrap();
             let mut turns = 0;
             let bytes = loop {
@@ -11206,12 +11078,12 @@ mod tests {
     }
 
     #[test]
-    fn relation_subscription_command_preserves_append_only_byte_contract() {
-        let command = ForegroundDbCommandRequest::SubscribeRelationQuery {
-            query_bytes: vec![0, 1, b't', 0],
-            options_json: "{}".to_owned(),
+    fn relation_preparation_uses_the_v1_query_kind_byte_contract() {
+        let command = ForegroundDbCommandRequest::PrepareQuery {
+            query: vec![0, 1, b't', 0],
+            kind: ForegroundQueryKind::Relation,
         };
-        let expected = [37, 4, 0, 1, b't', 0, 2, b'{', b'}'];
+        let expected = [2, 4, 0, 1, b't', 0, 1];
         assert_eq!(postcard::to_allocvec(&command).unwrap(), expected);
         assert_eq!(
             postcard::from_bytes::<ForegroundDbCommandRequest>(&expected).unwrap(),
@@ -11250,17 +11122,22 @@ mod tests {
             .unwrap();
         relay.pump().unwrap();
         let query = client
-            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .prepare_foreground_query(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ForegroundQueryKind::Query,
+            )
             .expect("preparation returns a handle without reentering the owner");
         let operation = relay.run(move |worker| {
-            let read = worker.start_foreground_read_with_options(id, query, "{}".into(), None, false)?;
+            let read = worker.start_foreground_read(id, query, "{}".into(), None)?;
             let ForegroundOperationPoll::Pending { operation } = read else {
                 panic!("read must await held owner");
             };
-            let cancelled = worker.subscribe_foreground_query(id, query)?;
+            let cancelled =
+                worker.subscribe_foreground_query_with_options(id, query, ReadOpts::default())?;
             assert!(worker.close_foreground_subscription(id, cancelled)?);
             assert!(!worker.foreground_client(id)?.pending_subscriptions.contains_key(&cancelled));
-            let live = worker.subscribe_foreground_query(id, query)?;
+            let live =
+                worker.subscribe_foreground_query_with_options(id, query, ReadOpts::default())?;
             assert!(matches!(worker.drain_foreground_subscription(id, live)?,
                 ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) if events.is_empty()));
             worker.foreground_client_mut(id)?.tick = None;
@@ -11469,8 +11346,12 @@ mod tests {
             .unwrap();
 
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let prepared = reader.prepare_foreground_query(query).unwrap();
-        let subscription = reader.subscribe_foreground_query(prepared).unwrap();
+        let prepared = reader
+            .prepare_foreground_query(query, ForegroundQueryKind::Query)
+            .unwrap();
+        let subscription = reader
+            .subscribe_foreground_query_with_options(prepared, ReadOpts::default())
+            .unwrap();
         let reader_id = reader.id();
         for _ in 0..16 {
             relay.pump().unwrap();
@@ -12827,22 +12708,25 @@ mod tests {
         relay
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
-                let prepared: ForegroundPreparedQuery = async move {
+                let pending = async move {
                     db.hold_node_owner_for_test().await;
                     unreachable!()
                 }
                 .boxed_local()
                 .shared();
                 assert!(
-                    prepared
+                    pending
                         .clone()
                         .poll_unpin(&mut Context::from_waker(Waker::noop()))
                         .is_pending()
                 );
-                worker
-                    .foreground_client_mut(id)?
-                    .prepared_queries
-                    .insert(999, prepared);
+                worker.foreground_client_mut(id)?.prepared_queries.insert(
+                    999,
+                    ForegroundPreparedQuery {
+                        prepared: pending,
+                        is_relation: false,
+                    },
+                );
                 Ok(())
             })
             .unwrap();
@@ -13468,14 +13352,21 @@ mod tests {
             ForegroundDbCommandResponse::Ticked
         );
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let (status, response) = execute(ForegroundDbCommandRequest::PrepareQuery { query });
+        let (status, response) = execute(ForegroundDbCommandRequest::PrepareQuery {
+            query,
+            kind: ForegroundQueryKind::Query,
+        });
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         let ForegroundDbCommandResponse::PreparedQuery { query } =
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
         else {
             panic!("prepare must return an opaque query handle");
         };
-        let (status, response) = execute(ForegroundDbCommandRequest::All { query });
+        let (status, response) = execute(ForegroundDbCommandRequest::All {
+            query,
+            options_json: "{}".into(),
+            transaction: None,
+        });
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         let ForegroundDbCommandResponse::Rows { rows } =
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
@@ -13483,7 +13374,10 @@ mod tests {
             panic!("all must return the shared row-batch bytes");
         };
         assert!(rows.len() <= 2, "empty foreground read must stay bounded");
-        let (status, response) = execute(ForegroundDbCommandRequest::Subscribe { query });
+        let (status, response) = execute(ForegroundDbCommandRequest::Subscribe {
+            query,
+            options_json: "{}".into(),
+        });
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         let ForegroundDbCommandResponse::Subscribed { subscription } =
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
@@ -13849,9 +13743,8 @@ mod tests {
             .unwrap(),
             vec![15, 1]
         );
-        // Append-only V1 extension: existing command/response discriminants
-        // above remain frozen, while authoritative settlement has one pinned
-        // byte spelling for JNI/Swift/JSI wrappers.
+        // Authoritative settlement has one pinned byte spelling for
+        // JNI/Swift/JSI wrappers.
         assert_eq!(
             postcard::to_allocvec(&ForegroundDbCommandRequest::WaitForCoreTransaction {
                 tx_id: [5; 16],
@@ -13898,34 +13791,41 @@ mod tests {
     fn foreground_extension_v1_byte_contract() {
         let cases = [
             (
-                ForegroundDbCommandRequest::AllWithOptions {
+                ForegroundDbCommandRequest::PrepareQuery {
+                    query: vec![1, 128, 2],
+                    kind: ForegroundQueryKind::Query,
+                },
+                vec![2, 3, 1, 128, 2, 0],
+            ),
+            (
+                ForegroundDbCommandRequest::All {
                     query: 128,
                     options_json: "{}".into(),
                     transaction: None,
                 },
-                vec![18, 128, 1, 2, 123, 125, 0],
+                vec![3, 128, 1, 2, 123, 125, 0],
             ),
             (
-                ForegroundDbCommandRequest::AllRelationSnapshotWithOptions {
+                ForegroundDbCommandRequest::All {
                     query: 1,
                     options_json: "{}".into(),
                     transaction: Some(256),
                 },
-                vec![19, 1, 2, 123, 125, 1, 128, 2],
+                vec![3, 1, 2, 123, 125, 1, 128, 2],
             ),
             (
-                ForegroundDbCommandRequest::SubscribeWithOptions {
+                ForegroundDbCommandRequest::Subscribe {
                     query: 1,
                     options_json: "{}".into(),
                 },
-                vec![20, 1, 2, 123, 125],
+                vec![4, 1, 2, 123, 125],
             ),
             (
                 ForegroundDbCommandRequest::WaitForTransaction {
                     tx_id: [7; 16],
                     tier: "core".into(),
                 },
-                [vec![21], vec![7; 16], vec![4, 99, 111, 114, 101]].concat(),
+                [vec![18], vec![7; 16], vec![4, 99, 111, 114, 101]].concat(),
             ),
             (
                 ForegroundDbCommandRequest::StageMutation {
@@ -13936,17 +13836,17 @@ mod tests {
                     cells: vec![],
                     options_json: "{}".into(),
                 },
-                vec![22, 1, 4, 1, 116, 0, 0, 2, 123, 125],
+                vec![19, 1, 4, 1, 116, 0, 0, 2, 123, 125],
             ),
             (
                 ForegroundDbCommandRequest::DisconnectNativeUpstream,
-                vec![23],
+                vec![20],
             ),
             (
                 ForegroundDbCommandRequest::ReconnectNativeUpstream,
-                vec![24],
+                vec![21],
             ),
-            (ForegroundDbCommandRequest::NativeConnectionStatus, vec![25]),
+            (ForegroundDbCommandRequest::NativeConnectionStatus, vec![22]),
         ];
         for (command, bytes) in cases {
             assert_eq!(postcard::to_allocvec(&command).unwrap(), bytes);
@@ -13983,12 +13883,12 @@ mod tests {
         // Internal byte fixtures pin host/OTA compatibility that row-level
         // database assertions cannot observe.
         let cases = [
-            (ForegroundDbCommandRequest::NativeSessionMetadata, vec![26]),
+            (ForegroundDbCommandRequest::NativeSessionMetadata, vec![23]),
             (
                 ForegroundDbCommandRequest::WriteState { tx_id: [7; 16] },
-                [vec![27], vec![7; 16]].concat(),
+                [vec![24], vec![7; 16]].concat(),
             ),
-            (ForegroundDbCommandRequest::DrainMutationErrors, vec![28]),
+            (ForegroundDbCommandRequest::DrainMutationErrors, vec![25]),
             (
                 ForegroundDbCommandRequest::BeginStreamingMutation {
                     mutation: ForegroundMutationKind::Update,
@@ -13999,7 +13899,7 @@ mod tests {
                     options_json: "{}".into(),
                 },
                 [
-                    vec![29, 1, 1, 116],
+                    vec![26, 1, 1, 116],
                     vec![7; 16],
                     vec![1, 9, 1, 99, 2, 123, 125],
                 ]
@@ -14010,29 +13910,22 @@ mod tests {
                     upload: 128,
                     chunk: vec![9],
                 },
-                vec![30, 128, 1, 1, 9],
+                vec![27, 128, 1, 1, 9],
             ),
             (
                 ForegroundDbCommandRequest::FinishStreamingMutation { upload: 128 },
-                vec![31, 128, 1],
+                vec![28, 128, 1],
             ),
             (
                 ForegroundDbCommandRequest::AbortStreamingMutation { upload: 128 },
-                vec![32, 128, 1],
-            ),
-            (
-                ForegroundDbCommandRequest::AllRelationQuery {
-                    query_bytes: vec![0, 1, b't', 0],
-                    options_json: "{}".into(),
-                },
-                vec![33, 4, 0, 1, b't', 0, 2, b'{', b'}'],
+                vec![29, 128, 1],
             ),
             (
                 ForegroundDbCommandRequest::LocalCurrentRow {
                     table: "t".into(),
                     row_id: [7; 16],
                 },
-                [vec![34, 1, 116], vec![7; 16]].concat(),
+                [vec![30, 1, 116], vec![7; 16]].concat(),
             ),
             (
                 ForegroundDbCommandRequest::UpdateLargeValues {
@@ -14043,7 +13936,7 @@ mod tests {
                     updated_at_ms: Some(128),
                 },
                 [
-                    vec![35, 1, 116],
+                    vec![31, 1, 116],
                     vec![7; 16],
                     vec![1, 9, 2, 91, 93, 1, 128, 1],
                 ]
@@ -14057,7 +13950,7 @@ mod tests {
                     cells: vec![9],
                     options_json: "{}".into(),
                 },
-                [vec![36, 0, 1, 116, 1], vec![7; 16], vec![1, 9, 2, 123, 125]].concat(),
+                [vec![32, 0, 1, 116, 1], vec![7; 16], vec![1, 9, 2, 123, 125]].concat(),
             ),
         ];
         for (command, bytes) in cases {

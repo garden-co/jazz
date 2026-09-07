@@ -24,21 +24,10 @@ type ForegroundCommand =
   | { type: "reconnectNativeUpstream" }
   | { type: "nativeConnectionStatus" }
   | { type: "nativeSessionMetadata" }
-  | { type: "prepareQuery"; query: Uint8Array }
-  | { type: "all"; query: number }
+  | { type: "prepareQuery"; query: Uint8Array; kind: "query" | "relation" }
+  | { type: "all"; query: number; optionsJson: string; transaction?: number }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | {
-      type: "allRelationQuery" | "subscribeRelationQuery";
-      queryBytes: Uint8Array;
-      optionsJson: string;
-    }
-  | {
-      type: "allWithOptions" | "allRelationSnapshotWithOptions";
-      query: number;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "subscribe"; query: number }
+  | { type: "subscribe"; query: number; optionsJson: string }
   | { type: "drainSubscription"; subscription: number }
   | { type: "unsubscribe"; subscription: number }
   | { type: "poll"; operation: number }
@@ -68,7 +57,6 @@ type ForegroundCommand =
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
-  | { type: "subscribeWithOptions"; query: number; optionsJson: string }
   | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
   | {
       type: "stageMutation";
@@ -225,10 +213,7 @@ export class NativeForegroundDb {
   }
 
   prepareQuery(query: Uint8Array, kind: "query" | "relation"): object {
-    if (kind === "relation") {
-      return { nativeForegroundRelationQuery: query.slice() };
-    }
-    const response = this.execute({ type: "prepareQuery", query });
+    const response = this.execute({ type: "prepareQuery", query, kind });
     if (response.type !== "preparedQuery") return unexpected("prepareQuery", response.type);
     return { nativeForegroundQuery: response.query };
   }
@@ -238,22 +223,6 @@ export class NativeForegroundDb {
     opts: unknown,
     openTransactionId?: string,
   ): Uint8Array | { poll(): Uint8Array | null } {
-    const relationQuery = relationQueryBytes(query);
-    if (relationQuery) {
-      if (openTransactionId !== undefined) {
-        throw new Error("Native runtime does not support relation reads inside a transaction");
-      }
-      this.tick();
-      const response = this.execute({
-        type: "allRelationQuery",
-        queryBytes: relationQuery,
-        optionsJson: JSON.stringify(opts ?? {}),
-      });
-      if (response.type === "rows") return response.rows;
-      if (response.type === "operationError") throw new Error(response.reason);
-      if (response.type === "pending") return this.pendingRows(response.operation);
-      return unexpected("all", response.type);
-    }
     const transaction =
       openTransactionId === undefined
         ? undefined
@@ -264,7 +233,7 @@ export class NativeForegroundDb {
     // after some unrelated caller happens to tick the host.
     this.tick();
     const response = this.execute({
-      type: "allWithOptions",
+      type: "all",
       query: queryHandle(query),
       optionsJson: JSON.stringify(opts ?? {}),
       transaction,
@@ -286,18 +255,11 @@ export class NativeForegroundDb {
 
   subscribe(query: object, opts: unknown): NativeForegroundSubscription {
     this.tick();
-    const relationQuery = relationQueryBytes(query);
-    const response = relationQuery
-      ? this.execute({
-          type: "subscribeRelationQuery",
-          queryBytes: relationQuery,
-          optionsJson: JSON.stringify(opts ?? {}),
-        })
-      : this.execute({
-          type: "subscribeWithOptions",
-          query: queryHandle(query),
-          optionsJson: JSON.stringify(opts),
-        });
+    const response = this.execute({
+      type: "subscribe",
+      query: queryHandle(query),
+      optionsJson: JSON.stringify(opts ?? {}),
+    });
     if (response.type === "operationError") throw new Error(response.reason);
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
@@ -961,16 +923,6 @@ function queryHandle(query: object): number {
     throw new Error("React Native native foreground received an invalid prepared query handle");
   }
   return handle as number;
-}
-
-function relationQueryBytes(query: object): Uint8Array | undefined {
-  const bytes = (query as { nativeForegroundRelationQuery?: unknown })
-    .nativeForegroundRelationQuery;
-  if (bytes === undefined) return undefined;
-  if (!(bytes instanceof Uint8Array)) {
-    throw new Error("React Native native foreground received invalid relation query bytes");
-  }
-  return bytes;
 }
 
 function unsupported(operation: string): never {

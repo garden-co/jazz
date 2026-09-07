@@ -77,12 +77,10 @@ export type NativeForegroundCommand =
   | { type: 'permissionAdvice'; action: NativeForegroundPermissionAdviceAction }
   | 'probe'
   | 'tick'
-  | { type: 'prepareQuery'; query: Uint8Array }
-  | { type: 'all'; query: number }
+  | { type: 'prepareQuery'; query: Uint8Array; kind: 'query' | 'relation' }
+  | { type: 'all'; query: number; optionsJson: string; transaction?: number }
   | { type: 'localCurrentRow'; table: string; rowId: Uint8Array }
-  | { type: 'allRelationQuery' | 'subscribeRelationQuery'; queryBytes: Uint8Array; optionsJson: string }
-  | { type: 'allWithOptions' | 'allRelationSnapshotWithOptions'; query: number; optionsJson: string; transaction?: number }
-  | { type: 'subscribe'; query: number }
+  | { type: 'subscribe'; query: number; optionsJson: string }
   | { type: 'drainSubscription'; subscription: number }
   | { type: 'unsubscribe'; subscription: number }
   | 'close'
@@ -113,30 +111,64 @@ export type NativeForegroundCommand =
   | { type: 'delete'; transaction: number; table: string; rowId: Uint8Array }
   | { type: 'commitTransaction'; transaction: number }
   | { type: 'rollbackTransaction'; transaction: number }
-  | { type: 'subscribeWithOptions'; query: number; optionsJson: string }
   | { type: 'waitForTransaction'; txId: Uint8Array; tier: string }
   | { type: 'disconnectNativeUpstream' }
   | { type: 'reconnectNativeUpstream' }
   | { type: 'nativeConnectionStatus' }
-  | { type: 'directMutation'; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore'; table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
-  | { type: 'stageMutation'; transaction: number; mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
-      table: string; rowId?: Uint8Array; cells: Uint8Array; optionsJson: string }
+  | {
+      type: 'directMutation';
+      mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
+      table: string;
+      rowId?: Uint8Array;
+      cells: Uint8Array;
+      optionsJson: string;
+    }
+  | {
+      type: 'stageMutation';
+      transaction: number;
+      mutation: 'insert' | 'update' | 'upsert' | 'delete' | 'restore';
+      table: string;
+      rowId?: Uint8Array;
+      cells: Uint8Array;
+      optionsJson: string;
+    }
   | { type: 'nativeSessionMetadata' }
   | { type: 'writeState'; txId: Uint8Array }
   | { type: 'drainMutationErrors' }
-  | { type: 'beginStreamingMutation'; mutation: 'insert' | 'update' | 'upsert';
-      table: string; rowId: Uint8Array; cells: Uint8Array; column: string; optionsJson: string }
+  | {
+      type: 'beginStreamingMutation';
+      mutation: 'insert' | 'update' | 'upsert';
+      table: string;
+      rowId: Uint8Array;
+      cells: Uint8Array;
+      column: string;
+      optionsJson: string;
+    }
   | { type: 'pushStreamingMutation'; upload: number; chunk: Uint8Array }
-  | { type: 'finishStreamingMutation' | 'abortStreamingMutation'; upload: number }
-  | { type: 'updateLargeValues'; table: string; rowId: Uint8Array; patch: Uint8Array; descriptorsJson: string; updatedAtMs?: number };
-
+  | {
+      type: 'finishStreamingMutation' | 'abortStreamingMutation';
+      upload: number;
+    }
+  | {
+      type: 'updateLargeValues';
+      table: string;
+      rowId: Uint8Array;
+      patch: Uint8Array;
+      descriptorsJson: string;
+      updatedAtMs?: number;
+    };
 
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
 
 export type NativeForegroundResponse =
   | { type: 'nativeSessionMetadata'; issuer: string; userId: string }
-  | { type: 'nativeConnectionStatus'; configured: boolean; explicitlyOffline: boolean; connected: boolean }
+  | {
+      type: 'nativeConnectionStatus';
+      configured: boolean;
+      explicitlyOffline: boolean;
+      connected: boolean;
+    }
   | { type: 'probe'; abiVersion: number }
   | { type: 'ticked' }
   | { type: 'preparedQuery'; query: number }
@@ -250,7 +282,10 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
         throw foregroundRuntimeInstallationError();
       }
       return {
-        isClosed: typeof foreground.isClosed === 'function' ? () => foreground.isClosed!() : undefined,
+        isClosed:
+          typeof foreground.isClosed === 'function'
+            ? () => foreground.isClosed!()
+            : undefined,
         execute(command: Uint8Array): Uint8Array {
           if (!(command instanceof Uint8Array)) {
             throw new Error(
@@ -287,48 +322,64 @@ export function encodeNativeForegroundCommand(
   if (command === 'probe') return Uint8Array.of(0);
   if (command === 'tick') return Uint8Array.of(1);
   if (command === 'close') return Uint8Array.of(7);
-  if (command.type === 'disconnectNativeUpstream') return Uint8Array.of(23);
-  if (command.type === 'reconnectNativeUpstream') return Uint8Array.of(24);
-  if (command.type === 'nativeConnectionStatus') return Uint8Array.of(25);
-  if (command.type === 'nativeSessionMetadata') return Uint8Array.of(26);
+  if (command.type === 'disconnectNativeUpstream') return Uint8Array.of(20);
+  if (command.type === 'reconnectNativeUpstream') return Uint8Array.of(21);
+  if (command.type === 'nativeConnectionStatus') return Uint8Array.of(22);
+  if (command.type === 'nativeSessionMetadata') return Uint8Array.of(23);
   if (command.type === 'permissionAdvice') {
     const action = command.action;
     const tag = { insert: 0, read: 1, update: 2, delete: 3 }[action.type];
-    const target = action.type === 'insert'
-      ? encodeForegroundBytes(action.cells)
-      : concatForegroundBytes(encodeForegroundId(action.rowId, 'row id'), ...(action.type === 'update' ? [encodeForegroundBytes(action.patch)] : []));
-    return concatForegroundBytes(Uint8Array.of(38, tag), encodeForegroundString(action.table), target);
+    const target =
+      action.type === 'insert'
+        ? encodeForegroundBytes(action.cells)
+        : concatForegroundBytes(
+            encodeForegroundId(action.rowId, 'row id'),
+            ...(action.type === 'update'
+              ? [encodeForegroundBytes(action.patch)]
+              : [])
+          );
+    return concatForegroundBytes(
+      Uint8Array.of(33, tag),
+      encodeForegroundString(action.table),
+      target
+    );
   }
   if (command.type === 'prepareQuery') {
     return concatForegroundBytes(
       Uint8Array.of(2),
-      encodeForegroundBytes(command.query)
+      encodeForegroundBytes(command.query),
+      Uint8Array.of(command.kind === 'query' ? 0 : 1)
     );
   }
-  if (command.type === 'subscribeWithOptions')
-    return concatForegroundBytes(Uint8Array.of(20), encodeForegroundU64(command.query), encodeForegroundString(command.optionsJson));
   if (command.type === 'waitForTransaction')
-    return concatForegroundBytes(Uint8Array.of(21), encodeForegroundId(command.txId, 'transaction id'), encodeForegroundString(command.tier));
+    return concatForegroundBytes(
+      Uint8Array.of(18),
+      encodeForegroundId(command.txId, 'transaction id'),
+      encodeForegroundString(command.tier)
+    );
   if (command.type === 'all')
     return concatForegroundBytes(
       Uint8Array.of(3),
-      encodeForegroundU64(command.query)
-    );
-  if (command.type === 'allWithOptions' || command.type === 'allRelationSnapshotWithOptions')
-    return concatForegroundBytes(
-      Uint8Array.of(command.type === 'allWithOptions' ? 18 : 19),
       encodeForegroundU64(command.query),
       encodeForegroundString(command.optionsJson),
-      command.transaction === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.transaction))
+      command.transaction === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(
+            Uint8Array.of(1),
+            encodeForegroundU64(command.transaction)
+          )
     );
-  if (command.type === 'allRelationQuery' || command.type === 'subscribeRelationQuery')
-    return concatForegroundBytes(Uint8Array.of(command.type === 'allRelationQuery' ? 33 : 37), encodeForegroundBytes(command.queryBytes), encodeForegroundString(command.optionsJson));
   if (command.type === 'localCurrentRow')
-    return concatForegroundBytes(Uint8Array.of(34), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'));
+    return concatForegroundBytes(
+      Uint8Array.of(30),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id')
+    );
   if (command.type === 'subscribe')
     return concatForegroundBytes(
       Uint8Array.of(4),
-      encodeForegroundU64(command.query)
+      encodeForegroundU64(command.query),
+      encodeForegroundString(command.optionsJson)
     );
   if (command.type === 'drainSubscription')
     return concatForegroundBytes(
@@ -350,30 +401,71 @@ export function encodeNativeForegroundCommand(
       Uint8Array.of(9),
       encodeForegroundU64(command.operation)
     );
-  if (command.type === 'writeState') return concatForegroundBytes(Uint8Array.of(27), encodeForegroundId(command.txId, 'txId'));
-  if (command.type === 'drainMutationErrors') return Uint8Array.of(28);
+  if (command.type === 'writeState')
+    return concatForegroundBytes(
+      Uint8Array.of(24),
+      encodeForegroundId(command.txId, 'txId')
+    );
+  if (command.type === 'drainMutationErrors') return Uint8Array.of(25);
   if (command.type === 'beginStreamingMutation') {
     const kind = ['insert', 'update', 'upsert'].indexOf(command.mutation);
     if (kind < 0) throw new Error('Invalid streaming mutation kind');
-    return concatForegroundBytes(Uint8Array.of(29, kind), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'), encodeForegroundBytes(command.cells), encodeForegroundString(command.column), encodeForegroundString(command.optionsJson));
+    return concatForegroundBytes(
+      Uint8Array.of(26, kind),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id'),
+      encodeForegroundBytes(command.cells),
+      encodeForegroundString(command.column),
+      encodeForegroundString(command.optionsJson)
+    );
   }
-  if (command.type === 'pushStreamingMutation') return concatForegroundBytes(Uint8Array.of(30), encodeForegroundU64(command.upload), encodeForegroundBytes(command.chunk));
-  if (command.type === 'finishStreamingMutation' || command.type === 'abortStreamingMutation') return concatForegroundBytes(Uint8Array.of(command.type === 'finishStreamingMutation' ? 31 : 32), encodeForegroundU64(command.upload));
-  if (command.type === 'updateLargeValues') return concatForegroundBytes(Uint8Array.of(35), encodeForegroundString(command.table), encodeForegroundId(command.rowId, 'row id'), encodeForegroundBytes(command.patch), encodeForegroundString(command.descriptorsJson), command.updatedAtMs === undefined ? Uint8Array.of(0) : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)));
+  if (command.type === 'pushStreamingMutation')
+    return concatForegroundBytes(
+      Uint8Array.of(27),
+      encodeForegroundU64(command.upload),
+      encodeForegroundBytes(command.chunk)
+    );
+  if (
+    command.type === 'finishStreamingMutation' ||
+    command.type === 'abortStreamingMutation'
+  )
+    return concatForegroundBytes(
+      Uint8Array.of(command.type === 'finishStreamingMutation' ? 28 : 29),
+      encodeForegroundU64(command.upload)
+    );
+  if (command.type === 'updateLargeValues')
+    return concatForegroundBytes(
+      Uint8Array.of(31),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id'),
+      encodeForegroundBytes(command.patch),
+      encodeForegroundString(command.descriptorsJson),
+      command.updatedAtMs === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(
+            Uint8Array.of(1),
+            encodeForegroundU64(command.updatedAtMs)
+          )
+    );
   if (command.type === 'stageMutation' || command.type === 'directMutation') {
     const kinds = ['insert', 'update', 'upsert', 'delete', 'restore'];
     const kind = kinds.indexOf(command.mutation);
     if (kind < 0) throw new Error('Invalid foreground mutation kind');
     return concatForegroundBytes(
-      Uint8Array.of(command.type === 'directMutation' ? 36 : 22),
-      command.type === 'directMutation' ? new Uint8Array() : encodeForegroundU64(command.transaction),
+      Uint8Array.of(command.type === 'directMutation' ? 32 : 19),
+      command.type === 'directMutation'
+        ? new Uint8Array()
+        : encodeForegroundU64(command.transaction),
       Uint8Array.of(kind),
       encodeForegroundString(command.table),
       command.rowId === undefined
         ? Uint8Array.of(0)
-        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundId(command.rowId, 'row id')),
+        : concatForegroundBytes(
+            Uint8Array.of(1),
+            encodeForegroundId(command.rowId, 'row id')
+          ),
       encodeForegroundBytes(command.cells),
-      encodeForegroundString(command.optionsJson),
+      encodeForegroundString(command.optionsJson)
     );
   }
   if (command.type === 'beginTransaction') {
@@ -512,28 +604,73 @@ export function decodeNativeForegroundResponse(
       type: 'transactionCommitted',
       txId: decodeForegroundId(bytes.subarray(1), 'committed txId'),
     };
-  if (tag === 16) return { type: 'transactionSettled', txId: decodeForegroundId(bytes.subarray(1), 'settled txId') };
+  if (tag === 16)
+    return {
+      type: 'transactionSettled',
+      txId: decodeForegroundId(bytes.subarray(1), 'settled txId'),
+    };
   if (tag === 18) {
     // Postcard strings use canonical u64 lengths. Read the first bounded
     // field, then require the second field to consume every remaining byte.
     let end = 1;
     while (end < bytes.length && (bytes[end]! & 0x80) !== 0) end++;
-    if (end >= bytes.length) throw new Error('Malformed native session metadata');
-    const length = decodeForegroundU64(bytes.subarray(1, end + 1), 'issuer length');
+    if (end >= bytes.length)
+      throw new Error('Malformed native session metadata');
+    const length = decodeForegroundU64(
+      bytes.subarray(1, end + 1),
+      'issuer length'
+    );
     const next = end + 1 + length;
-    if (next > bytes.length) throw new Error('Malformed native session metadata');
-    return { type: 'nativeSessionMetadata', issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'), userId: decodeForegroundString(bytes.subarray(next), 'user id') };
+    if (next > bytes.length)
+      throw new Error('Malformed native session metadata');
+    return {
+      type: 'nativeSessionMetadata',
+      issuer: decodeForegroundUtf8(bytes, end + 1, length, 'issuer'),
+      userId: decodeForegroundString(bytes.subarray(next), 'user id'),
+    };
   }
 
-  if (tag === 19) return { type: 'writeState', stateJson: decodeForegroundString(bytes.subarray(1), 'write state') };
-  if (tag === 20) return { type: 'mutationErrors', eventsJson: decodeForegroundString(bytes.subarray(1), 'mutation errors') };
-  if (tag === 21) return { type: 'streamingMutationOpened', upload: decodeForegroundU64(bytes.subarray(1), 'upload') };
-  if (tag === 22 && bytes.length === 1) return { type: 'streamingMutationPushed' };
-  if (tag === 24 && bytes.length === 33) return { type: 'mutationCommitted', txId: bytes.slice(1, 17), rowId: bytes.slice(17) };
-  if (tag === 25 && bytes.length === 2 && bytes[1]! <= 2) return { type: 'permissionAdvice', advice: (['allowed', 'denied', 'unknown'] as const)[bytes[1]!]! };
-  if (tag === 23 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) return { type: 'streamingMutationAborted', aborted: bytes[1] === 1 };
-  if (tag === 17 && bytes.length === 4 && bytes.subarray(1).every(value => value === 0 || value === 1)) {
-    return { type: 'nativeConnectionStatus', configured: bytes[1] === 1, explicitlyOffline: bytes[2] === 1, connected: bytes[3] === 1 };
+  if (tag === 19)
+    return {
+      type: 'writeState',
+      stateJson: decodeForegroundString(bytes.subarray(1), 'write state'),
+    };
+  if (tag === 20)
+    return {
+      type: 'mutationErrors',
+      eventsJson: decodeForegroundString(bytes.subarray(1), 'mutation errors'),
+    };
+  if (tag === 21)
+    return {
+      type: 'streamingMutationOpened',
+      upload: decodeForegroundU64(bytes.subarray(1), 'upload'),
+    };
+  if (tag === 22 && bytes.length === 1)
+    return { type: 'streamingMutationPushed' };
+  if (tag === 24 && bytes.length === 33)
+    return {
+      type: 'mutationCommitted',
+      txId: bytes.slice(1, 17),
+      rowId: bytes.slice(17),
+    };
+  if (tag === 25 && bytes.length === 2 && bytes[1]! <= 2)
+    return {
+      type: 'permissionAdvice',
+      advice: (['allowed', 'denied', 'unknown'] as const)[bytes[1]!]!,
+    };
+  if (tag === 23 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
+    return { type: 'streamingMutationAborted', aborted: bytes[1] === 1 };
+  if (
+    tag === 17 &&
+    bytes.length === 4 &&
+    bytes.subarray(1).every((value) => value === 0 || value === 1)
+  ) {
+    return {
+      type: 'nativeConnectionStatus',
+      configured: bytes[1] === 1,
+      explicitlyOffline: bytes[2] === 1,
+      connected: bytes[3] === 1,
+    };
   }
   if (tag === 15 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
     return { type: 'transactionRolledBack', rolledBack: bytes[1] === 1 };
@@ -628,7 +765,8 @@ function decodeForegroundU64(bytes: Uint8Array, label: string): number {
         index + 1 === bytes.length &&
         (index === 0 || (byte & 0x7f) !== 0) &&
         Number.isSafeInteger(value)
-      ) return value;
+      )
+        return value;
       break;
     }
     multiplier *= 128;
@@ -705,10 +843,18 @@ function decodeForegroundSubscriptionEvents(
       let terminalOperations: unknown[] | undefined;
       if (tag === 3) {
         const length = readVarint();
-        const json = decodeForegroundUtf8(bytes, offset, length, 'terminal operations');
+        const json = decodeForegroundUtf8(
+          bytes,
+          offset,
+          length,
+          'terminal operations'
+        );
         offset += length;
         const parsed: unknown = JSON.parse(json);
-        if (!Array.isArray(parsed)) throw new Error('Jazz native foreground returned malformed terminal operations');
+        if (!Array.isArray(parsed))
+          throw new Error(
+            'Jazz native foreground returned malformed terminal operations'
+          );
         terminalOperations = parsed;
       }
       events.push({

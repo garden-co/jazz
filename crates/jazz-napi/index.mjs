@@ -15,7 +15,6 @@ export const {
   Subscription,
   TestJwtIssuer,
   Transport,
-  Tx,
   Write,
   mintLocalFirstToken,
   verifyLocalFirstIdentityProof,

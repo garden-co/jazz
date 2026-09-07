@@ -189,10 +189,14 @@ export async function proveSameJsiRuntimeWriteSubscription(
     codec.decode(foreground.execute(codec.encode(command)));
   try {
     markFailure("same-runtime-subscribe-failed");
-    const prepared = execute(b, { type: "prepareQuery", query: todosQuery });
+    const prepared = execute(b, { type: "prepareQuery", query: todosQuery, kind: "query" });
     if (prepared.type !== "preparedQuery")
       throw new Error("foreground B could not prepare the todos subscription");
-    const subscribed = execute(b, { type: "subscribe", query: prepared.query });
+    const subscribed = execute(b, {
+      type: "subscribe",
+      query: prepared.query,
+      optionsJson: "{}",
+    });
     if (subscribed.type !== "subscribed")
       throw new Error("foreground B could not subscribe to the todos query");
 
@@ -497,10 +501,10 @@ async function readScopeRows(
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const prepared = execute({ type: "prepareQuery", query: scopeQuery });
+  const prepared = execute({ type: "prepareQuery", query: scopeQuery, kind: "query" });
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the owner-protected scope query");
-  const subscribed = execute({ type: "subscribe", query: prepared.query });
+  const subscribed = execute({ type: "subscribe", query: prepared.query, optionsJson: "{}" });
   if (subscribed.type !== "subscribed")
     throw new Error(
       "scope isolation fixture could not subscribe to the owner-protected scope query",
@@ -540,7 +544,7 @@ async function readScopeRows(
         pendingOperation !== undefined
           ? execute({ type: "poll", operation: pendingOperation })
           : published
-            ? execute({ type: "all", query: prepared.query })
+            ? execute({ type: "all", query: prepared.query, optionsJson: "{}" })
             : execute({ type: "drainSubscription", subscription: subscribed.subscription });
       // Retain a newly admitted operation even if execution crossed the deadline,
       // so timeout cleanup can cancel it rather than abandoning its future.
@@ -551,7 +555,7 @@ async function readScopeRows(
           throw new Error("scope isolation fixture subscription ended before its read");
         if (!response.events.some((event) => event.type === "delta")) continue;
         published = true;
-        response = execute({ type: "all", query: prepared.query });
+        response = execute({ type: "all", query: prepared.query, optionsJson: "{}" });
         pendingOperation = response.type === "pending" ? response.operation : undefined;
         if (timing.now() >= deadline) break;
       }
