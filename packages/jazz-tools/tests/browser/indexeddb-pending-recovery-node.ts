@@ -35,7 +35,13 @@ export async function recoverPendingIndexedDbWrites(
     } catch (error) {
       const context = `[pending-write recovery: ${phase}; method=${method}; serverStopped=${serverStopped}]`;
       if (error instanceof Error) {
-        error.message = `${context} ${error.message}`;
+        // Vitest's command boundary can discard a remote stack. Copy only the
+        // bounded, redacted coverage receipt into this test-only message.
+        const coverage = error.stack
+          ?.split("\n")
+          .find((line) => line.startsWith("Query coverage state: "))
+          ?.slice(0, 2_048);
+        error.message = `${context} ${error.message}${coverage ? `; ${coverage}` : ""}`;
         error.stack = `${context}\n${error.stack ?? error.message}`;
         throw error;
       }
