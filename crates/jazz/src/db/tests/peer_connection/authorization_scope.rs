@@ -198,6 +198,86 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
     }
 }
 
+/// Alice's initial Local opening survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn initial_local_opening_retries_after_transport_backpressure() {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                if !self.rejected.replace(true) {
+                    return Err(TransportError::Backpressure);
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+    }
+    assert!(rejected.get(), "fixture must reject the initial ViewUpdate");
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the unsent initial Local opening must retry after capacity returns"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        vec![cached]
+    );
+    assert_eq!(
+        accepted.get(),
+        1,
+        "retry must accept exactly one initial opening"
+    );
+    foreground.detach_query(attachment);
+}
+
 /// Alice's fresh foreground cannot treat its empty memory as the persistent
 /// owner's answer. Initial local delivery must work without any authority.
 /// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
