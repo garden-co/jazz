@@ -28,6 +28,20 @@ function recordRemoteBrowserDbLifecycle(lifecycle: string[], event: string): voi
   if (lifecycle.length > 32) lifecycle.splice(0, lifecycle.length - 32);
 }
 
+function boundedRemoteBrowserDbErrorReceipt(error: unknown): string {
+  const value = error instanceof Error ? error : new Error(String(error));
+  // Vitest's browser-command transport serializes the outer error message but
+  // discards its `cause`. Keep the evaluated harness failure in that message,
+  // with one-line bounded fields so a timeout receipt remains useful and safe
+  // for the synthetic browser fixtures.
+  const oneLine = (text: string, limit: number) => text.replace(/[\r\n\t]+/g, " ").slice(0, limit);
+  return [
+    `name=${oneLine(value.name, 160)}`,
+    `message=${oneLine(value.message, 1_200)}`,
+    `stack=${oneLine(value.stack ?? "unavailable", 2_400)}`,
+  ].join(" ");
+}
+
 function observeRemoteBrowserDbPage(page: Page, lifecycle: string[], tabIndex: number): void {
   const label = `tab=${tabIndex}`;
   page.on("framenavigated", (frame) => {
@@ -237,7 +251,11 @@ export async function waitForRemoteBrowserDbTitle(
     return await evaluateHarness(handle.pages[0]!, "waitForRemoteBrowserDbTitle", input);
   } catch (error) {
     const receipt = await remoteBrowserDbLifecycleReceipt(handle);
-    throw new Error(`Remote browser db title wait failed: ${receipt}`, { cause: error });
+    const underlying = boundedRemoteBrowserDbErrorReceipt(error);
+    throw new Error(
+      `Remote browser db title wait failed: ${receipt} underlying-error=${underlying}`,
+      { cause: error },
+    );
   }
 }
 
