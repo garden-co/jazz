@@ -273,3 +273,44 @@ The callback must return undefined synchronously; SecureStore operations use no
 biometric-prompt options. Older native builds without the lock fail preparation.
 Persistence errors remain observable and prevent a new handle from supplying
 credentials until retention succeeds; roots are never truncated to fit storage.
+
+## Account registry record journal (v2)
+
+The registry has its own application root, separate from ordinary row storage.
+Its `default` column family is accessed through Groove `RecordStore`. Keys are
+ASCII `account-command:v2:` followed by the big-endian eight-byte revision,
+starting at zero without gaps. Recovery scans the entire `account-command:`
+prefix and rejects other versions, malformed keys, and invalid commands.
+
+The former prerelease `jazz.account-command.v1` profile used bespoke `JACC`
+framing. The refreshed `jazz.account-command.v2` profile uses canonical Groove
+records exclusively. Its one field, `command`, is an Enum named
+`jazz.account-command.v2` with fixed registry identity 1 in this isolated root.
+Declaration-order cases and ordered payload fields are:
+
+- Register: principal Record, account Uuid.
+- RequestLink: approver Record, candidate Record, nonce Uuid, now U64, expires_at U64.
+- AcceptLink: candidate Record, nonce Uuid, now U64.
+- Revoke: approver Record, target Record.
+- FoundLocalFirst: principal Record, app Uuid.
+
+Every principal Record has issuer String then subject String, preserving exact
+UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
+framing, record offsets, strings, UUIDs, and integers; no account-specific byte
+tags or serializer defaults define their encoding. The command and descriptor
+bytes are pinned in `src/account_registry/command-v2.corpus` (five command lines,
+then the canonical descriptor). This prerelease refresh intentionally rejects
+v1 registry roots; it does not change ordinary row or wire encodings. As in
+ordinary Groove records, a terminal String consumes its record remainder:
+appending valid UTF-8 can change that principal component rather than represent
+trailing garbage. Invalid UTF-8, invalid offsets, unknown enum cases, and
+invalid principal components are rejected. No private length framing is added.
+
+Conditional append remains atomic through the backend primitive, followed by a
+durability barrier before publishing state. Recovery also flushes before serving.
+A competing append or ambiguous read/write/flush error poisons the owner until
+recovery; login checks absence of the next revision before admitting cached state.
+Assignments, nonce consumption, and revocation retain the existing state-machine
+semantics. For example, a loser at revision zero cannot overwrite registration;
+a stale reader after revocation fails unavailable instead of admitting its old
+assignment. Reopening replays only the ordered committed commands.

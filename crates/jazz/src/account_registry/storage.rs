@@ -3,10 +3,10 @@ use super::{
     AccountCommand, AccountCommandResult, AccountError, AccountRegistry, Assignment, Principal,
     codec,
 };
-use crate::groove::storage::{OrderedKvStorage, ScanRequest};
+use crate::groove::storage::{OrderedKvStorage, RecordStore, ScanBounds};
 
 const CF: &str = "default";
-const PREFIX: &[u8] = b"account-command:v1:";
+const PREFIX: &[u8] = b"account-command:v2:";
 
 /// A single authority owns this journal. Conditional append additionally fails
 /// closed if two owners accidentally attempt to advance the same revision.
@@ -35,8 +35,10 @@ impl<S: OrderedKvStorage> StoredAccountRegistry<S> {
         let mut state = AccountRegistry::default();
         let mut revision = 0u64;
         {
-            let mut scan = storage
-                .scan(ScanRequest::prefix(CF.into(), b"account-command:".to_vec()))
+            let descriptor = codec::descriptor();
+            let records = RecordStore::new(&storage, CF, &descriptor);
+            let mut scan = records
+                .scan(ScanBounds::Prefix(b"account-command:".to_vec()))
                 .await
                 .map_err(unavailable)?;
             while let Some(batch) = scan.next_batch().await.map_err(unavailable)? {
@@ -69,9 +71,10 @@ impl<S: OrderedKvStorage> StoredAccountRegistry<S> {
         // Fence cached admission even if a second owner only performs reads.
         // The successful absence read is this decision's linearization point.
         self.poisoned = true;
-        let advanced = self
-            .storage
-            .get(CF.into(), command_key(self.revision))
+        let descriptor = codec::descriptor();
+        let records = RecordStore::new(&self.storage, CF, &descriptor);
+        let advanced = records
+            .get(&command_key(self.revision))
             .await
             .map_err(unavailable)?;
         if advanced.is_some() {
@@ -96,9 +99,10 @@ impl<S: OrderedKvStorage> StoredAccountRegistry<S> {
             .checked_add(1)
             .ok_or_else(|| unavailable("account revision exhausted"))?;
         self.poisoned = true;
-        let existing = self
-            .storage
-            .put_if_absent(CF.into(), command_key(self.revision), bytes)
+        let descriptor = codec::descriptor();
+        let records = RecordStore::new(&self.storage, CF, &descriptor);
+        let existing = records
+            .put_if_absent(&command_key(self.revision), &bytes)
             .await
             .map_err(unavailable)?;
         if existing.is_some() {
@@ -145,6 +149,39 @@ mod tests {
     use crate::account_registry::AccountId;
     use crate::groove::storage::MemoryStorage;
     use uuid::Uuid;
+
+    // Journal corruption cannot be constructed through the public command API.
+    #[test]
+    fn recovery_rejects_old_versions_gaps_and_corrupt_records() {
+        crate::db::block_on(async {
+            let command = AccountCommand::Register {
+                principal: Principal {
+                    issuer: "i".into(),
+                    subject: "s".into(),
+                },
+                account: AccountId(Uuid::from_u128(1)),
+            };
+            for (key, bytes) in [
+                (
+                    [b"account-command:v1:".as_slice(), &0u64.to_be_bytes()].concat(),
+                    b"JACC\x01\x00".to_vec(),
+                ),
+                (command_key(1), codec::encode(&command).unwrap()),
+                (command_key(0), vec![0]),
+                (
+                    [b"account-command:v3:".as_slice(), &0u64.to_be_bytes()].concat(),
+                    codec::encode(&command).unwrap(),
+                ),
+            ] {
+                let storage = MemoryStorage::new(&[CF]).unwrap();
+                storage.put_if_absent(CF.into(), key, bytes).await.unwrap();
+                assert!(matches!(
+                    StoredAccountRegistry::open(storage).await,
+                    Err(RegistryError::Unavailable(_))
+                ));
+            }
+        });
+    }
 
     #[test]
     fn recovery_retains_revocation_and_competing_owners_fail_closed() {

@@ -1,22 +1,85 @@
-//! Closed v1 account registry command encoding. No serde-dependent storage tags.
+//! Registry v2 uses the Groove record/enum algebra, with no private byte codec.
 use super::{AccountCommand, AccountId, Principal};
-use uuid::Uuid;
+use crate::groove::records::{
+    EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, Value, ValueType,
+};
 
-const MAGIC: &[u8] = b"JACC\x01";
 const MAX_COMPONENT: usize = 16 * 1024;
 
-pub(super) fn encode(command: &AccountCommand) -> Result<Vec<u8>, String> {
-    let mut out = MAGIC.to_vec();
-    match command {
-        AccountCommand::FoundLocalFirst { principal, app } => {
-            out.push(4);
-            put_principal(&mut out, principal)?;
-            out.extend_from_slice(app.as_bytes());
+fn principal_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("issuer", ValueType::String),
+        ("subject", ValueType::String),
+    ])
+}
+
+fn schema() -> EnumSchema {
+    let principal = || ValueType::Record(Box::new(principal_descriptor()));
+    EnumSchema::new(
+        "jazz.account-command.v2",
+        [
+            EnumCase::new(
+                "Register",
+                RecordDescriptor::new([("principal", principal()), ("account", ValueType::Uuid)]),
+            ),
+            EnumCase::new(
+                "RequestLink",
+                RecordDescriptor::new([
+                    ("approver", principal()),
+                    ("candidate", principal()),
+                    ("nonce", ValueType::Uuid),
+                    ("now", ValueType::U64),
+                    ("expires_at", ValueType::U64),
+                ]),
+            ),
+            EnumCase::new(
+                "AcceptLink",
+                RecordDescriptor::new([
+                    ("candidate", principal()),
+                    ("nonce", ValueType::Uuid),
+                    ("now", ValueType::U64),
+                ]),
+            ),
+            EnumCase::new(
+                "Revoke",
+                RecordDescriptor::new([("approver", principal()), ("target", principal())]),
+            ),
+            EnumCase::new(
+                "FoundLocalFirst",
+                RecordDescriptor::new([("principal", principal()), ("app", ValueType::Uuid)]),
+            ),
+        ],
+    )
+    .expect("closed account command schema")
+    .with_registry_id(1)
+}
+
+pub(super) fn descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([("command", ValueType::Enum(Box::new(schema())))])
+}
+
+fn principal_value(principal: &Principal) -> Result<Value, String> {
+    for component in [&principal.issuer, &principal.subject] {
+        if component.len() > MAX_COMPONENT
+            || !crate::tools::identity::principal_is_nonempty(component)
+        {
+            return Err("invalid account principal component".into());
         }
+    }
+    let descriptor = principal_descriptor();
+    let bytes = descriptor
+        .create(&[
+            Value::String(principal.issuer.clone()),
+            Value::String(principal.subject.clone()),
+        ])
+        .map_err(error)?;
+    Ok(Value::Record(OwnedRecord::new(bytes, descriptor)))
+}
+
+pub(super) fn encode(command: &AccountCommand) -> Result<Vec<u8>, String> {
+    let (tag, values) = match command {
         AccountCommand::Register { principal, account } => {
-            out.push(0);
-            put_principal(&mut out, principal)?;
-            out.extend_from_slice(account.0.as_bytes());
+            (0, vec![principal_value(principal)?, Value::Uuid(account.0)])
         }
         AccountCommand::RequestLink {
             approver,
@@ -24,159 +87,119 @@ pub(super) fn encode(command: &AccountCommand) -> Result<Vec<u8>, String> {
             nonce,
             now,
             expires_at,
-        } => {
-            out.push(1);
-            put_principal(&mut out, approver)?;
-            put_principal(&mut out, candidate)?;
-            out.extend_from_slice(nonce.as_bytes());
-            out.extend_from_slice(&now.to_be_bytes());
-            out.extend_from_slice(&expires_at.to_be_bytes());
-        }
+        } => (
+            1,
+            vec![
+                principal_value(approver)?,
+                principal_value(candidate)?,
+                Value::Uuid(*nonce),
+                Value::U64(*now),
+                Value::U64(*expires_at),
+            ],
+        ),
         AccountCommand::AcceptLink {
             candidate,
             nonce,
             now,
-        } => {
-            out.push(2);
-            put_principal(&mut out, candidate)?;
-            out.extend_from_slice(nonce.as_bytes());
-            out.extend_from_slice(&now.to_be_bytes());
+        } => (
+            2,
+            vec![
+                principal_value(candidate)?,
+                Value::Uuid(*nonce),
+                Value::U64(*now),
+            ],
+        ),
+        AccountCommand::Revoke { approver, target } => (
+            3,
+            vec![principal_value(approver)?, principal_value(target)?],
+        ),
+        AccountCommand::FoundLocalFirst { principal, app } => {
+            (4, vec![principal_value(principal)?, Value::Uuid(*app)])
         }
-        AccountCommand::Revoke { approver, target } => {
-            out.push(3);
-            put_principal(&mut out, approver)?;
-            put_principal(&mut out, target)?;
-        }
-    }
-    Ok(out)
+    };
+    let payload = schema().cases[tag as usize].payload;
+    descriptor()
+        .create(&[Value::Enum(
+            EnumValue::create(tag, payload, &values).map_err(error)?,
+        )])
+        .map_err(error)
 }
 
-fn put_principal(out: &mut Vec<u8>, value: &Principal) -> Result<(), String> {
-    for component in [&value.issuer, &value.subject] {
-        if component.len() > MAX_COMPONENT
-            || !crate::tools::identity::principal_is_nonempty(component)
-        {
-            return Err("invalid account principal component".into());
-        }
-        out.extend_from_slice(&(component.len() as u32).to_be_bytes());
-        out.extend_from_slice(component.as_bytes());
-    }
-    Ok(())
+fn principal(value: &Value) -> Result<Principal, String> {
+    let Value::Record(record) = value else {
+        return Err("invalid account principal record".into());
+    };
+    let values = record.to_values().map_err(error)?;
+    let [Value::String(issuer), Value::String(subject)] = values.as_slice() else {
+        return Err("invalid account principal fields".into());
+    };
+    Ok(Principal {
+        issuer: issuer.clone(),
+        subject: subject.clone(),
+    })
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<AccountCommand, String> {
-    let mut reader = Reader(
-        bytes
-            .strip_prefix(MAGIC)
-            .ok_or("unsupported account command encoding")?,
-    );
-    let command = match reader.take(1)?[0] {
-        0 => AccountCommand::Register {
-            principal: reader.principal()?,
-            account: AccountId(reader.uuid()?),
-        },
-        1 => AccountCommand::RequestLink {
-            approver: reader.principal()?,
-            candidate: reader.principal()?,
-            nonce: reader.uuid()?,
-            now: reader.u64()?,
-            expires_at: reader.u64()?,
-        },
-        2 => AccountCommand::AcceptLink {
-            candidate: reader.principal()?,
-            nonce: reader.uuid()?,
-            now: reader.u64()?,
-        },
-        3 => AccountCommand::Revoke {
-            approver: reader.principal()?,
-            target: reader.principal()?,
-        },
-        4 => AccountCommand::FoundLocalFirst {
-            principal: reader.principal()?,
-            app: reader.uuid()?,
-        },
-        _ => return Err("unknown account command tag".into()),
+    let Value::Enum(command) = descriptor().get_idx(bytes, 0).map_err(error)? else {
+        return Err("invalid account command record".into());
     };
-    if !reader.0.is_empty() {
-        return Err("trailing account command bytes".into());
-    }
+    let values = command.record().to_values().map_err(error)?;
+    let command = match (command.tag(), values.as_slice()) {
+        (0, [p, Value::Uuid(account)]) => AccountCommand::Register {
+            principal: principal(p)?,
+            account: AccountId(*account),
+        },
+        (
+            1,
+            [
+                a,
+                c,
+                Value::Uuid(nonce),
+                Value::U64(now),
+                Value::U64(expires_at),
+            ],
+        ) => AccountCommand::RequestLink {
+            approver: principal(a)?,
+            candidate: principal(c)?,
+            nonce: *nonce,
+            now: *now,
+            expires_at: *expires_at,
+        },
+        (2, [c, Value::Uuid(nonce), Value::U64(now)]) => AccountCommand::AcceptLink {
+            candidate: principal(c)?,
+            nonce: *nonce,
+            now: *now,
+        },
+        (3, [a, t]) => AccountCommand::Revoke {
+            approver: principal(a)?,
+            target: principal(t)?,
+        },
+        (4, [p, Value::Uuid(app)]) => AccountCommand::FoundLocalFirst {
+            principal: principal(p)?,
+            app: *app,
+        },
+        _ => return Err("unknown account command".into()),
+    };
+    // Validate principals and reject noncanonical Groove record representations.
     if encode(&command)? != bytes {
         return Err("noncanonical account command".into());
     }
     Ok(command)
 }
 
-struct Reader<'a>(&'a [u8]);
-impl<'a> Reader<'a> {
-    fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
-        if self.0.len() < count {
-            return Err("truncated account command".into());
-        }
-        let (head, rest) = self.0.split_at(count);
-        self.0 = rest;
-        Ok(head)
-    }
-    fn uuid(&mut self) -> Result<Uuid, String> {
-        Ok(Uuid::from_bytes(
-            self.take(16)?.try_into().expect("length checked"),
-        ))
-    }
-    fn u64(&mut self) -> Result<u64, String> {
-        Ok(u64::from_be_bytes(
-            self.take(8)?.try_into().expect("length checked"),
-        ))
-    }
-    fn string(&mut self) -> Result<String, String> {
-        let length = u32::from_be_bytes(self.take(4)?.try_into().expect("length checked")) as usize;
-        if length > MAX_COMPONENT {
-            return Err("account principal exceeds limit".into());
-        }
-        String::from_utf8(self.take(length)?.to_vec())
-            .map_err(|_| "invalid account principal UTF-8".into())
-    }
-    fn principal(&mut self) -> Result<Principal, String> {
-        Ok(Principal {
-            issuer: self.string()?,
-            subject: self.string()?,
-        })
-    }
+fn error(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    // Pin actual durable bytes, not a serde round trip of an implementation type.
+    // The durable descriptor and bytes are not observable through admission APIs:
+    // pin them internally so coupled encoder/decoder changes cannot hide drift.
     #[test]
-    fn v1_registration_bytes_and_rejections_are_pinned() {
-        let command = AccountCommand::Register {
-            principal: Principal {
-                issuer: "i".into(),
-                subject: "s".into(),
-            },
-            account: AccountId(Uuid::from_u128(1)),
-        };
-        let golden = b"JACC\x01\x00\x00\x00\x00\x01i\x00\x00\x00\x01s\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01";
-        assert_eq!(encode(&command).unwrap(), golden);
-        assert_eq!(encode(&decode(golden).unwrap()).unwrap(), golden);
-        for length in 0..golden.len() {
-            assert!(decode(&golden[..length]).is_err());
-        }
-        let mut trailing = golden.to_vec();
-        trailing.push(0);
-        assert!(decode(&trailing).is_err());
-        let mut unknown = golden.to_vec();
-        unknown[5] = 5;
-        assert!(decode(&unknown).is_err());
-        let mut version = golden.to_vec();
-        version[4] = 2;
-        assert!(decode(&version).is_err());
-    }
-
-    // Each closed tag pins independent bytes; journal replay alone would not
-    // detect an encoder and decoder accidentally changing together.
-    #[test]
-    fn v1_link_revocation_and_founder_bytes_are_pinned() {
+    fn v2_command_and_descriptor_corpus() {
         let a = Principal {
             issuer: "i".into(),
             subject: "s".into(),
@@ -185,70 +208,110 @@ mod tests {
             issuer: "j".into(),
             subject: "λ".into(),
         };
-        let a_bytes = b"\x00\x00\x00\x01i\x00\x00\x00\x01s".as_slice();
-        let b_bytes = b"\x00\x00\x00\x01j\x00\x00\x00\x02\xce\xbb".as_slice();
         let nonce = Uuid::from_bytes([2; 16]);
-        let now = 0x0102030405060708;
-        let expiry = 0x1112131415161718;
-        let cases = [
-            (
-                AccountCommand::RequestLink {
-                    approver: a.clone(),
-                    candidate: b.clone(),
-                    nonce,
-                    now,
-                    expires_at: expiry,
-                },
-                [
-                    b"JACC\x01\x01".as_slice(),
-                    a_bytes,
-                    b_bytes,
-                    &[2; 16],
-                    b"\x01\x02\x03\x04\x05\x06\x07\x08",
-                    b"\x11\x12\x13\x14\x15\x16\x17\x18",
-                ]
-                .concat(),
-            ),
-            (
-                AccountCommand::AcceptLink {
-                    candidate: b.clone(),
-                    nonce,
-                    now,
-                },
-                [
-                    b"JACC\x01\x02".as_slice(),
-                    b_bytes,
-                    &[2; 16],
-                    b"\x01\x02\x03\x04\x05\x06\x07\x08",
-                ]
-                .concat(),
-            ),
-            (
-                AccountCommand::Revoke {
-                    approver: a.clone(),
-                    target: b,
-                },
-                [b"JACC\x01\x03".as_slice(), a_bytes, b_bytes].concat(),
-            ),
-            // Codec framing does not authenticate a founder; the state machine
-            // separately rejects this external principal for FoundLocalFirst.
-            (
-                AccountCommand::FoundLocalFirst {
-                    principal: a,
-                    app: nonce,
-                },
-                [b"JACC\x01\x04".as_slice(), a_bytes, &[2; 16]].concat(),
-            ),
+        let commands = [
+            AccountCommand::Register {
+                principal: a.clone(),
+                account: AccountId(Uuid::from_u128(1)),
+            },
+            AccountCommand::RequestLink {
+                approver: a.clone(),
+                candidate: b.clone(),
+                nonce,
+                now: 0x0102030405060708,
+                expires_at: 0x1112131415161718,
+            },
+            AccountCommand::AcceptLink {
+                candidate: b.clone(),
+                nonce,
+                now: 0x0102030405060708,
+            },
+            AccountCommand::Revoke {
+                approver: a.clone(),
+                target: b,
+            },
+            AccountCommand::FoundLocalFirst {
+                principal: a,
+                app: nonce,
+            },
         ];
-        for (command, golden) in cases {
-            assert_eq!(encode(&command).unwrap(), golden);
-            assert_eq!(decode(&golden).unwrap(), command);
-            for end in 0..golden.len() {
-                assert!(decode(&golden[..end]).is_err());
+        let mut corpus = String::new();
+        for command in commands {
+            let bytes = encode(&command).unwrap();
+            corpus.push_str(&hex(&bytes));
+            corpus.push('\n');
+            assert_eq!(decode(&bytes).unwrap(), command);
+            for end in 0..bytes.len() {
+                assert!(decode(&bytes[..end]).is_err());
             }
-            let mut trailing = golden;
-            trailing.push(0);
+            let mut trailing = bytes;
+            trailing.push(0xff);
             assert!(decode(&trailing).is_err());
         }
+        corpus.push_str(&hex(&crate::groove::records::encode_record_descriptor(
+            &descriptor(),
+        )
+        .unwrap()));
+        corpus.push('\n');
+        assert_eq!(corpus, include_str!("command-v2.corpus"));
+        assert!(decode(b"JACC\x01\x00").is_err());
+        // A terminal Groove String consumes its record remainder. Valid UTF-8
+        // suffixes change that field; they are not malformed framing.
+        let command = AccountCommand::Register {
+            principal: Principal {
+                issuer: "i".into(),
+                subject: "s".into(),
+            },
+            account: AccountId(Uuid::from_u128(1)),
+        };
+        let mut extended = encode(&command).unwrap();
+        extended.push(b'x');
+        assert_eq!(
+            decode(&extended).unwrap(),
+            AccountCommand::Register {
+                principal: Principal {
+                    issuer: "i".into(),
+                    subject: "sx".into()
+                },
+                account: AccountId(Uuid::from_u128(1)),
+            }
+        );
+    }
+
+    // Invalid on-disk principals require bypassing the valid command constructor.
+    #[test]
+    fn v2_rejects_unknown_tags_and_invalid_principals() {
+        assert!(decode(&[5]).is_err());
+        assert!(decode(&[0x80, 0]).is_err());
+        for issuer in ["".to_owned(), " ".to_owned(), "i".repeat(MAX_COMPONENT + 1)] {
+            let principal_descriptor = principal_descriptor();
+            let raw = principal_descriptor
+                .create(&[Value::String(issuer.clone()), Value::String("s".into())])
+                .unwrap();
+            let values = [
+                Value::Record(OwnedRecord::new(raw, principal_descriptor)),
+                Value::Uuid(Uuid::from_u128(1)),
+            ];
+            let bytes = descriptor()
+                .create(&[Value::Enum(
+                    EnumValue::create(0, schema().cases[0].payload, &values).unwrap(),
+                )])
+                .unwrap();
+            assert!(decode(&bytes).is_err());
+            assert!(
+                encode(&AccountCommand::Register {
+                    principal: Principal {
+                        issuer,
+                        subject: "s".into()
+                    },
+                    account: AccountId(Uuid::from_u128(1))
+                })
+                .is_err()
+            );
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

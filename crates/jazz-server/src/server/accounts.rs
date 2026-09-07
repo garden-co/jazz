@@ -41,7 +41,7 @@ impl AccountRegistryOwner {
                     Some((factory, path)) => {
                         let profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
                             .and_then(|profile| {
-                                profile.with_additional_codecs(["jazz.account-command.v1"])
+                                profile.with_additional_codecs(["jazz.account-command.v2"])
                             });
                         profile
                             .map_err(|error| error.to_string())
