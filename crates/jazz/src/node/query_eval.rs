@@ -1581,15 +1581,38 @@ where
         };
         let deltas = deltas_result?;
         retire_result?;
-        let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
-        } else if shape.query().flat_join.is_some() {
+        let rows = self.materialize_and_finalize_query_rows(
+            shape.query(),
+            shape.schema_version(),
+            &table_schema,
+            &app_output,
+            &deltas,
+            None,
+        )?;
+        Ok(rows)
+    }
+
+    /// Materialize one-shot current rows and expose the canonical public
+    /// result. Passing no profile keeps the ordinary read path clock-free.
+    fn materialize_and_finalize_query_rows(
+        &mut self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        table_schema: &TableSchema,
+        app_output: &AppRowSchema,
+        deltas: &RecordDeltas,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        let mut rows = if query.aggregate.is_some() {
+            self.materialize_aggregate_query_rows(query, app_output, deltas)?
+        } else if query.flat_join.is_some() {
             deltas
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
                     CurrentRow::new(
-                        shape.query().table.clone(),
+                        query.table.clone(),
                         OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
                     )
                 })
@@ -1598,36 +1621,48 @@ where
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
                 if weight > 0 {
-                    let row = decode_current_row(&table_schema, record)?;
-                    rows.push(self.materialize_current_row(&table_schema, row)?);
+                    let row = decode_current_row(table_schema, record)?;
+                    rows.push(self.materialize_current_row(table_schema, row)?);
                 }
             }
             rows
         };
-        if shape.query().aggregate.is_none() {
+        if query.aggregate.is_none() {
             for row in &mut rows {
-                Self::bind_app_row_schema_fields(row, &app_output)?;
+                Self::bind_app_row_schema_fields(row, app_output)?;
             }
         }
         // The graph used for synchronous materialization intentionally retains
         // physical provenance fields so policy witnesses can
-        // be resolved above.  Do not let that internal descriptor cross the
+        // be resolved above. Do not let that internal descriptor cross the
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
         // Tree collectors own relation fields such as `posts` in their public
-        // app-row descriptor.  Those fields are not columns of the root
+        // app-row descriptor. Those fields are not columns of the root
         // table, so normalizing a structured result against that table would
         // silently discard the recursive payload before the client can read
-        // it.  Flat rows still need this boundary to remove materializer-only
+        // it. Flat rows still need this boundary to remove materializer-only
         // physical fields.
-        if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
-            normalize_public_current_rows(shape.query(), &table_schema, &mut rows)?;
-        }
-        let query = shape.query();
-        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            normalize_public_current_rows(query, table_schema, &mut rows)?;
+        }
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.decode_materialize = started.elapsed();
+        }
+
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        self.finish_engine_query_rows_in_schema(query, schema_version, &mut rows)?;
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.finish_rows = started.elapsed();
+        }
+
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+            self.apply_projection_in_schema(query, schema_version, &mut rows)?;
+        }
+        if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
+            profile.apply_projection = started.elapsed();
         }
         Ok(rows)
     }
@@ -1767,36 +1802,14 @@ where
         let deltas = deltas_result?;
         profile.execute_plan = phase_started.elapsed();
 
-        let phase_started = Instant::now();
-        let mut rows = if shape.query().aggregate.is_some() {
-            self.materialize_aggregate_query_rows(shape.query(), &app_output, &deltas)?
-        } else {
-            let mut rows = Vec::new();
-            for (record, weight) in deltas.iter() {
-                if weight > 0 {
-                    let row = decode_current_row(&table_schema, record)?;
-                    rows.push(self.materialize_current_row(&table_schema, row)?);
-                }
-            }
-            rows
-        };
-        if shape.query().aggregate.is_none() {
-            for row in &mut rows {
-                Self::bind_app_row_schema_fields(row, &app_output)?;
-            }
-        }
-        profile.decode_materialize = phase_started.elapsed();
-
-        let query = shape.query();
-        let phase_started = Instant::now();
-        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
-        profile.finish_rows = phase_started.elapsed();
-
-        let phase_started = Instant::now();
-        if query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
-        }
-        profile.apply_projection = phase_started.elapsed();
+        let rows = self.materialize_and_finalize_query_rows(
+            shape.query(),
+            shape.schema_version(),
+            &table_schema,
+            &app_output,
+            &deltas,
+            Some(&mut profile),
+        )?;
         profile.total = total_started.elapsed();
         Ok((rows, profile))
     }
