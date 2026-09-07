@@ -883,9 +883,98 @@ mod version_record_wire_row {
 
     const MAGIC: &[u8; 5] = b"JVRR\x01";
 
+    // Descriptor identity includes immutable names, layouts, nested types and
+    // enum registry/case schemas. Cache only successful canonicalization;
+    // arbitrary OwnedRecord bytes still require validation on every call.
+    const MAX_DESCRIPTOR_PROOFS: usize = 16;
+    const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
+
+    #[derive(Clone)]
+    struct DescriptorProof {
+        source: RecordDescriptor,
+        canonical: RecordDescriptor,
+        encoded: std::sync::Arc<[u8]>,
+    }
+
+    #[derive(Default)]
+    struct DescriptorProofCache {
+        entries: std::collections::VecDeque<DescriptorProof>,
+        bytes: usize,
+    }
+
+    impl DescriptorProofCache {
+        fn remember(&mut self, proof: DescriptorProof) {
+            // This is a retention limit, never an input acceptance limit.
+            if proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES {
+                return;
+            }
+            while self.entries.len() >= MAX_DESCRIPTOR_PROOFS
+                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES
+            {
+                let evicted = self.entries.pop_front().expect("nonempty bounded cache");
+                self.bytes -= evicted.encoded.len();
+            }
+            self.bytes += proof.encoded.len();
+            self.entries.push_back(proof);
+        }
+    }
+
+    thread_local! {
+        static DESCRIPTOR_PROOFS: std::cell::RefCell<DescriptorProofCache> =
+            std::cell::RefCell::new(DescriptorProofCache::default());
+    }
+
+    fn descriptor_for_encode(
+        descriptor: &RecordDescriptor,
+    ) -> Result<DescriptorProof, groove::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
+            cache
+                .borrow()
+                .entries
+                .iter()
+                .rev()
+                .find(|proof| proof.source == *descriptor)
+                .cloned()
+        }) {
+            return Ok(proof);
+        }
+        let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
+        let canonical = groove::records::decode_persisted_record_descriptor(&encoded)?;
+        let proof = DescriptorProof {
+            source: *descriptor,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
+    fn descriptor_for_decode(encoded: &[u8]) -> Result<DescriptorProof, groove::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
+            cache
+                .borrow()
+                .entries
+                .iter()
+                .rev()
+                .find(|proof| proof.encoded.as_ref() == encoded)
+                .cloned()
+        }) {
+            return Ok(proof);
+        }
+        let canonical = groove::records::decode_persisted_record_descriptor(encoded)?;
+        let proof = DescriptorProof {
+            source: canonical,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
     pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
-        let descriptor = groove::records::encode_persisted_record_descriptor(record.descriptor())?;
-        let canonical = groove::records::decode_persisted_record_descriptor(&descriptor)?;
+        let proof = descriptor_for_encode(record.descriptor())?;
+        let descriptor = &proof.encoded;
+        let canonical = proof.canonical;
         let values = canonical.bind(record.raw()).to_values()?;
         if canonical.create(&values)? != record.raw() {
             return Err(groove::records::Error::NonCanonicalRecord);
@@ -913,9 +1002,7 @@ mod version_record_wire_row {
                 .map_err(|_| invalid())?,
         ) as usize;
         let end = 9usize.checked_add(length).ok_or_else(invalid)?;
-        let descriptor = groove::records::decode_persisted_record_descriptor(
-            bytes.get(9..end).ok_or_else(invalid)?,
-        )?;
+        let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
         let raw = bytes.get(end..).ok_or_else(invalid)?;
         let values = descriptor.bind(raw).to_values()?;
         if descriptor.create(&values)? != raw {
@@ -928,6 +1015,88 @@ mod version_record_wire_row {
     mod tests {
         use super::*;
         use groove::records::{DescriptorField, FieldIdentity};
+
+        // These internal tests exercise the exact untrusted byte boundary and
+        // proof reuse, which ordinary client queries cannot observe directly.
+        #[test]
+        fn descriptor_proof_cache_preserves_rejection_on_miss_and_hit() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let raw = descriptor.create(&[Value::U64(7)]).unwrap();
+            let record = OwnedRecord::new(raw.clone(), descriptor);
+            let encoded = encode(&record).unwrap();
+            let descriptor_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+            let mut malformed_descriptor = encoded.clone();
+            malformed_descriptor.insert(9 + descriptor_len, 0);
+            malformed_descriptor[5..9]
+                .copy_from_slice(&((descriptor_len + 1) as u32).to_le_bytes());
+            let mut malformed_row = encoded.clone();
+            malformed_row.push(0);
+            let mut malformed_raw = raw;
+            malformed_raw.push(0);
+            for warm in [false, true] {
+                DESCRIPTOR_PROOFS
+                    .with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+                if warm {
+                    assert_eq!(decode(&encoded).unwrap(), record);
+                    let first = descriptor_for_encode(&descriptor).unwrap();
+                    let second = descriptor_for_decode(&first.encoded).unwrap();
+                    assert!(std::sync::Arc::ptr_eq(&first.encoded, &second.encoded));
+                }
+                assert!(decode(&malformed_descriptor).is_err());
+                DESCRIPTOR_PROOFS
+                    .with(|cache| assert_eq!(cache.borrow().entries.len(), usize::from(warm)));
+                assert!(decode(&malformed_row).is_err());
+                assert!(encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).is_err());
+                assert_eq!(encode(&record).unwrap(), encoded);
+            }
+        }
+
+        #[test]
+        fn descriptor_proof_cache_keys_include_inline_enum_identity() {
+            use groove::records::{EnumCase, EnumSchema};
+            let payload = RecordDescriptor::new([("value", ValueType::U64)]);
+            let first = EnumSchema::new("choice", [EnumCase::new("one", payload)])
+                .unwrap()
+                .with_registry_id(1);
+            let mut second = first.clone();
+            second.registry_id = 2;
+            let mut third = first.clone();
+            third.cases[0].name = "other".to_owned();
+            let mut encoded = Vec::new();
+            for schema in [first, second, third] {
+                let descriptor =
+                    RecordDescriptor::new([("choice", ValueType::Enum(Box::new(schema)))]);
+                let proof = descriptor_for_encode(&descriptor).unwrap();
+                assert_eq!(
+                    proof.encoded.as_ref(),
+                    groove::records::encode_persisted_record_descriptor(&descriptor).unwrap()
+                );
+                encoded.push(proof.encoded);
+            }
+            assert_ne!(encoded[0], encoded[1]);
+            assert_ne!(encoded[0], encoded[2]);
+        }
+
+        #[test]
+        fn descriptor_proof_cache_limits_retention_not_valid_input() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let descriptor =
+                RecordDescriptor::new([("x".repeat(MAX_DESCRIPTOR_PROOF_BYTES), ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let encoded = encode(&record).unwrap();
+            assert_eq!(decode(&encoded).unwrap(), record);
+            DESCRIPTOR_PROOFS.with(|cache| assert!(cache.borrow().entries.is_empty()));
+            for index in 0..MAX_DESCRIPTOR_PROOFS + 1 {
+                let descriptor =
+                    RecordDescriptor::new([(format!("field_{index}"), ValueType::U64)]);
+                descriptor_for_encode(&descriptor).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_BYTES);
+            });
+        }
 
         #[test]
         fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
