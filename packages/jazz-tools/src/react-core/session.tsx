@@ -108,6 +108,7 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
       ...(error ? { error } : {}),
       createLocalFirst: unavailable,
       restoreLocalFirst: unavailable,
+      becomeBackend: unavailable,
       registerJWT: unavailable,
       loginJWT: unavailable,
       linkJWT: unavailable,

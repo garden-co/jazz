@@ -1,6 +1,6 @@
 import { settleAccountSelection } from "../accounts/selection-durability.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
-import type { JWTAuth } from "../accounts/enrollment.js";
+import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
   GracefulShutdownSyncError,
   SharedClientShutdownError,
@@ -12,6 +12,7 @@ export interface SessionClient {
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
+  | "becomeBackend"
   | "registerJWT"
   | "loginJWT"
   | "linkJWT"
@@ -27,6 +28,7 @@ export interface JazzSessionSnapshot<Client> {
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
+  becomeBackend(auth: BackendAuth): Promise<void>;
   registerJWT(auth: JWTAuth): Promise<void>;
   loginJWT(auth: JWTAuth): Promise<void>;
   linkJWT(auth: JWTAuth): Promise<void>;
@@ -58,11 +60,12 @@ const asError = (cause: unknown): Error =>
 export async function createJazzSessionOwner<Client extends SessionClient>(options: {
   accounts: AccountManager<JWTAuth>;
   openClient(account: AccountHandle): Promise<Client>;
-  initial?: "local-first";
+  initial?: "local-first" | BackendAuth;
 }): Promise<JazzSession<Client>> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first") selected = accounts.createLocalFirst();
+  if (typeof options.initial === "object") selected = await accounts.becomeBackend(options.initial);
   await settleAccountSelection(accounts);
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
@@ -201,6 +204,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
     restoreLocalFirst: (secret) =>
       run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
+    becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
     loginJWT: (auth) => run("loginJWT", () => accounts.loginJWT(auth)),
     linkJWT: (auth) => run("linkJWT", () => accounts.linkJWT(auth)),

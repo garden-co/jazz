@@ -1,5 +1,5 @@
 import { setAccountSelectionBarrier } from "./selection-durability.js";
-import { createAccountManagerWithRuntime } from "./enrollment.js";
+import { createAccountManagerWithRuntime, type BackendAccountHost } from "./enrollment.js";
 import { localFirstFactory } from "./local-first.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 
@@ -46,6 +46,7 @@ export async function prepareAccountManager(options: {
   mintToken(secret: string, audience: string): string;
   generateSecret?(): string;
   fetch?: typeof fetch;
+  backend?: BackendAccountHost;
 }) {
   const stored = decode(await options.store.read());
   let writes = Promise.resolve();
@@ -72,6 +73,7 @@ export async function prepareAccountManager(options: {
   const manager = createAccountManagerWithRuntime({
     registry: options.registry,
     fetch: options.fetch,
+    backend: options.backend,
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
     localFirst: localFirstFactory({
       appId: options.appId,

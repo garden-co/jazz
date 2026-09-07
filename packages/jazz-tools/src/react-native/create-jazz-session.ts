@@ -1,3 +1,4 @@
+import type { BackendAuth } from "../accounts/enrollment.js";
 import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
 import { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 import {
@@ -8,7 +9,7 @@ import {
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
   AccountManagerConfig & {
-    initial?: "local-first";
+    initial?: "local-first" | BackendAuth;
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */

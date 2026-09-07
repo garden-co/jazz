@@ -169,3 +169,54 @@ describe("opaque account credentials", () => {
     });
   });
 });
+
+it("keeps backend authority opaque, scoped, and revocable", async () => {
+  const { getBackendAuth, accountRegistry } = await import("./enrollment.js");
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
+    backend: { admitBackend: async () => ({ nodeId: id }) },
+  });
+  const backend = await manager.becomeBackend({ backendSecret: "private-backend-credential" });
+  expect(backend.id).toBe("00000000-0000-0000-0000-000000000000");
+  expect(backend.identity).toEqual({ issuer: "urn:jazz:system", subject: id });
+  expect(JSON.stringify(manager.getSnapshot())).not.toContain("private-backend-credential");
+  expect(getBackendAuth(backend, registry)).toEqual({
+    backendSecret: "private-backend-credential",
+    nodeId: id,
+  });
+  expect(() => getBackendAuth({ ...backend }, registry)).toThrow(/invalid_account_handle/);
+  expect(() => getBackendAuth(backend, registry + "other")).toThrow(/invalid_account_handle/);
+  await expect(accountToken(backend, registry)).rejects.toThrow(
+    /backend_account_requires_backend_host/,
+  );
+  await expect(manager.linkJWT(token())).rejects.toThrow(/backend_account_requires_backend_host/);
+  const invalidated = vi.fn();
+  onAccountInvalidated(backend, invalidated);
+  manager.createLocalFirst();
+  manager.logout();
+  expect(invalidated).toHaveBeenCalledOnce();
+  expect(() => accountRegistry(backend)).toThrow(/invalid_account_handle/);
+});
+
+it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
+  await expect(setup().becomeBackend({ backendSecret: "secret" })).rejects.toThrow(
+    /backend_host_unavailable/,
+  );
+  let finish!: (value: { nodeId: string }) => void;
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
+    backend: {
+      admitBackend: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    },
+  });
+  const pending = manager.becomeBackend({ backendSecret: "secret" });
+  manager.logout();
+  finish({ nodeId: id });
+  await expect(pending).rejects.toThrow(/account_logged_out/);
+  expect(manager.getLoggedIn()).toBeUndefined();
+});

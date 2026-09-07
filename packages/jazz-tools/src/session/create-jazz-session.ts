@@ -1,3 +1,4 @@
+import type { BackendAuth } from "../accounts/enrollment.js";
 import {
   createAccountManager,
   type AccountManagerConfig,
@@ -10,7 +11,7 @@ import {
 import { createJazzSessionOwner, type JazzSession } from "./state.js";
 
 export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
-  AccountManagerConfig & { initial?: "local-first" };
+  AccountManagerConfig & { initial?: "local-first" | BackendAuth };
 /** Own one configured client and serialize its account lifecycle. */
 export async function createJazzSession(
   config: JazzSessionConfig,

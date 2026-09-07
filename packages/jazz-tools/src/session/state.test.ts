@@ -244,3 +244,35 @@ describe("Jazz session lifecycle", () => {
     expect(session.getSnapshot().status).toBe("closed");
   });
 });
+
+it("backend transitions wait for detach and sync, and restore the old account on rejected admission", async () => {
+  const { createAccountManagerWithRuntime } = await import("../accounts/enrollment.js");
+  const old = handle("old");
+  const admitBackend = vi.fn(async () => {
+    throw new Error("backend denied");
+  });
+  const accounts = createAccountManagerWithRuntime({
+    registry: "https://core.example/apps/test/accounts",
+    localFirst: { create: () => ({ accountId: old.id, identity: old.identity, auth: "unused" }) },
+    backend: { admitBackend },
+  });
+  accounts.createLocalFirst();
+  const shutdown = vi.fn(async () => {});
+  const openClient = vi.fn(async () => ({ shutdown }));
+  const session = await createJazzSessionOwner({ accounts, openClient });
+  const previous = session.getSnapshot().account;
+  const lease = attachJazzSessionConsumer(session);
+  const pending = session.becomeBackend({ backendSecret: "secret" });
+  const rejected = expect(pending).rejects.toThrow("backend denied");
+  await tick();
+  expect(session.getSnapshot().pending).toBe("becomeBackend");
+  expect(shutdown).not.toHaveBeenCalled();
+  expect(admitBackend).not.toHaveBeenCalled();
+  lease.acknowledge(session.getSnapshot());
+  await rejected;
+  expect(shutdown).toHaveBeenCalledWith({ waitForSync: true });
+  expect(openClient).toHaveBeenCalledTimes(2);
+  expect(session.getSnapshot()).toMatchObject({ status: "ready", account: previous });
+  lease.release();
+  await session.close();
+});

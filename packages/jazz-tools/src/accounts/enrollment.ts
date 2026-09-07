@@ -12,9 +12,18 @@ import { AccountManager, type AccountHandle, type AccountIdentity } from "./stat
 /** A refresh callback must continue to authenticate the same exact identity. */
 export type JWTAuth = string | { getToken(): Promise<string> };
 
+export interface BackendAuth {
+  readonly backendSecret: string;
+}
+/** @internal Only supported hosts may validate and admit backend credentials. */
+export interface BackendAccountHost {
+  admitBackend(auth: BackendAuth): Promise<{ nodeId: string }>;
+}
+
 interface HandleCredentials {
   registry: string;
-  auth: JWTAuth;
+  auth?: JWTAuth;
+  backend?: Readonly<BackendAuth & { nodeId: string }>;
   localFirstSecret?: string;
   invalidated: Set<() => void>;
 }
@@ -102,11 +111,24 @@ export async function accountToken(handle: AccountHandle, registry: string): Pro
   const material = credentials.get(handle);
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
+  if (material.backend || !material.auth)
+    throw new AccountAuthError("backend_account_requires_backend_host");
   const token = await tokenFor(material.auth);
   if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
   if (!sameIdentity(identityFromToken(token), handle.identity))
     throw new AccountAuthError("credential_identity_changed");
   return token;
+}
+
+/** @internal Opaque backend material, accessible only to a supported host adapter. */
+export function getBackendAuth(
+  handle: AccountHandle,
+  registry: string,
+): Readonly<BackendAuth & { nodeId: string }> | undefined {
+  const material = credentials.get(handle);
+  if (!material || material.registry !== registry)
+    throw new AccountAuthError("invalid_account_handle");
+  return material.backend;
 }
 
 /** @internal Stop contexts when their owning manager logs out. */
@@ -132,6 +154,7 @@ export function createAccountManagerWithRuntime(options: {
   /** Exact application-scoped HTTP URL ending in /accounts. */
   registry: string;
   localFirst: LocalFirstAccountFactory;
+  backend?: BackendAccountHost;
   restoredLocalFirstSecret?: string;
   fetch?: typeof fetch;
 }): AccountManager<JWTAuth> {
@@ -199,6 +222,30 @@ export function createAccountManagerWithRuntime(options: {
         const local = options.localFirst.restore?.(secret);
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
+      },
+      async becomeBackend(auth) {
+        const started = epoch;
+        if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
+        if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
+          throw new AccountAuthError("invalid_backend_secret");
+        const backendSecret = auth.backendSecret;
+        const { nodeId } = await options.backend.admitBackend({ backendSecret });
+        assertCurrent(started);
+        if (
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(nodeId) ||
+          nodeId === "00000000-0000-0000-0000-000000000000"
+        )
+          throw new AccountAuthError("invalid_backend_node");
+        const handle = new EnrolledAccount("00000000-0000-0000-0000-000000000000", {
+          issuer: "urn:jazz:system",
+          subject: nodeId,
+        }) as AccountHandle;
+        credentials.set(handle, {
+          registry,
+          backend: Object.freeze({ backendSecret, nodeId }),
+          invalidated: new Set(),
+        });
+        return retain(handle);
       },
       registerJWT: (auth) => enroll("register", auth),
       loginJWT: (auth) => enroll("login", auth),

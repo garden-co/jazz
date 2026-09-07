@@ -77,3 +77,56 @@ it("retry durably retains the exact newly selected root before opening its clien
   expect(JSON.parse(value!).roots).toHaveLength(1);
   await session.close();
 });
+
+it("backend initialization and transitions retain roots but never persist backend selection or credentials", async () => {
+  let value: string | null = null;
+  let fail = false;
+  const registry = "https://core.example/apps/test/accounts";
+  const nodeId = "00000000-0000-4000-8000-000000000001";
+  const admitBackend = vi.fn(async () => ({ nodeId }));
+  const config = {
+    appId: "test",
+    registry,
+    backend: { admitBackend },
+    mintToken: () =>
+      `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: nodeId }))}.sig`,
+    store: {
+      read: async () => value,
+      update: async (transform: (current: string | null) => string) => {
+        if (fail) throw new Error("storage unavailable");
+        value = transform(value);
+      },
+    },
+  };
+  const accounts = await prepareAccountManager(config);
+  const local = accounts.createLocalFirst();
+  await accountToken(local, registry);
+  const shutdown = vi.fn(async () => {});
+  const openClient = vi.fn(async () => ({ shutdown }));
+  const session = await createJazzSessionOwner({
+    accounts,
+    openClient,
+    initial: { backendSecret: "ephemeral-secret" },
+  });
+  expect(session.getSnapshot().account?.identity).toEqual({
+    issuer: "urn:jazz:system",
+    subject: nodeId,
+  });
+  expect(JSON.parse(value!).roots).toHaveLength(1);
+  expect(JSON.parse(value!).selected).toBeNull();
+  expect(value).not.toContain("ephemeral-secret");
+  expect((await prepareAccountManager(config)).getLoggedIn()).toBeUndefined();
+  fail = true;
+  await expect(session.becomeBackend({ backendSecret: "replacement-secret" })).rejects.toThrow(
+    "storage unavailable",
+  );
+  expect(shutdown).toHaveBeenCalledWith({ waitForSync: true });
+  expect(session.getSnapshot().status).toBe("error");
+  const selected = session.getSnapshot().account;
+  fail = false;
+  await session.retry();
+  expect(session.getSnapshot().account).toBe(selected);
+  expect(admitBackend).toHaveBeenCalledTimes(2);
+  expect(value).not.toContain("replacement-secret");
+  await session.close();
+});

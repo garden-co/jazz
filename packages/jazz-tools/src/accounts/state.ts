@@ -1,3 +1,4 @@
+import type { BackendAuth } from "./enrollment.js";
 /** Framework-independent account selection. Credentials live in handles, never snapshots. */
 export interface AccountIdentity {
   readonly issuer: string;
@@ -12,7 +13,7 @@ export interface AccountHandle {
   readonly identity: AccountIdentity;
 }
 
-export type AccountOperation = "registerJWT" | "loginJWT" | "linkJWT";
+export type AccountOperation = "registerJWT" | "loginJWT" | "linkJWT" | "becomeBackend";
 export interface AccountSnapshot {
   readonly account: AccountHandle | undefined;
   readonly pending: AccountOperation | undefined;
@@ -24,6 +25,7 @@ export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
   restoreLocalFirst?(secret: string): AccountHandle;
   logout?(): void;
+  becomeBackend?(auth: BackendAuth): Promise<AccountHandle>;
   registerJWT(auth: Auth): Promise<AccountHandle>;
   loginJWT(auth: Auth): Promise<AccountHandle>;
   linkJWT(account: AccountHandle, auth: Auth): Promise<AccountHandle>;
@@ -92,6 +94,14 @@ export class AccountManager<Auth> {
     this.generation++;
     this.publish({ account, pending: undefined, error: undefined });
     return account;
+  }
+
+  becomeBackend(auth: BackendAuth): Promise<AccountHandle> {
+    return this.run("becomeBackend", () => {
+      if (!this.enrollment.becomeBackend)
+        throw new Error("Backend accounts are unavailable on this host");
+      return this.enrollment.becomeBackend(auth);
+    });
   }
 
   registerJWT(auth: Auth): Promise<AccountHandle> {

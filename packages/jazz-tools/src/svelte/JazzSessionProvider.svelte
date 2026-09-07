@@ -45,6 +45,7 @@
     getSnapshot: () => startup,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     createLocalFirst: unavailable, restoreLocalFirst: unavailable,
+      becomeBackend: unavailable,
     registerJWT: unavailable, loginJWT: unavailable, linkJWT: unavailable,
     logout: unavailable, retry: start,
     close: async () => { cancelled = true; publish({ status: 'closed' }); await created?.close(); },

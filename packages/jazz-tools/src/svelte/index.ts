@@ -22,7 +22,12 @@ export type {
   AccountSnapshot,
   AccountManager,
 } from "../accounts/state.js";
-export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "../accounts/enrollment.js";
+export {
+  AccountAuthError,
+  exportLocalFirstSecret,
+  type BackendAuth,
+  type JWTAuth,
+} from "../accounts/enrollment.js";
 export type { AccountStore } from "../accounts/persistence.js";
 
 export { accountState } from "./account-state.js";
