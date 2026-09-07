@@ -31,6 +31,8 @@ type EnvPrefix = "NEXT_PUBLIC" | "PUBLIC" | "VITE";
 export interface StarterConfig {
   name: StarterName;
   envPrefix: EnvPrefix;
+  /** Location of the schema module within the scaffolded starter. */
+  schemaPath: string;
   /**
    * Origin the prod server will be reachable on (host + port). The orchestrator
    * sets this as APP_ORIGIN so any auth/JWT issuance code aimed at "this app"
@@ -41,12 +43,27 @@ export interface StarterConfig {
 
 export function getStarterConfig(name: StarterName): StarterConfig {
   if (name.startsWith("next-")) {
-    return { name, envPrefix: "NEXT_PUBLIC", appOrigin: "http://localhost:3000" };
+    return {
+      name,
+      envPrefix: "NEXT_PUBLIC",
+      schemaPath: "schema.ts",
+      appOrigin: "http://localhost:3000",
+    };
   }
   if (name.startsWith("sveltekit-")) {
-    return { name, envPrefix: "PUBLIC", appOrigin: "http://localhost:5173" };
+    return {
+      name,
+      envPrefix: "PUBLIC",
+      schemaPath: "src/lib/schema.ts",
+      appOrigin: "http://localhost:5173",
+    };
   }
   // react-* and ts-* both serve from Vite (preview) or a Hono server bound to
   // 5173, matching their playwright BASE_URL.
-  return { name, envPrefix: "VITE", appOrigin: "http://localhost:5173" };
+  return {
+    name,
+    envPrefix: "VITE",
+    schemaPath: "schema.ts",
+    appOrigin: "http://localhost:5173",
+  };
 }

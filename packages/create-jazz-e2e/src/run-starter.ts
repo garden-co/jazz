@@ -4,6 +4,7 @@ import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
@@ -439,6 +440,26 @@ function writeEnvFile(
   fs.writeFileSync(path.join(appDir, ".env"), lines.join("\n") + "\n", "utf-8");
 }
 
+async function loadStarterSchema(
+  appDir: string,
+  config: ReturnType<typeof getStarterConfig>,
+): Promise<NonNullable<Parameters<typeof startLocalJazzServer>[0]>["schema"]> {
+  const schemaFile = path.join(appDir, config.schemaPath);
+  const module = (await import(pathToFileURL(schemaFile).href)) as {
+    app?: {
+      wasmSchema?: Exclude<
+        NonNullable<Parameters<typeof startLocalJazzServer>[0]>["schema"],
+        Uint8Array
+      >;
+    };
+  };
+  if (!module.app?.wasmSchema) {
+    throw new Error(`Starter schema module ${config.schemaPath} does not export app.wasmSchema`);
+  }
+
+  return module.app.wasmSchema;
+}
+
 export async function runStarter(opts: RunStarterOptions): Promise<RunStarterResult> {
   const verbose = !!opts.verbose;
   const config = getStarterConfig(opts.starter);
@@ -525,6 +546,8 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     patchInstalledJazzNapi(appDir, opts.repoRoot, harnessFingerprint);
     assertInstalledBrokerWorkerArtifacts(appDir);
 
+    const starterSchema = await loadStarterSchema(appDir, config);
+
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
     // Better Auth starters enroll the provider's external JWT identity at the
@@ -537,6 +560,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     server = await startLocalJazzServer({
       inMemory: true,
       allowLocalFirstAuth: true,
+      schema: starterSchema,
       ...(usesExternalJwt
         ? {
             jwksUrl: `${config.appOrigin}/api/auth/jwks`,

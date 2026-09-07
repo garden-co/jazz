@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
+import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
+import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -22,7 +24,12 @@ export interface StartLocalJazzServerOptions {
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
-  schema?: Uint8Array;
+  /**
+   * Schema used to initialize the server's core runtime. Byte input remains
+   * available for native callers; TypeScript callers can pass an app, query,
+   * or raw WasmSchema directly.
+   */
+  schema?: Uint8Array | SchemaSourceInput;
 }
 
 export interface LocalJazzServerHandle {
@@ -80,7 +87,13 @@ export async function startLocalJazzServer(
       upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
-      schema: options.schema ? [...options.schema] : undefined,
+      schema: options.schema
+        ? [
+            ...(options.schema instanceof Uint8Array
+              ? options.schema
+              : encodeSchema(resolveSchemaSource(options.schema))),
+          ]
+        : undefined,
     });
   } catch (error) {
     if (ownsDataDir && dataDir) {

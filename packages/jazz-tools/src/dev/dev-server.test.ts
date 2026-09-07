@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { JazzServer } from "jazz-napi";
 import { afterEach, describe, expect, it } from "vitest";
+import { schema as s } from "../index.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { getAvailablePort } from "./test-helpers.js";
 
@@ -50,6 +51,16 @@ describe("startLocalJazzServer via JazzServer", () => {
 
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
+  }, 30_000);
+
+  it("encodes a typed app schema during startup", async () => {
+    const port = await getAvailablePort();
+    const app = s.defineApp({
+      todos: s.table({ title: s.string(), done: s.boolean() }),
+    });
+    handle = await startLocalJazzServer({ port, schema: app });
+
+    expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
   }, 30_000);
 
   it("stops the server cleanly", async () => {
