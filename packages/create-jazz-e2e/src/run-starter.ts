@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
 
+import { mergePermissionsIntoWasmSchema } from "jazz-tools/testing";
+
 import { getStarterConfig, type StarterName } from "./starters.js";
 
 const APP_NAME = "test-app";
@@ -508,24 +510,30 @@ function writeEnvFile(
   fs.writeFileSync(path.join(appDir, ".env"), lines.join("\n") + "\n", "utf-8");
 }
 
-async function loadStarterSchema(
+export async function loadStarterSchema(
   appDir: string,
   config: ReturnType<typeof getStarterConfig>,
-): Promise<NonNullable<Parameters<typeof startLocalJazzServer>[0]>["schema"]> {
+): Promise<ReturnType<typeof mergePermissionsIntoWasmSchema>> {
   const schemaFile = path.join(appDir, config.schemaPath);
   const module = (await import(pathToFileURL(schemaFile).href)) as {
     app?: {
-      wasmSchema?: Exclude<
-        NonNullable<Parameters<typeof startLocalJazzServer>[0]>["schema"],
-        Uint8Array
-      >;
+      wasmSchema?: Parameters<typeof mergePermissionsIntoWasmSchema>[0];
     };
   };
   if (!module.app?.wasmSchema) {
     throw new Error(`Starter schema module ${config.schemaPath} does not export app.wasmSchema`);
   }
 
-  return module.app.wasmSchema;
+  const permissionsFile = path.join(path.dirname(schemaFile), "permissions.ts");
+  const permissionsModule = (await import(pathToFileURL(permissionsFile).href)) as {
+    default?: Parameters<typeof mergePermissionsIntoWasmSchema>[1];
+  };
+  if (!permissionsModule.default) {
+    throw new Error(
+      `Starter permissions module ${permissionsFile} does not export default permissions`,
+    );
+  }
+  return mergePermissionsIntoWasmSchema(module.app.wasmSchema, permissionsModule.default);
 }
 
 export async function runStarter(opts: RunStarterOptions): Promise<RunStarterResult> {

@@ -83,3 +83,42 @@ test("signin with existing account shows todos", async ({ page }) => {
   await waitForTodoApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
+
+test("a separate account sees only its own todos", async ({ page, browser }) => {
+  const runId = Date.now();
+  await page.goto("/");
+  await waitForTodoApp(page);
+  const ownerTodo = `Private owner todo ${runId}`;
+  await addTodo(page, ownerTodo);
+  const linked = page.waitForResponse(
+    (response) =>
+      /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+      response.request().method() === "POST",
+  );
+  await signUp(page, `owner-${runId}@example.com`, "s3cr3tpassword", "Owner");
+  expect((await linked).ok()).toBe(true);
+  await waitForTodoApp(page);
+  await expect(page.getByText(ownerTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  const otherContext = await browser.newContext();
+  try {
+    const other = await otherContext.newPage();
+    await other.goto(page.url());
+    await waitForTodoApp(other);
+    await signUp(other, `other-${runId}@example.com`, "s3cr3tpassword", "Other");
+    await waitForTodoApp(other);
+    const otherTodo = `Private other todo ${runId}`;
+    await addTodo(other, otherTodo);
+    // Reload to exercise the server's published policies with a new subscription.
+    await other.reload();
+    await waitForTodoApp(other);
+    await expect(other.getByText(otherTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+    await expect(other.getByText(ownerTodo, { exact: true })).toHaveCount(0);
+    await page.reload();
+    await waitForTodoApp(page);
+    await expect(page.getByText(ownerTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+    await expect(page.getByText(otherTodo, { exact: true })).toHaveCount(0);
+  } finally {
+    await otherContext.close();
+  }
+});

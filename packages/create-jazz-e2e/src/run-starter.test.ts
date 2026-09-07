@@ -11,7 +11,10 @@ import {
   loadedHarnessNapiFingerprint,
   patchInstalledJazzNapi,
   runStarter,
+  loadStarterSchema,
 } from "./run-starter.js";
+
+import { getStarterConfig } from "./starters.js";
 
 function missingTarballDir(): string {
   return path.join(os.tmpdir(), `create-jazz-e2e-missing-${randomUUID()}`);
@@ -216,4 +219,21 @@ test("cleanup removes a harness-created temporary work directory", async (t) => 
   assert.equal(result.success, false);
   assert.match(result.errorMessage ?? "", /does not exist/);
   assert.equal(fs.existsSync(workDir), false);
+});
+
+test("loads separate starter permissions and retains account ownership predicates", async () => {
+  const repoRoot = path.resolve(import.meta.dirname, "../../..");
+  for (const starter of ["ts-hybrid", "sveltekit-hybrid"] as const) {
+    const loaded = await loadStarterSchema(
+      path.join(repoRoot, "starters", starter),
+      getStarterConfig(starter),
+    );
+    assert.ok(loaded && !(loaded instanceof Uint8Array));
+    const policies = loaded.todos?.policies;
+    assert.ok(policies, `${starter} must publish its separate permissions module`);
+    for (const operation of ["select", "update", "delete"] as const) {
+      assert.match(JSON.stringify(policies[operation]), /\$createdBy.account/);
+      assert.match(JSON.stringify(policies[operation]), /"user","account"/);
+    }
+  }
 });
