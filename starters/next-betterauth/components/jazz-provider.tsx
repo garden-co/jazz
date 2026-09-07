@@ -60,9 +60,10 @@ function AccountContext({
   const [revision, reconcile] = useState(0);
   const [admitted, setAdmitted] = useState<string | null>(null);
   const [error, setError] = useState<Error>();
-  const [recovery, setRecovery] = useState<"login" | "register">("login");
+  const [recovery, setRecovery] = useState<"login" | "register" | "signout">("login");
 
   useEffect(() => {
+    if (recovery === "signout" && error) return;
     if (isPending || working.current || attempted.current === key) return;
     attempted.current = key;
     working.current = true;
@@ -86,7 +87,7 @@ function AccountContext({
         working.current = false;
         reconcile((value) => value + 1);
       });
-  }, [isPending, key, jazz, revision]);
+  }, [isPending, key, jazz, revision, recovery, error]);
 
   const actions: AuthActions = {
     async authenticate(enroll, request) {
@@ -118,12 +119,16 @@ function AccountContext({
     async signOut() {
       if (working.current) throw new Error("An authentication request is already pending");
       working.current = true;
+      setRecovery("signout");
       try {
         // Jazz syncs and detaches data consumers before the auth provider revokes credentials.
         await jazz.logout();
         const result = await authClient.signOut();
         if (result.error) throw new Error(result.error.message ?? "Sign out failed");
         window.location.assign("/");
+      } catch (cause) {
+        setError(toError(cause));
+        throw cause;
       } finally {
         working.current = false;
         reconcile((value) => value + 1);
@@ -135,6 +140,10 @@ function AccountContext({
   };
   async function recover() {
     if (working.current) return;
+    if (recovery === "signout") {
+      await actions.signOut().catch(() => {});
+      return;
+    }
     working.current = true;
     const recoveringKey = key;
     try {
@@ -175,7 +184,11 @@ function AccountContext({
           onClick={() => void recover()}
           disabled={snapshot.status === "transitioning"}
         >
-          {recovery === "login" ? "Retry sign in" : "Complete account setup"}
+          {recovery === "signout"
+            ? "Retry sign out"
+            : recovery === "login"
+              ? "Retry sign in"
+              : "Complete account setup"}
         </button>
       </div>
     </main>

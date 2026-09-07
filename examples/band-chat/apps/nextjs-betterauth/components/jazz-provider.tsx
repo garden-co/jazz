@@ -56,9 +56,11 @@ function AccountContext({
   const [revision, reconcile] = useState(0);
   const [admitted, setAdmitted] = useState<string | null>(null);
   const [error, setError] = useState<Error>();
+  const [failedAction, setFailedAction] = useState<"connect" | "signout">("connect");
 
   async function connect(retry = false) {
     if (working.current) return;
+    setFailedAction("connect");
     attempted.current = key;
     working.current = true;
     setAdmitted(null);
@@ -92,13 +94,15 @@ function AccountContext({
     }
   }
   useEffect(() => {
+    if (failedAction === "signout" && error) return;
     if (!isPending && !working.current && attempted.current !== key) void connect();
-  }, [isPending, key, revision]);
+  }, [isPending, key, revision, failedAction, error]);
 
   const actions: AuthActions = {
     async signOut() {
       if (working.current) return;
       working.current = true;
+      setFailedAction("signout");
       try {
         await jazz.logout();
         const result = await authClient.signOut();
@@ -115,9 +119,17 @@ function AccountContext({
   const failure = error ?? snapshot.error;
   const fallback = failure ? (
     <section>
-      <p role="alert">Could not connect BandChat: {failure.message}</p>
-      <button onClick={() => void connect(true)} disabled={snapshot.status === "transitioning"}>
-        Retry
+      <p role="alert">
+        {failedAction === "signout"
+          ? "Could not sign out of BandChat"
+          : "Could not connect BandChat"}
+        : {failure.message}
+      </p>
+      <button
+        onClick={() => void (failedAction === "signout" ? actions.signOut() : connect(true))}
+        disabled={snapshot.status === "transitioning"}
+      >
+        {failedAction === "signout" ? "Retry sign out" : "Retry connection"}
       </button>
     </section>
   ) : (

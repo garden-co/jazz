@@ -13,6 +13,8 @@ const controls = vi.hoisted(() => ({
   signOutError: undefined as string | undefined,
   loginError: undefined as Error | undefined,
   shutdownError: undefined as Error | undefined,
+  openError: undefined as Error | undefined,
+  opens: 0,
 }));
 
 vi.mock("@/src/lib/auth-client", () => ({
@@ -35,9 +37,9 @@ vi.mock("jazz-tools/react", async () => {
   return {
     useJazzSessionOwner: (config: object) =>
       core.useJazzSessionOwner(config, async () => {
-        const select = async () => {
+        const select = async (operation = "login") => {
           const subject = controls.session!.user.id;
-          controls.events.push(`login:${subject}`);
+          controls.events.push(`${operation}:${subject}`);
           if (controls.loginError) throw controls.loginError;
           return { id: subject, identity: { subject } } as never;
         };
@@ -48,25 +50,29 @@ vi.mock("jazz-tools/react", async () => {
           restoreLocalFirst: () => {
             throw new Error("unexpected restore");
           },
-          loginJWT: select,
-          registerJWT: select,
-          linkJWT: select,
+          loginJWT: () => select(),
+          registerJWT: () => select("register"),
+          linkJWT: () => select("link"),
           logout: () => {
             controls.events.push("logout");
           },
         });
         return createJazzSessionOwner({
           accounts,
-          openClient: async (account) => ({
-            db: {
-              getAuthState: () => ({ authMode: "external" as const, session: null }),
-              onAuthChanged: () => () => {},
-            },
-            shutdown: async ({ waitForSync }: { waitForSync?: boolean } = {}) => {
-              controls.events.push(`shutdown:${account.identity.subject}:${waitForSync}`);
-              if (waitForSync && controls.shutdownError) throw controls.shutdownError;
-            },
-          }),
+          openClient: async (account) => {
+            controls.opens++;
+            if (controls.openError) throw controls.openError;
+            return {
+              db: {
+                getAuthState: () => ({ authMode: "external" as const, session: null }),
+                onAuthChanged: () => () => {},
+              },
+              shutdown: async ({ waitForSync }: { waitForSync?: boolean } = {}) => {
+                controls.events.push(`shutdown:${account.identity.subject}:${waitForSync}`);
+                if (waitForSync && controls.shutdownError) throw controls.shutdownError;
+              },
+            };
+          },
         });
       }),
     JazzSessionProvider: ({
@@ -100,6 +106,9 @@ afterEach(() => {
   controls.signOutError = undefined;
   controls.loginError = undefined;
   controls.shutdownError = undefined;
+  controls.openError = undefined;
+  controls.opens = 0;
+  sessionStorage.removeItem("band-chat-register-jwt");
 });
 
 it("does not render A for B and syncs A before replacing its account", async () => {
@@ -185,7 +194,7 @@ it("does not revoke provider credentials when Jazz cannot finish graceful shutdo
   await new Promise((resolve) => setTimeout(resolve, 10));
 });
 
-it("keeps failed provider signout visible after Jazz logout and offers explicit recovery", async () => {
+it("retries failed provider signout without logging back into Jazz", async () => {
   const element = document.createElement("div");
   const root = createRoot(element);
   function SignOut() {
@@ -209,11 +218,43 @@ it("keeps failed provider signout visible after Jazz logout and offers explicit 
     "logout",
     "provider-signout",
   ]);
-  expect(element.querySelector("button")!.textContent).toBe("Retry");
-  controls.signOutError = undefined;
+  expect(element.querySelector("button")!.textContent).toBe("Retry sign out");
+  // A provider refresh while signout has failed must not silently reconnect Jazz.
+  controls.session = { session: { id: "refreshed-session-a" }, user: { id: "principal-a" } };
+  await act(async () =>
+    root.render(
+      <JazzProvider>
+        <SignOut />
+      </JazzProvider>,
+    ),
+  );
+  expect(controls.events.filter((event) => event.startsWith("login:"))).toEqual([
+    "login:principal-a",
+  ]);
   await act(async () => element.querySelector("button")!.click());
-  await waitFor(() => element.querySelector("button")!.textContent === "Sign out");
-  expect(controls.events.at(-1)).toBe("login:principal-a");
+  await waitFor(() => controls.events.filter((event) => event === "provider-signout").length === 2);
+  expect(controls.events.filter((event) => event.startsWith("login:"))).toEqual([
+    "login:principal-a",
+  ]);
+  expect(element.querySelector("button")!.textContent).toBe("Retry sign out");
+  await act(async () => root.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+});
+
+it("retries selected client startup after registration succeeds without repeating enrollment", async () => {
+  const element = document.createElement("div");
+  const root = createRoot(element);
+  sessionStorage.setItem("band-chat-register-jwt", "1");
+  controls.openError = new Error("client startup unavailable");
+  await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
+  await waitFor(() => element.textContent!.includes("client startup unavailable"));
+  expect(controls.events).toEqual(["register:principal-a"]);
+  expect(controls.opens).toBe(1);
+  controls.openError = undefined;
+  await act(async () => element.querySelector("button")!.click());
+  await waitFor(() => element.textContent === "rooms");
+  expect(controls.events).toEqual(["register:principal-a"]);
+  expect(controls.opens).toBe(2);
   await act(async () => root.unmount());
   await new Promise((resolve) => setTimeout(resolve, 10));
 });
