@@ -631,6 +631,22 @@ fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
         vec![row(1)]
     );
 }
+#[test]
+fn profiled_read_matches_ordinary_read_for_unselected_query() {
+    let schema = issue_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, author, &schema);
+    seed_issue_project(&db, author);
+
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    let ordinary = db.read(&prepared).unwrap();
+    let (profiled, _profile) = db.read_profiled(&prepared).unwrap();
+
+    assert_eq!(
+        profiled, ordinary,
+        "profiled reads must preserve ordinary public rows and descriptors",
+    );
+}
 
 #[test]
 fn authoritative_global_bound_read_uses_the_declared_index() {
