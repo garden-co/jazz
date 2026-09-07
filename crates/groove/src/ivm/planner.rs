@@ -732,8 +732,6 @@ fn graph_from_logical_required(
                 join_child_required_fields(left.fields(), left_on, required, "left")?;
             let right_required =
                 join_child_required_fields(right.fields(), right_on, required, "right")?;
-            let left_graph = graph_from_logical_required(left, Some(&left_required))?;
-            let right_graph = graph_from_logical_required(right, Some(&right_required))?;
             let left_keys = left_on
                 .iter()
                 .map(|key| field_name_for_source(&left_required, key))
@@ -742,6 +740,18 @@ fn graph_from_logical_required(
                 .iter()
                 .map(|key| field_name_for_source(&right_required, key))
                 .collect::<Result<Vec<_>, _>>()?;
+            let left_graph = filter_sql_nullable_join_keys(
+                graph_from_logical_required(left, Some(&left_required))?,
+                &left_required,
+                left_on,
+                &left_keys,
+            )?;
+            let right_graph = filter_sql_nullable_join_keys(
+                graph_from_logical_required(right, Some(&right_required))?,
+                &right_required,
+                right_on,
+                &right_keys,
+            )?;
             let join = GraphBuilder::join(left_graph, right_graph, left_keys, right_keys);
             project_join_required_graph(join, &left_required, &right_required, required)
         }
@@ -757,6 +767,33 @@ fn graph_from_logical_required(
             project_required_graph(graph, fields, required)
         }
     }
+}
+fn filter_sql_nullable_join_keys(
+    graph: GraphBuilder,
+    fields: &[LogicalField],
+    source_keys: &[String],
+    visible_keys: &[String],
+) -> Result<GraphBuilder, PlannerError> {
+    debug_assert_eq!(source_keys.len(), visible_keys.len());
+    let mut predicates = Vec::new();
+    for (source_key, visible_key) in source_keys.iter().zip(visible_keys) {
+        let field = field_for_source(fields, source_key)?;
+        if matches!(&field.value_type, ValueType::Nullable(_)) {
+            predicates.push(PredicateExpr::is_not_null(visible_key.clone()));
+        }
+    }
+    if predicates.is_empty() {
+        return Ok(graph);
+    }
+    let predicate = if predicates.len() == 1 {
+        predicates
+            .into_iter()
+            .next()
+            .expect("one nullable join key predicate")
+    } else {
+        PredicateExpr::And(predicates).canonicalize()
+    };
+    Ok(graph.filter(predicate))
 }
 
 fn project_join_required_graph(
