@@ -769,6 +769,103 @@ async fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
 }
 
 #[futures_test::test]
+async fn reversed_range_apis_return_empty() {
+    let schema = indexed_albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
+        "streams",
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([("payload", ValueType::Bytes)]),
+    ));
+    let column_families = schema.column_families();
+    let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("albums", vec![Value::U64(1), Value::String("A".to_owned())]);
+    batch.insert("albums", vec![Value::U64(2), Value::String("B".to_owned())]);
+    database.commit_batch(batch).await.unwrap();
+
+    assert!(
+        database
+            .primary_key_scan_range_raw("albums", &[Value::U64(3)], &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .primary_key_scan_range_raw("albums", &[Value::U64(1)], &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .primary_key_scan_range_raw("albums", &[Value::U64(1)], &[Value::U64(3)])
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    assert!(
+        database
+            .index_scan_range_raw(
+                "albums",
+                "albums_by_title",
+                &[Value::String("Z".to_owned())],
+                &[Value::String("A".to_owned())],
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .index_scan_range(
+                "albums",
+                "albums_by_title",
+                &[Value::String("Z".to_owned())],
+                &[Value::String("A".to_owned())],
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let store = database.direct_record_store("streams").unwrap();
+    store
+        .set(&[Value::U64(1)], &[Value::Bytes(b"one".to_vec())])
+        .await
+        .unwrap();
+    store
+        .set(&[Value::U64(2)], &[Value::Bytes(b"two".to_vec())])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .range(&[Value::U64(3)], &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .range_entries(&[Value::U64(3)], &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .range(&[Value::U64(1)], &[Value::U64(3)])
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[futures_test::test]
 async fn randomized_index_reads_match_full_scan_oracle() {
     let storage =
         MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");

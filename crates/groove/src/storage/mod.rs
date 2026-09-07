@@ -3360,6 +3360,84 @@ mod tests {
             ]
         );
     }
+    #[futures_test::test]
+    async fn reversed_range_bounds_return_empty() {
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"c".to_vec(), b"three".to_vec())
+            .await
+            .unwrap();
+
+        assert!(
+            storage
+                .range("records".into(), b"c".to_vec(), b"a".to_vec())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            storage
+                .range("records".into(), b"b".to_vec(), b"b".to_vec())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let descriptor = RecordDescriptor::new([("value", crate::records::ValueType::Bytes)]);
+        let store = RecordStore::new(&storage, "records", &descriptor);
+        assert!(store.range(b"c", b"a").await.unwrap().is_empty());
+        assert!(store.range_reverse(b"c", b"a").await.unwrap().is_empty());
+
+        let scan = storage
+            .scan(ScanRequest::range("records".into(), b"c".to_vec(), b"a".to_vec()).reversed())
+            .await
+            .unwrap();
+        assert!(collect_scan(scan).await.unwrap().is_empty());
+
+        assert_eq!(
+            storage
+                .range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap(),
+            vec![
+                (b"a".to_vec(), b"one".to_vec()),
+                (b"b".to_vec(), b"two".to_vec())
+            ]
+        );
+
+        let test_storage = TestStorage::new(&["records"]);
+        test_storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        test_storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            test_storage
+                .range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            test_storage
+                .range("records".into(), b"c".to_vec(), b"a".to_vec())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[futures_test::test]
     async fn prefix_returns_ordered_values_with_matching_prefix() {
