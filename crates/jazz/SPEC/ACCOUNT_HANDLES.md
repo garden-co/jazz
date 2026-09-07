@@ -315,3 +315,35 @@ Assignments, nonce consumption, and revocation retain the existing state-machine
 semantics. For example, a loser at revision zero cannot overwrite registration;
 a stale reader after revocation fails unavailable instead of admitting its old
 assignment. Reopening replays only the ordered committed commands.
+
+## Shared client session lifecycle
+
+The high-level TypeScript `createJazzSession` composes the account manager and
+one immutable-handle-bound client. Host adapters prepare credentials/storage and
+open clients; framework adapters observe the shared snapshot and acknowledge
+consumer detachment. Rust remains the registry/authorization authority. The
+session API introduces no storage or wire format.
+
+A transition publishes no usable client, waits for registered framework consumers
+to detach, and gracefully shuts down the old client with `waitForSync: true`.
+Only then may enrollment/selection change. A sync failure prevents enrollment and
+restores the old usable client. A later teardown failure cannot publish a dead
+client. Enrollment failure may reopen the previous selection; successful
+enrollment followed by failed local selection persistence or client startup
+retains the actual new selection and exposes an error. Retry reattempts local
+persistence/startup without repeating the registry operation or fabricating a
+rollback. A root-retention retry must prove the exact signing root is durable
+before credentials are usable.
+
+Ordinary overlapping account commands reject rather than silently target a
+later account. Logout/close supersede pending work and fence late publication.
+Logout awaits durable selection clearing; it does not delete retained roots,
+revoke identities, or sign out of the external provider. Ordinary close preserves
+local durability without requiring online sync. The returned session object is
+immutable; snapshots are immutable and contain no raw credentials.
+
+React's configured provider and `useJazzSessionOwner` share one owning lifecycle;
+StrictMode replay and Suspense layout replay must not duplicate ownership or leak
+consumer leases. An externally supplied session remains caller-owned when a
+provider unmounts. Startup and signed-out fallback UIs can read session state and
+invoke retry/auth commands; active query subtrees detach during transitions.
