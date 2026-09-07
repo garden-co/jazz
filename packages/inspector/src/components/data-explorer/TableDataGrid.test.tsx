@@ -466,6 +466,65 @@ describe("TableDataGrid", () => {
     });
   });
 
+  it("preserves exact BigInt filter values through URL and query serialization", async () => {
+    mockWasmSchema.todos.columns = [
+      ...initialMockTodoColumns,
+      { name: "rank", column_type: { type: "BigInt" }, nullable: false },
+    ];
+    currentRows = currentRows.map((row) => ({ ...row, rank: 1n }));
+
+    renderGrid();
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "rank" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "in" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: "9007199254740993, -9007199254740993" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    await waitFor(() => {
+      const filteredQuery = getLastTodosQuery();
+      expect(JSON.parse(filteredQuery._build())).toMatchObject({
+        conditions: [
+          {
+            column: "rank",
+            op: "in",
+            value: ["9007199254740993", "-9007199254740993"],
+          },
+        ],
+      });
+    });
+  });
+
+  it("keeps exact BigInt values through cell editing and saving", async () => {
+    mockWasmSchema.todos.columns = [
+      ...initialMockTodoColumns,
+      { name: "rank", column_type: { type: "BigInt" }, nullable: false },
+    ];
+    currentRows = currentRows.map((row) => ({ ...row, rank: 1n }));
+
+    renderGrid();
+
+    const rankCell = screen.getAllByRole("gridcell", { name: "1" })[0] as HTMLElement;
+    fireEvent.doubleClick(rankCell);
+    const rankEditor = screen.getByLabelText("Edit rank") as HTMLInputElement;
+    const exactValue = "9007199254740993";
+    expect(rankEditor.value).toBe("1");
+    fireEvent.change(rankEditor, { target: { value: exactValue } });
+    fireEvent.blur(rankEditor);
+
+    expect(screen.getByText(exactValue)).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({ rank: 9007199254740993n }),
+      );
+    });
+  });
+
   it("edits text cells in place and saves from the banner", async () => {
     renderGrid();
 
