@@ -3975,6 +3975,73 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   }, 60000);
 
+  it("returns an existing worker row to a fresh local follower after a rejected principal change", async () => {
+    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions(
+      "cold-local-follower-principal-guard",
+    );
+    const dbName = uniqueDbName("cold-local-follower-principal-guard");
+    const aliceJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000ca11",
+      undefined,
+      appId,
+    );
+    const bobJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000cb22",
+      undefined,
+      appId,
+    );
+    const config = {
+      appId,
+      serverUrl,
+      jwtToken: aliceJwt,
+      registerJwt: true,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const owner = track(await createDb(config));
+    let follower: Db | null = null;
+    try {
+      const knownOwnerRow = await owner
+        .insert(todos, { title: "owner row before follower opens", done: false })
+        .wait({ tier: "edge" });
+
+      // The follower has not inserted or queried this table. Its first local
+      // attachment must wait for the persistent owner's existing snapshot,
+      // rather than returning the follower's initially empty replica.
+      const freshFollower = track(await createDb(config));
+      follower = freshFollower;
+      await expect(
+        withTimeout(
+          freshFollower.all(allTodos, { tier: "local" }),
+          3_000,
+          "Fresh follower local read did not receive the persistent owner row",
+        ),
+      ).resolves.toEqual([knownOwnerRow]);
+
+      const aliceState = freshFollower.getAuthState();
+      expect(aliceState.session?.user).toBeDefined();
+      expect(() => freshFollower.updateAuthToken(bobJwt)).toThrow(
+        "Changing auth principal on a live client is not supported. Recreate the Db.",
+      );
+      expect(freshFollower.getAuthState()).toEqual(aliceState);
+
+      // The rejected update sends no new worker frame. A local reattachment
+      // still settles from the existing local attachment coverage instead of
+      // waiting for peer freshness that can no longer arrive.
+      await expect(
+        withTimeout(
+          freshFollower.all(allTodos, { tier: "local" }),
+          3_000,
+          "Local read waited for a peer frame after principal rejection",
+        ),
+      ).resolves.toEqual([knownOwnerRow]);
+    } finally {
+      await follower?.shutdown().catch(() => undefined);
+      if (follower) untrack(follower);
+      await owner.shutdown();
+      untrack(owner);
+    }
+  }, 60_000);
+
   it("rejects a principal-changing live auth update before local or worker state changes", async () => {
     const { appId, serverUrl } =
       await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
