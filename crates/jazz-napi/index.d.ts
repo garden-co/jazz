@@ -20,10 +20,10 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
-  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
-  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
-  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
