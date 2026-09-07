@@ -2,6 +2,21 @@
 export type { RowAuthor } from "./magic-columns.js";
 export { SYSTEM_ACCOUNT_ID, SYSTEM_ISSUER } from "./magic-columns.js";
 
+// Diagnostic-only Classic exports; these never implement Classic behaviour.
+export {
+  co,
+  z,
+  CoMap,
+  CoList,
+  CoFeed,
+  CoPlainText,
+  CoRichText,
+  FileStream,
+  Account,
+  Group,
+  Profile,
+} from "./classic-api.js";
+
 // DSL for schema definitions
 export {
   table,

@@ -1,4 +1,11 @@
 export {
+  useCoState,
+  useAccount,
+  useSuspenseCoState,
+  useSuspenseAccount,
+  JazzExpoProvider,
+} from "../classic-api.js";
+export {
   useLocalFirstAuth,
   type LocalFirstAuth,
   type UseLocalFirstAuthOptions,

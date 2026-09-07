@@ -1,3 +1,10 @@
+export {
+  useCoState,
+  useAccount,
+  useSuspenseCoState,
+  useSuspenseAccount,
+  JazzReactNativeProvider,
+} from "../classic-api.js";
 export { createDb, Db, type DbConfig } from "./create-db.js";
 export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
 export {
