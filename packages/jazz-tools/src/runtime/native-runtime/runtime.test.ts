@@ -1,3 +1,4 @@
+import { schema as s } from "../../schema-namespace.js";
 import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
@@ -2350,6 +2351,82 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
   });
+
+  it.each(["stream", "native", "native-close-throws"] as const)(
+    "forwards %s subscription source failures exactly once without an unhandled rejection",
+    async (kind) => {
+      const error = new Error("subscription source failed");
+      let controller!: ReadableStreamDefaultController<unknown>;
+      const cleanupError = new Error("source close failed");
+      const cleanupLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      const close = vi.fn(() => true);
+      if (kind === "native-close-throws")
+        close.mockImplementationOnce(() => {
+          throw cleanupError;
+        });
+      const source =
+        kind === "stream"
+          ? new ReadableStream({
+              start(value) {
+                controller = value;
+              },
+            })
+          : {
+              readAll: () => {
+                throw error;
+              },
+              close,
+            };
+      const runtime = runtimeWithSubscriptionSource(source);
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const handle = runtime.createSubscription(app.todos._build());
+      const callback = vi.fn();
+      runtime.executeSubscription(handle, callback);
+      if (kind === "stream") controller.error(error);
+      // Cross a host turn: an escaped void reader promise is an unhandled
+      // rejection here, which Vitest treats as a failed test run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(callback.mock.calls).toEqual([[error]]);
+      runtime.executeSubscription(handle, callback);
+      expect(callback).toHaveBeenCalledTimes(1);
+      if (kind !== "stream") expect(close).toHaveBeenCalledTimes(1);
+      if (kind === "native-close-throws") {
+        expect(cleanupLog).toHaveBeenCalledWith(
+          "Jazz subscription source cleanup failed",
+          cleanupError,
+        );
+      } else expect(cleanupLog).not.toHaveBeenCalled();
+      await runtime.close();
+      cleanupLog.mockRestore();
+    },
+  );
+
+  it.each(["unsubscribe", "close"] as const)(
+    "suppresses a pending stream read rejection after subscription %s",
+    async (termination) => {
+      let rejectRead!: (error: Error) => void;
+      const pending = new Promise<never>((_, reject) => {
+        rejectRead = reject;
+      });
+      // A binding read can already be in flight when its owner is retired.
+      // Cancelling its source must not turn that late rejection into an app error.
+      const cancel = vi.fn(async () => undefined);
+      const runtime = runtimeWithSubscriptionSource({
+        getReader: () => ({ read: () => pending, cancel }),
+      });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const handle = runtime.createSubscription(app.todos._build());
+      const callback = vi.fn();
+      runtime.executeSubscription(handle, callback);
+      if (termination === "unsubscribe") runtime.unsubscribe(handle);
+      else await runtime.close();
+      rejectRead(new Error("late retired source failure"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(callback).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
 
   it("trusts native subscription snapshots for simple equality relation filters", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
@@ -7031,6 +7108,27 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
           prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
           subscribeForIdentity: () => new ReadableStream(),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+}
+
+function runtimeWithSubscriptionSource(source: unknown): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQuery: () => ({}),
+          subscribe: () => source,
           tick: () => undefined,
         }),
       openBrowser: async () => {

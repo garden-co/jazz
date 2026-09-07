@@ -3661,6 +3661,17 @@ export class NativeRuntimeAdapter implements Runtime {
           );
         }
       }
+    } catch (error) {
+      if (
+        !this.closed &&
+        !subscription.cancelled &&
+        this.subscriptions.get(handle) === subscription
+      ) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     } finally {
       source.reading = false;
     }
@@ -3693,6 +3704,17 @@ export class NativeRuntimeAdapter implements Runtime {
           }
         }
         if (batch.length === 0) return;
+      }
+    } catch (error) {
+      if (
+        !this.closed &&
+        !subscription.cancelled &&
+        this.subscriptions.get(handle) === subscription
+      ) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
     } finally {
       source.reading = false;
@@ -4184,7 +4206,15 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.openingAbort?.abort();
     subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
-    closeSubscriptionSourceState(subscription);
+    for (const source of subscription.sources) {
+      try {
+        closeSubscriptionSource(source.source);
+      } catch (cleanupError) {
+        // Resource retirement must not replace the causal subscription error
+        // or prevent its once-only delivery to the application.
+        console.error("Jazz subscription source cleanup failed", cleanupError);
+      }
+    }
     this.deliverSubscriptionFailure(subscription);
   }
 
