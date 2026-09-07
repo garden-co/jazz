@@ -11930,6 +11930,103 @@ mod tests {
     }
 
     #[test]
+    fn retained_foreground_subscription_wakes_after_its_initial_reset_and_sibling_commit() {
+        // This is an internal native-host receipt: public rows cannot establish
+        // that the owner scheduled B's platform callback rather than relying on
+        // the test's manual relay pumps. It covers the installed JSI sequence
+        // where B drains its initial reset, then A commits through a foreground
+        // transaction while B's stream remains retained.
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let mut relay_config = config(
+            directory.path().join("wake-after-reset.sqlite"),
+            Some("alice"),
+        );
+        relay_config.schema = permissive_schema();
+        let relay = registry.open(relay_config).unwrap();
+        let writer = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xb3; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb4; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xc3; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb4; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader_wake = Arc::new(QueuedNativeWake::active());
+        reader
+            .set_foreground_wake_callback(
+                2,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&reader_wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+
+        let prepared = reader
+            .prepare_foreground_query(postcard::to_allocvec(&Query::from("todos")).unwrap())
+            .unwrap();
+        let subscription = reader.subscribe_foreground_query(prepared).unwrap();
+        for _ in 0..16 {
+            relay.pump().unwrap();
+        }
+        let initial = reader.drain_foreground_subscription(subscription).unwrap();
+        assert!(
+            matches!(
+                initial,
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(_))
+            ),
+            "the initial reset drains without retiring the retained subscription"
+        );
+        reader_wake.queued.lock().unwrap().clear();
+
+        let row = RowUuid::from_bytes([0xd3; 16]);
+        let transaction = writer
+            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+            .unwrap();
+        assert_eq!(
+            writer
+                .insert_foreground_transaction(
+                    transaction,
+                    "todos".into(),
+                    encoded_title_cells("wake after reset"),
+                    Some(*row.as_bytes()),
+                )
+                .unwrap(),
+            row
+        );
+        writer.commit_foreground_transaction(transaction).unwrap();
+
+        for _ in 0..32 {
+            relay.pump().unwrap();
+            if reader_wake.wait_for_queued(1) {
+                break;
+            }
+        }
+        assert!(
+            reader_wake.wait_for_queued(1),
+            "the retained reader subscription must schedule a post-commit native wake"
+        );
+        let wakes = reader_wake.queued.lock().unwrap();
+        assert!(
+            wakes.iter().any(|(foreground, _, _)| *foreground == 2),
+            "the post-commit wake targets the retained reader foreground"
+        );
+    }
+
+    #[test]
     fn abi_handshake_accepts_supported_versions_before_storage_opens() {
         assert_eq!(
             ensure_native_relay_abi_compatible(NativeRelayAbiRange {
