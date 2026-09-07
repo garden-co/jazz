@@ -170,3 +170,21 @@ test("published declarations reject Classic use and accept Jazz 2 schemas and Re
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+test("Vue rejects Classic provider configuration instead of silently ignoring it", () => {
+  runConsumer(`
+    import assert from "node:assert/strict";
+    import { createSSRApp, h } from "vue";
+    import { renderToString } from "@vue/server-renderer";
+    import { JazzProvider } from "jazz-tools/vue";
+
+    const app = createSSRApp({
+      render: () => h(JazzProvider, {
+        config: { appId: "classic-vue-props" },
+        sync: { peer: "wss://classic.invalid" },
+      }, { fallback: () => h("p", "loading") }),
+    });
+    await assert.rejects(renderToString(app), error =>
+      error.code === "JAZZ_CLASSIC_API_REMOVED" && error.message.includes("JazzProvider.sync"));
+  `);
+});
