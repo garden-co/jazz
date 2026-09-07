@@ -8,22 +8,21 @@ A local-first account lets someone start using an app before signing up. Jazz de
 
 ## Client setup
 
-Prepare the account manager before creating a context:
+Configure a session once:
 
 ```ts
-import { createAccountManager, createJazzClient } from "jazz-tools/client";
+import { createJazzSession } from "jazz-tools/client";
 
-const config = { appId: "my-app", serverUrl: "https://core.example" };
-const accounts = await createAccountManager(config);
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const client = await createJazzClient({ ...config, account });
+const jazz = await createJazzSession({
+  appId: "my-app",
+  serverUrl: "https://core.example",
+  initial: "local-first",
+});
 ```
 
-Manager preparation loads crypto and restores selection. `createLocalFirst()` is synchronous afterward. Browser managers retain the signing root in browser storage. Native hosts supply an atomic, protected `AccountStore`; they do not fall back to browser storage. Provider JWTs are never persisted in this store.
+Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`; provider JWTs are never persisted in it. Creating a local-first account works offline once runtime assets are available.
 
-The configured core URL identifies the account registry even while offline. For an intentionally local-only context, pass `{ appId: config.appId, account }` to `createJazzClient`, omitting the context's `serverUrl`.
-
-Framework providers accept the same account-bearing config. Use `useAccountState` in React/Vue, `createAccountState` in Solid, or `accountState` in Svelte to observe account selection. Account operations happen outside the provider's context; see [Lifecycle](/docs/auth/lifecycle).
+Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/auth/lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
 
 ## Backing up and restoring the secret
 
@@ -33,7 +32,7 @@ A signing root is a credential. Possession allows acting as its local-first iden
 import { exportLocalFirstSecret } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
-const secret = exportLocalFirstSecret(account);
+const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
 const phrase = RecoveryPhrase.fromSecret(secret);
 ```
 
@@ -41,15 +40,13 @@ The recovery phrase encodes the same root; it is not a second password. Keep it 
 
 ### Recovery passphrase
 
-Close the old context, restore the root, and create a context from the restored handle:
+Restore through the session; it owns the graceful handoff:
 
 ```ts
-await client.shutdown({ waitForSync: true });
-const restored = accounts.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
-const restoredClient = await createJazzClient({ ...config, account: restored });
+await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 ```
 
-Ordinary shutdown preserves local durability and works offline. Use `shutdown({ waitForSync: true })` when the handoff must first synchronize pending writes with the core.
+Session account transitions wait for pending writes to sync before replacing the client. Ordinary `jazz.close()` preserves local durability without requiring online sync.
 
 ### Passkey backup
 
@@ -62,16 +59,16 @@ const backup = new BrowserPasskeyBackup({
   appName: "My App",
   appHostname: "app.example",
 });
-await backup.backup(exportLocalFirstSecret(account), "My account");
+await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
 ```
 
-`await backup.restore()` returns the root for `accounts.restoreLocalFirst`. Restore outside a context, using the same shutdown and replacement sequence. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
+`await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
 
 ## Linking an external provider
 
 An external provider can issue an ordinary JWT with `iss` and `sub`. It does not need to mint Jazz-specific claims or reuse the local-first subject.
 
-After `await oldClient.shutdown({ waitForSync: true })`, call `accounts.linkJWT({ getToken })` and open a context using the returned handle. The external identity must be fresh in this application's registry. Linking requires a connection to the core and keeps the existing account ID, so account-based ownership remains valid. Earlier rows retain the exact identity that authored them.
+Call `await jazz.linkJWT({ getToken })`; Jazz performs graceful shutdown, linking, and client replacement. The external identity must be fresh in this application's registry. Linking requires a connection to the core and keeps the existing account ID, so account-based ownership remains valid. Earlier rows retain the exact identity that authored them.
 
 The core never moves an already assigned identity to another account. If the provider identity already has an account, the app must choose whether to log into that account or migrate data explicitly. See [Authentication](/docs/auth/authentication) for registration versus login, and [Lifecycle](/docs/auth/lifecycle) for failure and logout handling.
 

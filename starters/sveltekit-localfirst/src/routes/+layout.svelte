@@ -2,6 +2,7 @@
   import "../app.css";
   import { JazzSessionProvider } from "jazz-tools/svelte";
   import { env } from "$env/dynamic/public";
+  import SessionStatus from "$lib/SessionStatus.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
   let { children: pageChildren } = $props();
   const appId = env.PUBLIC_JAZZ_APP_ID;
@@ -17,6 +18,6 @@
       <AuthBackup />
     </main>
   {/snippet}
-  {#snippet fallback()}<p>Loading...</p>{/snippet}
+  {#snippet fallback()}<SessionStatus />{/snippet}
 </JazzSessionProvider>
 {:else}<p role="alert">PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set</p>{/if}

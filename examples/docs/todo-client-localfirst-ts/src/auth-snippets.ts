@@ -22,7 +22,7 @@ export async function createJwtSession(getToken: () => Promise<string>) {
     await session.loginJWT({ getToken });
     return session;
   } catch (error) {
-    await session.close();
+    await session.close().catch(() => {});
     throw error;
   }
 }

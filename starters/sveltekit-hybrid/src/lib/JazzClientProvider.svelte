@@ -50,6 +50,6 @@
   {#if authError}<p role="alert">{authError.message}</p><button onclick={() => signOut().catch(() => {})}>Retry sign out</button>{/if}
   <JazzSessionProvider session={jazz}>
     {#snippet children()}<AccountStatus />{@render pageChildren?.()}{/snippet}
-    {#snippet fallback()}<p>Loading...</p>{/snippet}
+    {#snippet fallback()}<AccountStatus />{/snippet}
   </JazzSessionProvider>
 {:else}<p>Loading...</p>{/if}

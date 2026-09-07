@@ -36,7 +36,7 @@ Choose the operation that matches the user's intent:
 | `jazz.getSnapshot().account` | Read the locally selected handle, or `undefined`.                                             |
 | `jazz.logout()`              | Clear selection and invalidate this manager's issued credentials.                             |
 
-Registration, login, and linking require a connection to the core. Authenticating with your provider does not implicitly register a Jazz account. A failed operation preserves the previous selection.
+Registration, login, and linking require a connection to the core. Authenticating with your provider does not implicitly register a Jazz account. An enrollment rejection preserves the previous selection. If enrollment succeeds but local persistence or client startup fails, the new selection remains; use `jazz.retry()` to retry that local work.
 
 ```ts
 await jazz.loginJWT({

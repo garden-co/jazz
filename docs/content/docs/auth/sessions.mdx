@@ -56,7 +56,7 @@ Use an explicit anonymous-access policy when that access is intended.
 | Svelte               | `const session = getSession()`; read `session.current`              |
 | TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
 
-Framework hooks must run inside the corresponding Jazz provider or context. These session APIs observe the open context. Account-selection observers such as `useAccountState(accounts)` observe the separate account manager.
+Framework hooks must run inside the corresponding Jazz provider or context. These session APIs observe the open context. `useJazzSession()` observes the owning lifecycle: selected account, transition state, errors, and commands. The lower-level `useAccountState(accounts)` observes only an account manager.
 
 ## Read rows for the current user
 

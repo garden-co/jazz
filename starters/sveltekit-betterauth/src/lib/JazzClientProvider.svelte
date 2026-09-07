@@ -12,10 +12,10 @@
   const appId = env.PUBLIC_JAZZ_APP_ID;
   const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
   let setupError = $state<Error | undefined>();
-  let recovery = $state<"login" | "register">("register");
+  let recovery = $state<"login" | "register" | "logout">("register");
   let admittedSession = $state<string | null>(null);
   let jazz = $state.raw<JazzSession<JazzClient>>();
-  let ready = false;
+  let ready = $state(false);
   let explicitAuth = false;
   let version = 0;
   let handledSession: string | null | undefined;
@@ -44,7 +44,7 @@
         reconcile(sessionKey($session.data));
       }
     },
-    reportFailure(cause) { setupError = toError(cause); },
+    reportFailure(cause) { recovery = "logout"; setupError = toError(cause); },
   });
 
   $effect(() => {
@@ -68,7 +68,15 @@
     if (!jazz) return;
     const currentVersion = ++version;
     const recoveryKey = sessionKey($session.data);
-    void (recovery === "login" ? jazz.loginJWT({ getToken: credential }) : jazz.registerJWT({ getToken: credential }))
+    void (async () => {
+      if (recovery === "logout") {
+        await jazz.logout();
+        const result = await authClient.signOut();
+        if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      } else if (jazz.getSnapshot().status === "error") await jazz.retry();
+      else if (recovery === "login") await jazz.loginJWT({ getToken: credential });
+      else await jazz.registerJWT({ getToken: credential });
+    })()
       .then(() => {
         if (currentVersion === version && recoveryKey === sessionKey($session.data)) {
           setupError = undefined;
@@ -120,12 +128,12 @@
         {#if setupError}<aside class="alert-error" role="alert">{setupError.message}</aside>{/if}
         {@render pageChildren?.()}
       {:else if setupError}
-        <p role="alert">{setupError.message}</p><button onclick={recover}>Retry sign in</button>
+        <p role="alert">{setupError.message}</p><button onclick={recover}>{recovery === "logout" ? "Retry sign out" : "Retry"}</button>
       {:else}<p>Loading...</p>{/if}
     {/snippet}
     {#snippet fallback()}
       {#if setupError && $session.data?.session}
-        <main class="page-center"><div class="card"><p class="alert-error" role="alert">{setupError.message}</p><button type="button" class="btn-primary" onclick={recover}>{recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>
+        <main class="page-center"><div class="card"><p class="alert-error" role="alert">{setupError.message}</p><button type="button" class="btn-primary" onclick={recover}>{recovery === "logout" ? "Retry sign out" : recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>
       {:else if !$session.data?.session}{@render pageChildren?.()}
       {:else}<p>Loading...</p>{/if}
     {/snippet}
