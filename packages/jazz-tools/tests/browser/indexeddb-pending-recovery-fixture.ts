@@ -1,5 +1,8 @@
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
+import { createDb as createInternalDb } from "../../src/runtime/testing/create-internal-db.js";
+import { accountRegistryUrl } from "../../src/accounts/context.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { Db } from "../../src/runtime/db.js";
 
 export const recoveryApp = s.defineApp({
@@ -17,7 +20,10 @@ export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy })
 export type RecoveryConfig = {
   appId: string;
   serverUrl: string;
-} & ({ jwtToken: string; secret?: never } | { secret: string; jwtToken?: never });
+} & (
+  | { jwtToken: string; accountId: string; secret?: never }
+  | { secret: string; jwtToken?: never; accountId?: never }
+);
 
 export interface RecoveryRows {
   marker: number | undefined;
@@ -28,9 +34,28 @@ const markerId = "018f0000-0000-7000-8000-000000000099";
 let db: Db;
 
 export async function open(config: RecoveryConfig): Promise<void> {
-  db = await createDb({
+  const driver = { type: "persistent" as const, dbName: `pending-recovery-${config.appId}` };
+  if (config.secret) {
+    const accounts = await createAccountManager({
+      appId: config.appId,
+      serverUrl: config.serverUrl,
+    });
+    db = await createDb({
+      appId: config.appId,
+      serverUrl: config.serverUrl,
+      driver,
+      account: accounts.restoreLocalFirst(config.secret),
+    });
+    return;
+  }
+  // External handles are neither persisted nor restorable without the account
+  // registry. This branch tests the internal subscriber protocol using the
+  // identity/account genuinely enrolled before the server stops. It does not
+  // claim public external-account offline login support.
+  db = await createInternalDb({
     ...config,
-    driver: { type: "persistent", dbName: `pending-recovery-${config.appId}` },
+    driver,
+    accountRegistryAuthority: accountRegistryUrl(config.serverUrl, config.appId),
   });
 }
 

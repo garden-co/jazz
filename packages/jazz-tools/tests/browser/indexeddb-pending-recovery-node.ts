@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { BrowserContext, Page } from "playwright";
 import type { RecoveryConfig, RecoveryRows } from "./indexeddb-pending-recovery-fixture.js";
+import { evaluateHarnessOperation } from "./evaluate-harness.mjs";
 import { stopJazzServerByUrl } from "./testing-server-node.js";
 
 export async function recoverPendingIndexedDbWrites(
@@ -20,30 +21,15 @@ export async function recoverPendingIndexedDbWrites(
   let serverStopped = false;
 
   async function call<T>(page: Page, method: string): Promise<T> {
-    // The deadline runs in Node, not in the SharedWorker whose event loop may
-    // be spinning. A failed stage must not leave the browser test runner hung.
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        page.evaluate(
-          async ({ method, config }) => {
-            const modulePath = "/tests/browser/indexeddb-pending-recovery-fixture.ts";
-            // Playwright serialises this callback into another browser realm;
-            // a static Node import cannot provide that realm's live Db instance.
-            const fixture = await import(/* @vite-ignore */ modulePath);
-            return fixture[method](config);
-          },
-          { method, config },
-        ),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error(`pending-write recovery: ${method} did not complete after 30000ms`));
-          }, 30_000);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    // Keep the deadline outside the recovering worker and retain the operation
+    // in its owning page rather than passing a long-lived promise through CDP.
+    return evaluateHarnessOperation<T>(
+      page,
+      "/tests/browser/indexeddb-pending-recovery-fixture.ts",
+      method,
+      config,
+      30_000,
+    );
   }
 
   async function launch(): Promise<Page> {
