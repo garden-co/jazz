@@ -739,7 +739,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
-test("React Native docs advertise the supported alpha account-handle client", async () => {
+test("React Native docs advertise the supported alpha session and account-handle clients", async () => {
   const [
     readme,
     installGuide,
@@ -795,10 +795,19 @@ test("React Native docs advertise the supported alpha account-handle client", as
     /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
     "the public install guide must direct RN users to the supported account-handle client path",
   );
-  assert.match(clientSetupGuide, /React Native and Expo/);
-  assert.match(clientSetupGuide, /createAccountManager.*jazz-tools\/expo/);
-  assert.match(clientSetupGuide, /createJazzClient.*JazzClientProvider/s);
-  assert.match(clientSetupGuide, /await client\.shutdown/);
+  const expoSetup = clientSetupGuide.match(/## React Native and Expo\n([\s\S]*?)(?=\n## )/)?.[1];
+  assert.ok(expoSetup, "the client setup guide must include a React Native and Expo section");
+  assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
+  assert.match(
+    expoSetup,
+    /<JazzSessionProvider config=\{\{ appId, serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
+    "Expo setup must give the session provider one local-first configuration and mount its child",
+  );
+  assert.doesNotMatch(
+    expoSetup,
+    /createAccountManager|createJazzClient|JazzClientProvider|client\.shutdown/,
+    "the session provider must own account selection and client lifecycle in the primary Expo setup",
+  );
   assert.match(clientSetupGuide, /canonical Expo\s+scaffold/);
   assert.match(
     durabilityGuide,
