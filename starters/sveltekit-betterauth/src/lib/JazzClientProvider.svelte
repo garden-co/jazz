@@ -12,7 +12,7 @@
   const appId = env.PUBLIC_JAZZ_APP_ID;
   const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
   let setupError = $state<Error | undefined>();
-  let recovery = $state<"login" | "register" | "logout">("register");
+  let recovery = $state<"login" | "register" | "logout">("login");
   let admittedSession = $state<string | null>(null);
   let jazz = $state.raw<JazzSession<JazzClient>>();
   let snapshot = $state.raw<JazzSessionSnapshot<JazzClient>>();
@@ -22,103 +22,160 @@
     return jazz.subscribe(() => { snapshot = jazz!.getSnapshot(); });
   });
   let ready = $state(false);
-  let explicitAuth = false;
-  let version = 0;
+  let explicitAuth = $state(false);
   let handledSession: string | null | undefined;
+  let observedSession: string | null | undefined;
+  let reconcileRequested = false;
+  let reconciliation = $state.raw<Promise<void>>();
+  let disposed = false;
+  let providerRevision = 0;
+
+  // Provider stores can notify after getSession() already returned a newer
+  // session. Notifications request reconciliation; only an authoritative read
+  // chooses the next account. One in-flight reconciliation coalesces changes.
+  async function selectCurrent(owner: JazzSession<JazzClient>) {
+    const revision = providerRevision;
+    const current = await authClient.getSession();
+    if (disposed) return;
+    if (revision !== providerRevision) { reconcileRequested = true; return; }
+    const key = sessionKey(current.data);
+    // A failed explicit signup must remain registration recovery, never an
+    // implicit login triggered by the provider finally publishing its session.
+    if (setupError && recovery === "register" && key) return;
+    if (key === handledSession) return;
+    handledSession = key;
+    admittedSession = null;
+    try {
+      if (key) await owner.loginJWT({ getToken: credential });
+      else await owner.logout();
+      if (!disposed) { setupError = undefined; admittedSession = key; }
+    } catch (cause) {
+      if (!disposed) { recovery = "login"; setupError = toError(cause); }
+    }
+  }
+
+  function requestReconciliation() {
+    reconcileRequested = true;
+    if (!jazz || !ready || explicitAuth || reconciliation || disposed ||
+      (recovery === "logout" && setupError)) return;
+    const owner = jazz;
+    const task = Promise.resolve().then(async () => {
+      while (reconcileRequested && !explicitAuth && !disposed) {
+        reconcileRequested = false;
+        await selectCurrent(owner);
+      }
+    }).catch((cause) => { if (!disposed) setupError = toError(cause); });
+    reconciliation = task;
+    void task.finally(() => {
+      if (reconciliation === task) reconciliation = undefined;
+      if (reconcileRequested && !disposed) requestReconciliation();
+    });
+  }
+
+  async function beginExplicit() {
+    if (!jazz || !ready) throw new Error("Jazz lifecycle is not ready");
+    if (explicitAuth) throw new Error("An authentication request is already pending");
+    explicitAuth = true;
+    await reconciliation;
+    if (disposed) throw new Error("Jazz lifecycle is closed");
+    return jazz;
+  }
+  function finishExplicit() {
+    explicitAuth = false;
+    requestReconciliation();
+  }
+
+  async function signOut() {
+    const owner = await beginExplicit();
+    recovery = "logout";
+    try {
+      await owner.logout();
+      if (disposed) return;
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      if (disposed) return;
+      handledSession = null;
+      admittedSession = null;
+      setupError = undefined;
+    } catch (cause) {
+      if (!disposed) setupError = toError(cause);
+      throw cause;
+    } finally { finishExplicit(); }
+  }
 
   setAuthActions({
     async authenticate(enroll, request) {
-      if (!jazz) throw new Error("Jazz lifecycle is not ready");
-      explicitAuth = true;
-      const currentVersion = ++version;
+      const owner = await beginExplicit();
+      let authenticated = false;
       try {
         const result = await request();
         if (result.error) throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
+        authenticated = true;
+        if (disposed) return;
         const current = await authClient.getSession();
-        handledSession = sessionKey(current.data);
-        if (currentVersion !== version) return;
-        if (enroll) await jazz.registerJWT({ getToken: credential });
-        else await jazz.loginJWT({ getToken: credential });
+        if (disposed) return;
+        const key = sessionKey(current.data);
+        if (!key) throw new Error("Provider did not establish a session");
+        handledSession = key;
+        admittedSession = null;
+        if (enroll) await owner.registerJWT({ getToken: credential });
+        else await owner.loginJWT({ getToken: credential });
+        if (disposed) return;
         setupError = undefined;
-        admittedSession = handledSession;
+        admittedSession = key;
       } catch (cause) {
-        const error = toError(cause);
-        if (sessionKey((await authClient.getSession()).data)) { recovery = enroll ? "register" : "login"; setupError = error; }
-        throw error;
-      } finally {
-        explicitAuth = false;
-        reconcile(sessionKey($session.data));
-      }
+        if (authenticated && !disposed) { recovery = enroll ? "register" : "login"; setupError = toError(cause); }
+        throw cause;
+      } finally { finishExplicit(); }
     },
+    signOut,
     reportFailure(cause) { recovery = "logout"; setupError = toError(cause); },
   });
 
   $effect(() => {
     const key = sessionKey($session.data);
-    if (ready) reconcile(key);
+    if (ready && key !== observedSession) {
+      observedSession = key;
+      providerRevision++;
+      requestReconciliation();
+    }
   });
 
-  function reconcile(key: string | null) {
-    if (!jazz || explicitAuth || key === handledSession) return;
-    handledSession = key;
-    admittedSession = null;
-    const currentVersion = ++version;
-    void (key ? jazz.loginJWT({ getToken: credential }) : jazz.logout()).then(() => {
-      if (currentVersion === version) { setupError = undefined; admittedSession = key; }
-    }).catch((cause) => {
-      if (currentVersion === version) { recovery = "login"; setupError = toError(cause); }
-    });
-  }
-
-  function recover() {
-    if (!jazz) return;
-    const currentVersion = ++version;
-    const recoveryKey = sessionKey($session.data);
-    void (async () => {
-      if (recovery === "logout") {
-        await jazz.logout();
-        const result = await authClient.signOut();
-        if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
-      } else if (jazz.getSnapshot().status === "error" &&
-        jazz.getSnapshot().account?.identity.subject === $session.data?.user.id &&
-        jazz.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") await jazz.retry();
-      else if (recovery === "login") await jazz.loginJWT({ getToken: credential });
-      else await jazz.registerJWT({ getToken: credential });
-    })()
-      .then(() => {
-        if (currentVersion === version && recoveryKey === sessionKey($session.data)) {
-          setupError = undefined;
-          admittedSession = recoveryKey;
-        }
-      })
-      .catch((cause) => {
-        if (currentVersion === version && recoveryKey === sessionKey($session.data)) setupError = toError(cause);
-      });
+  async function recover() {
+    if (recovery === "logout") { await signOut().catch(() => {}); return; }
+    let owner: JazzSession<JazzClient>;
+    try { owner = await beginExplicit(); }
+    catch (cause) { if (!disposed) setupError ??= toError(cause); return; }
+    try {
+      const current = await authClient.getSession();
+      if (disposed) return;
+      const key = sessionKey(current.data);
+      if (!key) throw new Error("Provider did not establish a session");
+      handledSession = key;
+      if (owner.getSnapshot().status === "error" &&
+        owner.getSnapshot().account?.identity.subject === current.data?.user.id &&
+        owner.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") await owner.retry();
+      else if (recovery === "login") await owner.loginJWT({ getToken: credential });
+      else await owner.registerJWT({ getToken: credential });
+      if (disposed) return;
+      setupError = undefined;
+      admittedSession = key;
+    } catch (cause) { if (!disposed) setupError = toError(cause); }
+    finally { finishExplicit(); }
   }
 
   onMount(() => {
     if (!appId || !serverUrl) throw new Error("PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set");
-    let cancelled = false;
     let owner: JazzSession<JazzClient> | undefined;
     void (async () => {
       owner = await createJazzSession({ appId, serverUrl });
-      if (cancelled) { await owner.close(); return; }
-      const current = await authClient.getSession();
-      const key = sessionKey(current.data);
-      handledSession = key;
-      const currentVersion = ++version;
-      try {
-        if (key) await owner.loginJWT({ getToken: credential });
-        else await owner.logout();
-        if (!cancelled && currentVersion === version) admittedSession = key;
-      } catch (cause) {
-        if (!cancelled && currentVersion === version) { recovery = "login"; setupError = toError(cause); }
-      }
-      if (cancelled) await owner.close();
+      if (disposed) { await owner.close(); return; }
+      await selectCurrent(owner);
+      if (disposed) await owner.close();
       else { jazz = owner; ready = true; }
-    })().catch((cause) => { if (!cancelled) setupError = toError(cause); });
+    })().catch((cause) => { if (!disposed) setupError = toError(cause); });
     return () => {
-      cancelled = true;
+      disposed = true;
       if (owner) void owner.close().catch((cause) => console.error("Jazz client shutdown failed", cause));
     };
   });
@@ -136,12 +193,12 @@
         {#if setupError}<aside class="alert-error" role="alert">{setupError.message}</aside>{/if}
         {@render pageChildren?.()}
       {:else if setupError}
-        <p role="alert">{setupError.message}</p><button onclick={recover}>{recovery === "logout" ? "Retry sign out" : "Retry"}</button>
+        <p role="alert">{setupError.message}</p><button onclick={recover} disabled={explicitAuth || reconciliation !== undefined}>{recovery === "logout" ? "Retry sign out" : "Retry"}</button>
       {:else}<p>Loading...</p>{/if}
     {/snippet}
     {#snippet fallback()}
       {#if setupError && $session.data?.session}
-        <main class="page-center"><div class="card"><p class="alert-error" role="alert">{setupError.message}</p><button type="button" class="btn-primary" onclick={recover}>{recovery === "logout" ? "Retry sign out" : recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>
+        <main class="page-center"><div class="card"><p class="alert-error" role="alert">{setupError.message}</p><button type="button" class="btn-primary" onclick={recover} disabled={explicitAuth || reconciliation !== undefined}>{recovery === "logout" ? "Retry sign out" : recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>
       {:else if !$session.data?.session}{@render pageChildren?.()}
       {:else}<p>Loading...</p>{/if}
     {/snippet}

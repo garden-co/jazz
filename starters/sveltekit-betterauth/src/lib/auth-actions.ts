@@ -5,6 +5,7 @@ export interface AuthActions {
     enroll: boolean,
     request: () => Promise<{ error?: { message?: string | null } | null }>,
   ): Promise<void>;
+  signOut(): Promise<void>;
   reportFailure(cause: unknown): void;
 }
 export function setAuthActions(actions: AuthActions) {
