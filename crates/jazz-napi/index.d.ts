@@ -163,6 +163,10 @@ export declare class NapiDb {
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
+  /** Return the originating node clock before a host releases its memory runtime. */
+  foregroundTxTimeHighWater(): bigint
+  /** Merge a checked host-retained node clock before opening new local writes. */
+  seedForegroundTxTimeHighWater(highWater: bigint): void
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }

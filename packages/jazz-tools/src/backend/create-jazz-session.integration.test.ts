@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createJazzSession } from "./index.js";
 
 const app = s.defineApp({
@@ -35,6 +36,42 @@ describe("Node shared backend session", () => {
         }),
       ).rejects.toThrow("Backend admission failed (401)");
     } finally {
+      await server.stop();
+    }
+  });
+
+  it("retains the memory node clock when a failed transition reopens its previous handle", async () => {
+    const appId = randomUUID();
+    const backendSecret = "clock-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    const owner = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: { backendSecret },
+    });
+    try {
+      const previous = owner.getSnapshot();
+      // Native wall time cannot be frozen by JS timers. Seed a future native
+      // clock to make lost high-water observable even after network round trips.
+      const native = (client: typeof previous.client) =>
+        (
+          client!.db as unknown as { client: { getRuntime(): NativeRuntimeAdapter } }
+        ).client.getRuntime();
+      const floor = 1n << 62n;
+      native(previous.client).seedForegroundTxTimeHighWater(floor);
+      await expect(owner.becomeBackend({ backendSecret: "wrong-clock-secret" })).rejects.toThrow(
+        "401",
+      );
+      const restored = owner.getSnapshot();
+      expect(restored.status).toBe("ready");
+      expect(restored.account).toBe(previous.account);
+      expect(restored.client).not.toBe(previous.client);
+      expect(native(restored.client).foregroundTxTimeHighWater()).toBeGreaterThanOrEqual(floor);
+    } finally {
+      await owner.close();
       await server.stop();
     }
   });
@@ -78,6 +115,7 @@ describe("Node shared backend session", () => {
       await vi.waitFor(() => expect(owner.getSnapshot().status).toBe("transitioning"));
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(finished).toBe(false);
+      await expect(scoped.shutdown({ waitForSync: true })).rejects.toThrow(/sync|shut/i);
       expect(() => scoped.insert(app.posts, { text: "race" })).toThrow(/shut|closed/);
       await backend.db.reconnect();
       await transition;

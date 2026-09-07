@@ -4034,6 +4034,44 @@ impl NapiDb {
         }
     }
 
+    /// Return the originating node clock before a host releases its memory runtime.
+    #[napi(js_name = "foregroundTxTimeHighWater")]
+    pub fn foreground_tx_time_high_water(&self) -> napi::Result<BigInt> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let value = match db {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.foreground_tx_time_high_water()).0,
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.foreground_tx_time_high_water()).0
+            }
+        };
+        Ok(BigInt::from(value))
+    }
+
+    /// Merge a checked host-retained node clock before opening new local writes.
+    #[napi(js_name = "seedForegroundTxTimeHighWater")]
+    pub fn seed_foreground_tx_time_high_water(&self, high_water: BigInt) -> napi::Result<()> {
+        let high_water = jazz::time::TxTime(authority_epoch_from_bigint(
+            high_water,
+            "node clock high-water",
+        )?);
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.seed_foreground_tx_time_high_water(high_water))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.seed_foreground_tx_time_high_water(high_water))
+            }
+        }
+        Ok(())
+    }
+
     #[napi(js_name = "waitForPendingWrites")]
     pub fn wait_for_pending_writes(
         &self,
@@ -6792,6 +6830,57 @@ mod tests {
             parsed.target,
             jazz::db::WriteTarget::BranchView { .. }
         ));
+    }
+
+    #[test]
+    fn native_node_clock_handoff_preserves_u64_and_rejects_lossy_inputs() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column("label", ColumnType::Text))
+            .build();
+        let open = || {
+            NapiDb::open_memory_as_backend(
+                Uint8Array::from(serde_json::to_vec(&schema).unwrap()),
+                Uint8Array::from(encode_persistent_open_config(
+                    CoreAuthorSubject::for_test_bytes([0x91; 16]),
+                )),
+            )
+            .unwrap()
+        };
+        let first = open();
+        first
+            .seed_foreground_tx_time_high_water(BigInt::from(u64::MAX - 1))
+            .unwrap();
+        let high_water = first.foreground_tx_time_high_water().unwrap();
+        assert_eq!(high_water.get_u64(), (false, u64::MAX - 1, true));
+        first.close().unwrap();
+        let second = open();
+        second
+            .seed_foreground_tx_time_high_water(high_water)
+            .unwrap();
+        second
+            .seed_foreground_tx_time_high_water(BigInt::from(1_u64))
+            .unwrap();
+        assert_eq!(
+            second.foreground_tx_time_high_water().unwrap().get_u64(),
+            (false, u64::MAX - 1, true)
+        );
+        for invalid in [
+            BigInt {
+                sign_bit: true,
+                words: vec![1],
+            },
+            BigInt {
+                sign_bit: false,
+                words: vec![0, 1],
+            },
+        ] {
+            assert!(second.seed_foreground_tx_time_high_water(invalid).is_err());
+        }
+        assert_eq!(
+            second.foreground_tx_time_high_water().unwrap().get_u64(),
+            (false, u64::MAX - 1, true)
+        );
+        second.close().unwrap();
     }
 
     #[test]

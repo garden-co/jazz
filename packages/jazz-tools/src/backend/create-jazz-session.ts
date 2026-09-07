@@ -106,6 +106,8 @@ class NodeUserRuntimeSource extends RuntimeSource {
     const scope = createHash("sha256")
       .update(
         JSON.stringify([
+          accountRegistry(this.account),
+          this.host.env ?? "dev",
           this.account.id,
           this.account.identity.issuer,
           this.account.identity.subject,
@@ -163,6 +165,7 @@ export async function createJazzSession(
   }
   if (!config.app) throw new Error("Node createJazzSession requires app");
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
+  const memoryClocks = new WeakMap<AccountHandle, bigint | undefined>();
   const accounts = await prepareAccountManager({
     appId: config.appId,
     registry,
@@ -225,10 +228,27 @@ export async function createJazzSession(
           },
         });
       }
+      const memoryClock =
+        config.driver.type === "memory"
+          ? {
+              initialHighWater: memoryClocks.get(account),
+              closed(highWater: bigint) {
+                memoryClocks.set(account, highWater);
+              },
+            }
+          : undefined;
+      if (memoryClock) {
+        if (memoryClocks.has(account) && memoryClock.initialHighWater === undefined) {
+          throw new Error("Backend memory node cannot reopen without its completed clock handoff");
+        }
+        // A failed/partial close must never reuse a stale earlier high-water.
+        memoryClocks.set(account, undefined);
+      }
       // The class remains internal; only a validated opaque account can reach it.
       const context = new JazzContext(
         { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
         uuidBytes(backend.nodeId),
+        memoryClock,
       );
       let db: Db;
       let client: SharedJazzClient;
