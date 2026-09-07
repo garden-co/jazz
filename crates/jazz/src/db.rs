@@ -2175,6 +2175,11 @@ struct CoverageGroup {
     policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    /// #2653: one generated opening awaiting semantic transport acceptance.
+    /// Retry its exact receipt before advancing this group again.
+    pending_initial_update: Option<(SubscriptionKey, SyncMessage)>,
+    /// Remaining recipients of one generated incremental publication.
+    pending_incremental_updates: VecDeque<(SubscriptionKey, SyncMessage)>,
     /// Claim revision whose replacement opening reset is currently being
     /// delivered. A retry of that same revision resumes this per-subscriber
     /// cursor; a newer admission revision starts every live usage over.

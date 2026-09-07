@@ -1280,6 +1280,8 @@ where
                             // revocation) from the new upstream usage.
                             group.initialized = false;
                             group.pending_initial_subscribers = group.subscribers.clone();
+                            group.pending_initial_update = None;
+                            group.pending_incremental_updates.clear();
                             upstream_replacements.push((
                                 coverage.clone(),
                                 replaced_coverage_by_new
@@ -1462,6 +1464,8 @@ where
                     // a newer revision must re-open them all.
                     group.initialized = false;
                     group.pending_initial_subscribers = group.subscribers.clone();
+                    group.pending_initial_update = None;
+                    group.pending_incremental_updates.clear();
                     group.pending_claim_refresh_revision = Some(current_revision);
                 }
                 group
@@ -4536,6 +4540,8 @@ where
                                         },
                                         subscribers: BTreeSet::new(),
                                         pending_initial_subscribers: BTreeSet::new(),
+                                        pending_initial_update: None,
+                                        pending_incremental_updates: VecDeque::new(),
                                         pending_claim_refresh_revision: None,
                                         initialized: false,
                                         authority_result_subscription,
@@ -4686,6 +4692,10 @@ where
                                 if let Some(group) = coverage_groups.get_mut(&coverage) {
                                     group.subscribers.remove(&subscription);
                                     group.pending_initial_subscribers.remove(&subscription);
+                                    group.pending_incremental_updates.retain(|(recipient, _)| *recipient != subscription);
+                                    if group.pending_initial_update.as_ref().is_some_and(|(pending, _)| *pending == subscription) {
+                                        group.pending_initial_update = None;
+                                    }
                                     if group.upstream_opts.propagate_upstream {
                                         if let Some(owner) = self
                                             .relay_upstream_subscription_owners
@@ -5151,8 +5161,13 @@ where
                                 authority_result_key,
                             );
                         }
-                        let pending_initial =
-                            std::mem::take(&mut group.pending_initial_subscribers);
+                        let pending_initial = if group.pending_incremental_updates.is_empty() {
+                            group.pending_initial_subscribers.clone()
+                        } else {
+                            // Finish an earlier publication before opening a new sibling.
+                            serve_again = true;
+                            BTreeSet::new()
+                        };
                         let serving_initial = !pending_initial.is_empty();
                         if serving_initial {
                             let mut established_subscribers = group
@@ -5160,7 +5175,19 @@ where
                                 .difference(&pending_initial)
                                 .copied()
                                 .collect::<BTreeSet<_>>();
-                            for subscription in pending_initial {
+                            let retained_subscription = group.pending_initial_update.as_ref().map(|(subscription, _)| *subscription);
+                            let mut initial_order = pending_initial.iter().copied().collect::<Vec<_>>();
+                            // A new sibling may sort before the stalled recipient. Its
+                            // opening cannot overtake an already-generated publication.
+                            initial_order.sort_by_key(|subscription| Some(*subscription) != retained_subscription);
+                            for subscription in initial_order {
+                            let update = if let Some((pending_subscription, update)) = &group.pending_initial_update {
+                                debug_assert_eq!(*pending_subscription, subscription);
+                                // Inbound writes may have arrived while this exact opening
+                                // waited for capacity. Publish their delta on a later turn.
+                                serve_again = true;
+                                update.clone()
+                            } else {
                             let cloning_existing = group.initialized
                                 || peer.has_maintained_subscription(group_subscription);
                             let reconciled = if cloning_existing {
@@ -5258,6 +5285,10 @@ where
                                         group_subscription,
                                         &mut sibling_update,
                                     );
+                                    stamp_subscriber_opening_state(&self.node, peer, &mut sibling_update);
+                                    group.pending_incremental_updates.push_back((sibling, sibling_update));
+                                }
+                                while let Some((sibling, sibling_update)) = group.pending_incremental_updates.front().cloned() {
                                     let receipt =
                                         scope_purposes.get(&sibling).and_then(|purpose| {
                                             aggregate_authorization_scope_receipt_for_view(
@@ -5270,14 +5301,21 @@ where
                                                 &sibling_update,
                                             )
                                         });
-                                    send_subscriber_with_sync_context(
+                                    if let Err(error) = send_prepared_subscriber_with_sync_context(
                                         &self.node,
                                         peer,
                                         self.transport.as_mut(),
                                         &self.local_fate_routes,
                                         &self.downstream_fates,
                                         sibling_update,
-                                    )?;
+                                    ) {
+                                        if error.code == ErrorCode::Backpressure {
+                                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                            return Ok(true);
+                                        }
+                                        return Err(error);
+                                    }
+                                    group.pending_incremental_updates.pop_front();
                                     if let Some((subscription, receipt)) = receipt {
                                         queue_direct_control(
                                             &mut self.pending_control_responses,
@@ -5391,6 +5429,12 @@ where
                                 group_subscription,
                                 &mut update,
                             );
+                                stamp_subscriber_opening_state(&self.node, peer, &mut update);
+                                update
+                            };
+                            // Keep the exact generated opening until the semantic transport
+                            // accepts it. Rehydrating on retry would advance its receipt.
+                            group.pending_initial_update = Some((subscription, update.clone()));
                             self.last_resume_bytes =
                                 Some(serialized_sync_message_len(&update));
                             let receipt = scope_purposes.get(&subscription).and_then(|purpose| {
@@ -5404,14 +5448,22 @@ where
                                     &update,
                                 )
                             });
-                            send_subscriber_with_sync_context(
+                            if let Err(error) = send_prepared_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
                                 update,
-                            )?;
+                            ) {
+                                if error.code == ErrorCode::Backpressure {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                    return Ok(true);
+                                }
+                                return Err(error);
+                            }
+                            group.pending_initial_update = None;
+                            group.pending_initial_subscribers.remove(&subscription);
                             if let Some((subscription, receipt)) = receipt {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     SyncMessage::AuthorizationScopeReceipt {
@@ -5429,6 +5481,7 @@ where
                         if serving_initial {
                             continue;
                         }
+                        if group.pending_incremental_updates.is_empty() {
                         let update_result = {
                             let mut node = self.node.lock().await;
                             let mut node = node.scoped_active_session_claims(
@@ -5518,6 +5571,12 @@ where
                                     group_subscription,
                                     &mut update,
                                 );
+                                stamp_subscriber_opening_state(&self.node, peer, &mut update);
+                                group.pending_incremental_updates.push_back((subscription, update));
+                            }
+                        }
+                        }
+                        while let Some((subscription, update)) = group.pending_incremental_updates.front().cloned() {
                                 let receipt =
                                     scope_purposes.get(&subscription).and_then(|purpose| {
                                         aggregate_authorization_scope_receipt_for_view(
@@ -5535,14 +5594,21 @@ where
                                     "subscriber send group delta {}",
                                     summarize_sync_message(&update)
                                 ));
-                                send_subscriber_with_sync_context(
+                                if let Err(error) = send_prepared_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
                                     &self.local_fate_routes,
                                     &self.downstream_fates,
                                     update,
-                                )?;
+                                ) {
+                                    if error.code == ErrorCode::Backpressure {
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                        return Ok(true);
+                                    }
+                                    return Err(error);
+                                }
+                                group.pending_incremental_updates.pop_front();
                                 if let Some((subscription, receipt)) = receipt {
                                     queue_direct_control(&mut self.pending_control_responses,
                                         SyncMessage::AuthorizationScopeReceipt {
@@ -5554,7 +5620,6 @@ where
                                     return Ok(true);
                                 }
                                 sent_view_update = true;
-                            }
                         }
                     }
                     *serve_dirty = serve_again;
@@ -6509,6 +6574,16 @@ fn rollback_rejected_subscriber_admission<S>(
     };
     group.subscribers.remove(&subscription);
     group.pending_initial_subscribers.remove(&subscription);
+    group
+        .pending_incremental_updates
+        .retain(|(recipient, _)| *recipient != subscription);
+    if group
+        .pending_initial_update
+        .as_ref()
+        .is_some_and(|(pending, _)| *pending == subscription)
+    {
+        group.pending_initial_update = None;
+    }
     if group.upstream_opts.propagate_upstream {
         if let Some(owner) = relay_upstream_subscription_owners.borrow_mut().get_mut(&(
             group.upstream_subscription,
@@ -6847,9 +6922,27 @@ pub(super) fn send_subscriber_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    stamp_subscriber_opening_state(node, peer, &mut message);
+    send_prepared_subscriber_with_sync_context(
+        node,
+        peer,
+        transport,
+        local_fate_routes,
+        downstream_fates,
+        message,
+    )
+}
+
+fn stamp_subscriber_opening_state<S>(
+    node: &SharedNodeState<S>,
+    peer: &PeerState,
+    message: &mut SyncMessage,
+) where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     // A selected upstream source does not itself make this a strict read.
     // Local-first still publishes cached inputs while that source is pending.
-    if let SyncMessage::ViewUpdate(payload) = &mut message
+    if let SyncMessage::ViewUpdate(payload) = message
         && node.borrow().client_relay_scope().is_some()
         && peer.subscription_awaits_selected_authority_source(payload.subscription)
     {
@@ -6869,6 +6962,21 @@ where
             payload.peer_payload_inventory.opening_pending = true;
         }
     }
+}
+
+/// A retained publication already owns its opening/authorization envelope.
+/// Retry must not restamp it from a newer authority state before acceptance.
+fn send_prepared_subscriber_with_sync_context<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    local_fate_routes: &LocalFateRoutes,
+    downstream_fates: &PendingDownstreamFates,
+    message: SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     let mut pending_tx_ids = BTreeSet::new();
     if let SyncMessage::ViewUpdate(payload) = &message {
         for carrier in &payload.version_carriers {

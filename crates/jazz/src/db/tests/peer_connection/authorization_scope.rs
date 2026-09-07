@@ -204,16 +204,219 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
 /// semantic opening; the public client cannot select that capacity boundary.
 #[test]
 fn initial_local_opening_retries_after_transport_backpressure() {
+    assert_initial_opening_backpressure(false, false, false);
+}
+
+/// Alice receives Bob's exact retained opening before a later committed row.
+#[test]
+fn retained_local_opening_precedes_writes_arriving_during_backpressure() {
+    assert_initial_opening_backpressure(true, false, false);
+}
+
+/// Alice cancels while Bob's initial opening is unaccepted; it must not leak later.
+#[test]
+fn cancelled_local_opening_is_not_sent_after_backpressure() {
+    assert_initial_opening_backpressure(false, true, false);
+}
+
+/// Bob's shared evaluator retries only Alice's unaccepted sibling opening.
+/// The internal sibling key models the shared-group path, as claim-refresh tests do.
+#[test]
+fn initial_group_openings_do_not_replay_accepted_siblings_after_backpressure() {
+    assert_initial_opening_backpressure(false, false, true);
+}
+
+/// Alice cancels her stalled opening while Bob keeps a sibling usage alive.
+#[test]
+fn cancelled_group_opening_does_not_block_or_replace_its_live_sibling() {
+    assert_initial_opening_backpressure(false, true, true);
+}
+
+fn assert_initial_opening_backpressure(
+    write_while_pending: bool,
+    cancel_while_pending: bool,
+    with_sibling: bool,
+) {
     struct RejectFirstView {
         inner: Box<dyn Transport>,
         rejected: Rc<Cell<bool>>,
         accepted: Rc<Cell<usize>>,
+        rejected_message: Option<SyncMessage>,
+        reject_at: usize,
+        cancelled_opening: bool,
     }
     impl Transport for RejectFirstView {
         fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
             if matches!(message, SyncMessage::ViewUpdate(_)) {
-                if !self.rejected.replace(true) {
+                if self.accepted.get() + 1 == self.reject_at && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
                     return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    if self.cancelled_opening {
+                        let (SyncMessage::ViewUpdate(actual), SyncMessage::ViewUpdate(cancelled)) =
+                            (&message, &expected)
+                        else {
+                            unreachable!()
+                        };
+                        assert_ne!(
+                            actual.subscription, cancelled.subscription,
+                            "a cancelled opening must not be sent for the surviving sibling"
+                        );
+                    } else {
+                        assert_eq!(
+                            message, expected,
+                            "retry retains the exact opening generation and row occurrences"
+                        );
+                    }
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            rejected_message: None,
+            reject_at: if with_sibling && !cancel_while_pending {
+                2
+            } else {
+                1
+            },
+            cancelled_opening: cancel_while_pending,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    if with_sibling {
+        foreground.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        let mut second = attachment.subscription();
+        second.read_view.id = uuid::Uuid::from_bytes([0xd7; 16]);
+        let mut connection = subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!()
+        };
+        let coverage = state.served[&attachment.subscription()].clone();
+        state.served.insert(second, coverage.clone());
+        let group = state.coverage_groups.get_mut(&coverage).unwrap();
+        group.subscribers.insert(second);
+        group.pending_initial_subscribers.insert(second);
+        state
+            .peer
+            .set_subscription_policy_binding(second, group.policy_binding.clone());
+    }
+    let later = row(0x7a);
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        let previously_rejected = rejected.get();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+        if !previously_rejected && rejected.get() {
+            if write_while_pending {
+                relay
+                    .insert_with_id_attributed(
+                        author,
+                        "todos",
+                        later,
+                        cells("later", false, author),
+                    )
+                    .unwrap();
+            }
+            if cancel_while_pending {
+                foreground.detach_query(attachment.clone());
+            }
+        }
+    }
+    assert!(rejected.get(), "fixture must reject the initial ViewUpdate");
+    if cancel_while_pending {
+        assert_eq!(
+            accepted.get(),
+            usize::from(with_sibling),
+            "only the surviving sibling may receive an opening after cancellation"
+        );
+        return;
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the unsent initial Local opening must retry after capacity returns"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        if write_while_pending {
+            vec![cached, later]
+        } else {
+            vec![cached]
+        }
+    );
+    assert_eq!(
+        accepted.get(),
+        if write_while_pending || with_sibling {
+            2
+        } else {
+            1
+        },
+        "retry accepts one initial opening and only the subsequent delta"
+    );
+    foreground.detach_query(attachment);
+}
+
+/// Alice's incremental Local update survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn incremental_local_update_retries_after_transport_backpressure() {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+        seen: usize,
+        rejected_message: Option<SyncMessage>,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                self.seen += 1;
+                if self.seen == 2 && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
+                    return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    assert_eq!(
+                        message, expected,
+                        "retry preserves the exact incremental publication"
+                    );
                 }
                 self.accepted.set(self.accepted.get() + 1);
             }
@@ -240,6 +443,8 @@ fn initial_local_opening_retries_after_transport_backpressure() {
     let _subscriber = relay.accept_subscriber_with_claims(
         Box::new(RejectFirstView {
             inner: down,
+            seen: 0,
+            rejected_message: None,
             rejected: rejected.clone(),
             accepted: accepted.clone(),
         }),
@@ -257,23 +462,35 @@ fn initial_local_opening_retries_after_transport_backpressure() {
         .unwrap();
     for _ in 0..16 {
         foreground.tick().unwrap();
+        relay.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    let later = row(0x7a);
+    relay
+        .insert_with_id_attributed(author, "todos", later, cells("later", false, author))
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
         if let Err(error) = block_on(relay.tick()) {
             assert_eq!(error.code, ErrorCode::Backpressure);
         }
     }
-    assert!(rejected.get(), "fixture must reject the initial ViewUpdate");
+    assert!(
+        rejected.get(),
+        "fixture must reject the incremental ViewUpdate"
+    );
     assert!(
         foreground.query_attachment_is_covered(&attachment),
-        "the unsent initial Local opening must retry after capacity returns"
+        "the established Local attachment remains covered while its incremental update retries"
     );
     assert_eq!(
         row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
-        vec![cached]
+        vec![cached, later]
     );
     assert_eq!(
         accepted.get(),
-        1,
-        "retry must accept exactly one initial opening"
+        2,
+        "retry accepts one initial opening and one incremental update"
     );
     foreground.detach_query(attachment);
 }
