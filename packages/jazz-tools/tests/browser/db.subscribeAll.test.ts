@@ -902,29 +902,52 @@ describe("internal subscription delta browser integration", () => {
       }),
     );
 
+    // Observe existing txId promises only; fulfillment does not prove Local durability.
+    // Adding Local waits here would
+    // advance transport and could hide the cold-hop delivery failure (#2621).
+    const txIdStates: Record<string, "pending" | "fulfilled" | "rejected"> = {};
+    function observeTxId<T extends { txId: Promise<unknown> }>(label: string, write: T): T {
+      txIdStates[label] = "pending";
+      void write.txId.then(
+        () => {
+          txIdStates[label] = "fulfilled";
+        },
+        () => {
+          txIdStates[label] = "rejected";
+        },
+      );
+      return write;
+    }
+
     const {
       value: { id: orgAId },
-    } = db.insert(orgs, { name: "Org A" });
+    } = observeTxId("orgA", db.insert(orgs, { name: "Org A" }));
     const {
       value: { id: orgBId },
-    } = db.insert(orgs, { name: "Org B" });
+    } = observeTxId("orgB", db.insert(orgs, { name: "Org B" }));
     const {
       value: { id: teamAId },
-    } = db.insert(teams, {
-      name: "Team A",
-      org_id: orgAId,
-      parent_id: undefined,
-    });
+    } = observeTxId(
+      "teamA",
+      db.insert(teams, {
+        name: "Team A",
+        org_id: orgAId,
+        parent_id: undefined,
+      }),
+    );
     const {
       value: { id: teamBId },
-    } = db.insert(teams, {
-      name: "Team B",
-      org_id: orgBId,
-      parent_id: undefined,
-    });
+    } = observeTxId(
+      "teamB",
+      db.insert(teams, {
+        name: "Team B",
+        org_id: orgBId,
+        parent_id: undefined,
+      }),
+    );
     const {
       value: { id: userId },
-    } = db.insert(users, { name: "Mover", team_id: teamAId });
+    } = observeTxId("user", db.insert(users, { name: "Mover", team_id: teamAId }));
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -943,7 +966,9 @@ describe("internal subscription delta browser integration", () => {
         return latestAll.length === 1 && latestAll[0]?.id === teamAId;
       },
       4000,
-      "expected initial team hop result",
+      () =>
+        "expected initial team hop result; " +
+        `txIdStates=${JSON.stringify(txIdStates)}; history=${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
 
     await db.update(users, userId, { team_id: teamBId });
