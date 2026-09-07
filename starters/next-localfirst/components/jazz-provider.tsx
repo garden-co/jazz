@@ -22,6 +22,16 @@ function SessionFallback() {
   );
 }
 
+function SessionContent({ children }: React.PropsWithChildren) {
+  const { error } = useJazzSession();
+  return (
+    <>
+      {error && <p role="alert">{error.message}</p>}
+      {children}
+    </>
+  );
+}
+
 export function JazzProvider({ children }: React.PropsWithChildren) {
   if (!APP_ID || !SERVER_URL) {
     const missing = [
@@ -40,7 +50,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
       config={{ appId: APP_ID, serverUrl: SERVER_URL, initial: "local-first" }}
       fallback={<SessionFallback />}
     >
-      {children}
+      <SessionContent>{children}</SessionContent>
     </JazzSessionProvider>
   );
 }

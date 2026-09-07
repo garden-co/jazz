@@ -36,8 +36,12 @@ test("signup → add todo → reload → todo persists", async ({ page }) => {
   const todo = `Buy milk ${runId}`;
 
   await page.goto("/");
+  await waitForTodoApp(page);
+  const localTodo = `Before signup ${runId}`;
+  await addTodo(page, localTodo);
   await signUp(page, email, password, "Alice");
   await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   await addTodo(page, todo);
 
   await page.reload();
@@ -56,7 +60,10 @@ test("signin with existing account shows todos", async ({ page }) => {
   await waitForTodoApp(page);
   await addTodo(page, todo);
 
-  await page.goto("/");
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await waitForTodoApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(0, { timeout: TIMEOUT });
+  await signIn(page, email, password);
   await waitForTodoApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });

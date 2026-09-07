@@ -1,4 +1,5 @@
-import { prepareAccountConfig } from "./account.js";
+import { sessionConfig } from "./account.js";
+import { createJazzSession } from "jazz-tools/client";
 import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
 
@@ -43,15 +44,23 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   return ordered;
 }
 
+// #region context-setup-ts-client
+async function openLocalFirst(config?: Partial<DbConfig>) {
+  const session = await createJazzSession(sessionConfig(config));
+  // Read the current client from session.getSnapshot(); close the session on teardown.
+  return session;
+}
+// #endregion context-setup-ts-client
+
 export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  const resolvedConfig = await prepareAccountConfig(config);
-
-  // #region context-setup-ts-client
-  const db = await createDb(resolvedConfig);
-  // #endregion context-setup-ts-client
+  // Explicit fixed handles remain supported for advanced callers and replica tests.
+  const session = config?.account ? undefined : await openLocalFirst(config);
+  const db = config?.account
+    ? await createDb({ ...config, appId: config.appId!, account: config.account })
+    : session!.getSnapshot().client!.db;
   let sessionUserId = db.getAuthState().session?.user.account ?? null;
 
   // Build DOM
@@ -199,7 +208,8 @@ export async function startApp(
     destroy: async () => {
       unsubscribe();
       stopAuthSync();
-      await db.shutdown();
+      if (session) await session.close();
+      else await db.shutdown();
       container.innerHTML = "";
     },
   };

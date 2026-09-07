@@ -1,10 +1,8 @@
 import * as React from "react";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, JazzSessionProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { AuthSessionExamples } from "./AuthSessionExamples.js";
-void AuthSessionExamples;
 import { TodoList } from "./TodoList.js";
-import { prepareAccountConfig } from "./account.js";
+import { sessionConfig } from "./account.js";
 
 type AppProps = {
   config?: Partial<DbConfig>;
@@ -13,34 +11,31 @@ type AppProps = {
 };
 
 // #region context-setup-react
-export function App({ config, fallback, children }: AppProps = {}) {
-  const [resolved, setResolved] = React.useState<DbConfig>();
-  const [error, setError] = React.useState<Error>();
-  React.useEffect(() => {
-    let cancelled = false;
-    // Keep the active provider while preparing. Equivalent inline configs
-    // retain the provider registry key and must not tear down its context.
-    setError(undefined);
-    prepareAccountConfig(config).then(
-      (value) => {
-        if (!cancelled) setResolved(value);
-      },
-      (cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [config]);
-  if (error) throw error;
-  if (!resolved) return <>{fallback ?? <p>Loading...</p>}</>;
+function LocalFirstApp({ config, fallback, children }: AppProps) {
   return (
-    <JazzProvider config={resolved} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzSessionProvider config={sessionConfig(config)} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
       {children}
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion context-setup-react
+
+export function App(props: AppProps = {}) {
+  // Advanced callers can still supply a fixed opaque handle, for example to
+  // exercise two independent replicas in the browser integration tests.
+  const { config, fallback, children } = props;
+  if (config?.account)
+    return (
+      <JazzProvider
+        config={{ appId: config.appId!, env: "dev", ...config, account: config.account }}
+        fallback={fallback ?? <p>Loading...</p>}
+      >
+        <h1>Todos</h1>
+        <TodoList />
+        {children}
+      </JazzProvider>
+    );
+  return <LocalFirstApp {...props} />;
+}

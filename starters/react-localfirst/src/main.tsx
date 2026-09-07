@@ -28,8 +28,13 @@ function SessionFallback() {
 }
 
 function AccountApp() {
-  const { account, restoreLocalFirst } = useJazzSession();
-  return <App account={account!} onRestore={restoreLocalFirst} />;
+  const { account, restoreLocalFirst, error } = useJazzSession();
+  return (
+    <>
+      {error && <p role="alert">{error.message}</p>}
+      <App account={account!} onRestore={restoreLocalFirst} />
+    </>
+  );
 }
 
 createRoot(document.getElementById("root")!).render(

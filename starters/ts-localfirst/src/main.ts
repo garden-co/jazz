@@ -43,6 +43,12 @@ async function boot() {
       const { status, client, account, error } = activeSession.getSnapshot();
       if (status === "ready" && client && account) {
         unmount = mountApp(root, client.db, account, activeSession.restoreLocalFirst);
+        if (error) {
+          const alert = document.createElement("p");
+          alert.setAttribute("role", "alert");
+          alert.textContent = error.message;
+          root.prepend(alert);
+        }
       } else {
         root.textContent = error?.message ?? "Loading...";
         if (error) {
