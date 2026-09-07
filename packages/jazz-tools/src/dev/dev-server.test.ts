@@ -1,9 +1,15 @@
 import { access } from "node:fs/promises";
 import { JazzServer } from "jazz-napi";
 import { afterEach, describe, expect, it } from "vitest";
+import { WebSocket } from "undici";
 import { schema as s } from "../index.js";
+import { JazzClient } from "../runtime/client.js";
+import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { getAvailablePort } from "./test-helpers.js";
+
+const maybeIt = hasJazzWasmBuild() ? it : it.skip;
+const previousWebSocket = globalThis.WebSocket;
 
 describe("dev-server re-export compatibility", () => {
   it("exports startLocalJazzServer and deploy from jazz-tools/testing path", async () => {
@@ -53,15 +59,51 @@ describe("startLocalJazzServer via JazzServer", () => {
     expect(healthResponse.ok).toBe(true);
   }, 30_000);
 
-  it("encodes a typed app schema during startup", async () => {
-    const port = await getAvailablePort();
-    const app = s.defineApp({
-      todos: s.table({ title: s.string(), done: s.boolean() }),
-    });
-    handle = await startLocalJazzServer({ port, schema: app });
+  maybeIt(
+    "boots a client with app, query, and raw schema sources",
+    async () => {
+      globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+      const app = s.defineApp({
+        todos: s.table({ title: s.string(), done: s.boolean() }),
+      });
+      const sources = [app, { _schema: app.wasmSchema }, app.wasmSchema] as const;
 
-    expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
-  }, 30_000);
+      try {
+        for (const source of sources) {
+          const server = await startLocalJazzServer({
+            port: await getAvailablePort(),
+            inMemory: true,
+            allowLocalFirstAuth: true,
+            schema: source,
+          });
+          const runtime = await createWasmRuntime(app.wasmSchema, {
+            appId: server.appId,
+            peerId: `startup-schema-${Math.random()}`,
+          });
+          const client = JazzClient.connectWithRuntime(runtime, {
+            appId: server.appId,
+            schema: app.wasmSchema,
+            serverUrl: server.url,
+          });
+
+          try {
+            client.connectTransport(server.url, { admin_secret: server.adminSecret });
+            const inserted = client.insert("todos", {
+              title: { type: "Text", value: "schema-source startup" },
+              done: { type: "Boolean", value: false },
+            });
+            await expect(inserted.wait({ tier: "edge" })).resolves.toBeDefined();
+          } finally {
+            await client.shutdown();
+            await server.stop();
+          }
+        }
+      } finally {
+        globalThis.WebSocket = previousWebSocket;
+      }
+    },
+    30_000,
+  );
 
   it("stops the server cleanly", async () => {
     const port = await getAvailablePort();
