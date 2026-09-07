@@ -266,20 +266,25 @@ export function patchInstalledJazzNapi(
   harnessFingerprint: string,
   readFingerprint = nativeArtifactFingerprint,
 ): void {
+  const dirsNeedingRepair = installedJazzNapiDirs(appDir).filter(
+    (dir) => !installedNapiIsUsable(dir, harnessFingerprint, readFingerprint),
+  );
+  if (dirsNeedingRepair.length === 0) return;
+
   const napiSourceDir = path.join(repoRoot, "crates/jazz-napi");
-  if (!fs.existsSync(napiSourceDir)) return;
-  const binaries = fs
-    .readdirSync(napiSourceDir)
-    .filter((f) => f.endsWith(".node"))
-    .map((f) => path.join(napiSourceDir, f));
+  const binaries = fs.existsSync(napiSourceDir)
+    ? fs
+        .readdirSync(napiSourceDir)
+        .filter((f) => f.endsWith(".node"))
+        .map((f) => path.join(napiSourceDir, f))
+    : [];
   if (binaries.length === 0) {
     throw new Error(
       "No Jazz NAPI binary is available to repair the packed starter candidate. Build or restore matching Jazz artifacts before running starter E2E.",
     );
   }
 
-  for (const dir of installedJazzNapiDirs(appDir)) {
-    if (installedNapiIsUsable(dir, harnessFingerprint, readFingerprint)) continue;
+  for (const dir of dirsNeedingRepair) {
     for (const src of binaries) {
       assertNapiBindingMatchesHarness(
         readFingerprint(src),

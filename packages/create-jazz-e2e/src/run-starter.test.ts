@@ -143,6 +143,31 @@ test("copies a workspace NAPI binary only after its actual binding matches", (t)
   assert.equal(fs.existsSync(path.join(candidateDir, path.basename(source))), true);
 });
 
+test("leaves a valid packed NAPI candidate alone when the workspace has no binary", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-packed-only-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "e".repeat(64);
+  const candidateDir = path.join(root, "app", "node_modules", "jazz-napi");
+  writeNapiFingerprint(candidateDir, fingerprint);
+  fs.writeFileSync(path.join(candidateDir, "jazz-napi.fake.node"), "fixture");
+
+  assert.doesNotThrow(() =>
+    patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, () => fingerprint),
+  );
+});
+
+test("rejects a candidate needing repair when no workspace NAPI binary exists", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-no-repair-source-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fingerprint = "e".repeat(64);
+  writeNapiFingerprint(path.join(root, "app", "node_modules", "jazz-napi"), fingerprint);
+
+  assert.throws(
+    () => patchInstalledJazzNapi(path.join(root, "app"), root, fingerprint, () => fingerprint),
+    /No Jazz NAPI binary is available to repair the packed starter candidate/,
+  );
+});
+
 test("repairs a NAPI candidate reached through pnpm's package symlink", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-e2e-napi-symlink-repair-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
