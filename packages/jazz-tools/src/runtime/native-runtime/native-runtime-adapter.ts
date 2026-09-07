@@ -34,6 +34,7 @@ import type {
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   SYSTEM_SESSION_ISSUER,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   isReservedJazzIssuer,
@@ -232,6 +233,7 @@ type NativeDb = {
     openTransactionId?: OpenTransactionId,
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
+  admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -3343,6 +3345,24 @@ export class NativeRuntimeAdapter implements Runtime {
       case "session-authority":
         return JSON.stringify([bytesKey(context.identity), canonicalJson(session?.claims ?? {})]);
     }
+  }
+
+  admitLocalFirstSession(session: Session, token: string, appId: string): void {
+    if (
+      !this.trustedBackend ||
+      session.issuer !== LOCAL_FIRST_JWT_ISSUER ||
+      !session.account_id ||
+      !isTrustedReservedSession(session, trustedReservedSessionToken(session))
+    ) {
+      throw new Error("Local-first native admission requires a verified account session");
+    }
+    if (!this.db.admitLocalFirstSession)
+      throw new Error("Native runtime lacks local-first session admission");
+    this.db.admitLocalFirstSession(
+      token,
+      appId,
+      new TextDecoder().decode(authorBytesForSession(session)),
+    );
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {

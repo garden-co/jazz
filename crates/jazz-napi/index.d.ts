@@ -111,6 +111,7 @@ export declare class NapiDb {
    * map is shared per author; concurrent delegated requests must instead
    * capture claims with prepareQueryAsync/prepareRelationQueryAsync.
    */
+  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
    * Materialize a prepared relation snapshot, optionally through an open

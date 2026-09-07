@@ -20,6 +20,12 @@ import {
 import type { Session } from "../runtime/context.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
+// Only verified requests that completed account admission receive this capability.
+const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
+export function verifiedLocalFirstRequestProof(session: Session) {
+  return localFirstProofs.get(session);
+}
+
 export interface BackendRequestAuthConfig {
   appId: string;
   /** Canonical core registry required by public request-derived contexts. */
@@ -473,7 +479,9 @@ export async function resolveRequestSession(
     if (session.user_id !== verifiedUserId) {
       throw new Error("Invalid local-first identity proof");
     }
-    return admit(session);
+    const admitted = await admit(session);
+    localFirstProofs.set(admitted, { token, appId: config.appId });
+    return admitted;
   }
 
   const session = requireJwtSession(payload);

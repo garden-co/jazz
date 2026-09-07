@@ -20,7 +20,7 @@ import {
   type SchemaSourceInput,
   type WasmSchemaSource,
 } from "../schema-source.js";
-import { resolveRequestSession } from "./request-auth.js";
+import { resolveRequestSession, verifiedLocalFirstRequestProof } from "./request-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -123,6 +123,16 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 
   get currentRuntime(): FlushableRuntime | undefined {
     return this.runtime;
+  }
+
+  admitSession(session: Session): void {
+    this.assertOpen();
+    const proof = verifiedLocalFirstRequestProof(session);
+    if (!proof) return;
+    if (proof.appId !== this.config.appId || !(this.runtime instanceof NativeRuntimeAdapter)) {
+      throw new Error("Local-first request proof does not match the backend runtime");
+    }
+    this.runtime.admitLocalFirstSession(session, proof.token, this.config.appId);
   }
 
   override createClient({
@@ -502,6 +512,7 @@ export class JazzContext {
     backendScoped = false,
     backendReads = false,
   ): Db {
+    if (session) this.coreSource.admitSession(session);
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
