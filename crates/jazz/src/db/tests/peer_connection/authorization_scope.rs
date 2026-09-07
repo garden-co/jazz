@@ -14,6 +14,190 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+/// Alice's foreground receives Bob's persistent owner's truthful Local answer
+/// after cold storage resumes, without an authority or unsolicited polling.
+/// This covers host callback progress, not dependence on one specific wake:
+/// deferred scheduler callbacks may also resume cold query work.
+/// Alice --Local attachment--> Bob --cold storage wake--> owner tick --> Alice.
+/// This is internal because the public client harness cannot suspend storage or
+/// constrain owner turns to the host's actual scheduler/transport callbacks.
+#[test]
+fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct HostWake {
+        owner: usize,
+        queue: Arc<Mutex<VecDeque<usize>>>,
+    }
+    impl HostWake {
+        fn enqueue(&self) {
+            self.queue.lock().unwrap().push_back(self.owner);
+        }
+    }
+    impl std::task::Wake for HostWake {
+        fn wake(self: Arc<Self>) {
+            self.enqueue();
+        }
+    }
+    impl TickScheduler for HostWake {
+        fn schedule_tick(&self, _: TickUrgency) {
+            self.enqueue();
+        }
+        fn schedule_tick_after(&self, _: u64) {
+            panic!("offline Local delivery must not require a protocol retry timer");
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(Waker::from(Arc::new(self.clone())))
+        }
+    }
+    struct DeliveringTransport {
+        inner: Box<dyn Transport>,
+        receiver: HostWake,
+    }
+    impl Transport for DeliveringTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.inner.send(message)?;
+            self.receiver.enqueue();
+            Ok(())
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+
+    for seed_cache in [false, true] {
+        let schema = schema_with_explicit_public_read();
+        let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&refs);
+        let eviction = storage.clone();
+        let relay = block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x74; 16]),
+                author,
+            },
+        )))
+        .unwrap();
+        relay.set_relay_authority_session_owner_for_test();
+        let cached = row(0x75);
+        if seed_cache {
+            relay
+                .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+                .unwrap();
+        }
+        let foreground = open_db(0x76, author, &schema);
+        foreground.set_non_durable_client();
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let wakes = [
+            HostWake {
+                owner: 0,
+                queue: queue.clone(),
+            },
+            HostWake {
+                owner: 1,
+                queue: queue.clone(),
+            },
+        ];
+        relay.set_tick_scheduler(Some(Rc::new(wakes[0].clone())));
+        foreground.set_tick_scheduler(Some(Rc::new(wakes[1].clone())));
+        let (up, down) = duplex();
+        let _upstream = block_on(foreground.connect_upstream(Box::new(DeliveringTransport {
+            inner: up,
+            receiver: wakes[0].clone(),
+        })));
+        let _subscriber = relay.accept_subscriber_with_claims(
+            Box::new(DeliveringTransport {
+                inner: down,
+                receiver: wakes[1].clone(),
+            }),
+            author,
+            BTreeMap::new(),
+        );
+        let query = prepared(&foreground, &Query::from("todos"));
+        let opts = ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        };
+        eviction.evict_all();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::Get);
+        control.pause_on(TestStorageOperation::ScanOpen);
+        let attachment = foreground
+            .attach_query_with_opts(&query, opts.clone())
+            .unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+
+        // Retain suspended owner turns, just as an async host retains tickAsync.
+        // Transport sends and scheduler callbacks are the only queue producers.
+        let mut turns: [Option<std::pin::Pin<Box<dyn Future<Output = ()> + '_>>>; 2] = [None, None];
+        let mut resumed = false;
+        for _ in 0..256 {
+            let owner = queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("Local delivery stalled without a scheduled host wake");
+            if turns[owner].is_none() {
+                turns[owner] = Some(if owner == 0 {
+                    Box::pin(async {
+                        relay.tick().await.unwrap();
+                    })
+                } else {
+                    Box::pin(async {
+                        foreground.tick().await.unwrap();
+                    })
+                });
+            }
+            let waker = Waker::from(Arc::new(wakes[owner].clone()));
+            if turns[owner]
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+            {
+                turns[owner] = None;
+            }
+            if !resumed
+                && control.observed().iter().any(|op| {
+                    matches!(
+                        op,
+                        TestStorageOperation::Get | TestStorageOperation::ScanOpen
+                    )
+                })
+            {
+                assert!(
+                    !foreground.query_attachment_is_covered(&attachment),
+                    "cold owner must not certify an unassembled answer"
+                );
+                control.resume();
+                resumed = true;
+            }
+            if foreground.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(resumed, "fixture must suspend an actual cold owner read");
+        assert!(
+            foreground.query_attachment_is_covered(&attachment),
+            "Local delivery did not complete within 256 scheduled callbacks (seed_cache={seed_cache})"
+        );
+        drop(turns);
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+            if seed_cache { vec![cached] } else { vec![] }
+        );
+        foreground.detach_query(attachment);
+    }
+}
+
 /// Alice's fresh foreground cannot treat its empty memory as the persistent
 /// owner's answer. Initial local delivery must work without any authority.
 /// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
