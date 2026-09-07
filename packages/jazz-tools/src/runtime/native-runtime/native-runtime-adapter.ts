@@ -817,6 +817,28 @@ export class NativeRuntimeAdapter implements Runtime {
   // epoch distinguishes that reattachment from its initial attachment.
   // Local-only reattachments may reuse their own confirmation when no newer
   // worker frame has arrived, scoped to the serving authorization context.
+  private readonly activeCoverageWaits = new Set<{
+    tier: string;
+    stage: string;
+    iterations: number;
+    lastCovered: boolean | null;
+  }>();
+
+  /** @internal Passive, redacted state: never probes native coverage or schedules work. */
+  describeQueryCoverageWaits() {
+    const owner = this.ownerRuntime;
+    return {
+      closed: this.closed,
+      nonDurableClient: this.nonDurableClient,
+      peerActivityEpoch: owner.peerTransportActivityEpoch,
+      peerProcessedActivityEpoch: owner.peerTransportProcessedActivityEpoch,
+      coreOperation: owner.coreOperation?.kind ?? null,
+      coreTickScheduled: owner.coreTickScheduled,
+      serverPumpRunning: owner.serverPumpRunning,
+      waits: Array.from(this.activeCoverageWaits, (wait) => ({ ...wait })),
+    };
+  }
+
   private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickAgain = false;
@@ -3350,44 +3372,58 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
-    while (Date.now() < deadline) {
-      // A query can still be waiting for an upstream coverage response while
-      // its owning browser runtime is being torn down. `close()` frees the
-      // WASM Db, so this background wait must not touch its attachment after
-      // that boundary.
-      if (this.closed) return;
-      this.throwServerTransportErrorForTier(tier);
-      await this.pumpServerTransport();
-      this.throwServerTransportErrorForTier(tier);
-      const covered = await this.runWhenCoreIdle(() => {
-        if (this.closed) return true;
-        if (!this.db.queryAttachmentIsCovered) return false;
-        const peerActivityWasProcessed =
-          minimumPeerActivityEpoch == null ||
-          this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
-          (exactContextWasConfirmed &&
-            minimumPeerActivityEpoch > 0 &&
-            this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
-          (pendingPeerActivityEpoch != null &&
-            this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
-        return peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment);
-      });
-      if (covered) return;
-      try {
-        await this.readRowsForContextAsync(query, opts, context);
-        if (!this.db.queryAttachmentIsCovered) return;
-      } catch (error) {
-        if (!isPendingCoverageError(error)) throw error;
+    const state = { tier, stage: "start", iterations: 0, lastCovered: null as boolean | null };
+    this.activeCoverageWaits.add(state);
+    try {
+      while (Date.now() < deadline) {
+        state.iterations += 1;
+        // A query can still be waiting for an upstream coverage response while
+        // its owning browser runtime is being torn down. `close()` frees the
+        // WASM Db, so this background wait must not touch its attachment after
+        // that boundary.
+        if (this.closed) return;
+        this.throwServerTransportErrorForTier(tier);
+        state.stage = "pump";
+        await this.pumpServerTransport();
+        this.throwServerTransportErrorForTier(tier);
+        state.stage = "probe";
+        const covered = await this.runWhenCoreIdle(() => {
+          if (this.closed) return true;
+          if (!this.db.queryAttachmentIsCovered) return false;
+          const peerActivityWasProcessed =
+            minimumPeerActivityEpoch == null ||
+            this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
+            (exactContextWasConfirmed &&
+              minimumPeerActivityEpoch > 0 &&
+              this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
+            (pendingPeerActivityEpoch != null &&
+              this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
+          return peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment);
+        });
+        state.lastCovered = covered;
+        if (covered) return;
+        try {
+          state.stage = "read";
+          await this.readRowsForContextAsync(query, opts, context);
+          if (!this.db.queryAttachmentIsCovered) return;
+        } catch (error) {
+          if (!isPendingCoverageError(error)) throw error;
+        }
+        state.stage = "sleep";
+        const transportError = this.waitForServerTransportError(tier);
+        try {
+          await (transportError ? Promise.race([sleep(10), transportError.promise]) : sleep(10));
+        } finally {
+          transportError?.cancel();
+        }
       }
-      const transportError = this.waitForServerTransportError(tier);
-      try {
-        await (transportError ? Promise.race([sleep(10), transportError.promise]) : sleep(10));
-      } finally {
-        transportError?.cancel();
-      }
+      this.scheduleServerPump();
+      const error = new Error("Timed out waiting for edge query coverage");
+      error.stack += `\nQuery coverage state: ${JSON.stringify(this.describeQueryCoverageWaits())}`;
+      throw error;
+    } finally {
+      this.activeCoverageWaits.delete(state);
     }
-    this.scheduleServerPump();
-    throw new Error("Timed out waiting for edge query coverage");
   }
 
   private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {

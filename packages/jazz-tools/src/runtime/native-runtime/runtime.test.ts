@@ -3909,6 +3909,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     try {
       let ownerAnswered = false;
       const attachedOptions: unknown[] = [];
+      const probeCoverage = vi.fn(() => ownerAnswered);
+      const tick = vi.fn();
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
@@ -3920,10 +3922,10 @@ describe("NativeRuntimeAdapter server transport", () => {
                 attachedOptions.push(opts);
                 return {};
               },
-              queryAttachmentIsCovered: () => ownerAnswered,
+              queryAttachmentIsCovered: probeCoverage,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
-              tick: () => undefined,
+              tick,
             }),
           openBrowser: async () => {
             throw new Error("not used");
@@ -3946,6 +3948,14 @@ describe("NativeRuntimeAdapter server transport", () => {
         });
       await vi.advanceTimersByTimeAsync(20);
       expect(settled).toBe(false);
+      const probeCalls = probeCoverage.mock.calls.length;
+      const tickCalls = tick.mock.calls.length;
+      expect(runtime.describeQueryCoverageWaits()).toMatchObject({
+        nonDurableClient: true,
+        waits: [{ tier: "local", lastCovered: false }],
+      });
+      expect(probeCoverage).toHaveBeenCalledTimes(probeCalls);
+      expect(tick).toHaveBeenCalledTimes(tickCalls);
       // An unrelated owner frame cannot acknowledge this exact query.
       runtime.notifyPeerTransportActivity();
       await runtime.progressPeerTransport();
@@ -3958,6 +3968,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await expect(pending).resolves.toEqual([]);
       expect(attachedOptions).toEqual([{ tier: "local" }]);
       expect(settled).toBe(true);
+      expect(runtime.describeQueryCoverageWaits().waits).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

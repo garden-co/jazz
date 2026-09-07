@@ -494,7 +494,23 @@ describe("Db disconnect/reconnect", () => {
           tier: "local",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
-      );
+      ).catch((error: unknown) => {
+        const runtime = (
+          db as unknown as {
+            getClient(schema: typeof todos._schema): {
+              getRuntime(): { describeQueryCoverageWaits(): unknown };
+            };
+          }
+        )
+          .getClient(todos._schema)
+          .getRuntime();
+        if (error instanceof Error) {
+          const receipt = JSON.stringify(runtime.describeQueryCoverageWaits());
+          error.message += `; queryCoverage=${receipt}`;
+          error.stack += `\nQuery coverage state: ${receipt}`;
+        }
+        throw error;
+      });
       expect(localRows.some((row) => row.title === offlineTitle)).toBe(true);
 
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
