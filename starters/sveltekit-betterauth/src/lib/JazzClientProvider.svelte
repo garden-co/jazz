@@ -31,15 +31,21 @@
   let disposed = false;
   let providerRevision = 0;
 
+  async function readProviderSession() {
+    const current = await authClient.getSession();
+    if (current.error) throw new Error(current.error.message ?? "Provider session read failed");
+    return current.data;
+  }
+
   // Provider stores can notify after getSession() already returned a newer
   // session. Notifications request reconciliation; only an authoritative read
   // chooses the next account. One in-flight reconciliation coalesces changes.
   async function selectCurrent(owner: JazzSession<JazzClient>) {
     const revision = providerRevision;
-    const current = await authClient.getSession();
+    const current = await readProviderSession();
     if (disposed) return;
     if (revision !== providerRevision) { reconcileRequested = true; return; }
-    const key = sessionKey(current.data);
+    const key = sessionKey(current);
     // A failed explicit signup must remain registration recovery, never an
     // implicit login triggered by the provider finally publishing its session.
     if (setupError && recovery === "register" && key) {
@@ -117,9 +123,9 @@
         if (result.error) throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
         authenticated = true;
         if (disposed) return;
-        const current = await authClient.getSession();
+        const current = await readProviderSession();
         if (disposed) return;
-        const key = sessionKey(current.data);
+        const key = sessionKey(current);
         if (!key) throw new Error("Provider did not establish a session");
         handledSession = key;
         recoverySession = key;
@@ -153,13 +159,13 @@
     try { owner = await beginExplicit(); }
     catch (cause) { if (!disposed) setupError ??= toError(cause); return; }
     try {
-      const current = await authClient.getSession();
+      const current = await readProviderSession();
       if (disposed) return;
-      const key = sessionKey(current.data);
+      const key = sessionKey(current);
       if (!key) throw new Error("Provider did not establish a session");
       handledSession = key;
       if (owner.getSnapshot().status === "error" &&
-        owner.getSnapshot().account?.identity.subject === current.data?.user.id &&
+        owner.getSnapshot().account?.identity.subject === current?.user.id &&
         owner.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") await owner.retry();
       else if (recovery === "login") await owner.loginJWT({ getToken: credential });
       else await owner.registerJWT({ getToken: credential });

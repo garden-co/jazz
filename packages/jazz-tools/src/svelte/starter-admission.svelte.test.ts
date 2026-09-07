@@ -9,7 +9,7 @@ const controls = vi.hoisted(() => ({
   auth: undefined as any,
   current: undefined as any,
   actions: undefined as any,
-  read: undefined as undefined | (() => Promise<{ data: any }>),
+  read: undefined as undefined | (() => Promise<{ data: any; error?: { message: string } }>),
 }));
 vi.mock("jazz-tools/svelte", async () => ({
   JazzSessionProvider: (await import("./JazzSessionProvider.svelte")).default,
@@ -249,12 +249,10 @@ it("keeps a successful provider request with a failed session read actionable", 
   const login = controls.actions.authenticate(false, async () => {
     controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
     controls.auth.set({ data: controls.current });
-    controls.read = async () => {
-      throw failure;
-    };
+    controls.read = async () => ({ data: null, error: { message: failure.message } });
     return {};
   });
-  await expect(login).rejects.toBe(failure);
+  await expect(login).rejects.toThrow(failure.message);
   await settle();
   expect(target.textContent).toContain(failure.message);
   expect(target.querySelector("button")).not.toBeNull();
@@ -284,6 +282,19 @@ it("does not let failed signup recovery suppress a genuinely newer provider acco
   expect(events).toEqual(["login:principal-a", "login:principal-c"]);
   expect(owner.getSnapshot().account?.identity.subject).toBe("principal-c");
   expect(target.textContent).toContain("PRIVATE DATA");
+  await unmount(component);
+  await settle();
+});
+
+it("does not turn a resolved provider read error into logout during reconciliation", async () => {
+  const { owner, target, events, component } = await setupNotifications();
+  controls.read = async () => ({ data: null, error: { message: "provider unavailable" } });
+  controls.auth.set({ data: null });
+  await settle();
+  expect(events).toEqual(["login:principal-a"]);
+  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-a");
+  expect(target.textContent).not.toContain("PRIVATE DATA");
+  controls.read = undefined;
   await unmount(component);
   await settle();
 });
