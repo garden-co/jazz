@@ -5,6 +5,7 @@ import {
   androidDeviceDiagnostic,
   androidCoreObservationDiagnostic,
   androidScopeWriterReadDiagnostic,
+  androidForegroundWakeDiagnostic,
 } from "./android-diagnostics.mjs";
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
@@ -20,6 +21,20 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
     "Timed out waiting for phase seed from the launched Android app; device stage: native-admission-failed",
   );
   assert.doesNotMatch(failure, /secret-device-token|linked-abi-admission/);
+});
+
+test("Android post-commit wake failure retains only fixed bridge stages", () => {
+  const output = [
+    "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: requested",
+    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: delivered",
+    "08-29 22:52:21.497  4268  4288 E JazzForegroundWake: requested-secret",
+    "08-29 22:52:21.498  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
+  ].join("\n");
+  assert.equal(androidForegroundWakeDiagnostic(output), "requested,delivered");
+  assert.match(
+    androidAcceptanceFailure("timeout", "seed", output),
+    /foreground wake: requested,delivered/,
+  );
 });
 
 test("Android timeout reports only the bounded scope writer-read counters", () => {

@@ -9,6 +9,8 @@ const WRITER_READ_DETAIL =
   /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
+const THREADTIME_FOREGROUND_WAKE =
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(requested|delivered)\s*$/;
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =
@@ -44,6 +46,15 @@ export function androidScopeWriterReadDiagnostic(output) {
   return latest;
 }
 
+export function androidForegroundWakeDiagnostic(output) {
+  const stages = [];
+  for (const line of String(output).split(/\r?\n/)) {
+    const stage = THREADTIME_FOREGROUND_WAKE.exec(line)?.[1];
+    if (stage) stages.push(stage);
+  }
+  return stages.slice(-16).join(",") || undefined;
+}
+
 export function androidAcceptanceFailure(kind, phase, output) {
   if (phase !== "seed" && phase !== "verify") throw new Error("invalid Android acceptance phase");
   const summary =
@@ -63,7 +74,14 @@ export function androidAcceptanceFailure(kind, phase, output) {
       ? androidScopeWriterReadDiagnostic(output)
       : undefined;
   const detailedStage = writerRead ? `${stage}; scope writer read: ${writerRead}` : stage;
-  return coreObservation
-    ? `${detailedStage}; native Core acknowledgement: ${coreObservation}`
+  const foregroundWake =
+    diagnostic === "same-runtime-postcommit-wake-failed"
+      ? androidForegroundWakeDiagnostic(output)
+      : undefined;
+  const wakeStage = foregroundWake
+    ? `${detailedStage}; foreground wake: ${foregroundWake}`
     : detailedStage;
+  return coreObservation
+    ? `${wakeStage}; native Core acknowledgement: ${coreObservation}`
+    : wakeStage;
 }

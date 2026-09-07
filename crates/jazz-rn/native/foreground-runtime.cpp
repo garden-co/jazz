@@ -12,7 +12,19 @@
 #include <utility>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 namespace jazz::rn {
+
+void traceForegroundWake(const char *stage) noexcept {
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_ERROR, "JazzForegroundWake", "%s", stage);
+#else
+  (void)stage;
+#endif
+}
 
 constexpr const char *kWakeCallbacksGlobal = "__jazzNativeForegroundWakeCallbacksV1";
 constexpr uint8_t kWakeImmediate = 0;
@@ -110,6 +122,9 @@ class ForegroundWakeRegistration final
       scheduled_ = true;
       invoker = callInvoker_;
     }
+    // Fixed pipeline marker: Rust's owner queue flushed a live foreground
+    // wake into the platform bridge. It contains no handle, query, or data.
+    traceForegroundWake("requested");
     schedule(std::move(invoker));
   }
 
@@ -140,6 +155,8 @@ class ForegroundWakeRegistration final
       kind = kind_;
       delayMs = delayMs_;
     }
+    // The CallInvoker reached this JSI runtime.
+    traceForegroundWake("delivered");
 
     try {
       auto callbacks = runtime.global().getProperty(runtime, kWakeCallbacksGlobal);
