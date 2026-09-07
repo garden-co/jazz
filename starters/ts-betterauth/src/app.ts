@@ -174,9 +174,13 @@ export function mountApp(
   }
 
   const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
+    const previousKey = sessionKey(session);
     session = next;
     reconcile(next);
-    render();
+    // Better Auth publishes an immediate snapshot after subscribe(). Rebuilding
+    // the dashboard for that same authenticated session tears down the freshly
+    // opened todo subscription before its initial snapshot arrives.
+    if (sessionKey(next) !== previousKey) render();
   });
 
   render();
