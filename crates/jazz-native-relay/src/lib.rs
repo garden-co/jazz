@@ -8809,6 +8809,209 @@ mod tests {
     }
 
     #[test]
+    fn c_abi_sibling_commit_wakes_retained_subscription_before_its_delta_drains() {
+        // This is deliberately an internal C-ABI receipt. The public Db
+        // integration suites establish subscription semantics; only the
+        // native host owns opaque foreground handles and raw callback
+        // registrations. It mirrors the installed A/B byte-command sequence
+        // and proves that B's post-commit callback arrives before B drains
+        // the committed delta.
+        let directory = tempfile::tempdir().unwrap();
+        // Raw callback contexts must outlive the host, including on assertion failure.
+        let a_wake = Arc::new(QueuedNativeWake::active());
+        let b_wake = Arc::new(QueuedNativeWake::active());
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("same-runtime-wake.sqlite"),
+            "same-runtime-wake",
+            &permissive_schema(),
+            0xc1,
+        );
+        let a = fixture.open_foreground(&capability);
+        let b = fixture.open_foreground(&capability);
+        assert_ne!(a, b, "each alias has an independent opaque C-ABI handle");
+
+        for (foreground, wake) in [(a, &a_wake), (b, &b_wake)] {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        fixture.lease,
+                        foreground,
+                        Some(queue_native_wake),
+                        Arc::as_ptr(wake) as *mut c_void,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "each installed alias registers its own native wake callback"
+            );
+        }
+
+        let ForegroundDbCommandResponse::PreparedQuery { query } = fixture.execute(
+            b,
+            ForegroundDbCommandRequest::PrepareQuery {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+            },
+        ) else {
+            panic!("B prepares the retained subscription query");
+        };
+        let ForegroundDbCommandResponse::Subscribed { subscription } =
+            fixture.execute(b, ForegroundDbCommandRequest::Subscribe { query })
+        else {
+            panic!("B opens the retained subscription");
+        };
+
+        let mut initial_reset_seen = false;
+        for _ in 0..96 {
+            match fixture.execute(
+                b,
+                ForegroundDbCommandRequest::DrainSubscription { subscription },
+            ) {
+                ForegroundDbCommandResponse::SubscriptionEvents { events } => {
+                    initial_reset_seen |= events.iter().any(|event| {
+                        matches!(
+                            event,
+                            ForegroundSubscriptionEvent::Delta { reset: true, .. }
+                                | ForegroundSubscriptionEvent::StructuredDelta { reset: true, .. }
+                        )
+                    });
+                }
+                ForegroundDbCommandResponse::Pending { operation } => {
+                    fixture.tick(b);
+                    let response =
+                        fixture.execute(b, ForegroundDbCommandRequest::Poll { operation });
+                    if let ForegroundDbCommandResponse::SubscriptionEvents { events } = response {
+                        initial_reset_seen |= events.iter().any(|event| {
+                            matches!(
+                                event,
+                                ForegroundSubscriptionEvent::Delta { reset: true, .. }
+                                    | ForegroundSubscriptionEvent::StructuredDelta {
+                                        reset: true,
+                                        ..
+                                    }
+                            )
+                        });
+                    }
+                }
+                response => panic!("initial B subscription drain failed: {response:?}"),
+            }
+            if initial_reset_seen {
+                break;
+            }
+            fixture.tick(b);
+        }
+        assert!(
+            initial_reset_seen,
+            "B observes and drains its initial reset before A writes"
+        );
+        a_wake.queued.lock().unwrap().clear();
+        b_wake.queued.lock().unwrap().clear();
+
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+            a,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("A opens the byte-command transaction");
+        };
+        let row_id = [0xd1; 16];
+        assert_eq!(
+            fixture.execute(
+                a,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".into(),
+                    cells: encoded_title_cells("wake across opaque aliases"),
+                    row_id: Some(row_id),
+                },
+            ),
+            ForegroundDbCommandResponse::Inserted { row_id }
+        );
+        assert!(matches!(
+            fixture.execute(
+                a,
+                ForegroundDbCommandRequest::CommitTransaction { transaction },
+            ),
+            ForegroundDbCommandResponse::TransactionCommitted { .. }
+        ));
+
+        let mut b_woke = false;
+        for _ in 0..96 {
+            fixture.tick(a);
+            fixture.tick(b);
+            if b_wake.queued() != 0 {
+                b_woke = true;
+                break;
+            }
+        }
+        assert!(
+            b_woke,
+            "A's committed byte transaction schedules B's native callback before B drains"
+        );
+        assert!(
+            b_wake
+                .queued
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(foreground, _, _)| *foreground == b),
+            "the callback preserves B's exact opaque foreground handle"
+        );
+
+        let mut observed_row_delta = false;
+        for _ in 0..96 {
+            match fixture.execute(
+                b,
+                ForegroundDbCommandRequest::DrainSubscription { subscription },
+            ) {
+                ForegroundDbCommandResponse::SubscriptionEvents { events } => {
+                    observed_row_delta |= events.iter().any(|event| match event {
+                        ForegroundSubscriptionEvent::Delta { reset, delta, .. }
+                        | ForegroundSubscriptionEvent::StructuredDelta { reset, delta, .. } => {
+                            !reset
+                                && delta
+                                    .windows(row_id.len())
+                                    .any(|candidate| candidate == row_id)
+                        }
+                        ForegroundSubscriptionEvent::Rejected { .. }
+                        | ForegroundSubscriptionEvent::Closed => false,
+                    });
+                }
+                ForegroundDbCommandResponse::Pending { operation } => {
+                    fixture.tick(b);
+                    let response =
+                        fixture.execute(b, ForegroundDbCommandRequest::Poll { operation });
+                    if let ForegroundDbCommandResponse::SubscriptionEvents { events } = response {
+                        observed_row_delta |= events.iter().any(|event| match event {
+                            ForegroundSubscriptionEvent::Delta { reset, delta, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta {
+                                reset, delta, ..
+                            } => {
+                                !reset
+                                    && delta
+                                        .windows(row_id.len())
+                                        .any(|candidate| candidate == row_id)
+                            }
+                            ForegroundSubscriptionEvent::Rejected { .. }
+                            | ForegroundSubscriptionEvent::Closed => false,
+                        });
+                    }
+                }
+                response => panic!("post-commit B subscription drain failed: {response:?}"),
+            }
+            if observed_row_delta {
+                break;
+            }
+            fixture.tick(a);
+            fixture.tick(b);
+        }
+        assert!(
+            observed_row_delta,
+            "B's retained subscription materializes A's committed row through the ordinary relay"
+        );
+    }
+
+    #[test]
     fn revocation_clears_queued_owner_wakes_and_retires_only_its_foreground_lease() {
         // Internal native-host lifecycle receipt. A JSI owner turn can already
         // be queued when trusted code revokes its admitted scope. The old
