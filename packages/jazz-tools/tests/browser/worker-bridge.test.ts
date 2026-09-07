@@ -34,6 +34,7 @@ import {
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
 import {
   TestCleanup,
+  acquireBrowserTestAccount,
   createSyncedDb,
   sleep,
   uniqueDbName,
@@ -2417,14 +2418,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-on-mutation-error-restart",
     );
 
-    const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-restart");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret: sharedLocalAuthToken,
+        account,
       });
 
     const dbBeforeRestart = track(await createPersistentDb(syncServer.serverUrl));
@@ -2526,14 +2531,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       readOnlyPermissions,
     );
 
-    const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-undelivered-restart");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret: sharedLocalAuthToken,
+        account,
       });
 
     const dbBeforeRestart = track(await createPersistentDb(undefined));
@@ -2615,14 +2624,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-recovery-terminal-pair",
       recoveryTerminalPermissions,
     );
-    const secret = generateAuthSecret();
     const dbName = uniqueDbName("sync-recovery-terminal-pair");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret,
+        account,
       });
 
     const first = track(await createPersistentDb(undefined));
@@ -2785,14 +2798,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           readOnlyPermissions,
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-insert");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const dbBeforeRestart = track(await createPersistentDb(undefined));
@@ -2826,14 +2843,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           "sync-restart-revert-update",
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-update");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const seeder = track(await createPersistentDb(syncServer.serverUrl));
@@ -2878,14 +2899,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           "sync-restart-revert-delete",
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-delete");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const seeder = track(await createPersistentDb(syncServer.serverUrl));
