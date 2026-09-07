@@ -283,7 +283,8 @@ starting at zero without gaps. Recovery scans the entire `account-command:`
 prefix and rejects other versions, malformed keys, and invalid commands.
 
 The former prerelease `jazz.account-command.v1` profile used bespoke `JACC`
-framing. The refreshed `jazz.account-command.v2` profile uses canonical Groove
+framing. The refreshed `jazz.account-journal.v2` profile versions the root-local journal
+key and closed descriptor contract, not a new value codec. It uses canonical Groove
 records exclusively. Its one field, `command`, is an Enum named
 `jazz.account-command.v2` with fixed registry identity 1 in this isolated root.
 Declaration-order cases and ordered payload fields are:

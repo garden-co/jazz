@@ -184,6 +184,63 @@ mod tests {
     }
 
     #[test]
+    fn recovery_retains_link_nonce_consumption_after_revocation() {
+        crate::db::block_on(async {
+            let storage = MemoryStorage::new(&[CF]).unwrap();
+            let mut registry = StoredAccountRegistry::open(storage.clone()).await.unwrap();
+            let approver = Principal {
+                issuer: "i".into(),
+                subject: "a".into(),
+            };
+            let candidate = Principal {
+                issuer: "i".into(),
+                subject: "b".into(),
+            };
+            let nonce = Uuid::from_u128(2);
+            registry
+                .execute(&AccountCommand::Register {
+                    principal: approver.clone(),
+                    account: AccountId(Uuid::from_u128(1)),
+                })
+                .await
+                .unwrap();
+            registry
+                .execute(&AccountCommand::RequestLink {
+                    approver: approver.clone(),
+                    candidate: candidate.clone(),
+                    nonce,
+                    now: 10,
+                    expires_at: 20,
+                })
+                .await
+                .unwrap();
+            let accept = AccountCommand::AcceptLink {
+                candidate: candidate.clone(),
+                nonce,
+                now: 11,
+            };
+            registry.execute(&accept).await.unwrap();
+            registry
+                .execute(&AccountCommand::Revoke {
+                    approver,
+                    target: candidate.clone(),
+                })
+                .await
+                .unwrap();
+            let mut reopened = StoredAccountRegistry::open(storage).await.unwrap();
+            assert!(matches!(
+                reopened.login(&candidate).await,
+                Err(RegistryError::Decision(AccountError::NotAuthorized))
+            ));
+            assert!(reopened.execute(&accept).await.is_err());
+            assert!(matches!(
+                reopened.login(&candidate).await,
+                Err(RegistryError::Decision(AccountError::NotAuthorized))
+            ));
+        });
+    }
+
+    #[test]
     fn recovery_retains_revocation_and_competing_owners_fail_closed() {
         crate::db::block_on(async {
             let storage = MemoryStorage::new(&[CF]).unwrap();
