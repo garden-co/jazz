@@ -172,5 +172,5 @@ Vitest browser mode (chromium) generates an ES256 keypair, hosts a local
 JWKS, and starts a local Jazz server pointed at it. Tests mint a
 verified JWT and assert that authenticated callers can post to both
 chats while anonymous callers are denied for Announcements. The Better
-Auth sign-up / sign-in flow is covered by the example itself when run
-via `pnpm dev` — it isn't exercised by `pnpm test`.
+Auth server suite exercises the application handler’s sign-up, sign-in,
+session JWT and logout flow against a local Jazz server.

@@ -58,6 +58,10 @@ it("signs up, signs in, signs a session JWT and logs out through the application
       new Request(`${origin}/api/auth/get-session`, { headers: { Cookie: cookie } }),
     );
     expect(current.status).toBe(200);
+    const token = current.headers.get("set-auth-jwt");
+    expect(token?.split(".")).toHaveLength(3);
+    const payload = JSON.parse(Buffer.from(token!.split(".")[1]!, "base64url").toString("utf8"));
+    expect(payload).toMatchObject({ iss: origin, sub: signed.user.id });
     expect((await current.json()).user.id).toBe(signed.user.id);
     // get-session signs a JWT and persists the installed plugin's alg/crv metadata.
     const { authJazzClient } = await import("../../src/lib/auth-jazz-client");
@@ -72,12 +76,18 @@ it("signs up, signs in, signs a session JWT and logs out through the application
     );
     expect(await ended.json()).toBeNull();
   } finally {
-    await globalThis.__authBetterAuthChatJazzSession?.then((session) => session.close());
-    globalThis.__authBetterAuthChatJazzSession = undefined;
-    await server.stop();
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
+    try {
+      await globalThis.__authBetterAuthChatJazzSession?.then((session) => session.close());
+    } finally {
+      globalThis.__authBetterAuthChatJazzSession = undefined;
+      try {
+        await server.stop();
+      } finally {
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
     }
   }
 });
