@@ -8,6 +8,45 @@ mod coverage;
 mod materialization;
 mod structured;
 
+/// Internal because the public cancellation contract crosses the runtime
+/// owner's detached-maintained-view boundary. A test-only rendezvous is needed
+/// to order that handoff deterministically; the observable assertion is that
+/// Alice's replacement stream remains live after cancelling its predecessor.
+///
+/// alice old stream ──refresh detaches──► owner wait
+/// alice cancel ──finalize old id───────► replacement remains live
+#[test]
+fn cancelling_a_detached_subscription_does_not_reject_its_replacement() {
+    let db = block_on(doctest_support::open_todos_db()).expect("open subscription fixture");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare replacement query");
+    let cancelled =
+        block_on(db.subscribe(&prepared, ReadOpts::default())).expect("open cancelled stream");
+    let mut replacement =
+        block_on(db.subscribe(&prepared, ReadOpts::default())).expect("open replacement stream");
+    let _ = block_on(replacement.next_raw()).expect("receive replacement opening");
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut refresh = Box::pin(db.node.refresh_subscriptions());
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(refresh.as_mut().poll(&mut context), Poll::Pending));
+    assert!(pause.entered(), "refresh detached the cancelled stream");
+
+    drop(cancelled);
+    block_on(db.node.drain_subscription_finalizations())
+        .expect("retire the cancelled stream before refresh resumes");
+    pause.release();
+    assert!(matches!(
+        refresh.as_mut().poll(&mut context),
+        Poll::Ready(Ok(_))
+    ));
+    assert!(
+        replacement.try_next_event().is_none(),
+        "replacement was not rejected"
+    );
+}
+
 /// Internal because deterministic cancellation needs to pause a public
 /// `subscribe` between node-mutex acquisition and maintained-view ownership.
 /// A close that is then cancelled must reject the stranded opener and retire

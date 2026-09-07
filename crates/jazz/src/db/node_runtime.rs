@@ -12,6 +12,66 @@ use super::*;
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
+/// Test-only rendezvous after refresh has detached a public stream's local
+/// maintained subscription. It makes the cancellation/finalization handoff
+/// deterministic without changing production scheduling.
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct SubscriptionRefreshDetachPause {
+    entered: Rc<Cell<bool>>,
+    released: Rc<Cell<bool>>,
+    waker: Rc<RefCell<Option<Waker>>>,
+}
+
+#[cfg(test)]
+impl SubscriptionRefreshDetachPause {
+    pub(super) fn entered(&self) -> bool {
+        self.entered.get()
+    }
+
+    pub(super) fn release(&self) {
+        self.released.set(true);
+        if let Some(waker) = self.waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SUBSCRIPTION_REFRESH_DETACH_PAUSE: RefCell<Option<SubscriptionRefreshDetachPause>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn pause_subscription_refresh_after_detach_for_test() -> SubscriptionRefreshDetachPause {
+    let pause = SubscriptionRefreshDetachPause {
+        entered: Rc::new(Cell::new(false)),
+        released: Rc::new(Cell::new(false)),
+        waker: Rc::new(RefCell::new(None)),
+    };
+    SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause.clone()));
+    pause
+}
+
+#[cfg(test)]
+async fn wait_for_subscription_refresh_detach_for_test() {
+    let pause = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow().clone());
+    let Some(pause) = pause else {
+        return;
+    };
+    pause.entered.set(true);
+    std::future::poll_fn(|context| {
+        if pause.released.get() {
+            Poll::Ready(())
+        } else {
+            *pause.waker.borrow_mut() = Some(context.waker().clone());
+            Poll::Pending
+        }
+    })
+    .await;
+    SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow_mut().take());
+}
+
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
 /// close future drops the lease, rather than the accepted operation.
 struct QueuedMutationLease<'a> {
@@ -3392,9 +3452,21 @@ where
                         .take()
                         .expect("replacement maintained subscription installed")
                 };
-                let drained = node
-                    .lock()
-                    .await
+                let mut node_ref = node.lock().await;
+                // A stream may be cancelled while this refresh waits for the
+                // node owner. Its queued finalizer can retire the exact local
+                // subscription before this drain acquires that owner.
+                if state.borrow().closed.get() {
+                    drop(node_ref);
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    *maintained_subscription = Some(maintained);
+                    continue;
+                }
+                let drained = node_ref
                     .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                         &mut maintained,
                         Some(authority_result_key.clone()),
@@ -3536,6 +3608,8 @@ where
         let cold_runtime_replacement_pending = state.borrow().cold_runtime_replacement;
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
+            #[cfg(test)]
+            wait_for_subscription_refresh_detach_for_test().await;
             let (shape, binding) = {
                 let state_ref = state.borrow();
                 let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
@@ -3704,6 +3778,12 @@ where
                     refresh.maintained.as_mut()
                 {
                     let mut node_ref = node.lock().await;
+                    // Finalization may have run while this refresh waited for
+                    // the owner. Do not drain the detached receiver after its
+                    // stream synchronously marked itself closed.
+                    if state.borrow().closed.get() {
+                        continue;
+                    }
                     // Only a scope-bound source consumes authority inputs.
                     // Local-first remains an ordinary storage-backed graph.
                     let authoritative_result_key = (authorization_mode
