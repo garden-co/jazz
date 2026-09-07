@@ -79,6 +79,7 @@ export interface SourceSnapshot {
   ref: string;
   remoteRef: string;
   label: string;
+  previewPackages?: Record<string, string>;
 }
 
 /** Resolve the immutable source snapshot bundled with this CLI package. */
@@ -91,17 +92,24 @@ export function readSourceSnapshot(packageDir = PACKAGE_DIR): SourceSnapshot {
       label: RELEASE_REF,
     };
   }
-  let snapshot: { schema?: unknown; packageVersion?: unknown; commit?: unknown };
+  let snapshot: {
+    schema?: unknown;
+    packageVersion?: unknown;
+    commit?: unknown;
+    packages?: unknown;
+  };
   try {
     snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as typeof snapshot;
   } catch (cause) {
     throw new Error(`Invalid bundled preview source snapshot: ${String(cause)}`, { cause });
   }
   if (
-    snapshot.schema !== 1 ||
+    !snapshot ||
+    snapshot.schema !== 2 ||
     snapshot.packageVersion !== CREATE_JAZZ_VERSION ||
     typeof snapshot.commit !== "string" ||
-    !/^[a-f0-9]{40}$/.test(snapshot.commit)
+    !/^[a-f0-9]{40}$/.test(snapshot.commit) ||
+    !validPreviewPackages(snapshot.packages, snapshot.commit)
   )
     throw new Error(
       "Invalid bundled preview source snapshot; refusing to fall back to a release tag or main.",
@@ -110,7 +118,22 @@ export function readSourceSnapshot(packageDir = PACKAGE_DIR): SourceSnapshot {
     ref: snapshot.commit,
     remoteRef: snapshot.commit,
     label: `preview commit ${snapshot.commit}`,
+    previewPackages: snapshot.packages as Record<string, string>,
   };
+}
+
+function validPreviewPackages(value: unknown, commit: string): value is Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return (
+    Object.hasOwn(value, "create-jazz") &&
+    Object.hasOwn(value, "jazz-tools") &&
+    entries.every(
+      ([name, url]) =>
+        /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name) &&
+        url === `https://pkg.pr.new/${REPO}/${name}@${commit}`,
+    )
+  );
 }
 
 function sourceSnapshotError(action: string, snapshot: SourceSnapshot, cause: unknown): Error {
@@ -151,11 +174,26 @@ async function resolveManifest(
 ): Promise<PackageManifest> {
   const localPath = process.env.JAZZ_STARTER_PATH;
   if (localPath) {
-    return resolveLocalDeps(manifest, path.resolve(localPath, "../.."), onProgress);
+    return resolveLocalDeps(
+      manifest,
+      path.resolve(localPath, "../.."),
+      onProgress,
+      snapshot.previewPackages,
+    );
   }
   try {
-    return await resolveRemoteDeps(manifest, { repo: REPO, ref: snapshot.remoteRef }, onProgress);
+    return await resolveRemoteDeps(
+      manifest,
+      { repo: REPO, ref: snapshot.remoteRef },
+      onProgress,
+      snapshot.previewPackages,
+    );
   } catch (cause) {
+    if (snapshot.previewPackages)
+      throw new Error(
+        `Could not resolve preview dependencies: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
+      );
     throw sourceSnapshotError("resolve starter dependencies", snapshot, cause);
   }
 }
@@ -227,9 +265,9 @@ export async function scaffold(
     try {
       execFileSync(options.pm, ["install"], { cwd: options.targetDir, stdio: "pipe" });
     } catch (err) {
-      const stderr = getStderr(err);
+      const output = getProcessOutput(err);
       throw new Error(
-        `${options.pm} install failed: ${stderr || (err instanceof Error ? err.message : String(err))}`,
+        `${options.pm} install failed: ${output || (err instanceof Error ? err.message : String(err))}`,
       );
     }
   }
@@ -262,4 +300,15 @@ function getStderr(err: unknown): string {
   return err instanceof Error && "stderr" in err
     ? String((err as { stderr: Buffer | string }).stderr)
     : "";
+}
+
+function getProcessOutput(err: unknown): string {
+  if (!(err instanceof Error)) return "";
+  return ["stdout", "stderr"]
+    .flatMap((key) => {
+      const value = (err as unknown as Record<string, unknown>)[key];
+      return typeof value === "string" || Buffer.isBuffer(value) ? [String(value).trim()] : [];
+    })
+    .filter(Boolean)
+    .join("\n");
 }

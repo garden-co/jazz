@@ -39,11 +39,13 @@ describe("release config", () => {
       };
     };
     const step = workflow.jobs["publish-pkg-pr-new"].steps.find(
-      (candidate) => candidate.name === "Bind create-jazz preview to this immutable commit",
+      (candidate) => candidate.name === "Publish to pkg.pr.new",
     );
-    expect(step?.env).toEqual({ PREVIEW_COMMIT: "${{ github.event.pull_request.head.sha }}" });
-    expect(step?.run).toContain("jazz-source-snapshot.json");
-    expect(step?.run).toContain("schema:1");
+    expect(step?.env).toMatchObject({
+      PREVIEW_COMMIT: "${{ github.event.pull_request.head.sha }}",
+    });
+    expect(step?.run).toContain('write-preview-snapshot.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"');
+    expect(step?.run).toContain('"${PACKAGES[@]}"');
   });
 
   it("stages and verifies embedded inspector assets before preview publication", () => {

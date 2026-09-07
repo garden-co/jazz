@@ -64,6 +64,7 @@ async function applyResolvedManifest(
   workspaceConfig: WorkspaceConfig,
   fetchPackageVersion: FetchPackageVersion,
   onProgress?: ResolveProgressCallback,
+  previewPackages?: Record<string, string>,
 ): Promise<PackageManifest> {
   const deps = manifest.dependencies ?? {};
   const devDeps = manifest.devDependencies ?? {};
@@ -72,6 +73,13 @@ async function applyResolvedManifest(
   for (const [name, value] of [...Object.entries(deps), ...Object.entries(devDeps)]) {
     if (value.startsWith("workspace:")) {
       const suffix = value.slice("workspace:".length);
+      if (!["*", "^", "~"].includes(suffix) && !isVersionPin(suffix))
+        throw badWorkspaceForm(name, value);
+      if (previewPackages) {
+        if (!Object.hasOwn(previewPackages, name))
+          throw new Error(`Package "${name}" was not published in this preview`);
+        continue;
+      }
       if (suffix === "*" || suffix === "^" || suffix === "~") {
         toFetch.add(name);
       } else if (!isVersionPin(suffix)) {
@@ -92,6 +100,8 @@ async function applyResolvedManifest(
   );
 
   function resolveEntry(depName: string, value: string): string {
+    if (previewPackages && Object.hasOwn(previewPackages, depName))
+      return previewPackages[depName]!;
     if (value.startsWith("workspace:")) {
       const suffix = value.slice("workspace:".length);
       if (isVersionPin(suffix)) return suffix;
@@ -215,6 +225,7 @@ export async function resolveRemoteDeps(
   manifest: PackageManifest,
   repoConfig: { repo: string; ref: string },
   onProgress?: ResolveProgressCallback,
+  previewPackages?: Record<string, string>,
 ): Promise<PackageManifest> {
   const rawBase = `https://raw.githubusercontent.com/${repoConfig.repo}/${repoConfig.ref}`;
   const workspaceUrl = `${rawBase}/pnpm-workspace.yaml`;
@@ -247,7 +258,13 @@ export async function resolveRemoteDeps(
     throw new Error(`Package "${name}" not found in upstream repo`);
   };
 
-  return applyResolvedManifest(manifest, workspaceConfig, fetchPackageVersion, onProgress);
+  return applyResolvedManifest(
+    manifest,
+    workspaceConfig,
+    fetchPackageVersion,
+    onProgress,
+    previewPackages,
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -258,6 +275,7 @@ export async function resolveLocalDeps(
   manifest: PackageManifest,
   repoRoot: string,
   onProgress?: ResolveProgressCallback,
+  previewPackages?: Record<string, string>,
 ): Promise<PackageManifest> {
   const wsPath = path.join(repoRoot, "pnpm-workspace.yaml");
   const wsYaml = fs.readFileSync(wsPath, "utf-8");
@@ -275,5 +293,11 @@ export async function resolveLocalDeps(
     throw new Error(`Package "${name}" not found in any workspace subdir`);
   };
 
-  return applyResolvedManifest(manifest, workspaceConfig, fetchPackageVersion, onProgress);
+  return applyResolvedManifest(
+    manifest,
+    workspaceConfig,
+    fetchPackageVersion,
+    onProgress,
+    previewPackages,
+  );
 }
