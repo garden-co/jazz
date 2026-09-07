@@ -1,3 +1,4 @@
+import { setAccountSelectionBarrier } from "./selection-durability.js";
 import { createAccountManagerWithRuntime } from "./enrollment.js";
 import { localFirstFactory } from "./local-first.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
@@ -95,6 +96,7 @@ export async function prepareAccountManager(options: {
     stored.selected = null;
     void save().catch((error) => manager.reportPersistenceError(error));
   });
+  setAccountSelectionBarrier(manager, (retry) => (retry ? writes.catch(() => save()) : writes));
   await writes;
   return manager;
 }

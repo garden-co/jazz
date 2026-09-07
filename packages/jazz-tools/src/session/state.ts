@@ -1,3 +1,4 @@
+import { settleAccountSelection } from "../accounts/selection-durability.js";
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import {
@@ -62,6 +63,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first") selected = accounts.createLocalFirst();
+  await settleAccountSelection(accounts);
   let client = selected ? await openClient(selected) : undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
     status: client ? "ready" : "signed-out",
@@ -158,6 +160,10 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     }
     if (token !== generation) throw superseded();
     try {
+      // The registry operation has already succeeded. A local persistence
+      // failure must not restore a now-invalid previous handle or repeat linking.
+      await settleAccountSelection(accounts, operation === "retry");
+      if (token !== generation) throw superseded();
       client = selected ? await openClient(selected) : undefined;
     } catch (cause) {
       if (token === generation)
@@ -261,5 +267,5 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       },
     };
   });
-  return session;
+  return Object.freeze(session);
 }

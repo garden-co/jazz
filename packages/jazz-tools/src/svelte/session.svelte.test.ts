@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { mount, unmount, tick, createRawSnippet } from "svelte";
+import { mount, unmount, tick, createRawSnippet, getAllContexts } from "svelte";
 import JazzSessionProvider from "./JazzSessionProvider.svelte";
 import { createJazzSessionOwner } from "../session/state.js";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { attachSubscriptionStore, type SubscriptionStore } from "../subscription-store-internal.js";
 import type { JazzClient } from "./create-jazz-client.js";
+import SessionStatus from "../../tests/svelte/SessionStatus.svelte";
 import { sessionState } from "./session-state.js";
 
 async function setup(events: string[]) {
@@ -55,6 +56,42 @@ const settle = async () => {
 };
 
 describe("Svelte Jazz session", () => {
+  it("provides startup status and retry to a configured fallback", async () => {
+    const events: string[] = [];
+    const { session } = await setup(events);
+    const factory = await import("../session/create-jazz-session.js");
+    const create = vi
+      .spyOn(factory, "createJazzSession")
+      .mockRejectedValueOnce(new Error("startup failed"))
+      .mockResolvedValueOnce(session);
+    const target = document.createElement("div");
+    const component = mount(JazzSessionProvider, {
+      target,
+      props: {
+        config: { appId: "test", serverUrl: "http://localhost:1", initial: "local-first" },
+        autoAttachDevTools: false,
+        children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
+        fallback: createRawSnippet(() => ({
+          render: () => "<div></div>",
+          setup: (element) => {
+            const status = mount(SessionStatus, { target: element, context: getAllContexts() });
+            return () => {
+              void unmount(status);
+            };
+          },
+        })),
+      },
+    });
+    await settle();
+    expect(target.textContent).toContain("error");
+    (target.querySelector("button") as HTMLButtonElement).click();
+    await settle();
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(target.textContent).toBe("Ready");
+    await unmount(component);
+    await settle();
+    create.mockRestore();
+  });
   it("detaches the rendered subtree before syncing and linking", async () => {
     const events: string[] = [];
     const { session, clients } = await setup(events);
