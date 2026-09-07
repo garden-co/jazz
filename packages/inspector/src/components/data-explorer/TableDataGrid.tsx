@@ -64,6 +64,12 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+function serializeFilterClauses(clauses: TableFilterClause[]): string {
+  return JSON.stringify(clauses, (_key, value) =>
+    typeof value === "bigint" ? value.toString() : value,
+  );
+}
+
 const RELATION_LABEL_COLUMN_PRIORITY = [
   "name",
   "title",
@@ -895,7 +901,7 @@ export function TableDataGrid() {
       (prev) => {
         const p = new URLSearchParams(prev);
         if (next.length > 0) {
-          p.set("filters", JSON.stringify(next));
+          p.set("filters", serializeFilterClauses(next));
         } else {
           p.delete("filters");
         }

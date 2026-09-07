@@ -104,6 +104,8 @@ import {
 } from "../../magic-columns.js";
 
 export { encodeSchema } from "./schema-codec.js";
+const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
+const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
 const NETWORK_RETRY_LIMIT = 10;
@@ -5756,12 +5758,24 @@ function readLiteral(value: unknown): QueryLiteral | null {
   ) {
     return { type: "Integer", value: record.value };
   }
-  if (
-    record.type === "BigInt" &&
-    (typeof record.value === "bigint" ||
-      (typeof record.value === "number" && Number.isSafeInteger(record.value)))
-  ) {
-    return { type: "BigInt", value: BigInt(record.value) };
+  if (record.type === "BigInt") {
+    if (
+      typeof record.value === "string" &&
+      record.value.length <= MAX_CANONICAL_SIGNED_I64_LENGTH &&
+      CANONICAL_SIGNED_I64_DECIMAL.test(record.value)
+    ) {
+      try {
+        return { type: "BigInt", value: exactSignedI64(BigInt(record.value), "BigInt value") };
+      } catch {
+        return null;
+      }
+    }
+    if (
+      typeof record.value === "bigint" ||
+      (typeof record.value === "number" && Number.isSafeInteger(record.value))
+    ) {
+      return { type: "BigInt", value: BigInt(record.value) };
+    }
   }
   if (
     record.type === "Timestamp" &&

@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router";
 import type * as ReactRouter from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
+import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 
 const issuer = "https://inspector-save.test";
 const userId = "editor";
@@ -15,6 +16,7 @@ const inspectorSaveApp = s.defineApp({
   todos: s.table({
     title: s.string(),
     owner_id: s.uuid(),
+    rank: s.bigint().optional(),
   }),
 });
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
@@ -24,8 +26,6 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
   policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
-let currentDb: Db | null = null;
-
 vi.mock("jazz-tools/react", () => ({
   useAll: () => ({ data: [], isLoading: false, error: null }),
   useDb: () => {
@@ -33,6 +33,8 @@ vi.mock("jazz-tools/react", () => ({
     return currentDb;
   },
 }));
+
+let currentDb: Db | null = null;
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
@@ -329,6 +331,82 @@ describe("TableDataGrid real Db save retries", () => {
         id: instrumented.insertIds[0],
         title: "retry same row",
         owner_id: permittedOwner,
+      }),
+    ]);
+  }, 30_000);
+
+  it("persists unsafe-range BigInt mutations exactly through the real Db", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const instrumented = instrumentDb(setup.db);
+    currentDb = instrumented.db;
+    const exactValue = 9007199254740993n;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "exact bigint");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    editStagedTextColumn(3, "rank", String(exactValue));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "exact bigint",
+          owner_id: permittedOwner,
+          rank: exactValue,
+        }),
+      ]),
+    );
+  }, 30_000);
+
+  it("applies URL-hydrated BigInt filters through the real query runtime", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const exactValue = 9007199254740993n;
+    await setup.db
+      .insert(inspectorSaveApp.todos, {
+        title: "exact rank",
+        owner_id: permittedOwner,
+        rank: exactValue,
+      })
+      .wait({ tier: "edge" });
+    await setup.db
+      .insert(inspectorSaveApp.todos, {
+        title: "nearby rank",
+        owner_id: permittedOwner,
+        rank: exactValue - 1n,
+      })
+      .wait({ tier: "edge" });
+
+    const filters = JSON.stringify([
+      { id: "hydrated-rank", column: "rank", operator: "eq", value: String(exactValue) },
+    ]);
+    const url = new URL(
+      `/data-explorer/todos/data?filters=${encodeURIComponent(filters)}`,
+      "https://inspector.test",
+    );
+    const [hydratedFilter] = JSON.parse(url.searchParams.get("filters") ?? "[]") as Array<{
+      column: string;
+      value: string;
+    }>;
+    const query = new GenericQueryBuilder("todos", inspectorSaveApp.wasmSchema).where({
+      [hydratedFilter.column]: hydratedFilter.value,
+    });
+    const rows = await setup.db.all(query, { tier: "edge" });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        title: "exact rank",
+        owner_id: permittedOwner,
+        rank: exactValue,
       }),
     ]);
   }, 30_000);

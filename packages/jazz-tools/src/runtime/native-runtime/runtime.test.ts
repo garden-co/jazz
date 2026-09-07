@@ -2,6 +2,7 @@ import { schema as s } from "../../schema-namespace.js";
 import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
+import { schema as s } from "../../schema-namespace.js";
 import type {
   ColumnDescriptor,
   RuntimeSubscriptionDelta,
@@ -2856,6 +2857,124 @@ describe("NativeRuntimeAdapter server transport", () => {
           { column: "largeCount", op: "Eq", value: { type: "BigInt", value } },
         ]),
       ).toThrow("BigInt value must be a signed 64-bit integer");
+    }
+  });
+
+  it("decodes canonical BigInt query strings into exact native i64 literals", () => {
+    const preparedBytes = prepareNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Ge",
+            right: {
+              Literal: { type: "BigInt", value: "-9223372036854775808" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Eq",
+            right: {
+              Literal: { type: "BigInt", value: "-9007199254740993" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Le",
+            right: {
+              Literal: { type: "BigInt", value: "9223372036854775807" },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedComparisonLiterals(preparedBytes)).toEqual([
+      {
+        predicateTag: 7,
+        column: "largeCount",
+        literal: { tag: 14, value: -9223372036854775808n },
+      },
+      {
+        predicateTag: 3,
+        column: "largeCount",
+        literal: { tag: 14, value: -9007199254740993n },
+      },
+      {
+        predicateTag: 9,
+        column: "largeCount",
+        literal: { tag: 14, value: 9223372036854775807n },
+      },
+    ]);
+  });
+
+  it("decodes canonical BigInt strings recursively inside array literals", () => {
+    const preparedBytes = prepareNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCounts" },
+            op: "Eq",
+            right: {
+              Literal: {
+                type: "Array",
+                value: [
+                  { type: "BigInt", value: "9223372036854775807" },
+                  { type: "BigInt", value: "-9007199254740993" },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedArrayComparison(preparedBytes)).toEqual({
+      predicateTag: 3,
+      column: "largeCounts",
+      literalTag: 12,
+      values: [
+        { tag: 14, value: 9223372036854775807n },
+        { tag: 14, value: -9007199254740993n },
+      ],
+    });
+  });
+
+  it("rejects malformed, noncanonical, oversized, and out-of-range BigInt strings", () => {
+    const invalidValues = [
+      "",
+      " 1",
+      "-0",
+      "01",
+      "+1",
+      "1e3",
+      "0x10",
+      "9".repeat(21),
+      "9223372036854775808",
+      "-9223372036854775809",
+    ];
+
+    for (const value of invalidValues) {
+      expect(() =>
+        prepareNativeQuery(bigintQuerySchema, {
+          table: "metrics",
+          conditions: [
+            {
+              Cmp: {
+                left: { column: "largeCount" },
+                op: "Eq",
+                right: { Literal: { type: "BigInt", value } },
+              },
+            },
+          ],
+        }),
+      ).toThrow("Native runtime cannot encode this query shape");
     }
   });
 
@@ -6769,6 +6888,44 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
+const bigintQuerySchema = s.defineApp({
+  metrics: s.table({
+    largeCount: s.bigint(),
+    largeCounts: s.array(s.bigint()),
+  }),
+}).wasmSchema;
+
+// Exercise the serialized adapter interface, including deliberately invalid literals.
+function prepareNativeQuery(schema: WasmSchema, query: object): Uint8Array {
+  let preparedBytes: Uint8Array | undefined;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQuery: (prepared: Uint8Array) => {
+            preparedBytes = prepared;
+            return {};
+          },
+          subscribe: () => new ReadableStream(),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    schema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  runtime.createSubscription(JSON.stringify(query));
+  if (preparedBytes === undefined) {
+    throw new Error("native query was not prepared");
+  }
+  return preparedBytes;
+}
+
 function emptyNativeRuntime(): NativeRuntimeAdapter {
   return new NativeRuntimeAdapter(
     {
@@ -7001,6 +7158,27 @@ function readPreparedComparisonLiterals(query: Uint8Array): Array<{
     expect(predicateReader.u64()).toBe(3);
     return { predicateTag, column, literal: readPreparedNumericLiteral(predicateReader) };
   });
+}
+
+function readPreparedArrayComparison(query: Uint8Array): {
+  predicateTag: number;
+  column: string;
+  literalTag: number;
+  values: Array<{ tag: number; value: number | bigint }>;
+} {
+  const reader = new PostcardReader(query);
+  reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  const predicateTag = reader.u64();
+  expect(predicateTag).toBe(3);
+  expect(reader.u64()).toBe(0);
+  const column = reader.string();
+  expect(reader.u64()).toBe(3);
+  const literalTag = reader.u64();
+  expect(literalTag).toBe(12);
+  const values = reader.readVec((valueReader) => readPreparedNumericLiteral(valueReader));
+  return { predicateTag, column, literalTag, values };
 }
 
 function readPreparedNumericLiteral(reader: PostcardReader): {

@@ -232,4 +232,25 @@ describe("TableFilterBuilder", () => {
 
     expect(screen.getAllByText("rank eq 9007199254740993").length).toBeGreaterThan(0);
   });
+
+  it("renders BigInt membership filters as exact decimal text", () => {
+    render(
+      <TableFilterBuilder
+        schemaColumns={bigintSchemaColumns}
+        clauses={[
+          {
+            id: "rank-membership-filter",
+            column: "rank",
+            operator: "in",
+            value: [9007199254740993n, -9007199254740993n],
+          },
+        ]}
+        onClausesChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByText('rank in ["9007199254740993","-9007199254740993"]').length,
+    ).toBeGreaterThan(0);
+  });
 });
