@@ -106,6 +106,9 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     return true
   }
 
+  @ReactMethod(isBlockingSynchronousMethod = true)
+  fun recordSameRuntimeWakeBoundary(): Boolean { Log.e("JazzForegroundWake", "armed"); return true }
+
   @ReactMethod fun waitForCoreObservation(promise: Promise) {
     try {
       val activity = reactApplicationContext.currentActivity

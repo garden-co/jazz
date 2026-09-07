@@ -25,6 +25,7 @@ import {
   recordScopeWriterReadDiagnostic,
   recordDeviceReceipt,
   recordNativeSeedBoundary,
+  recordSameRuntimeWakeBoundary,
   switchNativeRelayAuthScope,
   waitForNativeCoreObservation,
 } from "./src/native-fixture";
@@ -197,6 +198,12 @@ async function observeTrustedAdmissionLifecycleInner(
     foregroundCodec,
     rowIdForRun(receipt.runNonce),
     markFailure,
+    {
+      timeoutMs: 5_000,
+      now: () => performance.now(),
+      yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      onPostCommitWakeArmed: recordSameRuntimeWakeBoundary,
+    },
   );
   // Closing B's trusted relay before re-admitting A forces its scope owner and
   // SQLite handle to be recreated. A's row must survive that lifecycle while

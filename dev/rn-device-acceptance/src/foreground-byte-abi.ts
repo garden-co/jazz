@@ -23,6 +23,7 @@ type PostCommitWakeTiming = {
   now(): number;
   yieldTurn(): Promise<void>;
   onWake?(details: { elapsedMs: number; turns: number }): void;
+  onPostCommitWakeArmed?(): void;
 };
 
 const DEVICE_POST_COMMIT_WAKE_TIMING: PostCommitWakeTiming = {
@@ -240,6 +241,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // Retire already-delivered initial-settlement notifications before A's
       // write establishes the post-commit wake epoch.
     }
+    wakeTiming.onPostCommitWakeArmed?.();
 
     markFailure("same-runtime-write-failed");
     markFailure("same-runtime-transaction-open-failed");

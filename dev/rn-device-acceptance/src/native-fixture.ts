@@ -19,6 +19,7 @@ export type DeviceReceiptContext = {
 type FixtureModule = {
   waitForCoreObservation(): Promise<void>;
   recordSeedBoundary(code: SeedBoundary): boolean;
+  recordSameRuntimeWakeBoundary(): boolean;
   edgeEndpoint(): Promise<string>;
   receiptContext(): Promise<DeviceReceiptContext>;
   recordReceipt(receipt: string): Promise<void>;
@@ -186,4 +187,11 @@ export function recordNativeSeedBoundary(code: SeedBoundary): void {
   } catch {
     // Preserve the actual acceptance outcome if the diagnostic sink fails.
   }
+}
+
+export function recordSameRuntimeWakeBoundary(): void {
+  if (NativePlatform.OS !== "android") return;
+  try {
+    fixtureModule().recordSameRuntimeWakeBoundary();
+  } catch {}
 }

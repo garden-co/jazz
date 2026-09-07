@@ -10,6 +10,7 @@ import {
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
   const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
     "08-29 22:52:21.495  4268  4288 E JazzDeviceAcceptance: linked-abi-admission-failed",
     "08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: capability=secret-device-token",
     "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: native-admission-failed",
@@ -25,6 +26,7 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
 
 test("Android post-commit wake failure retains only fixed bridge stages", () => {
   const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
     "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: requested",
     "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: delivered",
     "08-29 22:52:21.497  4268  4288 E JazzForegroundWake: requested-secret",

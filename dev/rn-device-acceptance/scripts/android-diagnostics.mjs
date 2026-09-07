@@ -10,7 +10,7 @@ const WRITER_READ_DETAIL =
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 const THREADTIME_FOREGROUND_WAKE =
-  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(requested|delivered)\s*$/;
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(armed|requested|delivered)\s*$/;
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =
@@ -47,10 +47,14 @@ export function androidScopeWriterReadDiagnostic(output) {
 }
 
 export function androidForegroundWakeDiagnostic(output) {
+  let armed = false;
   const stages = [];
   for (const line of String(output).split(/\r?\n/)) {
     const stage = THREADTIME_FOREGROUND_WAKE.exec(line)?.[1];
-    if (stage) stages.push(stage);
+    if (stage === "armed") {
+      armed = true;
+      stages.length = 0;
+    } else if (armed && stage) stages.push(stage);
   }
   return stages.slice(-16).join(",") || undefined;
 }
