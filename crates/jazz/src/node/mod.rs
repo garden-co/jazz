@@ -2116,6 +2116,18 @@ impl CurrentRow {
             && provenance_matches
     }
 
+    /// Compare an aggregate row's stable identity and canonical public payload.
+    ///
+    /// Authority predicate validation must ignore source-row provenance: a
+    /// concurrent source update can preserve an aggregate's public payload
+    /// while changing the provenance carried by the materialized row.
+    pub(crate) fn aggregate_payload_equivalent(&self, other: &Self) -> bool {
+        self.table == other.table
+            && self.row_uuid() == other.row_uuid()
+            && self.deleted == other.deleted
+            && self.subscription_cells_equivalent(other)
+    }
+
     fn subscription_cells_equivalent(&self, other: &Self) -> bool {
         // Decode each cell exactly once. Descriptor order differs between a
         // physical current row and its public projection, so canonicalize the

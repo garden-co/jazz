@@ -2045,10 +2045,18 @@ where
             .query_graph(lowered_app_rows_graph(&program)?)
             .await
             .map_err(Error::Groove)?;
-        let table = self
-            .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
-            .clone();
-        self.materialize_historical_query_rows(table, deltas)
+        if lowered_shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(
+                lowered_shape.query(),
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )
+        } else {
+            let table = self
+                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .clone();
+            self.materialize_historical_query_rows(table, deltas)
+        }
     }
 
     pub(super) async fn query_rows_at_snapshot(
@@ -2079,10 +2087,18 @@ where
             .query_graph(lowered_app_rows_graph(&program)?)
             .await
             .map_err(Error::Groove)?;
-        let table = self
-            .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
-            .clone();
-        let mut rows = self.materialize_historical_query_rows(table, deltas)?;
+        let mut rows = if lowered_shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(
+                lowered_shape.query(),
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )?
+        } else {
+            let table = self
+                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .clone();
+            self.materialize_historical_query_rows(table, deltas)?
+        };
         self.finish_engine_query_rows_in_schema(
             lowered_shape.query(),
             lowered_shape.schema_version(),
@@ -3163,7 +3179,15 @@ where
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .await
             .map_err(Error::Groove)?;
-        let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
+        let mut rows = if query.aggregate.is_some() {
+            self.materialize_aggregate_query_rows(
+                query,
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )?
+        } else {
+            self.materialize_inline_current_query_rows(&table, deltas)?
+        };
         let predicate_read = PredicateRead {
             table: query.table.clone(),
             shape_id: shape.shape_id(),
