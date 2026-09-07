@@ -363,7 +363,7 @@ class BackendDb extends Db {
   }
 }
 
-function deterministicBytes(seed: string): Uint8Array {
+export function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;
   const bytes = new Uint8Array(16);
   const view = new DataView(bytes.buffer);

@@ -10,6 +10,9 @@ import {
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import { JazzClient as RuntimeClient, type RequestLike } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
@@ -29,6 +32,7 @@ import {
 } from "../web/create-jazz-client.js";
 import {
   JazzContext,
+  deterministicBytes,
   type BackendContextConfig,
   type BackendSchemaInput,
 } from "./create-jazz-context.js";
@@ -67,10 +71,10 @@ function uuidBytes(uuid: string): Uint8Array {
 
 function backendNodeId(config: JazzSessionConfig): string {
   if (config.driver.type === "memory") return randomUUID();
-  const hex = createHash("sha256")
-    .update(JSON.stringify([config.appId, config.env ?? "dev", config.driver.dataPath]))
-    .digest("hex")
-    .slice(0, 32);
+  // Preserve the existing persistent backend node identity across this API migration.
+  const hex = Buffer.from(
+    deterministicBytes(`${config.appId}:${config.env ?? "dev"}:${config.driver.dataPath}:node`),
+  ).toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
@@ -87,6 +91,14 @@ class NodeUserRuntimeSource extends RuntimeSource {
     super();
   }
   override createClient({ config, schema, onAuthFailure }: RuntimeClientContext): RuntimeClient {
+    const declaredSchema = resolveSchemaSource(this.host.app);
+    if (serializeRuntimeSchema(declaredSchema) !== serializeRuntimeSchema(schema)) {
+      throw new Error("Node session query schema does not match its configured app");
+    }
+    const runtimeSchema =
+      this.host.permissions && !Object.values(schema).some((table) => table.policies !== undefined)
+        ? mergePermissionsIntoWasmSchema(schema, this.host.permissions)
+        : schema;
     const trustedReservedSession = getTrustedReservedSession(config);
     const session = resolveClientInternalSessionSync({ ...config, trustedReservedSession });
     if (!session) throw new Error("Node user runtime requires an admitted account");
@@ -101,8 +113,12 @@ class NodeUserRuntimeSource extends RuntimeSource {
       .digest("hex");
     const runtime = new NativeRuntimeAdapter(
       NapiDb,
-      schema,
-      uuidBytes(randomUUID()),
+      runtimeSchema,
+      this.host.driver.type === "persistent"
+        ? deterministicBytes(
+            `${this.host.appId}:${this.host.env ?? "dev"}:${this.host.driver.dataPath}.accounts/${scope}:node`,
+          )
+        : uuidBytes(randomUUID()),
       authorBytesForSession(session),
       1,
       false,
@@ -114,7 +130,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         readAuthorizationHost: "client-local",
       },
     );
-    const context: AppContext = { ...config, schema, tier: "local" };
+    const context: AppContext = { ...config, schema: runtimeSchema, tier: "local" };
     setTrustedReservedSession(context, trustedReservedSession);
     return RuntimeClient.connectWithRuntime(runtime, context, { onAuthFailure });
   }
@@ -146,7 +162,6 @@ export async function createJazzSession(
   }
   if (!config.app) throw new Error("Node createJazzSession requires app");
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
-  const nodeId = backendNodeId(config);
   const accounts = await prepareAccountManager({
     appId: config.appId,
     registry,
@@ -163,7 +178,7 @@ export async function createJazzSession(
         });
         if (response.status !== 204)
           throw new Error(`Backend admission failed (${response.status})`);
-        return { nodeId };
+        return { nodeId: backendNodeId(config) };
       },
     },
   });
