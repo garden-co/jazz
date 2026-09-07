@@ -38,6 +38,8 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 }
 
 export interface BrowserWorkerConnection {
+  /** Only a rejected initial configuration admission permits a later API call to retry. */
+  canRetryInitialConfigurationAdmission?(): boolean;
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;

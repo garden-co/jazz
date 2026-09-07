@@ -359,6 +359,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
 export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
+  private initialConfigurationAdmissionRejected = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
@@ -480,7 +481,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           // report that rejection before the caller's operation has observed
           // readiness. The outer, constructor-owned state machine turns this
           // into the same explicit error after it has installed containment.
-          resolve({ connected: false, error: deserializeBrowserRelayError(event.data.error) });
+          const error = deserializeBrowserRelayError(event.data.error);
+          this.initialConfigurationAdmissionRejected =
+            error.message === "incompatible persistent browser configuration";
+          resolve({ connected: false, error });
           return;
         }
         if (event.data?.type === "worker-closing") {
@@ -593,6 +597,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
     await this.ready();
     await this.connection?.reconnect(authJson, sessionClaims);
+  }
+
+  canRetryInitialConfigurationAdmission(): boolean {
+    return this.initialConfigurationAdmissionRejected;
   }
 
   async shutdown(): Promise<void> {

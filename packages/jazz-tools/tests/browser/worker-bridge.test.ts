@@ -3783,35 +3783,39 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsubscribe();
   });
 
-  it.fails("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
+  it("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
     const dbName = uniqueDbName("schema-mismatch-recovery");
+    // Both versions must already be admitted with their lineage lens. Merely
+    // supplying a new schema at reopen is not a catalogue publication.
+    const server = await publishCatalogueSchemaFamily("schema-mismatch-recovery");
+    const nextApp = catalogueAppV2;
     const oldTab = track(
       await createDb({
-        appId: "test-app",
+        appId: server.appId,
+        serverUrl: server.serverUrl,
         driver: { type: "persistent", dbName },
       }),
     );
-    oldTab.insert(todos, { title: "Old schema row", done: false });
+    await withTimeout(
+      oldTab
+        .insert(catalogueAppV1.todos, { title: "Old schema row", completed: false })
+        .wait({ tier: "edge" }),
+      8000,
+      "Old tab should receive the published catalogue before pinning its schema",
+    );
     await waitForCondition(
       async () => {
-        const rows = await oldTab.all(allTodos, { tier: "local" });
+        const rows = await oldTab.all(catalogueAppV1.todos, { tier: "local" });
         return rows.some((row) => row.title === "Old schema row");
       },
       8000,
       "Old tab should be durable-ready with the original schema",
     );
 
-    const nextApp = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        done: s.boolean(),
-        priority: s.string().optional(),
-      }),
-    });
-
     const newTab = track(
       await createDb({
-        appId: "test-app",
+        appId: server.appId,
+        serverUrl: server.serverUrl,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3821,7 +3825,31 @@ describe("SharedWorker bridge with IndexedDB", () => {
         8000,
         "Schema-blocked tab query should reject instead of hanging",
       ),
-    ).rejects.toThrow("incompatible persistent browser schema");
+    ).rejects.toThrow("incompatible persistent browser configuration");
+
+    // Each later call gets one fresh admission attempt, and must still fail
+    // visibly while the incompatible worker remains pinned.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(
+        withTimeout(
+          newTab.all(nextApp.todos, { tier: "local" }),
+          8000,
+          "Repeated schema-blocked query should reject instead of hanging",
+        ),
+      ).rejects.toThrow("incompatible persistent browser configuration");
+    }
+
+    const failedTab = track(
+      await createDb({
+        appId: server.appId,
+        serverUrl: server.serverUrl,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    await expect(failedTab.all(nextApp.todos, { tier: "local" })).rejects.toThrow(
+      "incompatible persistent browser configuration",
+    );
+    await failedTab.shutdown();
 
     await oldTab.shutdown();
     const rows = await withTimeout(
@@ -3830,6 +3858,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "Recovered tab should be able to query with its own schema",
     );
     expect(Array.isArray(rows)).toBe(true);
+    expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
   });
 
   it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
