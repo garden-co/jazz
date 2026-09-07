@@ -1304,6 +1304,226 @@ mod tests {
     fn test_jwks_cache() -> JwksCache {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
     }
+    #[derive(Clone)]
+    struct JwksProbeState {
+        requests: std::sync::Arc<AtomicU64>,
+        body: std::sync::Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+        gate: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<JwksProbeGate>>>>,
+    }
+
+    struct JwksProbeGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        released: std::sync::atomic::AtomicBool,
+    }
+
+    struct JwksProbe {
+        state: JwksProbeState,
+        address: std::net::SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl JwksProbe {
+        async fn start(body: serde_json::Value) -> Self {
+            use axum::extract::State;
+            use axum::routing::get;
+            use axum::{Json, Router};
+
+            async fn handler(State(state): State<JwksProbeState>) -> axum::response::Response {
+                use axum::response::IntoResponse;
+
+                state.requests.fetch_add(1, Ordering::SeqCst);
+                let gate = state.gate.lock().await.clone();
+                if let Some(gate) = gate
+                    && !gate.released.load(Ordering::Acquire)
+                {
+                    gate.entered.notify_waiters();
+                    gate.release.notified().await;
+                }
+
+                let Some(body) = state.body.read().await.clone() else {
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                };
+                (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+            }
+
+            let state = JwksProbeState {
+                requests: std::sync::Arc::new(AtomicU64::new(0)),
+                body: std::sync::Arc::new(tokio::sync::RwLock::new(Some(body))),
+                gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind JWKS probe");
+            let address = listener.local_addr().expect("read JWKS probe address");
+            let app = Router::new()
+                .route("/jwks", get(handler))
+                .with_state(state.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve JWKS probe");
+            });
+            Self {
+                state,
+                address,
+                task,
+            }
+        }
+
+        fn endpoint(&self) -> String {
+            format!("http://{}/jwks", self.address)
+        }
+
+        fn requests(&self) -> u64 {
+            self.state.requests.load(Ordering::SeqCst)
+        }
+
+        async fn set_body(&self, body: Option<serde_json::Value>) {
+            *self.state.body.write().await = body;
+        }
+
+        async fn gate_next_cohort(&self) -> std::sync::Arc<JwksProbeGate> {
+            let gate = std::sync::Arc::new(JwksProbeGate {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            });
+            *self.state.gate.lock().await = Some(gate.clone());
+            gate
+        }
+    }
+
+    impl Drop for JwksProbe {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn jwks_document(kid: &str, secret: &str) -> serde_json::Value {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes());
+        serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "kid": kid,
+                    "alg": "HS256",
+                    "k": encoded
+                }
+            ]
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jwks_refreshes_are_singleflight_and_failed_forced_refreshes_are_cooldown_bound() {
+        let old_secret = "old-jwks-secret";
+        let new_secret = "new-jwks-secret";
+        let probe = JwksProbe::start(jwks_document("old-kid", old_secret)).await;
+        let client = reqwest::Client::new();
+        let cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            client.clone(),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        ));
+
+        let cold_gate = probe.gate_next_cohort().await;
+        let cold_callers = 16;
+        let mut cold_tasks = Vec::with_capacity(cold_callers);
+        for _ in 0..cold_callers {
+            let cache = cache.clone();
+            cold_tasks.push(tokio::spawn(async move { cache.load(false).await }));
+        }
+        cold_gate.entered.notified().await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        cold_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        cold_gate.release.notify_waiters();
+        for task in cold_tasks {
+            task.await
+                .expect("cold JWKS load must not panic")
+                .expect("cold JWKS load must succeed");
+        }
+        assert_eq!(
+            probe.requests(),
+            1,
+            "concurrent cold loads must share one JWKS fetch"
+        );
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        probe.set_body(None).await;
+        let first_failed_forced = cache
+            .load(true)
+            .await
+            .expect("failed forced refresh should serve bounded stale data");
+        let second_failed_forced = cache
+            .load(true)
+            .await
+            .expect("cooldown-denied forced refresh should serve bounded stale data");
+        assert_eq!(first_failed_forced.keys.len(), 1);
+        assert_eq!(second_failed_forced.keys.len(), 1);
+        assert_eq!(
+            probe.requests(),
+            2,
+            "a failed forced refresh must reserve the cooldown"
+        );
+
+        probe
+            .set_body(Some(jwks_document("old-kid", old_secret)))
+            .await;
+        let rotated_cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            client,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        rotated_cache
+            .load(false)
+            .await
+            .expect("rotation test must warm its cache");
+        let requests_before_rotation = probe.requests();
+        probe
+            .set_body(Some(jwks_document("new-kid", new_secret)))
+            .await;
+        let claims = JwtClaims {
+            sub: "rotated-user".to_owned(),
+            iss: Some("https://issuer.jazz.test".to_owned()),
+            claims: std::collections::BTreeMap::new(),
+            exp: Some(4_102_444_800),
+            iat: None,
+        };
+        let token = make_jwt(&claims, new_secret, "new-kid");
+        let config = make_test_config();
+        let forced_gate = probe.gate_next_cohort().await;
+        let mut validation_tasks = Vec::with_capacity(cold_callers);
+        for _ in 0..cold_callers {
+            let cache = rotated_cache.clone();
+            let token = token.clone();
+            let config = config.clone();
+            validation_tasks.push(tokio::spawn(async move {
+                validate_jwt_with_cache_at(&token, &cache, &config, 1_000_000).await
+            }));
+        }
+        forced_gate.entered.notified().await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        forced_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        forced_gate.release.notify_waiters();
+        for task in validation_tasks {
+            task.await
+                .expect("rotated JWT validation must not panic")
+                .expect("all concurrent rotated JWT validations must succeed");
+        }
+        assert_eq!(
+            probe.requests(),
+            requests_before_rotation + 1,
+            "concurrent forced refreshes must share one JWKS fetch"
+        );
+    }
 
     #[test]
     fn forced_jwks_refresh_reservation_allows_only_one_concurrent_request() {
