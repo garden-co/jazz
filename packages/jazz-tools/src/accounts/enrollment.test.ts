@@ -222,7 +222,7 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
 });
 
 it("rejects SYSTEM identities through every ordinary JWT enrollment path", async () => {
-  const fetcher = vi.fn<typeof fetch>();
+  const fetcher = vi.fn(async () => new Response(null, { status: 500 }));
   const manager = setup(fetcher);
   const forged = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:system", sub: id }))}.signature`;
   await expect(manager.registerJWT(forged)).rejects.toThrow(/external_identity_required/);
