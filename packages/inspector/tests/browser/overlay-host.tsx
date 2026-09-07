@@ -20,8 +20,11 @@ import { app } from "./schema.js";
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const TEST_ENV = "dev";
-const TEST_PORT = 19879;
-const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
+const SERVER_URL = (() => {
+  const url = new URL(window.location.href).searchParams.get("serverUrl");
+  if (!url) throw new Error("Inspector overlay fixture requires its owned server URL");
+  return url;
+})();
 
 function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();

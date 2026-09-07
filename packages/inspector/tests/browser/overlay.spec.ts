@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = join(here, "..", "..");
@@ -52,7 +52,9 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       }
     });
 
-    const hostResponse = await page.goto("/tests/browser/overlay-host.html");
+    const hostResponse = await page.goto(
+      `/tests/browser/overlay-host.html?serverUrl=${encodeURIComponent(process.env.JAZZ_INSPECTOR_TEST_SERVER_URL!)}`,
+    );
     expect(hostResponse?.status()).toBe(200);
 
     // Host app stands up its real Jazz client and publishes the host handle.
@@ -167,7 +169,7 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     // overlay must reconstruct its own peer and read the locally committed
     // write back through that fresh attachment.
     await page.locator('iframe[title="jazz-inspector"]').evaluate((iframe) => {
-      iframe.contentWindow?.location.reload();
+      (iframe as HTMLIFrameElement).contentWindow?.location.reload();
     });
     const reloadedInspector = page.frameLocator('iframe[title="jazz-inspector"]');
     await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
