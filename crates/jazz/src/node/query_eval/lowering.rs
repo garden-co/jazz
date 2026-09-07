@@ -6,6 +6,35 @@
 //! in their neighboring stages.
 
 use super::*;
+
+#[cfg(test)]
+pub(super) struct ScopedPolicyGraphReplacementPause;
+
+#[cfg(test)]
+thread_local! {
+    static SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl Drop for ScopedPolicyGraphReplacementPause {
+    fn drop(&mut self) {
+        SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn pause_scoped_policy_graph_replacement_for_test() -> ScopedPolicyGraphReplacementPause
+{
+    SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(true));
+    ScopedPolicyGraphReplacementPause
+}
+
+#[cfg(test)]
+async fn wait_for_scoped_policy_graph_replacement_for_test() {
+    if SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.get()) {
+        std::future::pending::<()>().await;
+    }
+}
 fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
     app_row_terminal_schema(output).and_then(|app_rows| {
         app_rows
@@ -661,6 +690,8 @@ where
                         self.query
                             .policy_authorization_graph_cache
                             .insert(cache_key.clone(), graph);
+                        #[cfg(test)]
+                        wait_for_scoped_policy_graph_replacement_for_test().await;
                     }
                     Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
                         self.restore_scoped_policy_authorization_graphs(lease);
