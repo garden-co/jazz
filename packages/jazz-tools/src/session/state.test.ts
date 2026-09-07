@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { attachJazzSessionConsumer, createJazzSessionOwner } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 const handle = (id: string) =>
   Object.freeze({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
 function deferred<T = void>() {
@@ -60,7 +61,7 @@ describe("Jazz session lifecycle", () => {
   });
   it("sync failure retains usable old client and prevents enrollment", async () => {
     const { session, clients, enrollment, old } = await setup();
-    const failure = new Error("sync failed");
+    const failure = new GracefulShutdownSyncError(new Error("sync failed"));
     clients[0]!.shutdown.mockRejectedValueOnce(failure);
     await expect(session.registerJWT("token")).rejects.toBe(failure);
     expect(enrollment.registerJWT).not.toHaveBeenCalled();
@@ -193,5 +194,53 @@ describe("Jazz session lifecycle", () => {
     expect(Object.isFrozen(getSnapshot())).toBe(true);
     expect(getSnapshot()).toBe(getSnapshot());
     await close();
+  });
+  it("hides a client after cleanup failure and prevents registry mutation", async () => {
+    const { session, clients, enrollment } = await setup();
+    const failure = new Error("cleanup failed");
+    clients[0]!.shutdown.mockRejectedValue(failure);
+    await expect(session.linkJWT("token")).rejects.toBe(failure);
+    expect(session.getSnapshot().status).toBe("error");
+    expect(session.getSnapshot().client).toBeUndefined();
+    await expect(session.retry()).rejects.toBe(failure);
+    expect(enrollment.linkJWT).not.toHaveBeenCalled();
+    await expect(session.close()).rejects.toBe(failure);
+    expect(session.getSnapshot().status).toBe("closed");
+  });
+  it("reserves logout before notifying reentrant command subscribers", async () => {
+    const { session, enrollment } = await setup();
+    let attempted: Promise<void> | undefined;
+    const stop = session.subscribe(() => {
+      if (!attempted)
+        attempted = expect(session.loginJWT("token")).rejects.toThrow("already pending");
+    });
+    await session.logout();
+    await attempted;
+    stop();
+    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    await session.close();
+  });
+  it("reentrant close observes the same close promise", async () => {
+    const { session, clients } = await setup();
+    let reentrant: Promise<void> | undefined;
+    session.subscribe(() => {
+      reentrant = session.close();
+    });
+    const closing = session.close();
+    expect(reentrant).toBe(closing);
+    await closing;
+    expect(clients[0]!.shutdown).toHaveBeenCalledOnce();
+  });
+  it("subscriber close fences a command before enrollment", async () => {
+    const { session, enrollment } = await setup();
+    let closing: Promise<void> | undefined;
+    session.subscribe(() => {
+      if (session.getSnapshot().status === "transitioning") closing = session.close();
+    });
+    await expect(session.loginJWT("token")).rejects.toThrow("superseded");
+    await closing;
+    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(session.getSnapshot().status).toBe("closed");
   });
 });

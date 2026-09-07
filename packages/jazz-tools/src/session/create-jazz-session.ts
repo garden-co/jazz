@@ -15,7 +15,7 @@ export type JazzSessionConfig = Omit<JazzClientConfig, "account"> &
 export async function createJazzSession(
   config: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
-  const { initial, store, ...clientConfig } = config;
+  const { initial, store: _store, ...clientConfig } = config;
   const accounts = await createAccountManager(config);
   return createJazzSessionOwner({
     accounts,

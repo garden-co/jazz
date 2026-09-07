@@ -1,5 +1,9 @@
 import type { AccountHandle, AccountManager } from "../accounts/state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
+import {
+  GracefulShutdownSyncError,
+  SharedClientShutdownError,
+} from "../runtime/graceful-shutdown-error.js";
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -116,8 +120,18 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
         client = undefined;
       }
     } catch (cause) {
-      if (token === generation)
-        publish({ status: "ready", account: selected, client, error: asError(cause) });
+      if (token === generation) {
+        const usable =
+          cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
+        // Unknown teardown failures retain the client privately as a shutdown
+        // barrier. Never publish a potentially stopped runtime or enroll over it.
+        publish({
+          status: usable ? "ready" : "error",
+          account: selected,
+          client: usable ? client : undefined,
+          error: asError(cause),
+        });
+      }
       throw cause;
     }
     if (token !== generation) throw superseded();
@@ -190,8 +204,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       if (loggingOut) return loggingOut;
       const token = ++generation;
       const pending = busy;
-      const barrier = detach({ status: "transitioning", account: selected, pending: "logout" });
-      const task = (async () => {
+      const task = Promise.resolve().then(async () => {
         await barrier.done;
         await pending?.catch(() => {});
         if (token !== generation) throw superseded();
@@ -203,8 +216,9 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           },
           token,
         );
-      })();
+      });
       loggingOut = task;
+      const barrier = detach({ status: "transitioning", account: selected, pending: "logout" });
       void task
         .finally(() => {
           if (loggingOut === task) loggingOut = undefined;
@@ -218,15 +232,15 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       ++generation;
       const pending = busy;
       const logout = loggingOut;
-      const barrier = detach({ status: "closed" });
-      closing = (async () => {
+      closing = Promise.resolve().then(async () => {
         await barrier.done;
         await pending?.catch(() => {});
         await logout?.catch(() => {});
         const old = client;
         client = undefined;
         await old?.shutdown();
-      })();
+      });
+      const barrier = detach({ status: "closed" });
       return closing;
     },
   };
