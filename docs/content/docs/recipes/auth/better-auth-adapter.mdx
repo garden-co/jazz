@@ -93,13 +93,13 @@ export const auth = betterAuth({
 });
 ```
 
-| Option      | Description                                                                                                 |
-| ----------- | ----------------------------------------------------------------------------------------------------------- |
-| `db`        | A function returning a `Db` handle via the ready backend `client.db`. Use the merged app, not `authSchema`. |
-| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                         |
-| `debugLogs` | Better Auth adapter debug logging controls.                                                                 |
-| `usePlural` | Whether Better Auth model names should use plural table names.                                              |
-| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                           |
+| Option      | Description                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------- |
+| `db`        | A function returning `Db` or `Promise<Db>` from the ready backend client. Use the merged app, not `authSchema`. |
+| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                             |
+| `debugLogs` | Better Auth adapter debug logging controls.                                                                     |
+| `usePlural` | Whether Better Auth model names should use plural table names.                                                  |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                               |
 
 <Callout title="Leave Better Auth joins disabled">
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable

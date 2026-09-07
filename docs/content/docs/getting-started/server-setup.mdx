@@ -51,7 +51,7 @@ It expects similar arguments as the CLI.
 
 A TypeScript backend creates one `createJazzSession` owner from `jazz-tools/backend`, with `appId`, `app`, `permissions`, `driver`, and `serverUrl` configured once. Select backend authority with `initial: { backendSecret }` or later with `await session.becomeBackend({ backendSecret })`. For authentication and account linking, see [Authentication](/docs/auth/authentication).
 
-Backend admission requires a reachable Jazz core: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after the core validates it. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
+Backend admission requires a reachable Jazz server: the Node host sends `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`, and proceeds only after that server validates it. An edge validates its backend transport credential; account registration and linking still use the core registry. This also applies to a memory driver; backend initialization is not an offline privilege grant. Browser and React Native hosts reject backend selection.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
