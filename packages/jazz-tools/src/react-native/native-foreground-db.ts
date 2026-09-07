@@ -84,7 +84,6 @@ export const REACT_NATIVE_UNSUPPORTED_ERROR =
   "React Native native foreground does not support this operation yet";
 
 type ForegroundWriteOptions = {
-  transactionId?: string;
   rowId?: Uint8Array;
   author?: Uint8Array;
   attribution?: Uint8Array;
@@ -336,15 +335,7 @@ export class NativeForegroundDb {
     table: string,
     cells: Uint8Array,
     options?: ForegroundWriteOptions,
-  ): NativeForegroundWrite | Uint8Array {
-    if (options?.transactionId) {
-      return this.stageInsert(
-        this.openTransaction(options.transactionId, "insert into"),
-        table,
-        cells,
-        options.rowId,
-      );
-    }
+  ): NativeForegroundWrite {
     return this.withOneMutation("insert", (transaction) => {
       const response = this.execute({
         type: "insert",
@@ -358,21 +349,26 @@ export class NativeForegroundDb {
     });
   }
 
+  insertInTransaction(
+    openTransactionId: string,
+    table: string,
+    cells: Uint8Array,
+    options?: ForegroundWriteOptions,
+  ): Uint8Array {
+    return this.stageInsert(
+      this.openTransaction(openTransactionId, "insert into"),
+      table,
+      cells,
+      options?.rowId,
+    );
+  }
+
   update(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    options?: ForegroundWriteOptions,
-  ): NativeForegroundWrite | undefined {
-    if (options?.transactionId) {
-      this.stageUpdate(
-        this.openTransaction(options.transactionId, "update in"),
-        table,
-        rowId,
-        patch,
-      );
-      return undefined;
-    }
+    _options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite {
     return this.withOneMutation("update", (transaction) => {
       const response = this.execute({
         type: "update",
@@ -386,21 +382,21 @@ export class NativeForegroundDb {
     });
   }
 
+  updateInTransaction(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+  ): void {
+    this.stageUpdate(this.openTransaction(openTransactionId, "update in"), table, rowId, patch);
+  }
+
   upsert(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    options?: ForegroundWriteOptions,
-  ): NativeForegroundWrite | undefined {
-    if (options?.transactionId) {
-      this.stageUpsert(
-        this.openTransaction(options.transactionId, "upsert into"),
-        table,
-        rowId,
-        cells,
-      );
-      return undefined;
-    }
+    _options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite {
     return this.withOneMutation("upsert", (transaction) => {
       const response = this.execute({
         type: "upsert",
@@ -414,15 +410,20 @@ export class NativeForegroundDb {
     });
   }
 
+  upsertInTransaction(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+  ): void {
+    this.stageUpsert(this.openTransaction(openTransactionId, "upsert into"), table, rowId, cells);
+  }
+
   delete(
     table: string,
     rowId: Uint8Array,
-    options?: ForegroundWriteOptions,
-  ): NativeForegroundWrite | undefined {
-    if (options?.transactionId) {
-      this.stageDelete(this.openTransaction(options.transactionId, "delete from"), table, rowId);
-      return undefined;
-    }
+    _options?: ForegroundWriteOptions,
+  ): NativeForegroundWrite {
     return this.withOneMutation("delete", (transaction) => {
       const response = this.execute({
         type: "delete",
@@ -433,6 +434,10 @@ export class NativeForegroundDb {
       if (response.type !== "mutationStaged") return unexpected("delete", response.type);
       return rowId;
     });
+  }
+
+  deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array): void {
+    this.stageDelete(this.openTransaction(openTransactionId, "delete from"), table, rowId);
   }
 
   restore(
@@ -447,6 +452,10 @@ export class NativeForegroundDb {
     void table;
     void rowId;
     void cells;
+    return unsupported("restore");
+  }
+
+  restoreInTransaction(): void {
     return unsupported("restore");
   }
 

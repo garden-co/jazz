@@ -81,41 +81,24 @@ function fakeDb<T extends object>(
     ) => {
       openBatches.set(openTransactionId, { kind, author });
     },
-    insert: (
+    insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => ({
+      ...fakeWrite(),
+      rowId: options?.rowId ?? new Uint8Array(16),
+    }),
+    insertInTransaction: (
+      openTransactionId: string,
       _table: string,
       _cells: Uint8Array,
-      options?: { transactionId?: string; rowId?: Uint8Array },
-    ) => {
-      const txId = options?.transactionId;
-      if (txId) {
-        requireOpenBatch(txId);
-        return options?.rowId ?? new Uint8Array(16);
-      }
-      return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
-    },
-    restore: (
-      _table: string,
-      _rowId: Uint8Array,
-      _cells: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    update: (
-      _table: string,
-      _rowId: Uint8Array,
-      _patch: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    upsert: (
-      _table: string,
-      _rowId: Uint8Array,
-      _cells: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    delete: (_table: string, _rowId: Uint8Array, options?: { transactionId?: string }) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
+      options?: { rowId?: Uint8Array },
+    ) => (requireOpenBatch(openTransactionId), options?.rowId ?? new Uint8Array(16)),
+    restore: () => fakeWrite(),
+    restoreInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    update: () => fakeWrite(),
+    updateInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    upsert: () => fakeWrite(),
+    upsertInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    delete: () => fakeWrite(),
+    deleteInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
     commitTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
@@ -574,7 +557,12 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
           ) => {
             if (author) authors.push(new TextDecoder().decode(author));
           },
-          insert: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
+          insertInTransaction: (
+            _openTransactionId: string,
+            table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => {
             staged.push(table);
             return options?.rowId ?? new Uint8Array(16);
           },
@@ -754,7 +742,12 @@ it("rejects a duplicate live OpenTransactionId without replacing its staged tran
     {
       openMemory: () =>
         fakeDb({
-          insert: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
+          insertInTransaction: (
+            _openTransactionId: string,
+            table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => {
             staged.push(table);
             return options?.rowId ?? new Uint8Array(16);
           },
@@ -916,8 +909,12 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
               phase: "begin",
               author: author && new TextDecoder().decode(author),
             }),
-          insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) =>
-            options?.rowId ?? new Uint8Array(16),
+          insertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => options?.rowId ?? new Uint8Array(16),
           commitTransaction: (
             _openTransactionId: string,
             _kind?: "mergeable" | "exclusive",
@@ -1093,7 +1090,8 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          insert: (
+          insertInTransaction: (
+            _openTransactionId: string,
             _table: string,
             _cells: Uint8Array,
             options?: { rowId?: Uint8Array; updatedAtMs?: number },
@@ -1101,26 +1099,33 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
             staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
             return options?.rowId ?? new Uint8Array(16);
           },
-          update: (
+          updateInTransaction: (
+            _openTransactionId: string,
             _table: string,
             _rowId: Uint8Array,
             _patch: Uint8Array,
             options?: { updatedAtMs?: number },
           ) => staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
-          upsert: (
+          upsertInTransaction: (
+            _openTransactionId: string,
             _table: string,
             _rowId: Uint8Array,
             _cells: Uint8Array,
             options?: { updatedAtMs?: number },
           ) => staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
-          restore: (
+          restoreInTransaction: (
+            _openTransactionId: string,
             _table: string,
             _rowId: Uint8Array,
             _cells: Uint8Array,
             options?: { updatedAtMs?: number },
           ) => staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
-          delete: (_table: string, _rowId: Uint8Array, options?: { updatedAtMs?: number }) =>
-            staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
+          deleteInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -1160,7 +1165,8 @@ it("preserves the full branch view for staged mergeable upserts", () => {
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          upsert: (
+          upsertInTransaction: (
+            _openTransactionId: string,
             _table: string,
             _rowId: Uint8Array,
             _cells: Uint8Array,

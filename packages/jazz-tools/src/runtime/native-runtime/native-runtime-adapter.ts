@@ -134,7 +134,6 @@ type NativeDbConstructor = {
 };
 
 type NativeWriteOptions = {
-  transactionId?: OpenTransactionId;
   author?: Uint8Array;
   attribution?: Uint8Array;
   updatedAtMs?: number;
@@ -152,11 +151,11 @@ function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
 }
 
-function requireNativeWrite(value: Write | Uint8Array | null | undefined): Write {
+function requireNativeWrite(value: unknown): Write {
   if (!value || value instanceof Uint8Array) {
     throw new Error("Native runtime direct mutation did not return a write receipt");
   }
-  return value;
+  return value as Write;
 }
 
 function isPendingNativePermissionAdvice(value: unknown): value is PendingNativePermissionAdvice {
@@ -220,26 +219,49 @@ type NativeDb = {
     | ReadableStream<unknown>
     | Subscription
     | PendingNativeOperation<ReadableStream<unknown> | Subscription>;
-  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write | Uint8Array;
-  update(
+  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
+  insertInTransaction(
+    openTransactionId: OpenTransactionId,
+    table: string,
+    cells: Uint8Array,
+    options?: NativeInsertOptions,
+  ): Uint8Array;
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): Write;
+  updateInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     options?: NativeUpdateOptions,
-  ): Write | null | undefined;
-  upsert(
+  ): void;
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): Write;
+  upsertInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeUpsertOptions,
-  ): Write | null | undefined;
-  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write | null | undefined;
+  ): void;
+  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  deleteInTransaction(
+    openTransactionId: OpenTransactionId,
+    table: string,
+    rowId: Uint8Array,
+    options?: NativeDeleteOptions,
+  ): void;
   restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeRestoreOptions,
-  ): Write | null | undefined;
+  ): Write;
+  restoreInTransaction(
+    openTransactionId: OpenTransactionId,
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
+  ): void;
   beginStreamingMutation?(
     table: string,
     rowId: Uint8Array,
@@ -1113,8 +1135,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      const rowId = this.db.insert(table, cells, {
-        transactionId: tx.id,
+      const rowId = this.db.insertInTransaction(tx.id, table, cells, {
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1276,8 +1297,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      this.db.restore(table, rowId, cells, {
-        transactionId: tx.id,
+      this.db.restoreInTransaction(tx.id, table, rowId, cells, {
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
@@ -1323,8 +1343,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      this.db.update(table, rowId, patch, {
-        transactionId: tx.id,
+      this.db.updateInTransaction(tx.id, table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1419,8 +1438,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      this.db.upsert(table, rowId, cells, {
-        transactionId: tx.id,
+      this.db.upsertInTransaction(tx.id, table, rowId, cells, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1463,8 +1481,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) this.assertTransactionAttribution(tx, attribution);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      this.db.delete(table, rowId, {
-        transactionId: tx.id,
+      this.db.deleteInTransaction(tx.id, table, rowId, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,

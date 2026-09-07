@@ -59,7 +59,6 @@ declare module "jazz-wasm" {
   }
 
   export type WriteOptions = {
-    transactionId?: string;
     author?: Uint8Array;
     attribution?: Uint8Array;
     updatedAtMs?: number;
@@ -157,16 +156,24 @@ declare module "jazz-wasm" {
       author?: Uint8Array,
     ): ReadableStream<unknown> | PendingNativeOperation<ReadableStream<unknown>>;
 
-    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite | Uint8Array;
+    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
+    insertInTransaction(
+      openTransactionId: string,
+      table: string,
+      cells: Uint8Array,
+      options?: InsertOptions,
+    ): Uint8Array;
     canInsert(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
     requestInsertPermissionAdvice(table: string, cells: Uint8Array): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    update(
+    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): WasmWrite;
+    updateInTransaction(
+      openTransactionId: string,
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
       options?: UpdateOptions,
-    ): WasmWrite | undefined;
+    ): void;
     updateLargeValues(
       table: string,
       rowId: Uint8Array,
@@ -180,19 +187,34 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    upsert(
+    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): WasmWrite;
+    upsertInTransaction(
+      openTransactionId: string,
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       options?: UpsertOptions,
-    ): WasmWrite | undefined;
-    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite | undefined;
+    ): void;
+    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
+    deleteInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      options?: DeleteOptions,
+    ): void;
     restore(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       options?: RestoreOptions,
-    ): WasmWrite | undefined;
+    ): WasmWrite;
+    restoreInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      options?: RestoreOptions,
+    ): void;
     setTickScheduler(
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;

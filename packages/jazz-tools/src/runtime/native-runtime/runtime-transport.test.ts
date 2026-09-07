@@ -1287,41 +1287,24 @@ function fakeDb<T extends object>(
     ) => {
       openBatches.set(openTransactionId, { kind, author });
     },
-    insert: (
+    insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => ({
+      ...fakeWrite(),
+      rowId: options?.rowId ?? new Uint8Array(16),
+    }),
+    insertInTransaction: (
+      openTransactionId: string,
       _table: string,
       _cells: Uint8Array,
-      options?: { transactionId?: string; rowId?: Uint8Array },
-    ) => {
-      const txId = options?.transactionId;
-      if (txId) {
-        requireOpenBatch(txId);
-        return options?.rowId ?? new Uint8Array(16);
-      }
-      return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
-    },
-    restore: (
-      _table: string,
-      _rowId: Uint8Array,
-      _cells: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    update: (
-      _table: string,
-      _rowId: Uint8Array,
-      _patch: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    upsert: (
-      _table: string,
-      _rowId: Uint8Array,
-      _cells: Uint8Array,
-      options?: { transactionId?: string },
-    ) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
-    delete: (_table: string, _rowId: Uint8Array, options?: { transactionId?: string }) =>
-      options?.transactionId ? (requireOpenBatch(options.transactionId), undefined) : fakeWrite(),
+      options?: { rowId?: Uint8Array },
+    ) => (requireOpenBatch(openTransactionId), options?.rowId ?? new Uint8Array(16)),
+    restore: () => fakeWrite(),
+    restoreInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    update: () => fakeWrite(),
+    updateInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    upsert: () => fakeWrite(),
+    upsertInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    delete: () => fakeWrite(),
+    deleteInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
     commitTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
