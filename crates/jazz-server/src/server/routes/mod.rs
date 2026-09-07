@@ -119,6 +119,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
         .nest("/accounts", account_routes)
+        .route("/backend/admit", post(accounts::admit_backend))
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
@@ -173,6 +174,58 @@ mod tests {
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
     };
+
+    #[tokio::test]
+    async fn backend_admission_requires_exact_service_secret_and_application() {
+        let state = make_sync_test_state("backend-admission-secret").await;
+        let router = super::create_router(state);
+        for (secret, path, expected) in [
+            (
+                None,
+                test_app_route("/backend/admit"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("wrong"),
+                test_app_route("/backend/admit"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("backend-admission-secret"),
+                test_app_route("/backend/admit"),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                Some("backend-admission-secret"),
+                format!("/apps/{}/backend/admit", AppId::from_name("other-app")),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let mut request = axum::http::Request::builder().method("POST").uri(path);
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Backend-Secret", secret);
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let router = super::create_router(make_sync_test_state("expected").await);
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/backend/admit"))
+                    .header("Authorization", "Bearer backend-admission-secret")
+                    .body(body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {

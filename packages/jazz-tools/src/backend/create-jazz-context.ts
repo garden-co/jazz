@@ -94,6 +94,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(
     private readonly config: ResolvedBackendContextConfig,
     private readonly nodeIdentityScope: string,
+    private readonly nodeIdentity?: Uint8Array,
   ) {
     super();
     this.nativeConnection = {
@@ -143,7 +144,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      this.nodeIdentity ??
+        deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
@@ -401,7 +403,7 @@ export class JazzContext {
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
 
-  constructor(config: BackendContextConfig) {
+  constructor(config: BackendContextConfig, nodeIdentity?: Uint8Array) {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
@@ -412,7 +414,7 @@ export class JazzContext {
       config.driver.type === "persistent"
         ? config.driver.dataPath
         : `memory:${Date.now()}:${Math.random()}`;
-    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope);
+    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope, nodeIdentity);
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
@@ -499,6 +501,16 @@ export class JazzContext {
   db(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     return this.wrapDb(client, schema);
+  }
+
+  /** @internal Display admitted SYSTEM provenance without passing it as policy authority. */
+  openBackendAccount(session: Session): Db {
+    const { client, schema } = this.getClientAndSchema();
+    this.enableBackendSyncIfConfigured(client);
+    return new BackendDb(this.buildDbConfig(), this.coreSource, client, schema, null, {
+      authMode: "external",
+      session: withCanonicalUser(session),
+    });
   }
 
   /**

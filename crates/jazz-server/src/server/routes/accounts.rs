@@ -15,6 +15,21 @@ use uuid::Uuid;
 
 type Failure = (StatusCode, &'static str);
 
+/// Validate backend service authority without creating or impersonating an account.
+/// The surrounding app-id gate binds admission to this configured application.
+pub(super) async fn admit_backend(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<StatusCode, Failure> {
+    crate::middleware::auth::validate_backend_secret(
+        headers
+            .get("x-jazz-backend-secret")
+            .and_then(|value| value.to_str().ok()),
+        &state.auth_config,
+    )?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Edges preserve end-user bearer proof; they never substitute service authority.
 pub(super) async fn forward_if_edge(
     State(state): State<Arc<ServerState>>,
