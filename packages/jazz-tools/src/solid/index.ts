@@ -34,3 +34,18 @@ export { AccountAuthError, exportLocalFirstSecret, type JWTAuth } from "../accou
 export type { AccountStore } from "../accounts/persistence.js";
 
 export { createAccountState } from "./create-account-state.js";
+
+export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export type {
+  JazzSession,
+  JazzSessionActions,
+  JazzSessionSnapshot,
+  JazzSessionOperation,
+} from "../session/state.js";
+export {
+  JazzSessionProvider,
+  useJazzSession,
+  createJazzSessionState,
+  type JazzSessionProviderProps,
+  type UseJazzSession,
+} from "./session.js";
