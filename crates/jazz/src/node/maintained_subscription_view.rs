@@ -6,20 +6,19 @@ use groove::ivm::{
 };
 use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
-    encode_record_descriptor,
 };
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
     owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    settled_result_value_storage_bytes, tx_ids_from_value, version_tx_id_from_aliases,
+    runtime_result_identity_bytes, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
     ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
-    VersionedRowRefSchema, logical_user_column,
+    VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias};
@@ -349,7 +348,7 @@ enum MaintainedTerminalKind {
     /// Compiler-owned aggregate app rows. The same local terminal drives its
     /// reset state and subsequent replacements; derived aggregate results are
     /// never accepted from an authority snapshot.
-    AggregateAppRows(AggregateResultSchema),
+    AggregateAppRows(AppRowSchema),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1489,6 +1488,12 @@ fn rebind_terminal_operation_to_layout(
     if operation.root_descriptor == layout.root_descriptor {
         return Ok(operation.clone());
     }
+    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        eprintln!(
+            "JAZZ_COVERED_INPUT_TRACE terminal_descriptor_mismatch operation={:?} layout={:?}",
+            operation.root_descriptor, layout.root_descriptor,
+        );
+    }
     if !terminal_descriptor_can_rebind_to_layout(
         &operation.root_descriptor,
         &layout.root_descriptor,
@@ -1671,6 +1676,32 @@ fn rebind_terminal_value(
 }
 
 impl MaintainedTerminalSchemas {
+    pub(in crate::node) fn current_payload_schema(
+        &self,
+    ) -> Result<&ResultMembershipSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::ResultCurrent(schema) => Some(schema),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained result has no compiled payload schema",
+            ))
+    }
+
+    pub(in crate::node) fn aggregate_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::AggregateAppRows(output) => Some(output),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained aggregate has no compiler-owned app-row schema",
+            ))
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn footprint(&self) -> MaintainedTerminalSchemasFootprint {
         let terminal_schemas_bytes = btree_map_bytes(self.sinks.len())
@@ -1704,8 +1735,8 @@ impl MaintainedTerminalSchemas {
                     {
                         MaintainedTerminalKind::DirectAppRows(rows.clone())
                     }
-                    crate::node::query_engine::AppRowTerminal::Aggregate(schema) => {
-                        MaintainedTerminalKind::AggregateAppRows(schema.clone())
+                    crate::node::query_engine::AppRowTerminal::Aggregate(_) => {
+                        MaintainedTerminalKind::AggregateAppRows(rows.clone())
                     }
                     crate::node::query_engine::AppRowTerminal::Direct => {
                         panic!("direct app-row terminal has no row_uuid")
@@ -1802,9 +1833,20 @@ impl MaintainedTerminalSchemas {
 }
 
 fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
+    // The terminal exposes canonical nested schemas, while publication below
+    // restores only public logical identities. Runtime allocation slots never
+    // enter the terminal descriptor or its layout hash.
+    let canonical_descriptor = groove::records::decode_persisted_record_descriptor(
+        &groove::records::encode_persisted_record_descriptor(&rows.descriptor)
+            .expect("compiler row schema is encodable"),
+    )
+    .expect("compiler row schema is canonical");
+    let mut descriptor_fields = canonical_descriptor.fields().to_vec();
     let root_key_slot = rows
         .descriptor
-        .field_index("row_uuid")
+        .fields()
+        .iter()
+        .position(|field| field.name.as_deref() == Some("row_uuid"))
         .expect("structured app-row terminal has a row_uuid slot");
     // Bind every public descriptor slot, including collector-owned trailing
     // arrays/records. A collector root may contain both physical `user_*`
@@ -1817,48 +1859,86 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
         .enumerate()
         .filter_map(|(slot, field)| {
             let name = field.name.as_deref()?;
-            (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
-                let carrier = rows
-                    .field_carriers
-                    .get(name)
-                    .copied()
-                    .unwrap_or(rows.carrier);
-                TerminalRootPublicField {
-                    // The compiler binds this identity before terminal
-                    // publication. Carrier describes encoding, not naming:
-                    // a logical include may legitimately begin with `user_`.
-                    name: rows.public_field_names.get(name).cloned().unwrap_or_else(
-                        || match carrier {
-                            AppRowCarrier::CurrentRow => logical_user_column(name).to_owned(),
-                            AppRowCarrier::Logical => name.to_owned(),
-                        },
-                    ),
-                    descriptor_field_name: name.to_owned(),
-                    slot,
-                    carrier: match carrier {
-                        AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
-                        AppRowCarrier::Logical => TerminalRootCarrier::Logical,
-                    },
-                }
+            if slot == root_key_slot || rows.hidden_fields.contains(name) {
+                return None;
+            }
+            let publication = rows.publication_fields.get(name)?.clone();
+            let public_name = publication.public_name()?.to_owned();
+            let carrier = rows
+                .field_carriers
+                .get(name)
+                .copied()
+                .unwrap_or(rows.carrier);
+            Some(TerminalRootPublicField {
+                publication,
+                name: public_name,
+                descriptor_field_name: name.to_owned(),
+                slot,
+                carrier: match carrier {
+                    AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+                    AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+                },
             })
         })
         .collect::<Vec<_>>();
+    for field in &public_fields {
+        if let Some(descriptor_field) = descriptor_fields.get_mut(field.slot) {
+            descriptor_field.identity =
+                Some(groove::records::FieldIdentity::Name(field.name.clone()));
+        }
+    }
+    let root_descriptor = RecordDescriptor::new_with_fields(descriptor_fields);
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"jazz terminal root layout v1");
+    hasher.update(b"jazz terminal root publication v1");
+    let role_descriptor =
+        RecordDescriptor::new_with_fields(root_descriptor.fields().iter().enumerate().map(
+            |(slot, field)| {
+                let role_name = if slot == root_key_slot {
+                    "metadata/row_uuid".to_owned()
+                } else if let Some(public) = public_fields.iter().find(|public| public.slot == slot)
+                {
+                    use super::{
+                        CurrentRowPublicationField as Publication,
+                        CurrentRowResultVisibility as Visibility,
+                    };
+                    let role = match &public.publication {
+                        Publication::StoredColumn { .. }
+                        | Publication::UnresolvedSourceCell { .. } => "source",
+                        Publication::ResultField {
+                            visibility: Visibility::ApplicationCell,
+                            ..
+                        } => "result",
+                        Publication::ResultField {
+                            visibility: Visibility::PublicProvenance,
+                            ..
+                        } => "provenance",
+                        Publication::ResultField {
+                            visibility: Visibility::HiddenMetadata,
+                            ..
+                        } => "hidden",
+                    };
+                    format!("{role}/{slot}/{}", public.name)
+                } else {
+                    // Hidden routing fields affect byte layout, not public field identity.
+                    format!("hidden/{slot}")
+                };
+                groove::records::DescriptorField::new(role_name, field.value_type.clone())
+            },
+        ));
     hasher.update(
-        &encode_record_descriptor(&rows.descriptor)
-            .expect("terminal layouts contain valid Groove record descriptors"),
+        &groove::records::encode_persisted_record_descriptor(&role_descriptor)
+            .expect("terminal role schemas contain valid Groove record descriptors"),
     );
     hasher.update(&(root_key_slot as u64).to_le_bytes());
     hasher.update(&[match rows.carrier {
         AppRowCarrier::CurrentRow => 0,
         AppRowCarrier::Logical => 1,
     }]);
+    hasher.update(&[u8::from(rows.root_union_arm)]);
     for field in &public_fields {
         hasher.update(field.name.as_bytes());
         hasher.update(&[0]);
-        hasher.update(field.descriptor_field_name.as_bytes());
-        hasher.update(&[0]);
+
         hasher.update(&(field.slot as u64).to_le_bytes());
         hasher.update(&[match field.carrier {
             TerminalRootCarrier::CurrentRow => 0,
@@ -1867,7 +1947,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
     }
     TerminalRootLayout {
         id: format!("terminal:{}", hasher.finalize().to_hex()),
-        root_descriptor: rows.descriptor,
+        root_descriptor,
         root_key_slot,
         root_key_field_name: rows.descriptor.fields()[root_key_slot]
             .name
@@ -1878,6 +1958,7 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
             AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
             AppRowCarrier::Logical => TerminalRootCarrier::Logical,
         },
+        root_union_arm: rows.root_union_arm,
     }
 }
 
@@ -1914,7 +1995,13 @@ fn decode_typed_terminal_record(
     read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
-        MaintainedTerminalKind::AggregateAppRows(schema) => {
+        MaintainedTerminalKind::AggregateAppRows(output) => {
+            let crate::node::query_engine::AppRowTerminal::Aggregate(schema) = &output.terminal
+            else {
+                return Err(super::Error::InvalidStoredValue(
+                    "aggregate terminal lost its lowered schema",
+                ));
+            };
             decode_aggregate_app_row(record, schema)
         }
         MaintainedTerminalKind::ResultCurrent(schema) => {
@@ -2024,7 +2111,7 @@ fn decode_typed_terminal_record(
                 .transpose()?
                 // The empty/shared branch has a non-empty postcard encoding.
                 // Keep its historical `None` identity so ordinary result
-                // members and durable receipts do not churn merely because
+                // members and runtime receipts do not churn merely because
                 // branch coordinates are now carried for non-shared rows.
                 .filter(|bytes| {
                     !bytes.is_empty() && *bytes != BranchKey::default().canonical_bytes()
@@ -2043,10 +2130,12 @@ fn decode_typed_terminal_record(
                 None => member,
             }
             .into();
+            let (descriptor, row_bytes) =
+                super::descriptor_roles::encode_current_payload_record(record, schema)?;
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
-                descriptor: encode_record_descriptor(&record.descriptor())?,
-                record: record.raw().to_vec(),
+                descriptor,
+                record: row_bytes,
             };
             Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
         }
@@ -2070,7 +2159,7 @@ fn decode_typed_terminal_record(
                 ))?
                 .value_type
                 .clone();
-            let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+            let row = runtime_result_identity_bytes(&row_value, &row_type)?;
             let replacement_idx = field_idx(record, &schema.synthetic.replacement_field)?;
             let replacement_value = record.get_idx(replacement_idx)?;
             let replacement_type = record
@@ -2082,17 +2171,18 @@ fn decode_typed_terminal_record(
                 ))?
                 .value_type
                 .clone();
-            let replacement =
-                settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+            let replacement = runtime_result_identity_bytes(&replacement_value, &replacement_type)?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
                 replacement: SyntheticReplacementToken::from_encoded_record(replacement),
             };
+            let (descriptor, row_bytes) =
+                super::descriptor_roles::encode_aggregate_payload_record(record, schema)?;
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
-                descriptor: encode_record_descriptor(&record.descriptor())?,
-                record: record.raw().to_vec(),
+                descriptor,
+                record: row_bytes,
             };
             Ok(DecodedMaintainedEvent::AggregateResult {
                 member,
@@ -2101,7 +2191,12 @@ fn decode_typed_terminal_record(
                 value_fields: schema
                     .value_fields
                     .iter()
-                    .map(|field| field.name.clone())
+                    .map(|field| {
+                        field
+                            .name
+                            .clone()
+                            .expect("lowered aggregate output is named")
+                    })
                     .collect(),
             })
         }
@@ -2194,12 +2289,13 @@ fn decode_aggregate_app_row(
     let descriptor = record.descriptor();
     let (row_value, row_type) = match schema.group_key_fields.first() {
         Some(group) => {
-            let index =
-                descriptor
-                    .field_index(&group.name)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "aggregate app-row terminal is missing group identity",
-                    ))?;
+            let index = descriptor
+                .field_index_by_identity(group.identity.as_ref().ok_or(
+                    super::Error::InvalidStoredValue("aggregate group has no lowered identity"),
+                )?)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row terminal is missing group identity",
+                ))?;
             let field = descriptor
                 .fields()
                 .get(index)
@@ -2210,15 +2306,16 @@ fn decode_aggregate_app_row(
         }
         None => (Value::String("global".to_owned()), ValueType::String),
     };
-    let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+    let row = runtime_result_identity_bytes(&row_value, &row_type)?;
     let (replacement_value, replacement_type) = match schema.value_fields.first() {
         Some(output) => {
-            let index =
-                descriptor
-                    .field_index(&output.name)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "aggregate app-row terminal is missing aggregate output",
-                    ))?;
+            let index = descriptor
+                .field_index_by_identity(output.identity.as_ref().ok_or(
+                    super::Error::InvalidStoredValue("aggregate output has no lowered identity"),
+                )?)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate app-row terminal is missing aggregate output",
+                ))?;
             let field = descriptor
                 .fields()
                 .get(index)
@@ -2229,16 +2326,18 @@ fn decode_aggregate_app_row(
         }
         None => (Value::String("empty".to_owned()), ValueType::String),
     };
-    let replacement = settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
+    let replacement = runtime_result_identity_bytes(&replacement_value, &replacement_type)?;
     let member = ResultMemberEntry::Synthetic {
         table: "aggregate_result".to_owned(),
         row,
         replacement: SyntheticReplacementToken::from_encoded_record(replacement),
     };
+    let (payload_descriptor, row_bytes) =
+        super::descriptor_roles::encode_aggregate_payload_record(record, schema)?;
     let payload = ResultMemberPayloadEntry {
         member: member.clone(),
-        descriptor: encode_record_descriptor(&descriptor)?,
-        record: record.raw().to_vec(),
+        descriptor: payload_descriptor,
+        record: row_bytes,
     };
     Ok(DecodedMaintainedEvent::AggregateResult {
         member,
@@ -2247,15 +2346,20 @@ fn decode_aggregate_app_row(
         value_fields: schema
             .value_fields
             .iter()
-            .map(|field| field.name.clone())
+            .map(|field| {
+                field
+                    .name
+                    .clone()
+                    .expect("lowered aggregate output is named")
+            })
             .collect(),
     })
 }
 
-/// Domain separation for the durable flat-join result revision.
+/// Domain separation for the runtime flat-join result revision.
 ///
-/// `ResultMemberEntry::row_digest` is persisted as part of settled result and
-/// program-fact state, so this must not inherit Rust/postcard layout. The
+/// `ResultMemberEntry::row_digest` identifies runtime tuple replacements. Its
+/// canonical identity does not inherit Rust/postcard layout. The
 /// preimage is a V1 envelope containing a canonical Groove descriptor with
 /// engine-owned ordinal field names and one canonical record under that exact
 /// descriptor. The descriptor carries every declared field type (including
@@ -2287,8 +2391,8 @@ fn flat_join_row_digest_preimage(
             .enumerate()
             .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
     );
-    let descriptor_bytes = encode_record_descriptor(&descriptor)?;
-    // The public payload descriptor is the durable contract. An inner join may
+    let descriptor_bytes = groove::records::encode_persisted_record_descriptor(&descriptor)?;
+    // The public payload descriptor is the runtime revision contract. An inner join may
     // nevertheless tighten a proven-present `Nullable(T)` runtime field to
     // `T` before the terminal sees it. Restore that wrapper here so the same
     // logical tuple gets one digest regardless of that execution detail.
@@ -3107,7 +3211,7 @@ mod tests {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
-    // Internal receipt: `row_digest` is a durable settled-result identity, so
+    // Internal receipt: `row_digest` is a canonical runtime result identity, so
     // its exact bytes cannot be asserted through the public query API alone.
     #[test]
     fn flat_join_row_digest_uses_the_v1_groove_record_envelope() {
@@ -3344,6 +3448,29 @@ mod tests {
             ("__route_org", ValueType::Uuid),
         ]);
         let rows = AppRowSchema {
+            publication_fields: BTreeMap::from([
+                (
+                    "user_title".to_owned(),
+                    crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(1),
+                        output_name: "title".to_owned(),
+                    },
+                ),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(2),
+                        output_name: "__jazz_include_project".to_owned(),
+                    },
+                ),
+                (
+                    "__jazz_include_project".to_owned(),
+                    crate::node::CurrentRowPublicationField::ResultField {
+                        name: "project".to_owned(),
+                        visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                    },
+                ),
+            ]),
             descriptor: descriptor.clone(),
             hidden_fields: BTreeSet::from(["__route_org".to_owned()]),
             carrier: AppRowCarrier::Logical,
@@ -3364,24 +3491,37 @@ mod tests {
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
             terminal: crate::node::query_engine::AppRowTerminal::RootCollector,
+            root_union_arm: false,
         };
         let layout = terminal_root_layout(&rows);
         assert_eq!(
             layout.public_fields,
             vec![
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(1),
+                        output_name: "title".to_owned()
+                    },
                     name: "title".to_owned(),
                     descriptor_field_name: "user_title".to_owned(),
                     slot: 1,
                     carrier: TerminalRootCarrier::CurrentRow,
                 },
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::StoredColumn {
+                        id: crate::ids::PhysicalColumnId(2),
+                        output_name: "__jazz_include_project".to_owned()
+                    },
                     name: "__jazz_include_project".to_owned(),
                     descriptor_field_name: "user___jazz_include_project".to_owned(),
                     slot: 2,
                     carrier: TerminalRootCarrier::CurrentRow,
                 },
                 TerminalRootPublicField {
+                    publication: crate::node::CurrentRowPublicationField::ResultField {
+                        name: "project".to_owned(),
+                        visibility: crate::node::CurrentRowResultVisibility::ApplicationCell
+                    },
                     name: "project".to_owned(),
                     descriptor_field_name: "__jazz_include_project".to_owned(),
                     slot: 3,
@@ -3405,6 +3545,7 @@ mod tests {
             root_descriptor: descriptor,
             public_fields: Vec::new(),
             carrier: TerminalRootCarrier::Logical,
+            root_union_arm: false,
         }
     }
 
@@ -4361,6 +4502,7 @@ mod tests {
             occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
             occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
             payload_fields: Vec::new(),
+            payload_publication_fields: BTreeMap::new(),
             branch_or_prefix_field: None,
             version: ResultMembershipVersionSchema::Content(
                 super::super::query_engine::ContentVersionFields {
@@ -4601,5 +4743,86 @@ mod tests {
             .unwrap();
         assert!(maintained.versions_by_tx(tx_id).is_empty());
         assert!(!maintained.versions.by_tx.contains_key(&tx_id));
+    }
+}
+
+#[cfg(test)]
+mod terminal_role_hash_tests {
+    use super::*;
+    use crate::node::query_engine::AppRowTerminal;
+    use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
+    use groove::records::{DescriptorField, FieldIdentity};
+
+    fn schema(local_id: u64, slot: u64, carrier: &str) -> AppRowSchema {
+        let nested = RecordDescriptor::new_with_fields([DescriptorField::new(
+            "nested_name",
+            ValueType::U64,
+        )
+        .with_identity(FieldIdentity::Slot(slot + 1))]);
+        AppRowSchema {
+            descriptor: RecordDescriptor::new_with_fields([
+                DescriptorField::new("row_uuid", ValueType::Uuid)
+                    .with_identity(FieldIdentity::Slot(slot)),
+                DescriptorField::new(carrier, ValueType::Record(Box::new(nested))).with_identity(
+                    FieldIdentity::NamedSlot {
+                        name: "title".to_owned(),
+                        slot: slot + 2,
+                    },
+                ),
+            ]),
+            publication_fields: BTreeMap::from([(
+                carrier.to_owned(),
+                CurrentRowPublicationField::StoredColumn {
+                    id: crate::ids::PhysicalColumnId(local_id),
+                    output_name: "title".to_owned(),
+                },
+            )]),
+            hidden_fields: BTreeSet::new(),
+            carrier: AppRowCarrier::Logical,
+            field_carriers: BTreeMap::new(),
+            public_field_names: BTreeMap::new(),
+            terminal: AppRowTerminal::RootCollector,
+            root_union_arm: false,
+        }
+    }
+
+    #[test]
+    fn terminal_layout_hash_uses_public_roles_not_local_catalogue_or_compiler_ids() {
+        let first = terminal_root_layout(&schema(1, 10, "_app_1"));
+        assert_eq!(
+            first.id,
+            "terminal:4091a932120f6c4bc4648cf92acff0530eded569f67b9fc0a4efabb739bfe69f"
+        );
+        let second = terminal_root_layout(&schema(99, 900, "_app_99"));
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            first.root_descriptor.fields()[0].identity,
+            Some(FieldIdentity::Name("row_uuid".to_owned()))
+        );
+        let ValueType::Record(nested) = &first.root_descriptor.fields()[1].value_type else {
+            panic!("nested value")
+        };
+        assert_eq!(
+            nested.fields()[0].identity,
+            Some(FieldIdentity::Name("nested_name".to_owned()))
+        );
+        let mut changed_role = schema(1, 10, "_app_1");
+        changed_role.publication_fields.insert(
+            "_app_1".to_owned(),
+            CurrentRowPublicationField::ResultField {
+                name: "title".to_owned(),
+                visibility: CurrentRowResultVisibility::ApplicationCell,
+            },
+        );
+        assert_ne!(first.id, terminal_root_layout(&changed_role).id);
+        let mut changed_name = schema(1, 10, "_app_1");
+        changed_name.publication_fields.insert(
+            "_app_1".to_owned(),
+            CurrentRowPublicationField::StoredColumn {
+                id: crate::ids::PhysicalColumnId(1),
+                output_name: "other_title".to_owned(),
+            },
+        );
+        assert_ne!(first.id, terminal_root_layout(&changed_name).id);
     }
 }

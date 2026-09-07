@@ -20,6 +20,7 @@ hex = "0.4"
 uuid = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 jazz = { workspace = true, features = ["testing", "transport-compression-zstd"] }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio"] }

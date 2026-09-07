@@ -24,6 +24,9 @@
 //! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
 //! callback that frees through mimalloc instead.
 
+#[cfg(feature = "rn-test-bridge")]
+mod rn_test_bridge;
+
 #[global_allocator]
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
@@ -70,9 +73,7 @@ use jazz::db::{
     TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
-use jazz::groove::records::{
-    BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
-};
+use jazz::groove::records::Value as CoreValue;
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage,
@@ -85,9 +86,7 @@ use jazz::protocol::{
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
     ReadViewSpec as CoreReadViewSpec,
 };
-use jazz::query::{
-    Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
-};
+use jazz::query::{Query as CoreQuery, RelationQuery as CoreRelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
@@ -2260,7 +2259,7 @@ impl NapiDb {
         claims: Option<JsonValue>,
     ) -> napi::Result<Either<PreparedQuery, PendingNativePreparation>> {
         enum Input {
-            Query(CoreQuery),
+            Query(Box<CoreQuery>),
             Relation(CoreRelationQuery),
         }
 
@@ -2271,16 +2270,11 @@ impl NapiDb {
             })
             .transpose()?;
         let input = match kind.as_str() {
-            "query" => Input::Query(
-                postcard::from_bytes(&query)
+            "query" => Input::Query(Box::new(
+                jazz::wire::decode_postcard_exact(&query)
                     .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?,
-            ),
-            "relation" => {
-                let query_json = std::str::from_utf8(&query).map_err(|error| {
-                    napi::Error::from_reason(format!("decode relation query UTF-8: {error}"))
-                })?;
-                Input::Relation(core_relation_query_from_json(query_json)?)
-            }
+            )),
+            "relation" => Input::Relation(core_relation_query_from_bytes(&query)?),
             _ => {
                 return Err(napi::Error::from_reason(
                     "prepared query kind must be query or relation",
@@ -2948,22 +2942,8 @@ where
 }
 
 fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
-        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
-    let record = CoreBorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
-    let mut cells = CoreRowCells::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let Some(name) = &field.name else {
-            return Err(napi::Error::from_reason(
-                "encoded cells must use named fields",
-            ));
-        };
-        cells.insert(name.clone(), value);
-    }
-    Ok(cells)
+    jazz::binding_codec::decode_named_cells(bytes)
+        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))
 }
 
 fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
@@ -3674,16 +3654,9 @@ fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().copied().map(u32::from).collect()
 }
 
-fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|err| napi::Error::from_reason(format!("decode query json: {err}")))?;
-    let relation_ir = value
-        .get("relation_ir")
-        .ok_or_else(|| napi::Error::from_reason("relation query json is missing relation_ir"))?
-        .clone();
-    let rel: CoreRelationExpr = serde_json::from_value(relation_ir)
-        .map_err(|err| napi::Error::from_reason(format!("decode relation_ir: {err}")))?;
-    Ok(CoreRelationQuery { rel })
+fn core_relation_query_from_bytes(query_bytes: &[u8]) -> napi::Result<CoreRelationQuery> {
+    jazz::query::decode_relation_query_postcard(query_bytes)
+        .map_err(|err| napi::Error::from_reason(err.to_string()))
 }
 
 // ============================================================================
@@ -4139,6 +4112,7 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
@@ -4761,7 +4735,10 @@ mod tests {
                 .create(&[CoreValue::String(value.to_owned())])
                 .expect("encode label fixture cell");
             Uint8Array::from(
-                postcard::to_allocvec(&(descriptor, raw)).expect("encode named NAPI cells"),
+                jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
+                    raw, descriptor,
+                ))
+                .expect("encode named NAPI cells"),
             )
         };
 
@@ -5241,7 +5218,10 @@ mod tests {
         let raw = descriptor
             .create(&[CoreValue::String("credited to alice".to_owned())])
             .unwrap();
-        let cells = postcard::to_allocvec(&(descriptor, raw)).unwrap();
+        let cells = jazz::binding_codec::encode_named_cells(
+            &jazz::groove::records::OwnedRecord::new(raw, descriptor),
+        )
+        .unwrap();
 
         let backend = NapiDb::open_memory_as_backend(
             Uint8Array::from(schema.clone()),

@@ -496,6 +496,10 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
                 .authored_columns(BTreeSet::from(["body".to_owned()])),
         )
         .unwrap();
+    // Exercise the explicit immutable-row envelope before local catalogue translation.
+    let wire = crate::wire::encode_sync_message(&unit).unwrap();
+    assert!(wire.windows(5).any(|bytes| bytes == b"JVRR\x01"));
+    let unit = crate::wire::decode_sync_message(&wire).unwrap();
     receiver.apply_sync_message_settled(unit).unwrap();
     let stored = receiver.query_versions_for_tx(tx_id).unwrap();
     assert_eq!(stored[0].authored_column_ids().unwrap(), Some(BTreeSet::from([receiver_body_id])));
@@ -683,18 +687,6 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
 
     let shape = Query::from("todos").validate(&evolved.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    receiver.query.settled_result_sets.insert(
-        crate::protocol::BindingViewKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        },
-        BTreeSet::from([crate::protocol::ResultMemberEntry::row((
-            groove::Intern::from("todos".to_owned()),
-            row(0x65),
-            tx_id,
-        ))]),
-    );
 
     let rows = receiver
         .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -749,27 +741,11 @@ fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_acti
         "a new historical lineage does not alter the active local runtime layout"
     );
 
-    let evolved = catalogue_evolved_schema();
-    let shape = Query::from("todos").validate(&evolved).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let cached_view = crate::protocol::BindingViewKey::new(
-        shape.shape_id(),
-        binding.binding_id(),
-        Default::default(),
-    );
-    receiver
-        .query
-        .settled_result_sets
-        .insert(cached_view, BTreeSet::new());
     let runtime_before_idempotent_replay = receiver.groove_runtime_token();
     receiver
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.groove_runtime_token(), runtime_before_idempotent_replay);
-    assert!(
-        receiver.query.settled_result_sets.contains_key(&cached_view),
-        "an identical trusted prefix must not clear maintained/query state"
-    );
     drop(receiver);
 
     let mut reopened = reopen_node_at(&dir, node(0x3f), base);

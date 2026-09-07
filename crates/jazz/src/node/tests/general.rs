@@ -1,4 +1,239 @@
 #[test]
+fn project_preserves_logical_binding_fields() {
+    // Query results use the same projection transform as current rows. The
+    // descriptor tag must survive so a logical public `user_check` is not
+    // decoded as physical application column `check` by a native host.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("user_check".to_owned(), records::ValueType::Bool),
+        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6d).0),
+            Value::Bool(true),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingRole::LogicalField,
+    )
+    .project(&table, &["check".to_owned()])
+    .expect("project logical result");
+
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingRole::LogicalField
+    );
+}
+
+#[test]
+fn project_keeps_literal_aggregate_shaped_column_names() {
+    let table = TableSchema::new(
+        "items",
+        [ColumnSchema::new("__jazz_aggregate_foo", ColumnType::U64)],
+    );
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name(
+            "__jazz_aggregate_foo".to_owned(),
+        )),
+        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x70).0),
+            Value::U64(9),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let projected = CurrentRow::new_with_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        CurrentRowBindingRole::PhysicalColumn,
+    )
+    .project(&table, &["__jazz_aggregate_foo".to_owned()])
+    .expect("project aggregate-shaped literal column");
+
+    assert_eq!(
+        projected.cell(&table, "__jazz_aggregate_foo"),
+        Some(Value::U64(9))
+    );
+    assert_eq!(
+        projected.publication_fields[1].application_name(),
+        Some("__jazz_aggregate_foo")
+    );
+    let cells = projected.test_cells_by_descriptor();
+    assert_eq!(cells["__jazz_aggregate_foo"], Value::U64(9));
+    assert_eq!(projected.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::SYSTEM,
+        created_at: 10,
+        updated_by: AuthorSubject::SYSTEM,
+        updated_at: 20,
+    }));
+}
+
+#[test]
+fn terminal_logical_name_override_survives_lookup_projection_and_cache_handoff() {
+    // A terminal can reuse `_app_title` as its private carrier for the public
+    // application field `title`, while also exposing a genuine logical output
+    // named `_app_title`. The explicit override, rather than prefix stripping,
+    // distinguishes them.
+    let table = TableSchema::new("items", [ColumnSchema::new("title", ColumnType::String)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
+        ])
+        .unwrap();
+    let terminal = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+
+    assert_eq!(
+        terminal.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    let projected = terminal.project(&table, &["title".to_owned()]).unwrap();
+    assert_eq!(
+        projected.cell(&table, "title"),
+        Some(Value::String("application title".to_owned()))
+    );
+    assert_eq!(projected.publication_fields[1].application_name(), Some("title"));
+
+    let physical_descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_title".to_owned(), records::ValueType::String),
+        ("_app_title".to_owned(), records::ValueType::String),
+    ]);
+    let physical_raw = physical_descriptor
+        .create(&[
+            Value::Uuid(row(0x6a).0),
+            Value::String("application title".to_owned()),
+            Value::String("genuine logical _app_title".to_owned()),
+        ])
+        .unwrap();
+    let physical_then_logical = CurrentRow::new_with_explicit_binding_fields_and_names(
+        "items",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
+            CurrentRowBindingRole::LogicalField,
+        ],
+        vec![None, Some("title".to_owned()), None],
+    );
+    assert!(
+        terminal.subscription_equivalent(&physical_then_logical),
+        "a cache handoff must not emit a reset solely because the terminal carrier changed"
+    );
+}
+
+#[test]
+fn projection_prefers_tagged_physical_column_over_reverse_order_logical_collision() {
+    // A hybrid collector may expose a logical `_app_check` beside the physical
+    // storage field `_app_check`. Descriptor position is not provenance: the
+    // logical field deliberately comes first here, and projecting schema
+    // column `check` must still select the physical true value.
+    let table = TableSchema::new("items", [ColumnSchema::new("check", ColumnType::Bool)]);
+    let descriptor = records::RecordDescriptor::new([
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("_app_check".to_owned(), records::ValueType::Bool),
+        ("_app_check".to_owned(), records::ValueType::Bool),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x6e).0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ])
+        .unwrap();
+    let hybrid = CurrentRow::new_with_explicit_binding_fields(
+        "items",
+        OwnedRecord::new(raw, descriptor),
+        vec![
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::LogicalField,
+            CurrentRowBindingRole::PhysicalColumn,
+        ],
+    );
+
+    assert_eq!(hybrid.cell(&table, "check"), Some(Value::Bool(true)));
+    let projected = hybrid
+        .project(&table, &["check".to_owned()])
+        .expect("project hybrid result");
+    assert_eq!(projected.cell(&table, "check"), Some(Value::Bool(true)));
+    assert_eq!(
+        projected.binding_fields()[1],
+        CurrentRowBindingRole::PhysicalColumn
+    );
+}
+
+#[test]
+fn subscription_equivalence_keeps_hybrid_physical_and_logical_user_names_distinct() {
+    // Before descriptor provenance was consulted here, both fields were
+    // normalized to `check`. Swapping their values then made two observably
+    // different public rows compare equal and suppressed an update.
+    fn hybrid_row(physical_check: bool, logical_user_check: bool) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new([
+            ("row_uuid".to_owned(), records::ValueType::Uuid),
+            ("user_check".to_owned(), records::ValueType::Bool),
+            ("user_check".to_owned(), records::ValueType::Bool),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::Uuid(row(0x6f).0),
+                Value::Bool(logical_user_check),
+                Value::Bool(physical_check),
+            ])
+            .unwrap();
+        CurrentRow::new_with_explicit_binding_fields(
+            "items",
+            OwnedRecord::new(raw, descriptor),
+            vec![
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::LogicalField,
+                CurrentRowBindingRole::PhysicalColumn,
+            ],
+        )
+    }
+
+    assert!(!hybrid_row(true, false).subscription_equivalent(&hybrid_row(false, true)));
+}
+
+#[test]
 fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
     fn current_row(
         physical: bool,
@@ -19,7 +254,7 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
                     ("created_at".to_owned(), records::ValueType::U64),
                     ("updated_by".to_owned(), records::ValueType::String),
                     ("updated_at".to_owned(), records::ValueType::U64),
-                    ("user_title".to_owned(), records::ValueType::String),
+                    (user_column_field("title"), records::ValueType::String),
                 ]),
                 vec![
                     Value::Bytes(Vec::new()),
@@ -53,7 +288,8 @@ fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
             )
         };
         let raw = descriptor.create(&values).unwrap();
-        CurrentRow::new("todos", OwnedRecord::new(raw, descriptor))
+        CurrentRow::new_with_binding_fields("todos", OwnedRecord::new(raw, descriptor),
+            if physical { CurrentRowBindingRole::PhysicalColumn } else { CurrentRowBindingRole::LogicalField })
     }
 
     let created_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x68; 16]));
@@ -130,16 +366,19 @@ fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() 
 
 #[test]
 fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
-    fn query_row(fields: Vec<(String, records::ValueType)>, values: Vec<Value>) -> CurrentRow {
-        let descriptor = records::RecordDescriptor::new(
-            [("row_uuid".to_owned(), records::ValueType::Uuid)]
+    fn query_row(fields: Vec<(&str, &str)>, values: Vec<Value>) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new_with_fields(
+            [records::DescriptorField::new("row_uuid", records::ValueType::Uuid)]
                 .into_iter()
-                .chain(fields)
+                .chain(fields.into_iter().map(|(carrier, logical)| {
+                    records::DescriptorField::new(carrier, records::ValueType::U64)
+                        .with_identity(records::FieldIdentity::Name(logical.to_owned()))
+                }))
                 .chain([
-                    ("$createdBy".to_owned(), records::ValueType::String),
-                    ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::String),
-                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                    records::DescriptorField::new("$createdBy", records::ValueType::String),
+                    records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                    records::DescriptorField::new("$updatedBy", records::ValueType::String),
+                    records::DescriptorField::new("$updatedAt", records::ValueType::U64),
                 ]),
         );
         let values = [Value::Uuid(row(0x6c).0)]
@@ -153,37 +392,84 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
             ])
             .collect::<Vec<_>>();
         let raw = descriptor.create(&values).unwrap();
-        CurrentRow::new("scores", OwnedRecord::new(raw, descriptor))
+        CurrentRow::new_with_binding_fields("scores", OwnedRecord::new(raw, descriptor), CurrentRowBindingRole::LogicalField)
     }
 
     let aggregate_layout = query_row(
         vec![
-            ("foo".to_owned(), records::ValueType::U64),
-            ("__jazz_aggregate_foo".to_owned(), records::ValueType::U64),
+            ("foo", "foo"),
+            ("__jazz_aggregate_foo", "foo"),
         ],
         vec![Value::U64(1), Value::U64(2)],
     );
     let public_layout = query_row(
         vec![
-            (
-                "user___jazz_aggregate_foo".to_owned(),
-                records::ValueType::U64,
-            ),
-            ("user_foo".to_owned(), records::ValueType::U64),
+            ("user___jazz_aggregate_foo", "foo"),
+            ("user_foo", "foo"),
         ],
         vec![Value::U64(2), Value::U64(1)],
     );
     let foo = query_row(
-        vec![("foo".to_owned(), records::ValueType::U64)],
+        vec![("foo", "foo")],
         vec![Value::U64(1)],
     );
     let bar = query_row(
-        vec![("bar".to_owned(), records::ValueType::U64)],
+        vec![("bar", "bar")],
         vec![Value::U64(1)],
     );
 
     assert!(aggregate_layout.subscription_equivalent(&public_layout));
     assert!(!foo.subscription_equivalent(&bar));
+}
+
+#[test]
+fn test_cells_keep_aggregate_shaped_logical_user_name_distinct() {
+    let descriptor = records::RecordDescriptor::new_with_fields(vec![
+        records::DescriptorField::new("row_uuid", records::ValueType::Uuid),
+        records::DescriptorField::new(
+            "user___jazz_aggregate_foo",
+            records::ValueType::U64,
+        )
+        .with_identity(records::FieldIdentity::Name("foo".to_owned())),
+        records::DescriptorField::new(
+            user_column_field("user___jazz_aggregate_foo"),
+            records::ValueType::U64,
+        ).with_identity(records::FieldIdentity::Name("user___jazz_aggregate_foo".to_owned())),
+        records::DescriptorField::new("$createdBy", records::ValueType::String),
+        records::DescriptorField::new("$createdAt", records::ValueType::U64),
+        records::DescriptorField::new("$updatedBy", records::ValueType::String),
+        records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+    ]);
+    let raw = descriptor
+        .create(&[
+            Value::Uuid(row(0x71).0),
+            Value::U64(2),
+            Value::U64(7),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(10),
+            Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+            Value::U64(20),
+        ])
+        .unwrap();
+    let row = CurrentRow::new("scores", OwnedRecord::new(raw, descriptor));
+
+    assert_eq!(
+        row.test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("foo".to_owned(), Value::U64(2)),
+            (
+                "user___jazz_aggregate_foo".to_owned(),
+                Value::U64(7),
+            ),
+
+        ])
+    );
+    assert_eq!(row.provenance().unwrap(), Some(RowProvenance {
+        created_by: AuthorSubject::SYSTEM,
+        created_at: 10,
+        updated_by: AuthorSubject::SYSTEM,
+        updated_at: 20,
+    }));
 }
 
 #[test]

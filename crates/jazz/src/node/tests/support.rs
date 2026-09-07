@@ -894,24 +894,6 @@ fn assert_subscription_rows_match_policy_oracle(
         delivered.subscription_entries, delivered.states
     );
 }
-fn assert_settled_result_sets_unique(
-    node: &NodeState<RocksDbStorage>,
-    subscription_ordinal: u64,
-    seed: u64,
-) {
-    // Subscriber-side settled binding-view result-set/completeness state, not peer shipped-state.
-    let subscription = node.whole_table_subscription_key("todos").unwrap();
-    let binding_view_key =
-        crate::protocol::BindingViewKey::from_canonical_subscription_key(subscription);
-    let Some(result_set) = node.query.settled_result_sets.get(&binding_view_key) else {
-        return;
-    };
-    if let Some((occurrence_id, first, second)) = duplicate_output_occurrence_result_set(result_set) {
-        panic!(
-            "seed {seed}: subscription {subscription_ordinal} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
-        );
-    }
-}
 #[derive(Clone, Debug, Default)]
 struct PerNodeKnowledge {
     tx_ids: BTreeSet<TxId>,
@@ -2103,8 +2085,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     assert_global_current_rows_match_oracle(&mut core, &oracle);
     assert_global_rows_match_known_oracle(&mut writer_a, &oracle, &writer_known_a);
     assert_global_rows_match_known_oracle(&mut writer_b, &oracle, &writer_known_b);
-    assert_settled_result_sets_unique(&reader_a, 42, seed);
-    assert_settled_result_sets_unique(&reader_b, 43, seed);
     assert_subscription_rows_match_policy_oracle(
         &mut reader_a,
         42,
@@ -2183,4 +2163,12 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         link_b_metrics: link_b.metrics.clone(),
         message_counts,
     }
+}
+
+// Rejection tests must observe active authority receipts, not removed binding-view shadows.
+fn authority_hydration_receipts(node: &NodeState<RocksDbStorage>) -> (BTreeSet<AuthorityResultKey>, BTreeSet<AuthorityResultKey>) {
+    (
+        node.query.authority_results.iter().filter(|(_, state)| state.initial_hydration).map(|(key, _)| key.clone()).collect(),
+        node.query.authority_results.iter().filter(|(_, state)| state.deferred_publication).map(|(key, _)| key.clone()).collect(),
+    )
 }

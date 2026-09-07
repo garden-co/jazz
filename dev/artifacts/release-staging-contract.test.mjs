@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
+import { verifyPackedNapi } from "./verify-packed-napi.mjs";
 import { stageNapiLoader } from "./stage-napi-loader.mjs";
 import { stageNativeFingerprints } from "./stage-native-fingerprints.mjs";
 
@@ -382,3 +384,127 @@ test("alpha release preview can call the publisher without elevating nested perm
   assert.match(publisherWorkflow, /permissions:[\s\S]*?contents: write/);
   assert.match(publisherWorkflow, /if: env\.RELEASE_MODE == 'publish'/);
 });
+
+function packedNapiFixture(mutate = () => {}) {
+  const root = mkdtempSync(join(tmpdir(), "jazz-packed-napi-check-"));
+  const packageDir = join(root, "input");
+  mkdirSync(packageDir);
+  const sourceDir = join(repositoryRoot, "crates/jazz-napi");
+  const manifest = JSON.parse(readFileSync(join(sourceDir, "package.json"), "utf8"));
+  manifest.scripts = {};
+  manifest.optionalDependencies = Object.fromEntries(
+    ["linux-x64-gnu", "darwin-x64", "darwin-arm64", "win32-x64-msvc"].map((target) => [
+      `@garden-co/jazz-napi-${target}`,
+      manifest.version,
+    ]),
+  );
+  for (const name of [
+    "index.cjs",
+    "index.mjs",
+    "index.d.ts",
+    "native-binding.cjs",
+    "close-pollable.cjs",
+  ])
+    writeFileSync(join(packageDir, name), readFileSync(join(sourceDir, name)));
+  writeFileSync(
+    join(packageDir, "native-artifact-fingerprint.cjs"),
+    `module.exports = { expectedNativeArtifactFingerprint: "${fingerprint}" };`,
+  );
+  writeFileSync(
+    join(packageDir, "native-loader.cjs"),
+    Object.keys(manifest.optionalDependencies)
+      .map((name) => `require(${JSON.stringify(name)});`)
+      .join("\n"),
+  );
+  try {
+    mutate(packageDir, manifest);
+    writeFileSync(join(packageDir, "package.json"), JSON.stringify(manifest));
+    const [receipt] = JSON.parse(
+      execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", root], {
+        cwd: packageDir,
+        encoding: "utf8",
+      }),
+    );
+    return { root, tarball: join(root, receipt.filename) };
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+test("release packed NAPI verification accepts current public loaders without legacy index.js", () => {
+  const fixture = packedNapiFixture();
+  try {
+    assert.equal(verifyPackedNapi(fixture.tarball).name, "jazz-napi");
+    execFileSync(process.execPath, [
+      join(repositoryRoot, "dev/artifacts/verify-packed-napi.mjs"),
+      fixture.tarball,
+    ]);
+    const inventory = execFileSync("tar", ["-tf", fixture.tarball], { encoding: "utf8" });
+    assert.ok(!inventory.split("\n").includes("package/index.js"));
+    const workflow = readFileSync(
+      join(repositoryRoot, ".github/workflows/publish-jazz-tools-alpha.yml"),
+      "utf8",
+    );
+    const step = workflow.split("- name: Verify packed jazz-napi payload")[1].split("- name:")[0];
+    assert.match(step, /node dev\/artifacts\/verify-packed-napi\.mjs "\$\{TARBALL\}"/);
+    assert.doesNotMatch(step, /package\/index\.js/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const [name, mutate, expected] of [
+  ["missing public ESM entrypoint", (dir) => rmSync(join(dir, "index.mjs")), /missing index.mjs/],
+  [
+    "missing published loader despite legacy index.js",
+    (dir) => {
+      rmSync(join(dir, "native-loader.cjs"));
+      writeFileSync(join(dir, "index.js"), "// legacy loader @garden-co");
+    },
+    /missing native-loader.cjs/,
+  ],
+  [
+    "unscoped native loader dependency",
+    (dir) =>
+      writeFileSync(
+        join(dir, "native-loader.cjs"),
+        "require('jazz-napi-linux-x64-gnu'); // @garden-co",
+      ),
+    /unscoped native packages/,
+  ],
+  [
+    "stale manifest export",
+    (dir, manifest) => {
+      manifest.exports["."].import = "./index.js";
+    },
+    /current CJS, ESM, and type entrypoints/,
+  ],
+  [
+    "missing required native dependency",
+    (dir, manifest) => {
+      delete manifest.optionalDependencies["@garden-co/jazz-napi-win32-x64-msvc"];
+    },
+    /missing optional dependency/,
+  ],
+  [
+    "missing scoped loader branch",
+    (dir) => writeFileSync(join(dir, "native-loader.cjs"), "// @garden-co"),
+    /missing scoped native package/,
+  ],
+  [
+    "workspace optional dependency",
+    (dir, manifest) => {
+      manifest.optionalDependencies["@garden-co/jazz-napi-linux-x64-gnu"] = "workspace:*";
+    },
+    /workspace protocol/,
+  ],
+])
+  test(`release packed NAPI verification rejects ${name}`, () => {
+    const fixture = packedNapiFixture(mutate);
+    try {
+      assert.throws(() => verifyPackedNapi(fixture.tarball), expected);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });

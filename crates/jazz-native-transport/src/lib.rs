@@ -56,6 +56,7 @@ pub enum WebSocketClientError {
     DecodeFrame(postcard::Error),
     Negotiation(WireError),
     ServerRejected(String),
+    ServerWireError(WireError),
 }
 
 impl fmt::Display for WebSocketClientError {
@@ -77,11 +78,58 @@ impl fmt::Display for WebSocketClientError {
             Self::DecodeFrame(error) => write!(f, "failed to decode frame: {error}"),
             Self::Negotiation(error) => write!(f, "websocket negotiation failed: {error:?}"),
             Self::ServerRejected(reason) => write!(f, "websocket rejected: {reason}"),
+            Self::ServerWireError(error) => write!(f, "websocket rejected: {error:?}"),
         }
     }
 }
 
 impl std::error::Error for WebSocketClientError {}
+
+/// Match typed transport/wire causes, never diagnostic strings. Only the same
+/// NotReady/Later admission response accepted by the browser is retryable.
+fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
+    let retryable = match &error {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+        | WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Io(error))
+        | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Io(error)) => {
+            // The rustls connector also returns certificate/protocol failures
+            // as Io(InvalidData), retaining rustls::Error as the source. An Io
+            // wrapper alone is therefore not evidence of network unavailability.
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::NetworkDown
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            )
+        }
+        WebSocketClientError::HandshakeTimeout => true,
+        // An HTTP 5xx response is a typed server-unavailability result before
+        // the authenticated wire handshake. It must retry like a refused
+        // connection; 4xx responses remain terminal authorization/admission
+        // failures.
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().is_server_error()
+        }
+        WebSocketClientError::ServerWireError(error) => {
+            error.code == jazz::wire::WireErrorCode::NotReady
+                && error.retry == jazz::wire::WireRetry::Later
+        }
+        _ => false,
+    };
+    if retryable {
+        NativeTransportError::Retryable(error.to_string())
+    } else {
+        NativeTransportError::Terminal(error.to_string())
+    }
+}
 
 pub struct WebSocketTransport {
     inbound: Arc<Mutex<mpsc::Receiver<InboundFrame>>>,
@@ -109,7 +157,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
         app_id: AppId,
     ) -> Result<(), jazz::tools::native_transport_connector::NativeTransportError> {
         validate_catalogue_bootstrap_upstream_url(server_url, app_id)
-            .map_err(jazz::tools::native_transport_connector::NativeTransportError)
+            .map_err(NativeTransportError::Terminal)
     }
 
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
@@ -124,9 +172,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.wake,
             )
             .await
-            .map_err(|error| {
-                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
-            })?;
+            .map_err(native_transport_error)?;
             let (protocol_version, features, session_context) =
                 transport.negotiated_transport_metadata();
             let terminal = transport.take_terminal_future();
@@ -153,9 +199,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.auth,
             )
             .await
-            .map_err(|error| {
-                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
-            })
+            .map_err(native_transport_error)
         })
     }
 }
@@ -522,7 +566,7 @@ impl WebSocketTransport {
             .expect("native transport terminal future is taken exactly once");
         Box::pin(async move {
             terminal.await.unwrap_or_else(|_| {
-                NativeTransportTerminal::Failed(NativeTransportError(
+                NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                     "websocket pump stopped without a terminal reason".to_owned(),
                 ))
             })
@@ -671,10 +715,7 @@ async fn receive_server_hello(
     let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
     let WireFrame::Hello(hello) = frame else {
         if let WireFrame::Error(error) = frame {
-            return Err(WebSocketClientError::ServerRejected(format!(
-                "{:?}: {}",
-                error.code, error.message
-            )));
+            return Err(WebSocketClientError::ServerWireError(error));
         }
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     };
@@ -733,7 +774,7 @@ async fn run_ws_pump(
                             let bytes = match encode_outbound_batch(&batch) {
                                 Ok(bytes) => bytes,
                                 Err(error) => {
-                                    return NativeTransportTerminal::Failed(NativeTransportError(
+                                    return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                                         format!(
                                             "failed to encode websocket wire batch: {error}"
                                         ),
@@ -741,8 +782,8 @@ async fn run_ws_pump(
                                 }
                             };
                             if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                                return NativeTransportTerminal::Failed(NativeTransportError(
-                                    format!("websocket send failed: {error}"),
+                                return NativeTransportTerminal::Failed(native_transport_error(
+                                    WebSocketClientError::Send(error),
                                 ));
                             }
                             batch.clear();
@@ -757,15 +798,15 @@ async fn run_ws_pump(
                     let bytes = match encode_outbound_batch(&batch) {
                         Ok(bytes) => bytes,
                         Err(error) => {
-                            return NativeTransportTerminal::Failed(NativeTransportError(format!(
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
                                 "failed to encode websocket wire batch: {error}"
                             )));
                         }
                     };
                     if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                        return NativeTransportTerminal::Failed(NativeTransportError(format!(
-                            "websocket send failed: {error}"
-                        )));
+                        return NativeTransportTerminal::Failed(native_transport_error(
+                            WebSocketClientError::Send(error),
+                        ));
                     }
                     drop(batch);
                     if outbound_backpressured.swap(false, Ordering::AcqRel) {
@@ -785,12 +826,13 @@ async fn run_ws_pump(
                             let reason = "websocket peer sent a non-binary wire batch".to_owned();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
                         }
                         Some(Err(error)) => {
-                            let reason = format!("websocket receive failed: {error}");
+                            let classified = native_transport_error(WebSocketClientError::Receive(error));
+                            let reason = classified.to_string();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                            return NativeTransportTerminal::Failed(classified);
                         }
                         None => {
                             let reason = "websocket peer closed before completing wire exchange"
@@ -804,14 +846,14 @@ async fn run_ws_pump(
                         Err(error) => {
                             fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
                     };
                     for frame in frames {
                         if let Err(error) = validate_wire_frame_len(frame.len()) {
                             fail_inbound(&inbound_error, &inbound_notify, &error);
                             let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
                         }
                         let permits =
                             u32::try_from(frame.len()).expect("wire frame limit fits u32");
@@ -853,6 +895,108 @@ fn decode_inbound_batch(bytes: &[u8], _bootstrap_catalogue: bool) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
+    // This adapter classification has no Db-level API: assert the typed socket
+    // and wire boundary, including conflicting error guidance, directly.
+    #[test]
+    fn native_connection_failures_preserve_retry_and_auth_categories() {
+        use jazz::wire::{WireErrorCode, WireRetry};
+        let refused = WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(
+            std::io::ErrorKind::ConnectionRefused.into(),
+        ));
+        assert!(native_transport_error(refused).is_retryable());
+        assert!(native_transport_error(WebSocketClientError::HandshakeTimeout).is_retryable());
+        for (status, retryable) in [(503, true), (401, false), (403, false), (429, false)] {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None::<Vec<u8>>)
+                .unwrap();
+            assert_eq!(
+                native_transport_error(WebSocketClientError::Connect(
+                    tokio_tungstenite::tungstenite::Error::Http(Box::new(response))
+                ))
+                .is_retryable(),
+                retryable,
+                "HTTP {status} must use its typed availability category"
+            );
+        }
+        for (code, retry, expected) in [
+            (WireErrorCode::NotReady, WireRetry::Later, true),
+            (WireErrorCode::NotReady, WireRetry::AfterAuth, false),
+            (WireErrorCode::AuthFailed, WireRetry::AfterAuth, false),
+            (WireErrorCode::AuthFailed, WireRetry::Later, false),
+            (WireErrorCode::MalformedFrame, WireRetry::Later, false),
+        ] {
+            assert_eq!(
+                native_transport_error(WebSocketClientError::ServerWireError(WireError::new(
+                    code,
+                    retry,
+                    "connection refused: diagnostic is not authority"
+                ),))
+                .is_retryable(),
+                expected
+            );
+        }
+        assert!(
+            !native_transport_error(WebSocketClientError::ServerRejected(
+                "connection refused".to_owned(),
+            ))
+            .is_retryable()
+        );
+        assert!(
+            !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
+                .is_retryable()
+        );
+    }
+
+    // The exact nested error comes from tokio-rustls before a Jazz handshake,
+    // so this adapter classification must be tested below the Db API.
+    #[test]
+    fn rustls_certificate_io_failures_remain_terminal() {
+        let certificate =
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, certificate);
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<rustls::Error>()
+                .is_some()
+        );
+        assert!(
+            !native_transport_error(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Io(error)
+            ))
+            .is_retryable()
+        );
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !native_transport_error(WebSocketClientError::Receive(
+                    tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                        kind,
+                        "connection refused"
+                    ))
+                ))
+                .is_retryable()
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::NetworkUnreachable,
+        ] {
+            assert!(
+                native_transport_error(WebSocketClientError::Send(
+                    tokio_tungstenite::tungstenite::Error::Io(kind.into())
+                ))
+                .is_retryable()
+            );
+        }
+    }
+
     use super::*;
     use jazz::db::Transport;
     use jazz::wire::WIRE_PROTOCOL_VERSION;
@@ -1024,6 +1168,49 @@ mod tests {
             decode_inbound_batch(&suffixed, false).is_err(),
             "a valid batch plus a suffix must not acquire a second interpretation"
         );
+    }
+
+    // This is an internal test because a JSON prelude is emitted before a Db
+    // exists. The shared fixture pins the native writer's exact first-message
+    // contract for the server and TypeScript carrier tests.
+    #[test]
+    fn native_writer_matches_websocket_prelude_v1_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../jazz/fixtures/websocket_prelude_v1.json",
+        ))
+        .expect("parse websocket prelude fixture");
+        for entry in fixture["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .filter(|entry| entry["writer"] == "rust-native")
+        {
+            let identity = AuthorSubject::from_canonical(
+                entry["peer_identity"]
+                    .as_str()
+                    .expect("fixture peer identity"),
+            )
+            .expect("fixture canonical peer identity");
+            let auth: AuthConfig =
+                serde_json::from_value(entry["auth"].clone()).expect("fixture native auth");
+            let actual = String::from_utf8(
+                encode_prelude(
+                    identity,
+                    auth,
+                    entry["bootstrap_catalogue"]
+                        .as_bool()
+                        .expect("fixture bootstrap flag"),
+                )
+                .expect("encode fixture prelude"),
+            )
+            .expect("native prelude is UTF-8 JSON");
+            assert_eq!(
+                actual,
+                entry["json"].as_str().expect("fixture JSON"),
+                "native writer drifted for {}",
+                entry["name"].as_str().expect("fixture name")
+            );
+        }
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub(crate) enum OutputTerminalSchema {
 /// App-facing row schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppRowSchema {
+    /// Single source-owned publication binding for each named terminal field.
+    pub(crate) publication_fields: BTreeMap<String, crate::node::CurrentRowPublicationField>,
     /// Descriptor for app-visible row records.
     pub(crate) descriptor: RecordDescriptor,
     /// Hidden fields retained by the graph and stripped before app delivery.
@@ -40,6 +42,10 @@ pub(crate) struct AppRowSchema {
     /// this distinction in lowered metadata prevents Jazz from guessing from
     /// a query's surface shape (for example, whether it has nested arrays).
     pub(crate) terminal: AppRowTerminal,
+    /// The root source itself is a labeled UNION ALL arm. The collector key
+    /// keeps its physical root UUID first, then carries this discriminator;
+    /// consumers use this flag to assign that label to source position zero.
+    pub(crate) root_union_arm: bool,
 }
 
 /// How an app-row terminal reaches the subscription boundary.
@@ -157,12 +163,15 @@ pub(crate) struct ResultMembershipSchema {
     /// Ordered source-row identity fields for the rendered output occurrence.
     /// The root source is first; ordinary output contains only `row_field`.
     pub(crate) occurrence_id_fields: Vec<String>,
-    /// Typed UNION ALL arm discriminators keyed by joined-source position
-    /// (that is, position zero names the first field after the root).
+    /// Typed UNION ALL arm discriminators keyed by source position: root is
+    /// position zero and joined sources are positions one and above.
     pub(crate) occurrence_union_arm_fields: BTreeMap<usize, String>,
     /// Flattened public tuple fields retained with the membership record when
     /// this is a flat joined output. Ordinary row output leaves this empty.
     pub(crate) payload_fields: Vec<TypedOutputField>,
+    /// Explicit source/result/provenance identities for durable payload cells.
+    pub(crate) payload_publication_fields:
+        BTreeMap<String, crate::node::CurrentRowPublicationField>,
     /// Branch/prefix field, when branch/prefix participates in result
     /// identity.
     pub(crate) branch_or_prefix_field: Option<String>,
@@ -466,9 +475,13 @@ pub(crate) struct AggregateResultSchema {
     /// Synthetic result membership for this aggregate group.
     pub(crate) synthetic: SyntheticResultMembershipSchema,
     /// Ordered stable group-key fields.
-    pub(crate) group_key_fields: Vec<TypedOutputField>,
+    pub(crate) group_key_fields: Vec<groove::records::DescriptorField>,
+    /// Schema-qualified logical group names, independent of runtime identities.
+    pub(crate) group_names: Vec<String>,
     /// Ordered aggregate value fields.
-    pub(crate) value_fields: Vec<TypedOutputField>,
+    pub(crate) value_fields: Vec<groove::records::DescriptorField>,
+    /// Declared aggregate aliases, including aliases colliding with group names.
+    pub(crate) value_names: Vec<String>,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }

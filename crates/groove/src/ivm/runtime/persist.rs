@@ -261,7 +261,9 @@ fn persist_record_keys(
             .name
             .as_deref()
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-        let value = descriptor.get(record, field_name)?;
+        let field_idx = super::record_projection::resolve_field_name(descriptor, field_name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field_name.to_owned()))?;
+        let value = descriptor.bind(record).get_idx(field_idx)?;
         let parts = arrangement_key_parts(value);
 
         if parts.is_empty() {

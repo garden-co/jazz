@@ -83,21 +83,125 @@ not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the mai
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
-#### Durable settled-program-fact keys
+#### Durable source closure facts
 
-`INV-QUERY-36` — Every settled program fact durable key is exactly one
-versioned, canonical `JPFK` codec value. Its version and variant tags are
-permanent. A `ResultPayload` carries its `RecordDescriptor` as one exact,
-ordinary canonical Groove record encoding and its row as a record under that
-descriptor; a synthetic result member likewise carries its dynamic row and
-replacement token as fixed Groove records containing the exact descriptor and
-value. These nested durable values never use a Rust-private serde/postcard
-encoding. Recovery MUST reject before mutating resident query state any legacy
-postcard payload, malformed or truncated value, unknown version/tag, trailing
-bytes, non-canonical representation, oversized field, or value beyond the
-codec nesting bound. There is no compatibility decode or on-open rewrite for
-the pre-freeze raw `ViewFactEntry` postcard keys. Add, remove, rewrite, and
-reopen all derive the same exact key bytes. Storage-freeze issue #2249.
+`INV-QUERY-36` — Only `ProgramSourceCoverage` and `CoveredInput` have a
+persisted fact representation. The `jazz_settled_program_facts` direct store
+uses the authority prefix `[shape UUID, binding UUID, read-view UUID,
+policy-presence U8, policy-directory digest Bytes]`, followed by a 32-byte
+BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`. Its single
+`fact: Bytes` value contains the canonical fact whose bytes derive that digest.
+The policy directory and known-state source-closure generation remain separate
+validated stores. The receiver rebuilds terminal results through local IVM over
+these covered source versions; no output row or result member is recovered.
+
+The fact bytes are ASCII `JPFK`, version byte `1`, then dense tag byte `0` for
+`ProgramSourceCoverage` or `1` for `CoveredInput`. Every other tag rejects.
+There is no persisted result-member store, `JRME`, or `JRSE` format.
+
+- Tag `0`: source identity, then one boolean byte (`0` incomplete, `1` complete).
+- Tag `1`: source identity, version-table string, source-row UUID, version ref.
+- A string/byte field is little-endian `U32` byte length then exact bytes;
+  strings must be UTF-8. UUIDs are exactly 16 bytes. A source identity is its
+  table string followed by `U32` path length and ordered roles: `0` root,
+  `1` alias, `2` recursive seed, `3` recursive step, `4` correlated child,
+  `5` policy; every non-root role has one following string. Paths contain
+  1–32 roles and must satisfy the protocol's canonical source-identity rules.
+- A version ref is transaction (`U64` time, node UUID), optional schema UUID,
+  layer byte (`0` content, `1` deletion, `2` content-or-deletion), optional
+  batch transaction, optional branch/prefix bytes, optional row-digest bytes.
+  Each option is byte `0` absent or byte `1` followed by the declared value.
+  Covered-input table, row, and version identity must be wire-valid.
+
+Total and individual byte fields are bounded to 1 MiB. Recovery validates the
+entire closure before resident query-state mutation: malformed, truncated,
+unknown-version/tag, trailing, noncanonical, oversized, or invalid source
+identity encodings reject. Add, remove, rewrite, and reopen use the same codec.
+The runtime protocol enum's serde layout is never a durable fact format.
+
+#### Typed identity descriptor roles
+
+The all-in typed format does not promise compatibility with the retired
+contained experiment. Its durable and runtime identities have explicit owners:
+`PhysicalColumnId` is a node-local catalogue key; `GlobalPhysicalColumnId` is a
+portable UUID. A schema-qualified logical column or output name remains part of
+interpretation even when its runtime field is bound to a compiler `Slot` or
+`NamedSlot`. Runtime bindings are never a durable substitute for either identity.
+
+The following role contracts govern the descriptor migration. A reader validates
+canonical bytes and the complete role/identity/type tree **before** installing
+runtime bindings. Equal widths, equal field counts, or positional coincidence do
+not establish schema equality. A descriptor mismatch is rejected, not coerced.
+
+| Role                                          | Authoritative fields and context                                                                                                                                                               | Canonical bytes and interpretation                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Immutable `VersionRecord`                     | Schema UUID, logical table, exact branch, fixed provenance/deletion fields, schema-declared application column names and recursive storage types; authored-column names stay schema-qualified. | An explicit versioned record envelope contains the persisted descriptor grammar and canonical row bytes. Generic `OwnedRecord` serde is not this wire format. The receiver validates the declared schema's wire descriptor and row encoding before catalogue translation; local physical IDs and compiler slots are absent. |
+| Real result payload                           | Result member identity plus the declared result-membership metadata roles and ordered logical flat-tuple output fields.                                                                        | Runtime `JRPD` publication carries the role-selected descriptor and canonical row. Schema-bound readers validate exact roles/names/types; stored-row columns resolve through the selected catalogue schema. This payload has no persistence family.                                                                         |
+| Aggregate result payload                      | Ordered group roles and aggregate-expression roles, including their logical output names and recursive value types; the member separately owns synthetic row/replacement identity.             | Role ordinals distinguish a group and aggregate with the same public name. A reader compares the complete canonical role schema to the compiled `AggregateResultSchema`, then rebinds to its exact execution identities. Route carriers and synthetic bookkeeping are not application identities.                           |
+| Terminal root layout                          | Root-key role, explicit publication visibility/name, recursive public collection schema, declared row layout and nullable-carrier kind.                                                        | The hash uses a new versioned domain and canonical role schema. Declared field positions may identify byte-layout positions; compiler allocation slots and node-local physical IDs do not enter the hash. Nested descriptors obey the same rule recursively.                                                                |
+| Synthetic values and tuple revision preimages | Ordered logical names/types and nested enum registry identities, under the owning group/replacement/revision role.                                                                             | Groove persisted descriptor grammar plus canonical values; recursive child records are rebound to the canonical child schema before encoding. No child runtime identity can enter a key through incidental record serde.                                                                                                    |
+
+The persisted descriptor grammar preserves names, nested field order, enum
+registry identity, and type distinctions such as logical string versus stored
+JSON. It intentionally does not preserve execution `FieldIdentity`. Consequently
+each producer must first construct the authoritative role schema; passing an
+arbitrary execution descriptor to this codec is not sufficient. Portable global
+physical identities, when a role requires them, remain explicit UUID fields in
+that role rather than being replaced by local numeric catalogue aliases.
+
+The concrete v1 byte contracts are:
+
+- Immutable-version row blob: ASCII `JVRR`, byte `1`, descriptor byte length as
+  little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
+  canonical row bytes consuming the remainder. The enclosing sync message owns
+  the blob length and retains, in its declared order, table, schema UUID, branch,
+  this row blob, and authored-column set. The row blob is not a serde tuple of
+  `RecordDescriptor` and bytes. Both unknown versions and the former incidental
+  `OwnedRecord` representation are rejected.
+- Result descriptor blob: ASCII `JRPD`, byte `1`, role byte (`0` current,
+  `1` aggregate), then one exact Groove persisted-descriptor tree. This is a
+  runtime publication format, not a persisted-output family. Current descriptors start with
+  `metadata/row_uuid: UUID`, then ordered `source/<i>/<name>`,
+  `result/<i>/<name>`, `provenance/<i>/<name>`, or `metadata/<i>/<name>` fields;
+  `<i>` starts at zero after the root. Current descriptors then append ordered
+  `occurrence/<i>/<carrier>: UUID` fields for joined sources (`<i>` starts at one),
+  followed by `occurrence_union/<position>/<carrier>: String` fields ordered by
+  zero-based joined-source position. These carriers identify normalized query
+  declarations, not global table identities or compiler slots. Exact descriptor
+  equality precedes row decoding; each ordered UUID and union label must also
+  match the member occurrence identity. Reordered declarations, changed source
+  lists, and discriminator substitutions are rejected. Aggregate descriptors contain all
+  `group/<i>/<name>` fields followed by all `value/<i>/<name>` fields, each role
+  numbering independently from zero. Decimal ordinals have no padding. The
+  remainder after the second slash is the exact logical name, including any
+  slash in that name. Current row bytes contain only the root and these declared
+  payload cells plus declared occurrence UUIDs and union labels; aggregate bytes
+  contain only the declared groups and values.
+  Member identity and query binding own omitted version/routing bookkeeping.
+- Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
+  the persisted role descriptor, root byte-layout position as little-endian
+  `U64`, and carrier byte (`0` current-row, `1` logical). In descriptor order,
+  each public field then appends its exact UTF-8 name, zero byte, byte-layout
+  position as little-endian `U64`, and its carrier byte. The role descriptor uses
+  `metadata/row_uuid` for the root, `<role>/<position>/<name>` for public fields
+  (`source`, `result`, or `provenance`), and `hidden/<position>` for non-public
+  layout fields. This new v1 domain replaces the pre-freeze root-layout domain;
+  no old hash is accepted as an alternate spelling. Public source role records
+  the schema-qualified name, never its local `PhysicalColumnId`.
+
+All embedded descriptor trees use Groove SPEC 2's canonical prefix-order grammar,
+including its 1024-node limit, exact nested field/case order, and enum registry
+identity. The same rejection rules apply recursively. Runtime child descriptors
+are reconstructed only after complete canonical type-tree equality; row values
+must re-encode byte-for-byte, so truncated rows and trailing bytes are rejected.
+A same-width type substitution, logical-name substitution, or source/result role
+substitution fails before execution bindings are installed. A changed runtime
+slot allocation or local physical-column alias alone does not change these bytes.
+
+No role accepts both the old incidental execution-descriptor representation and
+the new role grammar. Format fixtures and reopen receipts must identify their
+writer format explicitly. Hash-domain changes and descriptor-envelope versions
+are reviewed with the corresponding reader and rejection tests.
 
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the

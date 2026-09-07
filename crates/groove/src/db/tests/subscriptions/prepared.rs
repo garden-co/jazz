@@ -1420,3 +1420,83 @@ async fn prepared_subscription_reports_incremental_contains_field_filter_deltas(
         ]
     );
 }
+
+#[futures_test::test]
+async fn routed_prepared_public_carriers_preserve_distinct_logical_identities() {
+    use crate::records::{DescriptorField, FieldIdentity};
+
+    // `user_title` is both the first field's carrier and the second field's
+    // logical name. Public carrier selection must not pick that second value.
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField::new("route", ValueType::U64),
+        DescriptorField::new("user_title", ValueType::U64)
+            .with_identity(FieldIdentity::Name("title".into())),
+        DescriptorField::new("user_user_title", ValueType::U64)
+            .with_identity(FieldIdentity::Name("user_title".into())),
+        DescriptorField::new("left_carrier", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 1,
+            },
+        ),
+        DescriptorField::new("right_carrier", ValueType::U64).with_identity(
+            FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 2,
+            },
+        ),
+    ]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        [vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::U64(22),
+            Value::U64(33),
+            Value::U64(44),
+        ]],
+    )
+    .unwrap();
+    let storage = MemoryStorage::new(&[]).unwrap();
+    let mut database = Database::new(DatabaseSchema::new([]), storage)
+        .await
+        .unwrap();
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                graph,
+                ["route"],
+                ["user_title", "user_user_title", "right_carrier"],
+            )],
+            "public_carrier_identities",
+            RecordDescriptor::new([("route", ValueType::U64)]),
+        )
+        .await
+        .unwrap();
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    let rows = initial.get("rows").unwrap();
+    assert_eq!(
+        rows.to_values().unwrap(),
+        [(vec![Value::U64(11), Value::U64(22), Value::U64(44)], 1)]
+    );
+    assert_eq!(
+        rows.descriptor
+            .fields()
+            .iter()
+            .map(|field| field.identity.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Some(FieldIdentity::Name("title".into())),
+            Some(FieldIdentity::Name("user_title".into())),
+            Some(FieldIdentity::NamedSlot {
+                name: "shared".into(),
+                slot: 2
+            })
+        ]
+    );
+}

@@ -436,7 +436,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       (kind === "wasm"
         ? "wasm32-unknown-unknown"
         : (toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown")),
-    features: "default",
+    features: artifactFeatures(kind),
     packageInputs,
     artifacts: artifactHashes(root, kind, options),
   };
@@ -450,6 +450,13 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
  * closure already determines them. Including them would create a pre-build vs
  * post-build circular fingerprint.
  */
+export function artifactFeatures(kind) {
+  const enabled = process.env.JAZZ_RN_TEST_BRIDGE;
+  if (enabled !== undefined && enabled !== "0" && enabled !== "1")
+    throw new Error("JAZZ_RN_TEST_BRIDGE must be 0 or 1");
+  return kind === "napi" && enabled === "1" ? "default,rn-test-bridge" : "default";
+}
+
 export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
   // Runtime compatibility is content-addressed by relevant producer inputs,
   // never by commit identity or provenance receipts. In particular, do not
@@ -471,7 +478,7 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
     surfaceHash.update(surfaceContents.get(path) ?? "missing");
     surfaceHash.update("\0");
   }
-  return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}`);
+  return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}\0${artifactFeatures(kind)}`);
 }
 
 export const manifestPath = (root, kind) => {

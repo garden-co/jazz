@@ -1,5 +1,5 @@
 import { PostcardWriter, type NativeRowBatch } from "./native-codec.js";
-import { writeDescriptor, writeValueType, type ValueType } from "./native-row-codec.js";
+import { writeNativeRowDescriptor, writeValueType, type ValueType } from "./native-row-codec.js";
 
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 
@@ -24,7 +24,7 @@ export function nativeRowFieldPlanCacheKey(
 ): string {
   const writer = new PostcardWriter();
   writer.string(batch.table);
-  writeDescriptor(writer, [...batch.descriptor]);
+  writeNativeRowDescriptor(writer, [...batch.descriptor]);
   return bytesToHex(writer.finish());
 }
 

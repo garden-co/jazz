@@ -685,8 +685,7 @@ where
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
+        let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single
         // root row set. They have no array payload edges, so request ordinary
         // app rows instead of the relation-snapshot fact output (which is
@@ -707,8 +706,7 @@ where
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        let query = relation_query_to_query(query)?;
-        let prepared = self.prepare_query(&query)?;
+        let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single
         // root row set.  They have no array payload edges, so request ordinary
         // app rows instead of the relation-snapshot fact output (which is

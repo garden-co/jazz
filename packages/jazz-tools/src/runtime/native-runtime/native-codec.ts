@@ -13,6 +13,7 @@ import {
   writeValueType,
 } from "./native-row-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -22,13 +23,16 @@ export {
   decodeRecordBytes,
   decodeRecordString,
   fieldIndex,
+  nativeRowDescriptorPublicName,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
   readNativeSubscriptionDelta,
   readDescriptor,
+  readNativeRowDescriptor,
   readValueType,
   writeDescriptor,
+  writeNativeRowDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
 export type {
@@ -36,6 +40,7 @@ export type {
   NativeRemovedRow,
   NativeRow,
   NativeRowBatch,
+  NativeRowDescriptorField,
   NativeSubscriptionDelta,
   DescriptorField,
   ValueType,
@@ -295,6 +300,8 @@ export type QueryOptions = {
   orderBy?: QueryOrder[];
   select?: string[];
   arraySubqueries?: QueryArraySubquery[];
+  /** Relation expression carried in Query.relation by the public IR adapter. */
+  relation?: unknown;
 };
 
 export function queryWithEqFilters(
@@ -315,7 +322,7 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
+  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [], relation } = queryOptions;
   if (limit != null) validateQueryBound("query limit", limit);
   validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
@@ -356,6 +363,12 @@ export function queryWithPredicates(
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
   writer.u64(offset);
+  // Query.relation is an explicit final Option in the Rust postcard envelope.
+  if (relation == null) writer.none();
+  else
+    writer.some((relationWriter) =>
+      relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr), false),
+    );
   return writer.finish();
 }
 

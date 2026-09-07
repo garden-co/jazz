@@ -2,6 +2,55 @@
 
 use super::*;
 
+// Hold the real subscriber owner across publication; its next tick must
+// consume the shared dirty epoch and deliver both exact rows to an idle stream.
+#[test]
+fn contended_subscriber_observes_every_local_publication_after_release() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd7; 16]);
+    let server = open_core(0xd7, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd8, author, &schema);
+    let (upstream, downstream, _sent, _received) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, author);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..16 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.root_count, 0);
+    let held = block_on(subscriber.lock());
+    server
+        .insert_with_id(
+            "todos",
+            row(0xd1),
+            cells("first contended commit", false, author),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "todos",
+            row(0xd2),
+            cells("second contended commit", false, author),
+        )
+        .unwrap();
+    drop(held);
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    let rows: BTreeSet<_> = snapshot.rows.iter().map(|r| r.row_uuid()).collect();
+    assert_eq!(rows, BTreeSet::from([row(0xd1), row(0xd2)]));
+}
+
 fn branch_sync_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(

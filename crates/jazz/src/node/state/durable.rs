@@ -663,37 +663,24 @@ where
             store.delete(&key).await?;
         }
         self.query.authority_results.clear();
-        self.clear_all_settled_result_state().await?;
+        self.clear_all_persisted_source_closures().await?;
         Ok(())
     }
 
-    pub(crate) async fn persist_settled_result_state_delta_for_authority_result(
+    pub(crate) async fn persist_source_closure_delta_for_authority_result(
         &self,
         authority_result_key: AuthorityResultKey,
         cleared: bool,
-        member_adds: &[ResultMemberEntry],
-        member_removes: &[ResultMemberEntry],
-        member_rewrite: Option<&BTreeSet<ResultMemberEntry>>,
         fact_adds: &[ViewFactEntry],
         fact_removes: &[ViewFactEntry],
-        fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
         self.persist_authority_policy_binding_directory(&authority_result_key)
             .await?;
-        self.persist_settled_result_members_delta(
-            authority_result_key.clone(),
-            cleared,
-            member_adds,
-            member_removes,
-            member_rewrite,
-        )
-        .await?;
         self.persist_settled_program_facts_delta(
             authority_result_key,
             cleared,
             fact_adds,
             fact_removes,
-            fact_rewrite,
         )
         .await?;
         Ok(())
@@ -753,78 +740,17 @@ where
         Ok(())
     }
 
-    async fn persist_settled_result_members_delta(
-        &self,
-        authority_result_key: AuthorityResultKey,
-        cleared: bool,
-        adds: &[ResultMemberEntry],
-        removes: &[ResultMemberEntry],
-        rewrite: Option<&BTreeSet<ResultMemberEntry>>,
-    ) -> Result<(), Error> {
-        let store = self
-            .database
-            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        if cleared || rewrite.is_some() {
-            let prefix = authority_result_store_prefix(&authority_result_key);
-            let keys = store
-                .prefix_entries(&prefix)
-                .await?
-                .into_iter()
-                .map(|entry| entry.key)
-                .collect::<Vec<_>>();
-            let mut operations = keys
-                .into_iter()
-                .map(|key| DirectRecordStoreWrite::Delete { key })
-                .collect::<Vec<_>>();
-            if let Some(members) = rewrite {
-                for member in members {
-                    operations.push(settled_result_member_storage_write(
-                        &authority_result_key,
-                        member,
-                    )?);
-                }
-            } else {
-                for member in adds {
-                    operations.push(settled_result_member_storage_write(
-                        &authority_result_key,
-                        member,
-                    )?);
-                }
-            }
-            store.write_many(&operations).await?;
-            return Ok(());
-        }
-
-        let mut operations = Vec::with_capacity(removes.len() + adds.len());
-        for member in removes {
-            operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_result_member_key(&authority_result_key, member)?,
-            });
-        }
-        for member in adds {
-            operations.push(settled_result_member_storage_write(
-                &authority_result_key,
-                member,
-            )?);
-        }
-        if !operations.is_empty() {
-            store.write_many(&operations).await?;
-        }
-        Ok(())
-    }
-
     async fn persist_settled_program_facts_delta(
         &self,
         authority_result_key: AuthorityResultKey,
         cleared: bool,
         adds: &[ViewFactEntry],
         removes: &[ViewFactEntry],
-        rewrite: Option<&BTreeSet<ViewFactEntry>>,
     ) -> Result<(), Error> {
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        if cleared || rewrite.is_some() {
+        if cleared {
             let prefix = authority_result_store_prefix(&authority_result_key);
             let keys = store
                 .prefix_entries(&prefix)
@@ -836,20 +762,8 @@ where
                 .into_iter()
                 .map(|key| DirectRecordStoreWrite::Delete { key })
                 .collect::<Vec<_>>();
-            if let Some(facts) = rewrite {
-                for fact in facts {
-                    operations.push(settled_program_fact_storage_write(
-                        &authority_result_key,
-                        fact,
-                    )?);
-                }
-            } else {
-                for fact in adds {
-                    operations.push(settled_program_fact_storage_write(
-                        &authority_result_key,
-                        fact,
-                    )?);
-                }
+            for fact in adds {
+                operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
             }
             store.write_many(&operations).await?;
             return Ok(());
@@ -873,8 +787,8 @@ where
         Ok(())
     }
 
-    async fn clear_all_settled_result_state(&mut self) -> Result<(), Error> {
-        for store_name in [SETTLED_RESULT_MEMBERS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
+    async fn clear_all_persisted_source_closures(&mut self) -> Result<(), Error> {
+        for store_name in [SETTLED_PROGRAM_FACTS_STORE] {
             let store = self.database.direct_record_store(store_name)?;
             let keys = store
                 .prefix_entries(&[])
@@ -992,59 +906,6 @@ where
                 }
             }
         }
-        let store = self
-            .database
-            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        for entry in store.prefix_entries(&[]).await? {
-            let Some((member_digest, prefix)) = entry.key.split_last() else {
-                return Err(Error::InvalidStoredValue(
-                    "settled result member key is empty",
-                ));
-            };
-            let authority_result_key = resolve_stored_authority_result_key(
-                authority_result_key_from_store_prefix(
-                    prefix,
-                    "settled result member binding key must be valid",
-                )?,
-                &policies,
-                "settled result member policy directory entry is missing",
-            )?;
-            let member_digest = match member_digest {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled result member digest must be bytes",
-                    ));
-                }
-            };
-            if member_digest.len() != 32 {
-                return Err(Error::InvalidStoredValue(
-                    "settled result member digest must be 32 bytes",
-                ));
-            }
-            let member_bytes = match entry.value.get_idx(0)? {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled result member payload must be bytes",
-                    ));
-                }
-            };
-            if settled_result_member_digest(&member_bytes).as_slice() != member_digest {
-                return Err(Error::InvalidStoredValue(
-                    "settled result member payload does not match its digest",
-                ));
-            }
-            let member = result_member_from_storage_bytes(&member_bytes)?;
-            let state = authority_results.entry(authority_result_key).or_default();
-            if let Some(row_key) = Self::result_member_row_key(&member) {
-                state
-                    .settled_result_row_index
-                    .insert(row_key, member.clone());
-            }
-            state.settled_result_set.insert(member);
-        }
-
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;

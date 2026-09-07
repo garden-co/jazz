@@ -116,6 +116,9 @@ pub(super) struct RecursiveRelationPlan {
 #[derive(Clone, Debug)]
 pub(super) struct UnionPlan {
     pub(super) branches: Vec<UnionBranchPlan>,
+    /// Order/window operators above a public root UNION ALL. They execute
+    /// after every labeled arm has contributed rows.
+    pub(super) terminal_steps: Vec<LinearStep>,
 }
 
 impl UnionPlan {
@@ -511,6 +514,44 @@ fn is_slice_step(step: &LinearStep) -> bool {
     matches!(step, LinearStep::Slice { .. })
 }
 
+fn root_union_terminal_steps<'a>(
+    root: &RowSetNodeId,
+    nodes: &'a BTreeMap<RowSetNodeId, RowSetExpr>,
+) -> Option<(&'a [UnionInput], Vec<LinearStep>)> {
+    let mut current = root;
+    let mut outer_to_inner = Vec::new();
+    loop {
+        match nodes.get(current)? {
+            RowSetExpr::OrderBy { input, keys } => {
+                outer_to_inner.push(LinearStep::OrderBy(keys.clone()));
+                current = input;
+            }
+            RowSetExpr::Slice {
+                input,
+                partition_by,
+                limit,
+                offset,
+                tie_breaker,
+                rank_output,
+            } => {
+                outer_to_inner.push(LinearStep::Slice {
+                    partition_by: partition_by.clone(),
+                    limit: *limit,
+                    offset: *offset,
+                    tie_breaker: tie_breaker.clone(),
+                    rank_output: rank_output.clone(),
+                });
+                current = input;
+            }
+            RowSetExpr::Union { inputs } => {
+                outer_to_inner.reverse();
+                return Some((inputs, outer_to_inner));
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn analyze_root_node(
     request: &QueryProgramRequest,
 ) -> Result<AnalyzedQueryPlan, UnsupportedReason> {
@@ -526,6 +567,23 @@ fn analyze_root_node(
                 request.input.shape.root
             ))
         })?;
+
+    if let Some((inputs, terminal_steps)) =
+        root_union_terminal_steps(&request.input.shape.root, &request.input.shape.nodes)
+    {
+        visited.insert(request.input.shape.root.clone());
+        let mut union = analyze_union(inputs, &request.input.shape.nodes, &mut visited)?;
+        union.terminal_steps = terminal_steps;
+        validate_result_source(
+            request,
+            union.root_source().ok_or_else(|| {
+                UnsupportedReason::Operator(
+                    "union result branches must share one root source".to_owned(),
+                )
+            })?,
+        )?;
+        return Ok(AnalyzedQueryPlan::Union(union));
+    }
 
     let plan = match root_node {
         RowSetExpr::CorrelatedPathProjection {
@@ -1266,7 +1324,10 @@ fn analyze_union(
             plan,
         });
     }
-    Ok(UnionPlan { branches })
+    Ok(UnionPlan {
+        branches,
+        terminal_steps: Vec::new(),
+    })
 }
 
 #[cfg(test)]

@@ -169,6 +169,7 @@ const relayJsExports = new Set([
   "NativeForegroundRuntimeFactory",
   "NativeForegroundRuntime",
   "NativeForegroundCommand",
+  "NativeForegroundPermissionAdviceAction",
   "NativeForegroundTransactionKind",
   "NativeForegroundResponse",
   "NativeForegroundSubscriptionEvent",
@@ -405,6 +406,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
       "NativeForegroundRuntimeFactory",
       "NativeForegroundRuntime",
       "NativeForegroundCommand",
+      "NativeForegroundPermissionAdviceAction",
       "NativeForegroundTransactionKind",
       "NativeForegroundResponse",
       "NativeForegroundSubscriptionEvent",
@@ -414,7 +416,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
       "executeNativeRelayCommand",
     ]),
   );
-  assert.equal(relayExports.length, 12, "relay must expose exactly its fixed ABI declarations");
+  assert.equal(relayExports.length, 13, "relay must expose exactly its fixed ABI declarations");
 
   assert.equal(
     indexExports.length,
@@ -2462,6 +2464,23 @@ ${
       },
     );
 
+    // An explicitly empty pin was the release publisher's failure mode. Neither
+    // an empty expectation nor a different toolchain may accept sealed bytes.
+    for (const expectedCargoNdk of ["", "4.1.1"]) {
+      assert.throws(
+        () =>
+          execFileSync(
+            process.execPath,
+            [verifier.pathname, "--package-root", packageRoot, "android"],
+            {
+              env: { ...environment, JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk },
+              stdio: "pipe",
+            },
+          ),
+        /Android relay manifest does not match cargo-ndk provenance/,
+      );
+    }
+
     for (const transitiveInput of ["crates/idb-tree/", "crates/jazz-compression/"]) {
       const entry = nativeSourceInventory
         .split("\n")
@@ -2987,4 +3006,33 @@ test("RN preview publishes selected packages once and device acceptance grants K
     "Assemble, launch, and require the run-bound receipt",
   );
   assert.match(android.steps[grant].run, /sudo setfacl/);
+});
+
+test("release publisher pins the same cargo-ndk provenance as native producers", async () => {
+  const workflows = await Promise.all(
+    ["build-jazz-packages", "rn-native-artifacts", "publish-jazz-tools-alpha"].map(async (name) =>
+      parse(
+        await readFile(new URL(`../../../.github/workflows/${name}.yml`, import.meta.url), "utf8"),
+      ),
+    ),
+  );
+  const producerPin = workflows[0].env.JAZZ_RN_CARGO_NDK_VERSION;
+  assert.match(producerPin, /^[0-9]+\.[0-9]+\.[0-9]+$/);
+  for (const workflow of workflows) {
+    assert.equal(workflow.env.JAZZ_RN_CARGO_NDK_VERSION, producerPin, workflow.name);
+    const packedCheck = Object.values(workflow.jobs)
+      .flatMap((job) => job.steps ?? [])
+      .find((step) => step.name === "Verify packed jazz-rn relay payload");
+    if (packedCheck) {
+      assert.match(
+        packedCheck.run,
+        /JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="\$\{JAZZ_RN_CARGO_NDK_VERSION\}"/,
+      );
+      const actual = execFileSync("bash", ["-c", 'printf "%s" "${JAZZ_RN_CARGO_NDK_VERSION}"'], {
+        env: { ...process.env, ...workflow.env, ...packedCheck.env },
+        encoding: "utf8",
+      });
+      assert.equal(actual, producerPin);
+    }
+  }
 });

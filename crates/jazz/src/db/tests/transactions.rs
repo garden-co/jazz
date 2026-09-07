@@ -574,16 +574,10 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         overlay_row
             .encoded_record()
             .0
-            .field_index("user_title")
+            .field_index("title")
             .is_some()
     );
-    assert!(
-        overlay_row
-            .encoded_record()
-            .0
-            .field_index("user_done")
-            .is_some()
-    );
+    assert!(overlay_row.encoded_record().0.field_index("done").is_some());
     assert_eq!(
         overlay_row.cell_at(0),
         Some(Value::String("overlay".to_owned()))
@@ -597,13 +591,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), inserted);
-    assert!(
-        rows[0]
-            .encoded_record()
-            .0
-            .field_index("user_title")
-            .is_some()
-    );
+    assert!(rows[0].encoded_record().0.field_index("title").is_some());
     assert_eq!(
         rows[0].cell_at(0),
         Some(Value::String("attached".to_owned()))
@@ -1866,6 +1854,34 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
 }
 
 #[test]
+fn mergeable_tx_rejects_update_of_committed_deleted_row() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(1);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("archived", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row, Default::default()).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    let error = tx
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(prepared_read(&db, &db.table("todos")).is_empty());
+}
+
+#[test]
 fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
@@ -2688,6 +2704,9 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
 
     db.commit_mergeable_handle(open).unwrap();
     let committed = db.local_current_row("todos", target).unwrap().unwrap();
+    crate::binding_codec::encode_rows(std::slice::from_ref(&committed))
+        .expect("exact local write-merge rows must carry resolved publication identities");
+
     let table = &schema.tables[0];
     assert_eq!(committed.cell(table, "done"), Some(Value::Bool(true)));
     assert_eq!(

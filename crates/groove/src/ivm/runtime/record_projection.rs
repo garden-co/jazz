@@ -1,7 +1,7 @@
 //! Record descriptors, projection, enum remapping, and operator shape validation.
 
 use super::*;
-use crate::records::collect_by_ordered_scalar;
+use crate::records::{DescriptorField, collect_by_ordered_scalar};
 
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
@@ -143,10 +143,13 @@ pub(super) fn project_descriptor(
                 }
                 ProjectExpr::RecursiveEnumRemap { target, .. } => target.clone(),
             };
-            Ok((project_field.output_name.clone(), value_type))
+            Ok(
+                DescriptorField::new(project_field.output_name.clone(), value_type)
+                    .with_identity(project_field.output_identity.clone()),
+            )
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn collect_by_descriptor(
@@ -210,13 +213,13 @@ pub(super) fn collect_by_root_descriptor(
         .iter()
         .map(|field| {
             let index = resolve_field_ref(input, &field.field)?;
-            Ok((
+            Ok(DescriptorField::new(
                 field.output_name.clone(),
                 collect_by_field_value_type(input, index, field)?,
             ))
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn collect_by_tree_descriptor(
@@ -610,35 +613,20 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
 pub(super) fn project_field_expr(
     input: &RecordDescriptor,
     field: &ProjectField,
-) -> Result<PlanExpr, IvmRuntimeError> {
-    match &field.expression {
-        ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
-        ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
-        ProjectExpr::TypedLiteral { value, .. } => Ok(PlanExpr::literal(value.clone())),
-        ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
-        ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
-        ProjectExpr::NullableFlat(source) => {
-            Ok(PlanExpr::nullable_flat(field_ref_name(input, source)?))
+) -> Result<ProjectExpr, IvmRuntimeError> {
+    let mut expression = field.expression.clone();
+    match &mut expression {
+        ProjectExpr::Field(source)
+        | ProjectExpr::Nullable(source)
+        | ProjectExpr::NullableFlat(source)
+        | ProjectExpr::EnumTagRemap { source, .. }
+        | ProjectExpr::EnumRemap { source, .. }
+        | ProjectExpr::RecursiveEnumRemap { source, .. } => {
+            *source = FieldRef::Resolved(resolve_field_ref(input, source)?);
         }
-        ProjectExpr::EnumTagRemap { source, tags } => Ok(PlanExpr::EnumTagRemap {
-            field: field_ref_name(input, source)?,
-            tags: tags.clone(),
-        }),
-        ProjectExpr::EnumRemap { source, tags } => Ok(PlanExpr::EnumRemap {
-            field: field_ref_name(input, source)?,
-            tags: tags.clone(),
-        }),
-        ProjectExpr::RecursiveEnumRemap {
-            source,
-            remaps,
-            omit_unrepresentable,
-            ..
-        } => Ok(PlanExpr::RecursiveEnumRemap {
-            field: field_ref_name(input, source)?,
-            remaps: remaps.clone(),
-            omit_unrepresentable: *omit_unrepresentable,
-        }),
+        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {}
     }
+    Ok(expression)
 }
 
 pub(super) fn project_record(
@@ -658,35 +646,44 @@ pub(super) fn project_record(
 
     let input = BorrowedRecord::new(input_record, input_desc);
     let mut values = Vec::with_capacity(expressions.len());
-    for expr in expressions {
+    for (output_idx, expr) in expressions.iter().enumerate() {
+        let resolved = |field: &FieldRef| -> Result<Value, IvmRuntimeError> {
+            let source_idx = resolve_field_ref(input_desc, field)?;
+            input
+                .get_idx(source_idx)
+                .map_err(IvmRuntimeError::RecordEncoding)
+        };
         values.push(match &expr.expression {
-            PlanExpr::Field(field) => input.get(field)?.clone(),
-            PlanExpr::Literal(value) => value.to_value(),
-            PlanExpr::Null(_) => Value::Nullable(None),
-            PlanExpr::Nullable(field) => Value::Nullable(Some(Box::new(input.get(field)?.clone()))),
-            PlanExpr::NullableFlat(field) => {
-                let value = input.get(field)?.clone();
+            ProjectExpr::Field(field) => resolved(field)?,
+            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
+                value.to_value()
+            }
+            ProjectExpr::Null(_) => Value::Nullable(None),
+            ProjectExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
+            ProjectExpr::NullableFlat(field) => {
+                let value = resolved(field)?;
                 if matches!(value, Value::Nullable(_)) {
                     value
                 } else {
                     Value::Nullable(Some(Box::new(value)))
                 }
             }
-            PlanExpr::EnumTagRemap { field, tags } => {
-                remap_enum_tag(input.get(field)?.clone(), tags)?
-            }
-            PlanExpr::EnumRemap { field, tags } => remap_enum(input.get(field)?.clone(), tags)?,
-            PlanExpr::RecursiveEnumRemap { field, remaps, .. } => {
-                let source_idx = input_desc
-                    .field_index(field)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
-                let output_idx = output_desc
-                    .field_index(expr.output_name.as_deref().ok_or_else(|| {
-                        IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned())
-                    })?)
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+            ProjectExpr::EnumTagRemap {
+                source: field,
+                tags,
+            } => remap_enum_tag(resolved(field)?, tags)?,
+            ProjectExpr::EnumRemap {
+                source: field,
+                tags,
+            } => remap_enum(resolved(field)?, tags)?,
+            ProjectExpr::RecursiveEnumRemap {
+                source: field,
+                remaps,
+                ..
+            } => {
+                let source_idx = resolve_field_ref(input_desc, field)?;
                 remap_recursive_enum_value(
-                    input.get(field)?.clone(),
+                    resolved(field)?,
                     &input_desc.fields()[source_idx].value_type,
                     &output_desc.fields()[output_idx].value_type,
                     remaps,
@@ -933,7 +930,7 @@ pub(super) fn projection_uses_raw_copy(
         && mapping.len() == output_desc.fields().len()
         && expressions
             .iter()
-            .all(|expr| matches!(expr.expression, PlanExpr::Field(_)))
+            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
 }
 
 pub(super) fn raw_projection_fields(
@@ -948,35 +945,34 @@ pub(super) fn raw_projection_fields(
     let fields = project
         .expressions
         .iter()
-        .map(|expr| match &expr.expression {
-            PlanExpr::Field(field) => input_desc
-                .field_index(field)
+        .enumerate()
+        .map(|(output_idx, expr)| match &expr.expression {
+            ProjectExpr::Field(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::Copy { source_idx }),
-            PlanExpr::Nullable(field) => input_desc
-                .field_index(field)
+            ProjectExpr::Nullable(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::WrapNullable { source_idx }),
-            PlanExpr::NullableFlat(field) => input_desc
-                .field_index(field)
+            ProjectExpr::NullableFlat(field) => resolve_field_ref(input_desc, field)
+                .ok()
                 .map(|source_idx| RawProjectionField::FlattenNullable { source_idx }),
-            PlanExpr::Null(_) => Some(RawProjectionField::Encoded {
+            ProjectExpr::Null(_) => Some(RawProjectionField::Encoded {
                 bytes: encode_projection_field_value(
                     output_desc,
-                    expr.output_name.as_deref(),
+                    output_idx,
                     Value::Nullable(None),
                 )
                 .ok()?,
             }),
-            PlanExpr::Literal(value) => Some(RawProjectionField::Encoded {
-                bytes: encode_projection_field_value(
-                    output_desc,
-                    expr.output_name.as_deref(),
-                    value.to_value(),
-                )
-                .ok()?,
-            }),
-            PlanExpr::EnumTagRemap { .. }
-            | PlanExpr::EnumRemap { .. }
-            | PlanExpr::RecursiveEnumRemap { .. } => None,
+            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
+                Some(RawProjectionField::Encoded {
+                    bytes: encode_projection_field_value(output_desc, output_idx, value.to_value())
+                        .ok()?,
+                })
+            }
+            ProjectExpr::EnumTagRemap { .. }
+            | ProjectExpr::EnumRemap { .. }
+            | ProjectExpr::RecursiveEnumRemap { .. } => None,
         })
         .collect::<Option<Vec<_>>>();
     Ok(fields)
@@ -984,16 +980,9 @@ pub(super) fn raw_projection_fields(
 
 fn encode_projection_field_value(
     output_desc: RecordDescriptor,
-    output_name: Option<&str>,
+    field_idx: usize,
     value: Value,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    let field_idx = if let Some(output_name) = output_name {
-        output_desc
-            .field_index(output_name)
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(output_name.to_owned()))?
-    } else {
-        return Err(IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()));
-    };
     let field = output_desc
         .fields()
         .get(field_idx)
@@ -1006,8 +995,12 @@ pub(super) fn resolve_field_ref(
     field: &FieldRef,
 ) -> Result<usize, IvmRuntimeError> {
     match field {
-        FieldRef::Name(name) => descriptor
-            .field_index(name)
+        FieldRef::Name(name) => resolve_field_name(descriptor, name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone())),
+        FieldRef::StoredName(name) => descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some(name))
             .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone())),
         FieldRef::Resolved(index) => {
             if *index < descriptor.fields().len() {
@@ -1019,12 +1012,36 @@ pub(super) fn resolve_field_ref(
     }
 }
 
+pub(super) fn resolve_field_name(descriptor: &RecordDescriptor, name: &str) -> Option<usize> {
+    descriptor.field_index(name).or_else(|| {
+        descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some(name))
+    })
+}
+
 pub(super) fn field_ref_name(
     descriptor: &RecordDescriptor,
     field: &FieldRef,
 ) -> Result<String, IvmRuntimeError> {
     match field {
         FieldRef::Name(name) => Ok(name.clone()),
+        FieldRef::StoredName(_) => {
+            let index = resolve_field_ref(descriptor, field)?;
+            let resolved = &descriptor.fields()[index];
+            // PlanExpr still carries names. Only emit a spelling that its
+            // resolver binds back to this exact field; logical labels alone
+            // cannot distinguish fields with different NamedSlot identities.
+            resolved
+                .name
+                .as_deref()
+                .into_iter()
+                .chain(resolved.logical_name())
+                .find(|name| resolve_field_name(descriptor, name) == Some(index))
+                .map(str::to_owned)
+                .ok_or_else(|| IvmRuntimeError::AmbiguousGraphFieldReference(field.display_name()))
+        }
         FieldRef::Resolved(index) => field_name_at(descriptor, *index),
     }
 }
@@ -1060,10 +1077,14 @@ pub(super) fn unwrap_nullable_descriptor(
             } else {
                 field.value_type.clone()
             };
-            Ok((field.name.clone().unwrap_or_default(), value_type))
+            Ok(DescriptorField {
+                name: field.name.clone(),
+                identity: field.identity.clone(),
+                value_type,
+            })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
-        .map(RecordDescriptor::new)
+        .map(RecordDescriptor::new_with_fields)
 }
 
 pub(super) fn unnest_descriptor(
@@ -1081,15 +1102,17 @@ pub(super) fn unnest_descriptor(
     let mut fields = input
         .fields()
         .iter()
-        .map(|field| {
-            (
-                field.name.clone().unwrap_or_default(),
-                field.value_type.clone(),
-            )
+        .map(|field| DescriptorField {
+            name: field.name.clone(),
+            identity: field.identity.clone(),
+            value_type: field.value_type.clone(),
         })
         .collect::<Vec<_>>();
-    fields.push((element_field.to_owned(), (**element_type).clone()));
-    Ok(RecordDescriptor::new(fields))
+    fields.push(DescriptorField::new(
+        element_field.to_owned(),
+        (**element_type).clone(),
+    ));
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 pub(super) fn variant_project_descriptor(
@@ -1122,16 +1145,36 @@ pub(super) fn aggregate_descriptor(
             .fields()
             .get(field_idx)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-        fields.push((field_ref_name(input, group_col)?, field.value_type.clone()));
+        // A reference may use a logical spelling to avoid a carrier collision.
+        // The output still carries the selected source field's physical name.
+        fields.push(
+            DescriptorField::new(field_name_at(input, field_idx)?, field.value_type.clone())
+                .with_identity(field.identity.clone().unwrap_or_else(|| {
+                    crate::records::FieldIdentity::Name(
+                        field
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| field_ref_name(input, group_col).unwrap()),
+                    )
+                })),
+        );
     }
     for (index, aggregate) in aggregates.iter().enumerate() {
         let name = aggregate
             .output_name
             .clone()
             .unwrap_or_else(|| format!("aggregate_{index}"));
-        fields.push((name, aggregate_output_type(input, aggregate)?));
+        fields.push(
+            DescriptorField::new(name.clone(), aggregate_output_type(input, aggregate)?)
+                .with_identity(
+                    aggregate
+                        .output_identity
+                        .clone()
+                        .unwrap_or(crate::records::FieldIdentity::Name(name)),
+                ),
+        );
     }
-    Ok(RecordDescriptor::new(fields))
+    Ok(RecordDescriptor::new_with_fields(fields))
 }
 
 fn aggregate_output_type(
@@ -1175,8 +1218,7 @@ fn aggregate_expr_value_type(
         | PlanExpr::EnumTagRemap { field, .. }
         | PlanExpr::EnumRemap { field, .. }
         | PlanExpr::RecursiveEnumRemap { field, .. } => {
-            let field_idx = input
-                .field_index(field)
+            let field_idx = resolve_field_name(input, field)
                 .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
             Ok(input
                 .fields()

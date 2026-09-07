@@ -105,7 +105,7 @@ const benchmarkSmokeMode = (mode) => {
   return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
 };
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
-  const cpu = jobName === "test-ts" ? 16 : 4;
+  const cpu = ["test-ts", "test-react-native"].includes(jobName) ? 16 : 4;
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
   assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
@@ -711,11 +711,17 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const preCheckout = shard.steps.find(
     (step) => step.name === "Reject pre-checkout source residue",
   );
+  const safeDirectory = shard.steps.find(
+    (step) => step.name === "Trust checked-out workspace for Git diagnostics",
+  );
   const normalizeCheckout = shard.steps.find(
     (step) => step.name === "Record checkout source state",
   );
   const sealBaseline = shard.steps.find(
     (step) => step.name === "Seal clean checked-out source baseline",
+  );
+  const runShard = shard.steps.find(
+    (step) => step.name === "Run exact-inventory Rust shadow shard",
   );
   const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   assert.equal(
@@ -733,6 +739,17 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
     "pre-checkout inspection must run before actions/checkout",
   );
+  assert.ok(safeDirectory, "shadow must trust its exact container checkout before Git diagnostics");
+  assert.match(
+    safeDirectory.run,
+    /git config --global --add safe\.directory "\$\{GITHUB_WORKSPACE:\?GITHUB_WORKSPACE is required\}"/,
+    "the ownership exception must name only the Actions workspace",
+  );
+  assert.ok(
+    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory) &&
+      shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
+    "the safe-directory setup must follow checkout and precede the first Git diagnostic",
+  );
   assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
   assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);
   assert.doesNotMatch(normalizeCheckout.run, /git reset|git clean/);
@@ -749,6 +766,11 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
     "${{ runner.temp }}/rust-shadow-source.json",
     "the source baseline must resolve runner.temp at step scope",
+  );
+  assert.equal(
+    runShard?.env?.RUST_SHADOW_SOURCE_BASELINE,
+    "${{ runner.temp }}/rust-shadow-source.json",
+    "the exact partition producer must consume the sealed source baseline",
   );
   assert.match(
     rustShadowWorkflow,
@@ -788,6 +810,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     commit: "a".repeat(40),
     headTree: "b".repeat(40),
     indexTree: "b".repeat(40),
+    staged: "e".repeat(64),
     unstaged: "c".repeat(64),
     untracked: "d".repeat(64),
     dirty: false,
@@ -796,7 +819,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     crypto
       .createHash("sha256")
       .update(
-        ["headTree", "indexTree", "unstaged", "untracked"]
+        ["headTree", "indexTree", "staged", "unstaged", "untracked"]
           .map((field) => `${field}\0${value[field]}\0`)
           .join(""),
       )
@@ -927,6 +950,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       /maintained M3 seed 11/,
     ],
     [
+      "nested receipt staged source identity",
+      (shards) => {
+        shards[0].testReceipt.source.staged = "f".repeat(64);
+        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
+      },
+      /partition test receipt source staged does not match its inventory receipt/,
+    ],
+    [
       "nested receipt source identity",
       (shards) => {
         shards[0].testReceipt.source.untracked = "e".repeat(64);
@@ -959,6 +990,52 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       message,
       `planted ${name} mismatch must identify the violated binding`,
     );
+  }
+});
+
+test("a clean checkout seals a Rust shadow source baseline", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-shadow-source-"));
+  const receipt = path.join(
+    os.tmpdir(),
+    `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`,
+  );
+  try {
+    const gates = path.join(fixture, "dev/gates");
+    fs.mkdirSync(gates, { recursive: true });
+    for (const file of ["rust-shadow-matrix.mjs", "source-identity.mjs"])
+      fs.copyFileSync(path.join(root, "dev/gates", file), path.join(gates, file));
+    fs.writeFileSync(path.join(fixture, "synthetic-source.txt"), "committed fixture source\n");
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.email", "test@example.invalid"],
+      ["config", "user.name", "Test"],
+      ["add", "."],
+      ["commit", "--quiet", "-m", "fixture"],
+      ["rev-parse", "HEAD"],
+    ]) {
+      const result = spawnSync("git", args, { cwd: fixture, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      if (args[0] === "rev-parse") {
+        const baseline = spawnSync(
+          "node",
+          [
+            path.join(gates, "rust-shadow-matrix.mjs"),
+            "clean-source-baseline",
+            receipt,
+            result.stdout.trim(),
+          ],
+          { cwd: fixture, encoding: "utf8" },
+        );
+        assert.equal(baseline.status, 0, baseline.stderr);
+        const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
+        assert.equal(source.commit, result.stdout.trim());
+        assert.equal(source.dirty, false);
+        assert.match(source.staged, /^[0-9a-f]{64}$/);
+      }
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+    fs.rmSync(receipt, { force: true });
   }
 });
 
@@ -1329,7 +1406,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/source-identity.test.mjs dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ensure-correctness-artifacts.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
@@ -1477,9 +1554,45 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
 
 test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
   const workspace = job("test-rust-workspace");
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
+  const requiredSmokeTests = [
+    "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
+    "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+    "jazz-sim::scenario_smoke=s1_saas_smoke",
+    "jazz-sim::scenario_smoke=micro_correctness_smoke",
+    "jazz-sim::scenario_smoke=s1_saas_db_surface_smoke",
+    "jazz-sim::scenario_smoke=s2_canvas_smoke",
+    "jazz-sim::scenario_smoke=s3_permissions_smoke",
+    "jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile",
+    "jazz-sim::scenario_smoke=s5_durable_stream_smoke",
+    "jazz-sim::scenario_smoke=s7_migrations_smoke",
+    "jazz-sim::scenario_smoke=s8_branch_views_smoke",
+    "jazz-sim::scenario_smoke=s9_durable_execution_smoke",
+  ];
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
+  assert.deepEqual(
+    [
+      ...localCi.matchAll(/"(?:jazz|jazz-sim)::(?:legacy_benchmark_smoke|scenario_smoke)=[^"]+"/g),
+    ].map((match) => match[0].slice(1, -1)),
+    requiredSmokeTests,
+  );
+  assert.doesNotMatch(
+    localCi,
+    /command\("benchmark deterministic scenario smoke", "bash", \[[\s\S]*benchmark-smoke\.sh[\s\S]*"--ci"/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        localCi.replace('"jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile",', ""),
+        /jazz-sim::scenario_smoke=s4_order_processing_smoke_debug_profile/,
+      ),
+    /s4_order_processing_smoke_debug_profile/,
+  );
   assert.match(
     realisticWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
@@ -1722,7 +1835,10 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /native correctness-artifact producer[\s\S]*build:correctness-artifacts/);
+  assert.match(
+    localCi,
+    /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
+  );
   assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
@@ -1753,6 +1869,22 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("React Native CI has a separate bridge-enabled producer and real Vitest admission", () => {
+  const reactNative = job("test-react-native");
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
+  assert.match(reactNative, /local-ci-equivalent\.mjs --ci-partition react-native/);
+  assert.match(
+    localCi,
+    /React Native bridge correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/,
+  );
+  assert.match(
+    localCi,
+    /admitted Jazz Tools build for React Native[\s\S]*run-correctness-consumer\.mjs/,
+  );
+  assert.match(localCi, /React Native bridge tests[\s\S]*vitest\.react-native\.config\.ts/);
+  assert.match(localCi, /JAZZ_RN_TEST_BRIDGE: "1"/);
 });
 
 test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {

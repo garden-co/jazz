@@ -867,6 +867,7 @@ fn album_count_graph() -> GraphBuilder {
             expression: None,
             distinct: false,
             output_name: Some("count".to_owned()),
+            output_identity: None,
         }],
     )
 }
@@ -1392,7 +1393,7 @@ async fn pure_copy_project_lowers_with_full_fast_mapping() {
             && project
                 .expressions
                 .iter()
-                .all(|expr| matches!(expr.expression, PlanExpr::Field(_)))
+                .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
     }));
 }
 

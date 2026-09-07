@@ -231,7 +231,7 @@ function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
   private terminalRows = new Map<string, WasmRow>();
-  /** Exact ordered Groove root key -> opaque v2 occurrence sidecar address. */
+  /** Exact ordered Groove root key -> opaque ResultKey V1 sidecar address. */
   private terminalOccurrenceAddresses = new Map<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
@@ -282,8 +282,8 @@ export class SubscriptionManager<T extends { id: string }> {
         const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
         if (orderedKey) {
           this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
-        } else if (key[0] === 2) {
-          throw new Error("malformed or noncanonical typed terminal occurrence key");
+        } else {
+          throw new Error("malformed or noncanonical ResultKey V1 terminal occurrence key");
         }
       }
       const decoded: DecodedRowDelta[] = [
@@ -670,14 +670,14 @@ export class SubscriptionManager<T extends { id: string }> {
 }
 
 /**
- * Reconstruct the exact Groove ordered root key from a typed ResultKey v2.
+ * Reconstruct the exact Groove ordered root key from a complete ResultKey V1.
  * This is metadata-driven: a terminal key is accepted as typed only when it
  * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
  * discriminators. It intentionally does not infer meaning from a string in an
  * arbitrary ordered key.
  */
 function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array | undefined {
-  if (sidecar[0] !== 2 || sidecar.byteLength < 25) return undefined;
+  if (sidecar[0] !== 1 || sidecar.byteLength < 25) return undefined;
   let cursor = 1;
   const root = sidecar.subarray(cursor, (cursor += 16));
   const joinedCount = readU32Be(sidecar, cursor);
@@ -689,9 +689,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   });
   const discriminatorCount = readU32Be(sidecar, cursor);
   cursor += 4;
-  // ResultKey v2 exists only for union-discriminated output. Allowing no arms
-  // aliases the UUID-only v1 ordered key, so it is deliberately noncanonical.
-  if (discriminatorCount === 0 || discriminatorCount > joinedCount) return undefined;
+  if (discriminatorCount > joinedCount + 1) return undefined;
   const arms = new Map<number, Uint8Array>();
   let previousPosition = -1;
   for (let index = 0; index < discriminatorCount; index += 1) {
@@ -700,7 +698,7 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     const length = readU32Be(sidecar, cursor + 4);
     cursor += 8;
     if (
-      position >= joinedCount ||
+      position > joinedCount ||
       position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
@@ -715,9 +713,12 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   }
   if (cursor !== sidecar.byteLength) return undefined;
 
-  const ordered: number[] = [10, ...root];
+  const ordered: number[] = [];
+  const rootArm = arms.get(0);
+  if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
+  ordered.push(10, ...root);
   for (const [index, uuid] of joined.entries()) {
-    const arm = arms.get(index);
+    const arm = arms.get(index + 1);
     if (arm) {
       ordered.push(6, ...orderedBytes(arm));
     }
@@ -726,19 +727,10 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   return Uint8Array.from(ordered);
 }
 
-/** Reconstruct a terminal key from either supported occurrence-key carrier. */
+/** Reconstruct a terminal key from the sole ResultKey V1 carrier. */
 function terminalKeyForOccurrence(sidecar: Uint8Array | undefined): Uint8Array | undefined {
   if (!sidecar) return undefined;
-  const typed = orderedTerminalKeyForTypedOccurrence(sidecar);
-  if (typed) return typed;
-  if (sidecar[0] !== 1 || sidecar.byteLength < 17 || (sidecar.byteLength - 1) % 16 !== 0) {
-    return undefined;
-  }
-  const key: number[] = [];
-  for (let offset = 1; offset < sidecar.byteLength; offset += 16) {
-    key.push(10, ...sidecar.subarray(offset, offset + 16));
-  }
-  return Uint8Array.from(key);
+  return orderedTerminalKeyForTypedOccurrence(sidecar);
 }
 
 function readU32Be(bytes: Uint8Array, offset: number): number {
@@ -781,18 +773,28 @@ function terminalKeyId(encoded: readonly number[]): string {
   }
   // Groove terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
-  // occurrence sidecar uses the equivalent v1 ResultKey (`1, uuid, uuid,
-  // …`). Normalize only this exact physical form so terminal patches meet the
-  // same full occurrence identity that seeded the subscription state.
+  // occurrence sidecar uses the equivalent V1 ResultKey (`1, root UUID,
+  // joined count, joined UUIDs, label count`). Normalize only this exact
+  // physical form so terminal patches meet the same full occurrence identity
+  // that seeded the subscription state.
   if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
-    const occurrence = [1];
+    const uuids: number[][] = [];
     for (let offset = 0; offset < bytes.length; offset += 17) {
       if (bytes[offset] !== 10) {
         return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
       }
-      occurrence.push(...bytes.subarray(offset + 1, offset + 17));
+      uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
-    return publicResultKey(Uint8Array.from(occurrence));
+    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16);
+    occurrence[0] = 1;
+    occurrence.set(uuids[0]!, 1);
+    new DataView(occurrence.buffer).setUint32(17, uuids.length - 1);
+    let cursor = 21;
+    for (const uuid of uuids.slice(1)) {
+      occurrence.set(uuid, cursor);
+      cursor += 16;
+    }
+    return publicResultKey(occurrence);
   }
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -928,6 +930,7 @@ function readUuid(bytes: Uint8Array, offset: number): string {
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 17 && bytes[0] === 1) return readUuid(bytes, 1);
+  if (bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0))
+    return readUuid(bytes, 1);
   return `result:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

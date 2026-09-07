@@ -67,8 +67,6 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   "jazz.catalogue.physical-mapping.v1",
   "jazz.catalogue.schema.v1",
   "jazz.catalogue.write-pointer.v1",
-  "jazz.result-member-key.v1",
-  "jazz.result-row-source.v1",
   "jazz.subscription-program-fact-key.v1",
 ] as const;
 

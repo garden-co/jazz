@@ -1870,28 +1870,14 @@ where
             peer_complete_tx_payload_refs,
             authorization_progress,
             opening_pending,
-            result_member_adds,
-            result_member_removes,
+            result_member_adds: _,
+            result_member_removes: _,
             program_fact_adds,
             program_fact_removes,
         } = update;
-        let synthetic_result_changed = result_member_adds
-            .iter()
-            .chain(&result_member_removes)
-            .any(|member| matches!(member, ResultMemberEntry::Synthetic { .. }))
-            || program_fact_adds
-                .iter()
-                .chain(&program_fact_removes)
-                .any(|fact| {
-                    matches!(
-                        fact,
-                        ProgramFactEntry::ResultPayload(payload)
-                            if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
-                    )
-                });
         let version_bundle_refs = version_bundle_refs_for_carriers(&version_carriers)?;
-        let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
-            Ok(binding_view_key) => binding_view_key,
+        match self.binding_view_key_for_subscription(subscription) {
+            Ok(_) => {}
             Err(Error::InvalidStoredValue(
                 "subscription referenced unregistered shape"
                 | "subscription referenced unregistered binding",
@@ -1906,8 +1892,6 @@ where
             }
             Err(error) => return Err(error),
         };
-        #[cfg(not(debug_assertions))]
-        let _ = &binding_view_key;
         // Wire updates name a usage subscription only.  Resolve the complete
         // policy-scoped authority identity captured when that subscription was
         // admitted; never reconstruct or share it through BindingViewKey.
@@ -1922,10 +1906,7 @@ where
         };
         let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
             preloaded.clone()
-        } else if reset_result_set
-            && peer_complete_tx_payload_refs.is_empty()
-            && result_member_removes.is_empty()
-        {
+        } else if reset_result_set && peer_complete_tx_payload_refs.is_empty() {
             // A reset with bundles is a snapshot for this subscription even
             // when other subscriptions already advanced the node watermark.
             // Empty reset stamps stay orthogonal below: with no bundles there
@@ -1977,10 +1958,6 @@ where
                 .or_default()
                 .live_settled = false;
         }
-        let row_result_adds = result_member_adds
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .collect::<Vec<_>>();
         let version_bundles_is_empty = version_bundle_refs.is_empty();
         if let Some(preflight) = &preflight {
             for bundle in preflight.bundles.values() {
@@ -1991,38 +1968,15 @@ where
                 self.ingest_view_bundle(bundle.clone()).await?;
             }
         }
-        let mut available_peer_complete_tx_payload_refs = Vec::new();
-        for tx_id in peer_complete_tx_payload_refs.iter() {
-            if bulk_loaded_tx_ids.contains(tx_id) {
-                available_peer_complete_tx_payload_refs.push(*tx_id);
-                continue;
-            }
-            if self.query_transaction(*tx_id).await?.is_none() {
+        // Retain the active peer payload inventory diagnostic independently
+        // from the retired result-member witness validation.
+        for tx_id in &peer_complete_tx_payload_refs {
+            if !bulk_loaded_tx_ids.contains(tx_id)
+                && self.query_transaction(*tx_id).await?.is_none()
+            {
                 self.record_peer_payload_inventory_missing_fallback();
-                continue;
-            }
-            available_peer_complete_tx_payload_refs.push(*tx_id);
-        }
-        for tx_id in row_result_adds.iter().map(|(_, _, tx_id)| tx_id) {
-            if bulk_loaded_tx_ids.contains(tx_id) {
-                continue;
-            }
-            if self.query_transaction(*tx_id).await?.is_none() {
-                self.sync_metrics.parked_orphans += 1;
-                return Err(Error::MissingTransaction(*tx_id));
             }
         }
-        // Removals are self-sufficient: the removed version can be invisible
-        // under the receiver's policy, so fetching its body is allowed to
-        // return nothing. The row ref in the removal is enough to clear local
-        // believed membership and advance coverage.
-        self.validate_result_member_adds_are_witnessed(
-            &available_peer_complete_tx_payload_refs,
-            &row_result_adds,
-        )
-        .await?;
-        let persisted_member_adds = result_member_adds.clone();
-        let persisted_member_removes = result_member_removes.clone();
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
         let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
@@ -2040,49 +1994,7 @@ where
                 .entry(authority_result_key.clone())
                 .or_default();
         }
-        let mut result_members_need_rewrite = false;
-        let member_rewrite;
-        let fact_rewrite;
         {
-            for member in result_member_removes {
-                if self.remove_settled_result_member_indexed(authority_result_key.clone(), &member)
-                {
-                    continue;
-                }
-                if let Some(occurrence_id) = member.output_occurrence_id()
-                    && self
-                        .remove_settled_result_member_for_occurrence_indexed(
-                            authority_result_key.clone(),
-                            occurrence_id,
-                        )
-                        .is_some()
-                {
-                    result_members_need_rewrite = true;
-                }
-            }
-            for member in result_member_adds {
-                if let Some(occurrence_id) = member.output_occurrence_id() {
-                    result_members_need_rewrite |= self
-                        .remove_settled_result_member_for_occurrence_indexed(
-                            authority_result_key.clone(),
-                            occurrence_id,
-                        )
-                        .is_some();
-                }
-                self.insert_settled_result_member_indexed(authority_result_key.clone(), member);
-            }
-            member_rewrite = if result_members_need_rewrite {
-                Some(
-                    self.query
-                        .authority_results
-                        .get(&authority_result_key)
-                        .map(|state| state.settled_result_set.clone())
-                        .unwrap_or_default(),
-                )
-            } else {
-                None
-            };
-
             let program_facts = &mut self
                 .query
                 .authority_results
@@ -2093,7 +2005,6 @@ where
                 program_facts.remove(&fact);
             }
             program_facts.extend(program_fact_adds);
-            fact_rewrite = None;
         }
         let state = self
             .query
@@ -2106,19 +2017,6 @@ where
             &persisted_fact_adds,
             &persisted_fact_removes,
         );
-        if synthetic_result_changed
-            && self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .is_some_and(|state| state.initial_hydration)
-        {
-            self.query
-                .authority_results
-                .entry(authority_result_key.clone())
-                .or_default()
-                .pending_authoritative_reset = true;
-        }
         if !defer_settlement && !opening_pending {
             let state = self
                 .query
@@ -2144,32 +2042,12 @@ where
                     .pending_authoritative_reset = true;
             }
         }
-        // Diagnostic-only: the duplicate-content-version scan feeds a
-        // debug_assert, so it is wasted work in release. Gate to debug builds.
-        #[cfg(debug_assertions)]
-        {
-            if let Some((occurrence_id, first, second)) = self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .and_then(|state| duplicate_output_occurrence_result_set(&state.settled_result_set))
-            {
-                debug_assert!(
-                    first == second,
-                    "settled binding view {binding_view_key:?} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
-                );
-            }
-        }
         if !defer_settlement && !opening_pending {
-            self.persist_settled_result_state_delta_for_authority_result(
+            self.persist_source_closure_delta_for_authority_result(
                 authority_result_key.clone(),
                 reset_cleared_shared_state,
-                &persisted_member_adds,
-                &persisted_member_removes,
-                member_rewrite.as_ref(),
                 &persisted_fact_adds,
                 &persisted_fact_removes,
-                fact_rewrite.as_ref(),
             )
             .await?;
         }
@@ -2274,45 +2152,6 @@ where
                 settled_through,
             )
             .await?;
-        }
-        Ok(())
-    }
-
-    async fn validate_result_member_adds_are_witnessed(
-        &mut self,
-        peer_complete_tx_payload_refs: &[TxId],
-        result_member_adds: &[ResultRowEntry],
-    ) -> Result<(), Error> {
-        let peer_complete_tx_payload_refs = peer_complete_tx_payload_refs
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let mut partial_exclusive_keys = BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new();
-        for (table, row_uuid, tx_id) in result_member_adds {
-            let Some(tx) = self.query_transaction(*tx_id).await? else {
-                continue;
-            };
-            if tx.tx.kind != TxKind::Exclusive || peer_complete_tx_payload_refs.contains(tx_id) {
-                continue;
-            }
-            let keys = match partial_exclusive_keys.entry(*tx_id) {
-                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    let keys = self
-                        .query_versions_for_tx(*tx_id)
-                        .await?
-                        .into_iter()
-                        .filter(|version| version.deletion().is_none())
-                        .map(|version| (version.table().to_owned(), version.row_uuid()))
-                        .collect();
-                    entry.insert(keys)
-                }
-            };
-            if !keys.contains(&(table.to_string(), *row_uuid)) {
-                return Err(Error::MalformedViewUpdate(
-                    "exclusive result row add is not witnessed by partial payload",
-                ));
-            }
         }
         Ok(())
     }

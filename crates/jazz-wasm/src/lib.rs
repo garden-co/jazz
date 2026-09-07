@@ -25,13 +25,13 @@ use jazz::db::{
     SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
     TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
-use jazz::query::{Query, RelationExpr, RelationQuery};
+use jazz::query::{Query, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::DurabilityTier;
@@ -1904,7 +1904,7 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<JsValue, JsValue> {
         enum Input {
-            Query(Query),
+            Query(Box<Query>),
             Relation(RelationQuery),
         }
 
@@ -1915,15 +1915,11 @@ impl WasmDb {
             })
             .transpose()?;
         let input = match kind.as_str() {
-            "query" => Input::Query(
-                postcard::from_bytes(&query)
+            "query" => Input::Query(Box::new(
+                jazz::wire::decode_postcard_exact(&query)
                     .map_err(|err| to_js_error(format!("decode query: {err}")))?,
-            ),
-            "relation" => {
-                let query_json = std::str::from_utf8(&query)
-                    .map_err(|err| to_js_error(format!("decode relation query UTF-8: {err}")))?;
-                Input::Relation(relation_query_from_json(query_json)?)
-            }
+            )),
+            "relation" => Input::Relation(relation_query_from_bytes(&query)?),
             _ => {
                 return Err(JsValue::from_str(
                     "prepared query kind must be query or relation",
@@ -2810,20 +2806,8 @@ fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
 }
 
 fn decode_cells(bytes: &[u8]) -> Result<RowCells, JsValue> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) =
-        postcard::from_bytes(bytes).map_err(|err| to_js_error(format!("decode cells: {err}")))?;
-    let record = BorrowedRecord::new(&raw, &descriptor);
-    let values = record
-        .to_values()
-        .map_err(|err| to_js_error(format!("decode cell record: {err}")))?;
-    let mut cells = RowCells::new();
-    for (field, value) in descriptor.fields().iter().zip(values) {
-        let Some(name) = &field.name else {
-            return Err(JsValue::from_str("encoded cells must use named fields"));
-        };
-        cells.insert(name.clone(), value);
-    }
-    Ok(cells)
+    jazz::binding_codec::decode_named_cells(bytes)
+        .map_err(|error| to_js_error(format!("decode cells: {error}")))
 }
 
 fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
@@ -2986,16 +2970,8 @@ fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
     jazz::tools::public_schema_convert::decode_public_schema_json(schema).map_err(to_js_error)
 }
 
-fn relation_query_from_json(query_json: &str) -> Result<RelationQuery, JsValue> {
-    let value: serde_json::Value = serde_json::from_str(query_json)
-        .map_err(|err| to_js_error(format!("decode query json: {err}")))?;
-    let relation_ir = value
-        .get("relation_ir")
-        .ok_or_else(|| to_js_error("relation query json is missing relation_ir"))?
-        .clone();
-    let rel: RelationExpr = serde_json::from_value(relation_ir)
-        .map_err(|err| to_js_error(format!("decode relation_ir: {err}")))?;
-    Ok(RelationQuery { rel })
+fn relation_query_from_bytes(query_bytes: &[u8]) -> Result<RelationQuery, JsValue> {
+    jazz::query::decode_relation_query_postcard(query_bytes).map_err(to_js_error)
 }
 
 async fn open_db<S>(
@@ -4885,6 +4861,7 @@ mod dynamic_schema_view_tests {
             .expect("cleanup owner transaction");
     }
 
+    #[cfg(target_arch = "wasm32")]
     async fn resolve_wasm_read(read: JsValue) -> Result<JsValue, JsValue> {
         if read.is_instance_of::<js_sys::Uint8Array>() {
             return Ok(read);

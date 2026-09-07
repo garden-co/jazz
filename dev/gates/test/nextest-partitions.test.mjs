@@ -36,10 +36,15 @@ function inventoryFromNextestJson(output) {
         filterStatuses.has(status),
         `nextest testcase has unsupported filter-match status: ${String(status)}`,
       );
+      assert.equal(
+        typeof testcase.ignored,
+        "boolean",
+        "nextest testcase is missing boolean ignored",
+      );
       const id = `${suite["binary-id"]}\0${name}`;
       assert.ok(!all.has(id), `duplicate nextest testcase: ${id}`);
       all.add(id);
-      if (status === "matches") selected.add(id);
+      if (status === "matches" && !testcase.ignored) selected.add(id);
     }
   }
   assert.equal(all.size, document["test-count"], "nextest test-count disagrees with rust-suites");
@@ -49,7 +54,7 @@ function inventoryFromNextestJson(output) {
 test("nextest 0.9.143 single-document output selects only partition matches", () => {
   assert.deepEqual(
     inventoryFromNextestJson(fixture),
-    new Set(["pkg::unit\0alpha", "pkg::integration\0gamma", "pkg::integration\0delta"]),
+    new Set(["pkg::unit\0alpha", "pkg::integration\0gamma"]),
   );
 });
 
@@ -71,6 +76,13 @@ test("nextest JSON parser rejects unknown and missing partition membership", () 
   assert.throws(
     () => inventoryFromNextestJson(missing),
     /unsupported filter-match status: undefined/,
+  );
+});
+
+test("nextest JSON parser rejects missing ignored state", () => {
+  assert.throws(
+    () => inventoryFromNextestJson(fixture.replace('"ignored": true, ', "")),
+    /missing boolean ignored/,
   );
 });
 

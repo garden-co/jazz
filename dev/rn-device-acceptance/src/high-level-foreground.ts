@@ -1,8 +1,9 @@
 import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools/react-native";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
-import { finishSeedClient } from "./seed-teardown";
+import { finishSeedClient, type SeedBoundary } from "./seed-teardown";
 import { waitForPublication } from "./publication-wait";
+import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -37,11 +38,14 @@ export async function seedHighLevelForegroundRuntime(
   capability: Uint8Array,
   runNonce: string,
   markFailure: (code: DeviceDiagnosticCode) => void,
+  waitForCoreObservation: () => Promise<void>,
+  boundary?: (code: SeedBoundary) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
   const client = await createJazzClient(clientConfig(capability));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
+  let recoveredObserved = false;
   let completed = false;
   let failed = false;
   let unsubscribe = () => {};
@@ -49,6 +53,7 @@ export async function seedHighLevelForegroundRuntime(
     markFailure("public-client-subscribe-failed");
     unsubscribe = client.db.subscribe(app.todos, (todos) => {
       observed ||= todos.some((todo) => todo.title === title);
+      recoveredObserved ||= todos.some((todo) => todo.title === `${title}:recovered-by-core`);
     });
     markFailure("public-client-write-failed");
     const write = client.db.insert(app.todos, { title });
@@ -65,57 +70,103 @@ export async function seedHighLevelForegroundRuntime(
     if (!(await waitForPublication(() => observed))) {
       throw new Error("high-level React Native foreground did not publish its local write");
     }
+    // Keep this foreground and its native relay alive until the host's
+    // independent Core reader observes the same run-bound title. This fixture
+    // handshake does not widen the public RN local-only write.wait contract.
+    markFailure("public-client-core-observation-failed");
+    boundary?.("js-before-core-await");
+    await waitForCoreObservation();
+    boundary?.("js-core-await-returned");
+    markFailure("public-client-reconnect-failed");
+    await requireCoreRecoveryMarker(
+      () => recoveredObserved,
+      async () => (await client.db.all(app.todos)).map((row) => row.title),
+      title,
+    );
+    // A second native acknowledgement is issued only after the same original
+    // subscription has observed the Core-authored marker.
+    await waitForCoreObservation();
     completed = true;
   } catch (error) {
     failed = true;
     throw error;
   } finally {
     if (completed && !failed) markFailure("public-client-shutdown-failed");
-    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed, boundary);
   }
 }
 
 /**
  * Open a second public foreground after the seed foreground has shut down and
- * require the seed row through it. This is the pre-termination half of the
- * persistence receipt: unlike the seed client's own read, this new in-memory
- * foreground can materialize the row only after the persistent native relay
- * has accepted it. The subsequent process-restart read remains the durable
- * SQLite half of the same end-to-end claim.
+ * require the seed row through it. This is the pre-termination LocalFirst
+ * propagation receipt: the subscription waits until the relay has delivered
+ * the run-bound marker into this fresh foreground's local knowledge, then the
+ * ordinary local read must materialize that same marker. Core observation is
+ * proved independently by the host; the subsequent process-restart read is
+ * the durable SQLite half of the end-to-end claim.
  */
 export async function proveHighLevelForegroundRelayReadback(
   capability: Uint8Array,
   runNonce: string,
 ): Promise<void> {
   const client = await createJazzClient(clientConfig(capability));
+  let unsubscribe = () => {},
+    failed = false;
   try {
+    const title = persistedTitleForRun(runNonce);
+    let observed = false;
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      observed ||= todos.some((todo) => todo.title === title);
+    });
+    if (!(await waitForPublication(() => observed))) {
+      throw new Error("fresh high-level React Native foreground did not receive the relay marker");
+    }
     const rows = await client.db.all(app.todos);
     assertPersistedTitleForRun(
       rows.map((row) => row.title),
       runNonce,
     );
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await client.shutdown();
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }
 
 /**
  * Materialize the row written by a prior process through `createJazzClient`.
  * This deliberately does not use the byte-level fixture or read SQLite: it is
- * the public API half of the process-restart receipt.
+ * the public API half of the process-restart receipt. The driver has stopped
+ * upstream before this launch; the marker must arrive from local relay storage.
  */
 export async function proveHighLevelForegroundRestart(
   capability: Uint8Array,
   runNonce: string,
 ): Promise<void> {
   const client = await createJazzClient(clientConfig(capability));
+  let unsubscribe = () => {},
+    failed = false;
   try {
+    const title = persistedTitleForRun(runNonce);
+    let observed = false;
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      observed ||= todos.some((todo) => todo.title === title);
+    });
+    if (!(await waitForPublication(() => observed))) {
+      throw new Error(
+        "restarted high-level React Native foreground did not receive the persisted marker",
+      );
+    }
     const rows = await client.db.all(app.todos);
     assertPersistedTitleForRun(
       rows.map((row) => row.title),
       runNonce,
     );
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await client.shutdown();
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }

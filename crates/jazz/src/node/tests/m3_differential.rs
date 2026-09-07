@@ -383,6 +383,81 @@ fn m3_differential_plain_body_cells_match_one_shot() {
     oracle.tick_and_assert(&mut core, 0, "after-visible-doc");
 }
 
+/// Alice's grouped aggregate subscription applies its result window after each
+/// locally maintained aggregate update, keeping the selected group aligned
+/// with an equivalent one-shot read.
+///
+/// alice ──covered source update──► receiver aggregate ──window──► selected group
+#[test]
+fn maintained_grouped_aggregate_window_tracks_live_membership() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x76), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let mut parents = m3_differential_parent_map(&mut core);
+    accept_with_parent(
+        &mut core,
+        &mut parents,
+        "docs",
+        row(0x15),
+        100,
+        differential_doc_cells("third-group", "match", user(0xa1), 7, 3, 0.0, None, 0, 0),
+    );
+    let shape = Query::from("docs")
+        .count()
+        .group_by("bucket")
+        .order_by("count", OrderDirection::Desc)
+        .order_by("bucket", OrderDirection::Asc)
+        .offset(1)
+        .limit(1)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let identity = user(0xa1);
+    let mut peer = PeerState::client_link(identity);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let mut receiver = maintained_receiver(&schema, 0xd8);
+    register_maintained_receiver(&mut receiver, &shape, &binding, identity);
+    receiver.apply_sync_message_settled(initial).unwrap();
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        BTreeMap::from([(2, Value::U64(2))]),
+        "the tied second group is selected by its explicit bucket tie-breaker"
+    );
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        one_shot_aggregate_values(&mut core, &shape, &binding, identity, "count"),
+        "initial maintained aggregate window agrees with one-shot"
+    );
+
+    accept_with_parent(
+        &mut core,
+        &mut parents,
+        "docs",
+        row(0x11),
+        101,
+        differential_doc_cells("moved-group", "match", identity, 7, 2, 1.5, Some(1.5), -11, 11),
+    );
+    let update = peer
+        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
+        .unwrap();
+    receiver.apply_sync_message_settled(update).unwrap();
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        BTreeMap::from([(1, Value::U64(1))]),
+        "a count update retracts the former window member and admits its replacement"
+    );
+    assert_eq!(
+        receiver_aggregate_values(&mut receiver, &shape, &binding, identity, "count"),
+        one_shot_aggregate_values(&mut core, &shape, &binding, identity, "count"),
+        "updated maintained aggregate window agrees with one-shot"
+    );
+}
+
 /// The authority publishes only Alice's exact recursive seed closure: the
 /// allowed group seed reaches visible docs, while Bob's otherwise valid group
 /// seed must neither appear as a covered source nor arrive in the receiver.
@@ -1074,6 +1149,48 @@ fn m3_differential_revoke_mid_stream_and_reconnect_mid_stream() {
     core = reopen_node_at(&core_dir, node(0x75), schema);
     grant_edge_access(&mut core, &mut parents, 1);
     oracle.tick_and_assert(&mut core, 0, "after-reconnect-mid-stream");
+}
+
+// Internal because this must inspect a receiver rebuilt only from its persisted
+// covered-input frontier, with no live authority capable of refreshing it.
+#[test]
+fn maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_without_authority() {
+    let schema = m3_differential_schema();
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0xd1), schema.clone());
+    seed_m3_differential_base(&mut authority, 0);
+    let nested = m3_differential_shapes(&schema).into_iter()
+        .find(|shape| shape.name == "docs_projected_with_doc_access").unwrap();
+    let aggregate = Query::from("docs").aggregate([crate::query::Aggregate::count()])
+        .group_by("bucket").validate(&schema).unwrap();
+    let aggregate_binding = aggregate.bind(BTreeMap::new()).unwrap();
+    let identity = user(0xa1);
+    let (receiver_dir, mut receiver) = open_node_with_schema(node(0xd2), schema.clone());
+    for (shape, binding) in [(&nested.shape, &nested.binding), (&aggregate, &aggregate_binding)] {
+        register_maintained_receiver(&mut receiver, shape, binding, identity);
+        let mut peer = PeerState::client_link(identity);
+        let update = peer.rehydrate_query(&mut authority, shape, binding).unwrap();
+        let bytes = crate::wire::encode_sync_message(&update).unwrap();
+        receiver.apply_sync_message_settled(crate::wire::decode_sync_message(&bytes).unwrap()).unwrap();
+    }
+    let nested_before = m3_receiver_row_bodies(&mut receiver, &nested.shape, &nested.binding, identity);
+    assert!(!nested_before.is_empty());
+    assert!(nested_before.values().any(|cells| matches!(cells.get("access"), Some(Value::Array(values)) if !values.is_empty())),
+        "the fixture must contain actual nested rows");
+    let aggregates_before = receiver_aggregate_values(&mut receiver, &aggregate, &aggregate_binding, identity, "count");
+    assert!(!aggregates_before.is_empty());
+    assert_eq!(aggregates_before, one_shot_aggregate_values(&mut authority, &aggregate, &aggregate_binding, identity, "count"));
+    drop(authority);
+    drop(receiver);
+    let mut reopened = reopen_node_at(&receiver_dir, node(0xd2), schema);
+    // No peer or serving authority survives. Registration can only compile a
+    // new receiver graph against recovered records and the durable frontier.
+    for (shape, binding) in [(&nested.shape, &nested.binding), (&aggregate, &aggregate_binding)] {
+        register_maintained_receiver(&mut reopened, shape, binding, identity);
+    }
+    assert_eq!(m3_receiver_row_bodies(&mut reopened, &nested.shape, &nested.binding, identity), nested_before,
+        "reopen preserves root and child identities plus every nested value");
+    assert_eq!(receiver_aggregate_values(&mut reopened, &aggregate, &aggregate_binding, identity, "count"), aggregates_before,
+        "reopen preserves aggregate group identities and values without refresh");
 }
 
 #[test]
@@ -2023,8 +2140,8 @@ fn m3_receiver_row_bodies<S: OrderedKvStorage>(
         .collect()
 }
 
-fn receiver_aggregate_values(
-    receiver: &mut NodeState<MemoryStorage>,
+fn receiver_aggregate_values<S: OrderedKvStorage>(
+    receiver: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,

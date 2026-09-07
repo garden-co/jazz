@@ -622,6 +622,13 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Observe a ready queued staging failure without consuming its transaction
+    /// poison. A subsequent commit must report the same rejected transaction.
+    #[doc(hidden)]
+    pub fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
+        self.node.queued_transaction_error(id)
+    }
+
     /// Queue a transaction-local read behind already-admitted transaction
     /// work. Bindings retain the returned receiver instead of synchronously
     /// polling cold storage on their host thread.
@@ -806,6 +813,29 @@ where
         })
     }
 
+    /// Read write state without synchronously reentering a suspended owner.
+    /// Bindings may retain this future, or poll once and report a transient busy
+    /// result when their public state accessor is synchronous.
+    #[doc(hidden)]
+    pub async fn write_state_async(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        if let Some(state) = self.node.queued_mutation_write_state(tx_id) {
+            return state;
+        }
+        let Some((fate, global_time, durability)) =
+            self.node.node.lock().await.transaction_state(tx_id).await
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("transaction {tx_id:?} is not known locally"),
+            ));
+        };
+        Ok(WriteState {
+            fate,
+            global_time,
+            durability,
+        })
+    }
+
     /// Consume a failure discovered by a binding-owned bounded admission turn.
     ///
     /// Normal writes retain their failure until `wait()` observes it. A
@@ -893,6 +923,17 @@ where
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.connect_upstream(transport).await
+    }
+
+    /// Attach after asynchronously loading parked replay units. Read failure
+    /// or cancellation before admission leaves runtime receipts and outbox
+    /// unchanged. Native socket installation uses this strict entry point;
+    /// `connect_upstream` retains its historical empty-upload error fallback.
+    pub async fn try_connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        self.node.try_connect_upstream(transport).await
     }
 
     /// Attach an upstream with a test-only opaque handle for staging inbound
@@ -1053,6 +1094,21 @@ where
             .accept_subscriber_with_claims(transport, identity, claims)
     }
 
+    /// Admit a subscriber after its semantic owner and local replay are ready.
+    /// Hosts may retain this future without blocking their command loop. A
+    /// cancelled or failed admission does not register a peer connection.
+    #[doc(hidden)]
+    pub async fn accept_subscriber_with_claims_async(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        self.node
+            .accept_subscriber_with_claims_async(transport, identity, claims)
+            .await
+    }
+
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
@@ -1106,6 +1162,16 @@ where
         self.node.detach_connection(connection)
     }
 
+    /// Detach after acquiring a stable peer inventory and the storage owner.
+    /// Cold replay is loaded asynchronously before changing receipts or outbox;
+    /// a load error or cancellation before that transition leaves them intact.
+    pub async fn detach_connection_async(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+    ) -> Result<bool, Error> {
+        self.node.detach_connection_async(connection).await
+    }
+
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub fn tick(&self) -> impl Future<Output = Result<(), Error>> + '_ {
@@ -1122,7 +1188,10 @@ where
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
-        if queued_mutation_pending {
+        // A queued read may await a delivery receipt without retaining the
+        // owner. Keep its FIFO position, but service the semantic/peer work
+        // producing that receipt. Cold operations holding the owner still yield.
+        if queued_mutation_pending && !self.node.owner_is_available() {
             // A cold FIFO owner operation remains retained at the queue head.
             // If a close future was cancelled while polling it, its terminal
             // sweeps still belong to node maintenance and must not wait for
@@ -1159,7 +1228,10 @@ where
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
-        if queued_mutation_pending {
+        // A queued read may await a delivery receipt without retaining the
+        // owner. Keep its FIFO position, but service the semantic/peer work
+        // producing that receipt. Cold operations holding the owner still yield.
+        if queued_mutation_pending && !self.node.owner_is_available() {
             if self.node.transaction_abandonment_shutdown_is_pending() {
                 self.node.finish_transaction_abandonment_shutdown().await?;
             }

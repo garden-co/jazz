@@ -11,6 +11,11 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
+import {
+  encodeRelationQueryPostcard,
+  parseRelationQueryJsonLossless,
+  type RelExpr,
+} from "../../ir.js";
 import type {
   TxId,
   InsertResult,
@@ -42,6 +47,7 @@ import {
   PostcardReader,
   PostcardWriter,
   openConfig,
+  nativeRowDescriptorPublicName,
   queryWithPredicates,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
@@ -187,6 +193,14 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   /** Native foreground capabilities are bound to admission-time auth. */
   rejectAuthUpdate?(): never;
+  isNativeForegroundClosed?(): boolean;
+  disconnectNativeUpstream?(): void;
+  reconnectNativeUpstream?(): void;
+  nativeConnectionStatus?(): {
+    configured: boolean;
+    explicitlyOffline: boolean;
+    connected: boolean;
+  };
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
@@ -1871,6 +1885,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
+    if (this.db?.reconnectNativeUpstream) {
+      // The admitted native host owns the endpoint and credentials. The JS
+      // connection manager controls lifecycle only, never a parallel socket.
+      this.db.reconnectNativeUpstream();
+      return;
+    }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
@@ -2023,10 +2043,21 @@ export class NativeRuntimeAdapter implements Runtime {
     return features;
   }
 
+  nativeUpstreamConfigured(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.nativeUpstreamConfigured();
+    // Configured authority remains configured during explicit disconnect;
+    // exclusive confirmation must wait for it rather than settle locally.
+    return this.db.nativeConnectionStatus?.().configured === true;
+  }
+
   async disconnect(
     options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    if (this.db?.disconnectNativeUpstream) {
+      this.db.disconnectNativeUpstream();
+      return;
+    }
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
     if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;
@@ -2499,9 +2530,7 @@ export class NativeRuntimeAdapter implements Runtime {
       session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
-      kind === "relation"
-        ? new TextEncoder().encode(queryJson)
-        : encodeQueryJson(queryJson, this.schema);
+      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
     const key = `${kind}:${bytesKey(queryBytes)}`;
     const cached = contextual ? undefined : this.preparedQueries.get(key);
     if (cached) return cached;
@@ -2524,9 +2553,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private prepareQuery(queryJson: string): PreparedQuery {
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
-      kind === "relation"
-        ? new TextEncoder().encode(queryJson)
-        : encodeQueryJson(queryJson, this.schema);
+      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
     const key = `${kind}:${bytesKey(queryBytes)}`;
     let query = this.preparedQueries.get(key);
     if (!query) {
@@ -2547,8 +2574,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /**
    * A strict remote query cannot materialize its local snapshot before an
    * in-flight server handshake has either admitted its authority transport or
-   * failed. Relation-IR reads bypass query attachment, so they share this
-   * gate with attached reads instead of acquiring a second coverage path.
+   * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "edge" && tier !== "global") return;
@@ -2706,7 +2732,10 @@ export class NativeRuntimeAdapter implements Runtime {
     start: () => NativePermissionAdviceResult,
   ): Promise<PermissionAdvice> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
-    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+    if (
+      this.closed ||
+      ((!this.serverTransport || !this.serverCarrier) && !this.nativeUpstreamConfigured())
+    ) {
       return Promise.resolve("unknown");
     }
     const started = start();
@@ -2804,7 +2833,18 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      void this.runCoreTick().catch(reportAsyncRuntimeError);
+      void this.runCoreTick().catch((error) => {
+        // Native revocation can retire a foreground after its wake crossed
+        // into the JS queue. Native liveness distinguishes that stale wake
+        // from a still-live scope with an actual transport/core failure.
+        try {
+          if (this.db.isNativeForegroundClosed?.()) return;
+        } catch (livenessError) {
+          reportAsyncRuntimeError(livenessError);
+          return;
+        }
+        reportAsyncRuntimeError(error);
+      });
     });
   }
 
@@ -3829,6 +3869,7 @@ function readOptions(
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
   const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
   if (includeDeleted) readOptions.include_deleted = true;
+  if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;
@@ -3953,6 +3994,20 @@ function queryUsesNativeRelationApi(queryJson: string): boolean {
   } catch {
     return false;
   }
+}
+
+function relationQueryBytes(queryJson: string): Uint8Array {
+  let relation_ir: unknown;
+  try {
+    relation_ir = (parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown })
+      .relation_ir;
+  } catch {
+    throw new Error("Relation query is not valid runtime query JSON");
+  }
+  if (!relation_ir || typeof relation_ir !== "object") {
+    throw new Error("Relation query is missing relation_ir");
+  }
+  return encodeRelationQueryPostcard(relation_ir as RelExpr);
 }
 
 function relationIrContainsNativeOperator(value: unknown): boolean {
@@ -4429,6 +4484,12 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
+  }
+  // UNION ALL is retained relation IR. It cannot be flattened into the legacy
+  // predicate envelope because duplicate arm occurrences and global windows
+  // are semantic. Carry the relation tree in Query.relation instead.
+  if (relationOperator(parsed.relation_ir) === "Union") {
+    return queryWithPredicates(parsed.table, [], { relation: parsed.relation_ir });
   }
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(parsed.table, encoded.predicates, {
@@ -5501,33 +5562,26 @@ function nativeRowFieldPlans(
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
-    const fieldName = batch.descriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
+    const field = batch.descriptor[index];
+    const fieldName = field && nativeRowDescriptorPublicName(field);
+    if (!fieldName) {
+      continue;
+    }
 
-    const name = publicFieldName(fieldName);
-    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
+    const type = magicColumnType(fieldName) ?? columnsByName.get(fieldName)?.column_type;
     plans.push({
-      name,
+      name: fieldName,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
       includeInValues:
-        !isHiddenIncludeColumn(name) &&
-        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
+        !isHiddenIncludeColumn(fieldName) &&
+        (!isProvenanceMagicColumn(fieldName) || projectedNames?.has(fieldName) === true),
     });
   }
 
   if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
-}
-
-// These fields are provenance retained by settled/materializer read paths.
-// They are never Jazz application columns (user columns use the `user_`
-// descriptor namespace) and must not cross the public native row boundary.
-function isCurrentRowPhysicalField(fieldName: string): boolean {
-  return (
-    fieldName === "schema_version" || fieldName === "parents" || fieldName === "authored_columns"
-  );
 }
 
 function rowsFromRelationSnapshot(
@@ -5748,13 +5802,17 @@ function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
 }
 
 function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
-  if (bytes.length === 17 && bytes[0] === 1 && table && sourceId) return rowKey(table, sourceId);
+  if (isOrdinaryResultKey(bytes) && table && sourceId) return rowKey(table, sourceId);
   return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 17 && bytes[0] === 1) return formatUuid(bytes.subarray(1));
+  if (isOrdinaryResultKey(bytes)) return formatUuid(bytes.subarray(1, 17));
   return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function isOrdinaryResultKey(bytes: Uint8Array): boolean {
+  return bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0);
 }
 
 function rowStateKey(row: RowState): string {
@@ -6283,19 +6341,19 @@ function runtimeDeltaFromChanges(
   return {
     added: added.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
       row: runtimeSubscriptionRow(row, schema, outputColumns),
     })),
     updated: updated.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
       row: runtimeSubscriptionRow(row, schema, outputColumns),
     })),
     removed: removed.map((row) => ({
       sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
       index: row.index,
     })),
   };
@@ -6408,8 +6466,8 @@ function subscriptionRowsRequireBufferedPublication(
   });
 }
 
-function legacyResultKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...parseUuid(id)]);
+function ordinaryResultKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...parseUuid(id), 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function rowValuesEqual(left: Value[], right: Value[]): boolean {
@@ -6515,21 +6573,6 @@ function canonicalJson(value: unknown): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function publicFieldName(name: string): string {
-  return name.startsWith("user_") ? name.slice("user_".length) : name;
-}
-
-function isInternalField(name?: string): boolean {
-  return (
-    name === "row_uuid" ||
-    name === "tx_node_id" ||
-    name === "tx_time" ||
-    name === "schema_version" ||
-    name === "parents" ||
-    name === "authored_columns"
-  );
 }
 
 function isHiddenIncludeColumn(name: string): boolean {

@@ -120,7 +120,14 @@ SQL lowering remains narrower and must reject unsupported or ill-typed predicate
 forms rather than approximate them (`INV-QUERY-4`).
 
 **MapProject** emits one output delta for each input delta by copying the
-configured fields into the output descriptor. **UnwrapNullable** drops
+configured fields into the output descriptor. The compiler resolves each selected
+source to its exact input descriptor index and carries that typed reference into
+the executable projection, including nullable and enum transformations. Output
+slots follow the declared projection order. Execution must not reinterpret either
+source carriers or output slots through application aliases. Join output mappings
+likewise resolve their occurrence-prefixed carriers against exact source carriers,
+so an application field named `created_by` cannot capture provenance metadata.
+**UnwrapNullable** drops
 `Nullable(None)` deltas and unwraps `Nullable(Some(v))` to `v`.
 
 **Union** combines compatible inputs with bag (`UNION ALL`) semantics: duplicate

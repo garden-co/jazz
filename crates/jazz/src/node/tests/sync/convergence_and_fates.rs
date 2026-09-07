@@ -31,8 +31,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
         reader.sync_metrics().dropped_detached_subscription_messages,
         1
     );
-    assert!(reader.query.settled_result_sets.is_empty());
-    assert!(reader.query.settled_program_facts.is_empty());
+    assert!(reader.query.authority_results.is_empty());
 }
 
 /// Build receipts only from a real authority maintained program. The empty

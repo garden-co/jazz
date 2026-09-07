@@ -12,8 +12,13 @@ export interface BuiltRelation {
   hops?: string[];
   gather?: BuiltGather;
   union?: {
-    inputs: BuiltRelation[];
+    inputs: BuiltUnionArm[];
   };
+}
+
+export interface BuiltUnionArm {
+  label: string;
+  input: BuiltRelation;
 }
 
 export interface BuiltGather {
@@ -57,6 +62,9 @@ export interface NormalizedBuiltQuery {
   includeDeleted: boolean;
   hops: string[];
   gather?: BuiltGather;
+  union?: {
+    inputs: BuiltUnionArm[];
+  };
 }
 
 export type LargeValueSelectDescriptor =
@@ -76,6 +84,7 @@ type BuiltQueryShape = {
   includeDeleted?: unknown;
   hops?: unknown;
   gather?: unknown;
+  union?: unknown;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -191,7 +200,10 @@ function normalizeBuiltRelation(value: unknown): BuiltRelation {
 
   if (isPlainObject(value.union) && Array.isArray(value.union.inputs)) {
     normalized.union = {
-      inputs: value.union.inputs.map((input) => normalizeBuiltRelation(input)),
+      inputs: value.union.inputs.flatMap((input) => {
+        if (!isPlainObject(input) || typeof input.label !== "string") return [];
+        return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
+      }),
     };
   }
 
@@ -320,5 +332,15 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
+    ...(isPlainObject(value.union) && Array.isArray(value.union.inputs)
+      ? {
+          union: {
+            inputs: value.union.inputs.flatMap((input) => {
+              if (!isPlainObject(input) || typeof input.label !== "string") return [];
+              return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
+            }),
+          },
+        }
+      : {}),
   };
 }

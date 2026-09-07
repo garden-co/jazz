@@ -58,6 +58,7 @@ async fn count_star_does_not_fetch_an_unused_indirect_column() {
             expression: None,
             distinct: false,
             output_name: Some("count".to_owned()),
+            output_identity: None,
         }],
     );
 

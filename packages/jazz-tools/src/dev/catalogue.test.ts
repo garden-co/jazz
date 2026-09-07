@@ -888,7 +888,7 @@ export default s.defineMigration({
 
     const previousHead = {
       schemaHash: SCHEMA_HASH,
-      version: 2,
+      version: 1,
       parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
       bundleObjectId: "22222222-2222-2222-2222-222222222222",
     };

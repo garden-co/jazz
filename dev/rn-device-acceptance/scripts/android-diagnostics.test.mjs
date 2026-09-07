@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { androidAcceptanceFailure, androidDeviceDiagnostic } from "./android-diagnostics.mjs";
+import {
+  androidAcceptanceFailure,
+  androidDeviceDiagnostic,
+  androidCoreObservationDiagnostic,
+} from "./android-diagnostics.mjs";
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
   const output = [
@@ -51,4 +55,59 @@ test("ReactNativeJS payload cannot spoof the native diagnostic priority and tag"
     "Timed out waiting for phase seed from the launched Android app; no device stage",
   );
   assert.doesNotMatch(failure, /native-admission|secret-device-token/);
+});
+
+test("native Core HTTP outcome survives a later generic JS stage retry without exposing payloads", () => {
+  const line = (code, tag = "JazzCoreObservation") =>
+    `08-29 22:52:21.495  4268  4288 E ${tag}: ${code}`;
+  const output = [
+    line("request-started"),
+    line("request-sent"),
+    line("http-status-503"),
+    line("failure-response-state"),
+    line("public-client-core-observation-failed", "JazzDeviceAcceptance"),
+    line("failure-response-timeout secret-token"),
+    line("http-status-204 endpoint=secret"),
+    line("failure-response-secret"),
+    line("http-status-999"),
+    line("promise-resolved", "ReactNativeJS"),
+  ].join("\n");
+  const outcome = "request-started,request-sent,http-status-503,failure-response-state";
+  assert.equal(androidCoreObservationDiagnostic(output), outcome);
+  assert.equal(
+    androidAcceptanceFailure("timeout", "seed", output),
+    `Timed out waiting for phase seed from the launched Android app; device stage: public-client-core-observation-failed; native Core acknowledgement: ${outcome}`,
+  );
+  assert.equal(
+    androidCoreObservationDiagnostic(line("http-status-204") + "\n" + line("promise-resolved")),
+    "http-status-204,promise-resolved",
+  );
+  assert.equal(
+    androidCoreObservationDiagnostic(line("failure-response-timeout")),
+    "failure-response-timeout",
+  );
+});
+
+test("synchronous seed boundaries survive alongside native acknowledgement without arbitrary payloads", () => {
+  const codes = [
+    "request-started",
+    "request-sent",
+    "http-status-204",
+    "promise-resolved",
+    "js-before-core-await",
+    "js-core-await-returned",
+    "js-before-unsubscribe",
+    "js-after-unsubscribe",
+    "js-before-shutdown",
+    "js-after-shutdown",
+  ];
+  const line = (code, tag = "JazzCoreObservation") =>
+    `08-29 22:52:21.495  4268  4288 E ${tag}: ${code}`;
+  const output = [
+    ...codes.map((code) => line(code)),
+    line("js-after-shutdown secret"),
+    line("js-arbitrary"),
+    line("js-before-unsubscribe", "ReactNativeJS"),
+  ].join("\n");
+  assert.equal(androidCoreObservationDiagnostic(output), codes.join(","));
 });

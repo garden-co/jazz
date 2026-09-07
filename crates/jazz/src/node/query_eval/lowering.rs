@@ -43,6 +43,29 @@ fn app_row_terminal_schema(output: &ProgramOutputSchemas) -> Result<&AppRowSchem
         ))
 }
 
+pub(super) fn materialization_app_row_schema(
+    plan: Option<&PreparedQueryPlan>,
+    program: Option<&QueryProgram>,
+) -> Result<AppRowSchema, Error> {
+    match plan {
+        Some(plan) => plan
+            .app_row_schema()
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "prepared plan has no app-row schema",
+            )),
+        None => app_row_terminal_schema(
+            &program
+                .ok_or(Error::InvalidStoredValue(
+                    "materialization has no lowered program",
+                ))?
+                .lowered
+                .output,
+        )
+        .cloned(),
+    }
+}
+
 pub(super) fn lowered_terminal_graph(
     program: &QueryProgram,
     sink: &str,
@@ -225,7 +248,12 @@ pub(super) fn fact_public_fields(
                     .group_key_fields
                     .iter()
                     .chain(&schema.value_fields)
-                    .map(|field| field.name.clone()),
+                    .map(|field| {
+                        field
+                            .name
+                            .clone()
+                            .expect("lowered aggregate field is named")
+                    }),
             );
             fields.extend(schema.routing_param_fields.iter().cloned());
             Ok(fields)
@@ -716,6 +744,7 @@ where
         _shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
+        let output = app_row_terminal_schema(&program.lowered.output)?.clone();
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_materialization_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
@@ -742,7 +771,7 @@ where
                 .zip(params.iter().map(|param| param.ty.clone())),
         );
         if params.is_empty() {
-            Ok(PreparedQueryPlan::Graph(graph))
+            Ok(PreparedQueryPlan::Graph { graph, output })
         } else {
             let binding_source_shape = program
                 .request
@@ -770,6 +799,7 @@ where
             Ok(PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
                 params,
+                output,
             })
         }
     }
@@ -884,6 +914,7 @@ mod tests {
                 occurrence_id_fields: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()],
                 occurrence_union_arm_fields: BTreeMap::from([(0, "__root_join_arm_0".to_owned())]),
                 payload_fields: Vec::new(),
+                payload_publication_fields: BTreeMap::new(),
                 branch_or_prefix_field: None,
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),

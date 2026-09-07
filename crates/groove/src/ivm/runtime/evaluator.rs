@@ -967,7 +967,41 @@ impl TickEvaluator<'_> {
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
-        Box::pin(self.update_subgraph(node))
+        // The postorder driver has already evaluated ordinary inputs. Check
+        // their memo before entering another evaluator future: even a cache
+        // hit inside update_one_node would recursively poll that wide future
+        // beneath its parent, overflowing Safari's WebAssembly call stack.
+        match self.cached_node_records(node) {
+            Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+            Ok(None) => Box::pin(self.update_subgraph(node)),
+        }
+    }
+
+    fn cached_node_records(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
+        let signature = self.input_signature(node)?;
+        let memo_key = self.memo_key(node, &signature)?;
+        let current_watermark = self.input_generation(node);
+        let requires_state_rebuild = (self.context.hydrate_arrangements
+            && self.node_depends_on_aggregate(node)?
+            && !self.aggregate_arrangements_are_current(node)?)
+            || (self.context.eval_mode == EvalMode::Tick
+                && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
+        if !requires_state_rebuild
+            && let Some(entry) = self.eval_memo.get_mut(&memo_key)
+            && entry.input_watermark == current_watermark
+        {
+            *self.memo_use_clock += 1;
+            entry.last_used = *self.memo_use_clock;
+            if self.context.eval_mode == EvalMode::Hydrate {
+                self.metrics.hydration_memo_hits += 1;
+            }
+            return Ok(Some(Arc::clone(&entry.records)));
+        }
+        Ok(None)
     }
 
     fn update_one_node(
@@ -975,6 +1009,9 @@ impl TickEvaluator<'_> {
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         Box::pin(async move {
+            if let Some(records) = self.cached_node_records(node)? {
+                return Ok(records);
+            }
             let graph_node = self
                 .graph
                 .node(node)
@@ -982,22 +1019,6 @@ impl TickEvaluator<'_> {
             let signature = self.input_signature(node)?;
             let memo_key = self.memo_key(node, &signature)?;
             let current_watermark = self.input_generation(node);
-            let requires_state_rebuild = (self.context.hydrate_arrangements
-                && self.node_depends_on_aggregate(node)?
-                && !self.aggregate_arrangements_are_current(node)?)
-                || (self.context.eval_mode == EvalMode::Tick
-                    && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
-            if !requires_state_rebuild
-                && let Some(entry) = self.eval_memo.get_mut(&memo_key)
-                && entry.input_watermark == current_watermark
-            {
-                *self.memo_use_clock += 1;
-                entry.last_used = *self.memo_use_clock;
-                if self.context.eval_mode == EvalMode::Hydrate {
-                    self.metrics.hydration_memo_hits += 1;
-                }
-                return Ok(Arc::clone(&entry.records));
-            }
 
             if self.context.eval_mode == EvalMode::Hydrate {
                 self.metrics.hydration_memo_computes += 1;
@@ -1246,9 +1267,15 @@ impl TickEvaluator<'_> {
                             .cloned()
                             .collect::<Vec<_>>();
                         for field in plan_expr_fields(&expression_fields) {
-                            fields.push(input.descriptor.field_index(&field).ok_or_else(|| {
-                                IvmRuntimeError::GraphFieldNotFound(field.clone())
-                            })?);
+                            fields.push(
+                                super::record_projection::resolve_field_name(
+                                    &input.descriptor,
+                                    &field,
+                                )
+                                .ok_or_else(|| {
+                                    IvmRuntimeError::GraphFieldNotFound(field.clone())
+                                })?,
+                            );
                         }
                         fields.sort_unstable();
                         fields.dedup();
@@ -2598,29 +2625,11 @@ impl TickEvaluator<'_> {
         if let Some(mapping) = &self.node_meta.entry(node).or_default().join_output_mapping {
             return Ok(mapping.clone());
         }
-        let mapping = output_descriptor
-            .fields()
-            .iter()
-            .map(|field| {
-                let name = field
-                    .name
-                    .as_deref()
-                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-                if let Some(name) = name.strip_prefix("left.") {
-                    let field_idx = left_descriptor
-                        .field_index(name)
-                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
-                    Ok((0, field_idx))
-                } else if let Some(name) = name.strip_prefix("right.") {
-                    let field_idx = right_descriptor
-                        .field_index(name)
-                        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.to_owned()))?;
-                    Ok((1, field_idx))
-                } else {
-                    Err(IvmRuntimeError::GraphFieldNotFound(name.to_owned()))
-                }
-            })
-            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        let mapping = super::join::join_output_mapping(
+            &left_descriptor,
+            &right_descriptor,
+            &output_descriptor,
+        )?;
         let mapping = Arc::<[(usize, usize)]>::from(mapping);
         self.node_meta.entry(node).or_default().join_output_mapping = Some(mapping.clone());
         Ok(mapping)
@@ -3055,9 +3064,7 @@ impl TickEvaluator<'_> {
         let indices = fields
             .iter()
             .map(|field| {
-                input
-                    .descriptor
-                    .field_index(field)
+                resolve_field_name(&input.descriptor, field)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;

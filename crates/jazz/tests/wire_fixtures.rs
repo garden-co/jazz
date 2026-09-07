@@ -3,11 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
-    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
+    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, RowDescriptorField,
+    RowDescriptorFieldName, SubscriptionDeltaPayload,
 };
 use jazz::ids::{
     AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
-    RowUuid, SchemaVersionId,
+    PhysicalColumnId, RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
@@ -19,8 +20,9 @@ use jazz::protocol::{
     VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
-    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
-    lit,
+    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, RelationCmpOp,
+    RelationColumnRef, RelationExpr, RelationPredicate, RelationQuery, RelationUnionArm,
+    RelationValueRef, ShapeId, col, eq, lit,
 };
 use jazz::schema::JazzSchema;
 use jazz::time::{GlobalTime, TxTime};
@@ -1345,13 +1347,8 @@ fn assert_artifact_execution_is_exhaustive(
 fn native_row_codec_fixture_round_trips_every_groove_value_type() {
     if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
         let (descriptor, values) = exhaustive_native_row_codec_case();
-        let descriptor_fields = descriptor
-            .fields()
-            .iter()
-            .map(|field| (field.name.clone(), field.value_type.clone()))
-            .collect::<Vec<_>>();
-        let descriptor_bytes =
-            postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+        let descriptor_bytes = jazz::binding_codec::encode_named_cell_descriptor(&descriptor)
+            .expect("explicit binding descriptor encodes");
         let record = descriptor.create(&values).expect("record encodes");
         let fields = descriptor
             .fields()
@@ -1393,12 +1390,8 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
         .iter()
         .find(|case| case.name == "all_value_types_depth_three")
         .expect("all ValueType fixture is present");
-    let descriptor_fields = descriptor
-        .fields()
-        .iter()
-        .map(|field| (field.name.clone(), field.value_type.clone()))
-        .collect::<Vec<_>>();
-    let descriptor_bytes = postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+    let descriptor_bytes = jazz::binding_codec::encode_named_cell_descriptor(&descriptor)
+        .expect("explicit binding descriptor encodes");
     let record = descriptor.create(&values).expect("record encodes");
 
     assert_eq!(hex(&descriptor_bytes), case.descriptor_hex.concat());
@@ -1525,12 +1518,35 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let current_descriptor = RecordDescriptor::new([
         ("row_uuid", ValueType::Uuid),
         (
-            "user_title",
+            "_app_title",
             ValueType::Nullable(Box::new(ValueType::String)),
         ),
     ]);
     let logical_descriptor =
         RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+    let current_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::HiddenMetadata { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::StoredColumn {
+                id: PhysicalColumnId(1),
+                output_name: "title",
+            },
+            value_type: ValueType::Nullable(Box::new(ValueType::String)),
+        },
+    ];
+    let logical_binding_descriptor = vec![
+        RowDescriptorField {
+            name: RowDescriptorFieldName::HiddenMetadata { name: "row_uuid" },
+            value_type: ValueType::Uuid,
+        },
+        RowDescriptorField {
+            name: RowDescriptorFieldName::ResultField { name: "title" },
+            value_type: ValueType::String,
+        },
+    ];
     let todo_one_id = RowUuid::from_bytes([0x11; 16]);
     let todo_two_id = RowUuid::from_bytes([0x12; 16]);
     let note_id = RowUuid::from_bytes([0x21; 16]);
@@ -1569,7 +1585,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         rows: vec![
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![
                     Row {
                         row_id: todo_one_id,
@@ -1585,7 +1601,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
             RowBatch {
                 table: "notes",
-                descriptor: logical_descriptor,
+                descriptor: logical_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
@@ -1596,7 +1612,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             // must create a new batch, even though its descriptor is identical.
             RowBatch {
                 table: "todos",
-                descriptor: current_descriptor,
+                descriptor: current_binding_descriptor.clone(),
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
@@ -1615,7 +1631,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let delta = SubscriptionDeltaPayload {
         added: vec![RowBatch {
             table: "todos",
-            descriptor: current_descriptor,
+            descriptor: current_binding_descriptor,
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
@@ -1624,7 +1640,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         }],
         updated: vec![RowBatch {
             table: "notes",
-            descriptor: logical_descriptor,
+            descriptor: logical_binding_descriptor,
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,
@@ -1714,7 +1730,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             },
         ],
         subscription_deltas: vec![BindingCodecGoldenBinaryCase {
-            name: "added_updated_removed_with_v1_and_v2_occurrence_keys".to_owned(),
+            name: "added_updated_removed_with_complete_v1_occurrence_keys".to_owned(),
             payload_hex: hex(&postcard::to_allocvec(&delta).expect("subscription delta encodes")),
         }],
         terminal: BindingCodecGoldenTerminal {
@@ -1778,10 +1794,49 @@ fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
         .array_subqueries
         .push(ArraySubquery::new("participants", "participants", "team_id", "id").offset(2));
 
+    let mut union = Query::from("todos");
+    union.relation = Some(RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![
+                    RelationUnionArm {
+                        label: "first".to_owned(),
+                        input: RelationExpr::TableScan {
+                            table: "todos".to_owned(),
+                            alias: Some("left".to_owned()),
+                        },
+                    },
+                    RelationUnionArm {
+                        label: "second".to_owned(),
+                        input: RelationExpr::Filter {
+                            input: Box::new(RelationExpr::TableScan {
+                                table: "todos".to_owned(),
+                                alias: None,
+                            }),
+                            predicate: RelationPredicate::Cmp {
+                                left: RelationColumnRef {
+                                    scope: Some("todos".to_owned()),
+                                    column: "metadata".to_owned(),
+                                },
+                                op: RelationCmpOp::Eq,
+                                right: RelationValueRef::Literal(serde_json::json!({
+                                    "type": "Json",
+                                    "value": {"nested": [true, null, 7]}
+                                })),
+                            },
+                        },
+                    },
+                ],
+            }),
+            limit: 1,
+        },
+    });
+
     vec![
         ("forward_include_projected_optional", forward),
         ("reverse_include_required_nested_projection", reverse),
         ("unbounded_reverse_include_with_offset", unbounded),
+        ("labeled_union_relation_json_literal", union),
     ]
 }
 

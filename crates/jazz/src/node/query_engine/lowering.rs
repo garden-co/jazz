@@ -19,22 +19,13 @@ use closure::{
 // Groove returns RecursiveIterationLimit instead of silently truncating when
 // this bound is reached before convergence.
 const FIXPOINT_MAX_ITERS: usize = 128;
-fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> String {
-    let source_field = field.source_field.as_deref().unwrap_or(&field.output);
-    let logical = logical_user_column(source_field);
-    if source
-        .table_schema
-        .columns
-        .iter()
-        .any(|column| column.name == logical)
-    {
-        logical_user_column(&field.output).to_owned()
-    } else {
-        // Collector slots already carry their public path field as their
-        // physical descriptor name. Do not infer from a reserved-looking
-        // prefix here: table columns may legitimately use any such name.
-        field.output.clone()
-    }
+fn public_root_field_name(field: &CollectFlatField) -> String {
+    // Layout construction binds the public identity before collector fields
+    // are renamed. Its stored carrier is not a logical lookup key.
+    field
+        .source_public_name
+        .clone()
+        .unwrap_or_else(|| field.output.clone())
 }
 
 /// Parameter domains attached to one lowered graph.
@@ -277,6 +268,11 @@ pub(crate) fn lower_resolved_query_program(
         &parameters.routing_params,
         &lowered.fields,
     )?;
+    for terminal in &terminals {
+        if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
+            validate_app_row_publication_schema(rows)?;
+        }
+    }
     verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
@@ -447,7 +443,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 output_field,
                 ..
             } => child_output(input).and_then(|mut fields| match field {
-                FieldRef::Name(field) => {
+                FieldRef::Name(field) | FieldRef::StoredName(field) => {
                     fields.remove(field);
                     fields.insert(output_field.clone());
                     Some(fields)
@@ -973,4 +969,19 @@ pub(crate) struct LoweredTerminal {
     pub(crate) graph: GraphBuilder,
     /// Typed terminal output contract.
     pub(crate) output: OutputTerminalSchema,
+}
+
+#[cfg(test)]
+pub(crate) fn retained_projection_graph_for_test(
+    request: &QueryProgramRequest,
+    sources: &ResolvedQuerySources,
+) -> (GraphBuilder, BTreeMap<String, usize>) {
+    let plan = analyze_relation_input_node(
+        &request.input.shape.root,
+        &request.input.shape.nodes,
+        &mut BTreeSet::new(),
+    )
+    .unwrap();
+    let lowered = lower_relation_input_for_contributor(&plan, sources, request).unwrap();
+    (lowered.graph, lowered.nullable_field_depths)
 }

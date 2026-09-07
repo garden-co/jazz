@@ -161,6 +161,38 @@ describe("websocket frame carrier", () => {
     });
   });
 
+  it("matches the shared websocket prelude v1 fixture", () => {
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL("../../../../../crates/jazz/fixtures/websocket_prelude_v1.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      fixtures: Array<{
+        name: string;
+        writer: string;
+        peer_identity: string;
+        auth_json?: string;
+        requested_link: string;
+        json: string;
+      }>;
+    };
+
+    for (const entry of fixture.fixtures.filter(
+      (candidate) => candidate.writer === "typescript-native-runtime",
+    )) {
+      expect(
+        encodeWebSocketPrelude(
+          entry.auth_json!,
+          new TextEncoder().encode(entry.peer_identity),
+          entry.requested_link === "scope_isolated_client_relay"
+            ? "scope_isolated_client_relay"
+            : undefined,
+        ),
+      ).toBe(entry.json);
+    }
+  });
+
   it("uses the JWT subject for the websocket auth prelude when present", () => {
     const token = `header.${btoa(JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }))}.sig`;
 

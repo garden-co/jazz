@@ -36,7 +36,6 @@ pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 /// Direct groove record store used for persisted settled result memberships.
-pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
@@ -628,22 +627,6 @@ impl RuntimeSchema {
                 ]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
-                SETTLED_RESULT_MEMBERS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                    ("member_digest", ValueType::Bytes),
-                ]),
-                // Result members may contain synthetic application values or
-                // rich path identities. Their fixed digest is the ordered
-                // key; the complete canonical member belongs in this value
-                // cell where backends can use value-overflow storage.
-                RecordDescriptor::new([("member", ValueType::Bytes)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
                 SETTLED_PROGRAM_FACTS_STORE,
                 RecordDescriptor::new([
                     ("shape_id", ValueType::Uuid),
@@ -651,10 +634,9 @@ impl RuntimeSchema {
                     ("read_view_id", ValueType::Uuid),
                     ("policy_scope", ValueType::U8),
                     ("policy_binding_digest", ValueType::Bytes),
-                    // Program facts can contain an application result payload.
-                    // Keep their durable identity bounded so a promoted large
-                    // value is stored in the record body (where the backend
-                    // can use value overflow), not in an ordered B-tree key.
+                    // Canonical source closure facts are addressed by digest.
+                    // Their exact source roles and version references remain
+                    // in the validated record body.
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),
@@ -886,7 +868,7 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// Storage descriptors are schema-derived. JSON remains string-shaped to
 /// callers and operators, but its internal cell codec is distinct so a large
 /// JSON descriptor cannot be mistaken for text.
-fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+pub(crate) fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
     match column.large_value_kind {
         LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
             groove::large_values::LargeValueKind::Json,
@@ -1087,7 +1069,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1126,7 +1108,7 @@ impl TableSchema {
         ];
         columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1208,7 +1190,7 @@ impl TableSchema {
         // on the indexed subset below.
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1227,7 +1209,7 @@ impl TableSchema {
         for indexed in &indexed_columns {
             content_table = content_table.with_index(GrooveIndexSchema::new(
                 global_current_index_name(indexed),
-                ["branch_key".to_owned(), format!("user_{indexed}")],
+                ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
         vec![
@@ -1273,7 +1255,7 @@ impl TableSchema {
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
-                format!("user_{}", user_column.name),
+                app_storage_column_name(&user_column.name),
                 storage_column_type(user_column).nullable(),
             )
         }));
@@ -1337,8 +1319,9 @@ impl TableSchema {
     /// Wire records contain row payload data and immutable row provenance:
     /// `row_uuid`, `parents`, provenance, `_deletion`, and nullable user cells.
     /// Receiver-local currentness and authority-state columns are deliberately
-    /// excluded. Schema changes change this descriptor; v0 requires identical
-    /// descriptors at sender and receiver.
+    /// excluded. Schema changes change this descriptor; v1 requires identical
+    /// descriptors at sender and receiver. JSON cells retain their schema-derived
+    /// stored-scalar kind so indirect JSON is never encoded as ordinary text.
     pub fn wire_record_descriptor(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             [
@@ -1359,8 +1342,8 @@ impl TableSchema {
             .into_iter()
             .chain(self.columns.iter().map(|column| {
                 (
-                    format!("user_{}", column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
+                    app_storage_column_name(&column.name),
+                    ValueType::Nullable(Box::new(storage_column_type(column))),
                 )
             })),
         )
@@ -1611,8 +1594,16 @@ fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::sch
     groove::schema::ColumnSchema::new(name, column_type)
 }
 
+/// Frozen carrier namespace used by schema-owned stored/current/wire fields.
+/// Application names are encoded by this constructor, never parsed as identity.
+pub(crate) const APP_COLUMN_PREFIX: &str = "_app_";
+
+pub(crate) fn app_storage_column_name(column: &str) -> String {
+    format!("{APP_COLUMN_PREFIX}{column}")
+}
+
 pub(crate) fn global_current_index_name(column: &str) -> String {
-    format!("by_user_{column}")
+    format!("by_app_{column}")
 }
 
 fn nodes_table() -> GrooveTableSchema {
@@ -1843,7 +1834,7 @@ pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v3-large-value-kinds");
+    put_str(&mut bytes, "jazz-schema-v1-large-value-kinds");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -2089,7 +2080,7 @@ mod tests {
             table
                 .columns
                 .iter()
-                .any(|column| column.name == "user_title")
+                .any(|column| column.name == "_app_title")
         );
         assert!(
             table
@@ -2522,8 +2513,8 @@ mod tests {
             registry(right.register_storage_table(), "_deletion")
         );
         assert_ne!(
-            registry(left.history_storage_table(), "user_state"),
-            registry(right.history_storage_table(), "user_state"),
+            registry(left.history_storage_table(), "_app_state"),
+            registry(right.history_storage_table(), "_app_state"),
             "structurally identical user enums must retain independent registries"
         );
     }

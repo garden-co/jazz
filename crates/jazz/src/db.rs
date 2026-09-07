@@ -35,6 +35,8 @@ use crate::authorization_scope::{
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
+#[cfg(test)]
+use crate::node::CurrentRowBindingRole;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
@@ -1071,6 +1073,25 @@ impl PeerIoPump {
                 ))
             }
         }
+    }
+
+    /// Hand one bounded auxiliary batch to an in-process transport. Preserve
+    /// its source obligation when the transport rejects the send, just as the
+    /// wire-frame reservation does for socket bindings.
+    pub fn send_outbound(
+        &self,
+        transport: &mut dyn Transport,
+        limit: usize,
+    ) -> Result<bool, TransportError> {
+        let Some(message) = self.take_outbound(limit) else {
+            return Ok(false);
+        };
+        if let Err(error) = transport.send(message.clone()) {
+            self.restore_outbound(message);
+            return Err(error);
+        }
+        self.acknowledge_outbound(&message);
+        Ok(true)
     }
 
     fn restore_outbound(&self, message: SyncMessage) {
@@ -4316,11 +4337,16 @@ pub struct TerminalRootLayout {
     pub public_fields: Vec<TerminalRootPublicField>,
     /// Physical representation used for public cells.
     pub carrier: TerminalRootCarrier,
+    /// The collector key contains an arm discriminator immediately after its
+    /// physical root UUID, which denotes source position zero.
+    pub root_union_arm: bool,
 }
 
 /// One public root field's immutable physical slot identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalRootPublicField {
+    /// Authoritative publication binding supplied by the compiler.
+    pub publication: crate::node::CurrentRowPublicationField,
     /// Public column name.
     pub name: String,
     /// Physical descriptor field name at `slot`.
@@ -4740,7 +4766,6 @@ pub(in crate::db) fn demote_authority_receipt_subscriptions(
 ///
 /// Every changed occurrence carries its previous and final position, so
 /// consumers never reconstruct ordering from a suffix convention.
-#[cfg(test)]
 fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
@@ -4938,6 +4963,14 @@ fn apply_maintained_update_to_snapshot(
             LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
                 format!("flat:add={} remove={}", added.len(), removed.len())
             }
+            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+                snapshot,
+                occurrence_ids,
+            } => format!(
+                "aggregate-window:roots={} occurrences={}",
+                snapshot.root_count,
+                occurrence_ids.len()
+            ),
         };
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=apply_maintained_snapshot roots={} update={update_kind}",
@@ -4945,11 +4978,28 @@ fn apply_maintained_update_to_snapshot(
         );
     }
     match update {
-        LocalMaintainedViewSubscriptionUpdate::Flat {
-            authoritative_membership_changed: _,
-            added,
-            removed,
+        LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            snapshot: current,
+            occurrence_ids,
         } => {
+            // Validate the entire replacement facade before touching the
+            // currently published snapshot. In particular, a BTreeMap would
+            // otherwise silently collapse duplicate occurrence identities.
+            let current_index =
+                relation_snapshot_index_with_root_occurrences(&current, &occurrence_ids)?;
+            let event = subscription_terminal_delta_event(
+                tier,
+                settled,
+                snapshot,
+                &snapshot_root_occurrences(snapshot, snapshot_index)?,
+                &current,
+                &occurrence_ids,
+            )?;
+            *snapshot = current;
+            *snapshot_index = current_index;
+            Ok(event)
+        }
+        LocalMaintainedViewSubscriptionUpdate::Flat { added, removed } => {
             let mut event = apply_maintained_membership_update_to_snapshot(
                 snapshot,
                 snapshot_index,
@@ -4997,7 +5047,12 @@ fn apply_maintained_update_to_snapshot(
                 .iter()
                 .filter(|operation| operation.path.is_empty())
             {
-                if terminal_root_occurrence_id(&operation.root_key).is_ok() {
+                if terminal_root_occurrence_id_with_root_union(
+                    &operation.root_key,
+                    layout.root_union_arm,
+                )
+                .is_ok()
+                {
                     continue;
                 }
                 let root_bytes = operation
@@ -5014,7 +5069,10 @@ fn apply_maintained_update_to_snapshot(
                         occurrence_overrides.insert(operation.root_key.clone(), candidate.clone());
                     }
                     [] => {
-                        terminal_root_occurrence_id(&operation.root_key)?;
+                        terminal_root_occurrence_id_with_root_union(
+                            &operation.root_key,
+                            layout.root_union_arm,
+                        )?;
                     }
                     _ => {
                         return Err(Error::new(
@@ -5234,7 +5292,12 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .and_then(|overrides| overrides.get(operation.root_key.as_slice()))
                 .cloned()
                 .map(Ok)
-                .unwrap_or_else(|| terminal_root_occurrence_id(&operation.root_key))?;
+                .unwrap_or_else(|| {
+                    terminal_root_occurrence_id_with_root_union(
+                        &operation.root_key,
+                        layout.root_union_arm,
+                    )
+                })?;
             root_operations.push((occurrence_id, operation));
         } else {
             descendant_operations.push(operation);
@@ -5389,6 +5452,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
         &occurrences,
         &affected,
         &descendant_operations,
+        layout.root_union_arm,
     )?;
 
     let terminal_records = std::mem::take(&mut snapshot_index.terminal_records);
@@ -5459,12 +5523,14 @@ fn apply_descendant_terminal_operations_to_snapshot(
     occurrences: &[OutputOccurrenceId],
     roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
+    root_union_arm: bool,
 ) -> Result<(), Error> {
     for operation in operations {
         if operation.path.is_empty() {
             continue;
         }
-        let occurrence = terminal_root_occurrence_id(&operation.root_key)?;
+        let occurrence =
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
         let Some(root_index) = occurrences
             .iter()
             .position(|candidate| candidate == &occurrence)
@@ -5546,7 +5612,10 @@ fn materialize_subscription_terminal_record(
                 "retained terminal root position is outside snapshot",
             )
         })?;
-        *root = CurrentRow::new(root.table().to_owned(), record.record()?);
+        let table = root.table().to_owned();
+        let publication_fields = root.publication_fields().to_vec();
+        *root =
+            CurrentRow::new_with_publication_fields(table, record.record()?, publication_fields);
     }
     Ok(())
 }
@@ -5646,19 +5715,87 @@ fn terminal_subscription_output_row(
 
     Ok(SubscriptionOutputRow {
         occurrence_id,
-        row: CurrentRow::new(
+        row: CurrentRow::new_with_publication_fields(
             table.to_owned(),
             OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
+            terminal_root_publication_fields(layout),
         ),
         previous_index,
         index,
     })
 }
 
+/// Derive the explicit producer provenance for every terminal descriptor slot.
+///
+/// Both terminal-delta decoding and local maintained-view reset snapshots use
+/// this exact mapping; treating a hybrid collector record as wholly logical
+/// loses the distinction between a physical `user_{column}` and a logical
+/// field with that same name.
+pub(crate) fn terminal_root_publication_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<crate::node::CurrentRowPublicationField> {
+    use crate::node::CurrentRowPublicationField;
+    let mut fields = layout
+        .root_descriptor
+        .fields()
+        .iter()
+        .map(|field| CurrentRowPublicationField::ResultField {
+            name: field.name.clone().expect("terminal fields are named"),
+            visibility: crate::node::CurrentRowResultVisibility::HiddenMetadata,
+        })
+        .collect::<Vec<_>>();
+    for field in &layout.public_fields {
+        assert_eq!(
+            field.publication.public_name(),
+            Some(field.name.as_str()),
+            "terminal publication name must match its public slot mapping"
+        );
+        fields[field.slot] = field.publication.clone();
+    }
+    fields
+}
+
+#[cfg(test)]
+pub(crate) fn terminal_root_binding_fields(
+    layout: &TerminalRootLayout,
+) -> Vec<CurrentRowBindingRole> {
+    let binding_for_carrier = |carrier| match carrier {
+        TerminalRootCarrier::CurrentRow => CurrentRowBindingRole::PhysicalColumn,
+        TerminalRootCarrier::Logical => CurrentRowBindingRole::LogicalField,
+    };
+    let mut fields =
+        vec![binding_for_carrier(layout.carrier); layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        fields[field.slot] = binding_for_carrier(field.carrier);
+    }
+    fields
+}
+
+/// Public logical names for the same terminal descriptor slots.  A terminal
+/// projection can retain its source's `user_{column}` carrier name while its
+/// public output is simply `{column}`.  Native hosts must receive the latter
+/// without guessing from a prefix, while truly logical `user_*` fields remain
+/// untouched.
+#[cfg(test)]
+pub(crate) fn terminal_root_binding_field_names(
+    layout: &TerminalRootLayout,
+) -> Vec<Option<String>> {
+    let mut names = vec![None; layout.root_descriptor.fields().len()];
+    for field in &layout.public_fields {
+        names[field.slot] = Some(field.name.clone());
+    }
+    names
+}
+
 /// Decode the Groove ordered key used to address one root output occurrence.
-/// Plain joins are UUID sequences. A union-derived joined source is preceded
-/// by its ordered UTF-8 discriminator.
-pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId, Error> {
+/// Plain joins are UUID sequences; joined-source discriminators precede their
+/// UUIDs at source positions one and above. Root-union collector keys retain
+/// their physical UUID first and need the prepared layout to identify the
+/// following `(label, actual-root-row)` pair as source position zero.
+pub(crate) fn terminal_root_occurrence_id_with_root_union(
+    encoded: &[u8],
+    root_union_arm: bool,
+) -> Result<OutputOccurrenceId, Error> {
     fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
         if encoded.get(*cursor).copied() != Some(10) {
             return None;
@@ -5707,6 +5844,27 @@ pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurr
     })?;
     let mut joined = Vec::new();
     let mut union_arms = Vec::new();
+    if root_union_arm {
+        let label = ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root key contains an invalid root union discriminator",
+            )
+        })?;
+        let actual_root = uuid_at(encoded, &mut cursor).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root key contains no root union contributor",
+            )
+        })?;
+        if actual_root != root {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "terminal root key root union contributor disagrees with root UUID",
+            ));
+        }
+        union_arms.push((0, label));
+    }
     while cursor < encoded.len() {
         let discriminator = if encoded[cursor] == 6 {
             Some(ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
@@ -5725,7 +5883,7 @@ pub(crate) fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurr
             )
         })?;
         if let Some(discriminator) = discriminator {
-            union_arms.push((joined.len(), discriminator));
+            union_arms.push((joined.len() + 1, discriminator));
         }
         joined.push(joined_id);
     }

@@ -11,7 +11,7 @@ use jazz::tools::native_transport_connector::{
     NativeTransportConnector as _, NativeTransportRequest, NativeTransportTerminal,
 };
 use jazz::tools::{AppContext, ClientStorage, JazzClient};
-use jazz::wire::WireTransport as _;
+use jazz::wire::{WireErrorCode, WireRetry, WireTransport as _};
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
 use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;
@@ -513,7 +513,7 @@ async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached()
     .await
     .expect_err("downstream admission waits for the normal upstream route");
     assert!(
-        matches!(error, WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later && wire.message.contains("bootstrapping") && wire.message.contains("retry shortly")),
         "unready dynamic edge must give retryable admission failure: {error}"
     );
 
@@ -541,7 +541,7 @@ async fn dynamic_catalogue_bootstrap_rejects_wrong_authority_credential() {
     .await
     .expect_err("wrong bootstrap credential must not obtain a catalogue");
     assert!(
-        matches!(error, WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
         "unexpected bootstrap auth result: {error}"
     );
     task.abort();
@@ -567,7 +567,7 @@ async fn dynamic_catalogue_bootstrap_requires_the_reserved_edge_identity() {
     .await
     .expect_err("normal privileged client identity must not request bootstrap");
     assert!(
-        matches!(error, WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
         "bootstrap identity boundary returned {error}"
     );
     task.abort();
@@ -600,7 +600,7 @@ async fn dynamic_catalogue_bootstrap_rejects_generic_backend_credential() {
     .await
     .expect_err("backend credential must not read an authority catalogue");
     assert!(
-        matches!(error, WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::AuthFailed && wire.retry == WireRetry::Never),
         "generic backend credential crossed bootstrap boundary: {error}"
     );
     task.abort();
@@ -633,7 +633,7 @@ async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
     .await
     .expect_err("unready edge must not admit a downstream session");
     assert!(
-        matches!(error, WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later && wire.message.contains("bootstrapping") && wire.message.contains("retry shortly")),
         "unready edge must return an explicit retry-later diagnosis: {error}"
     );
     task.abort();

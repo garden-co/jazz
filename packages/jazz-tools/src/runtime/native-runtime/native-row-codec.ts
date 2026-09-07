@@ -28,7 +28,41 @@ export type EnumSchema = {
   cases?: { name: string; payload: DescriptorField[] }[];
 };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
-export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
+export type NativeStoredColumnDescriptorField = {
+  id: number;
+  outputName: string;
+  valueType: ValueType;
+  kind: "stored-column";
+};
+export type NativeResultFieldDescriptorField = {
+  name: string;
+  valueType: ValueType;
+  kind: "result-field";
+};
+export type NativeHiddenMetadataDescriptorField = {
+  name: string;
+  valueType: ValueType;
+  kind: "hidden-metadata";
+};
+/** Explicit Rust-to-JavaScript provenance for one descriptor field. */
+export type NativeRowDescriptorField =
+  | NativeStoredColumnDescriptorField
+  | NativeResultFieldDescriptorField
+  | NativeHiddenMetadataDescriptorField;
+
+/**
+ * The producer owns a publication field's public identity. Hidden metadata is
+ * carried in the same record only for decoding and never has a public binding.
+ */
+export function nativeRowDescriptorPublicName(field: NativeRowDescriptorField): string | undefined {
+  if (field.kind === "hidden-metadata") return undefined;
+  return field.kind === "stored-column" ? field.outputName : field.name;
+}
+export type NativeRowBatch = {
+  table: string;
+  descriptor: NativeRowDescriptorField[];
+  rows: NativeRow[];
+};
 export type NativeRemovedRow = { table: string; rowId: Uint8Array };
 export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
@@ -71,13 +105,63 @@ type PostcardWriterLike = {
 export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
   return {
     table: reader.string(),
-    descriptor: readDescriptor(reader),
+    descriptor: readNativeRowDescriptor(reader),
     rows: reader.readVec((rowReader) => ({
       rowId: rowReader.bytes(),
       deleted: rowReader.bool(),
       raw: rowReader.bytes(),
     })),
   };
+}
+
+export function writeNativeRowDescriptor(
+  writer: PostcardWriterLike,
+  descriptor: readonly NativeRowDescriptorField[],
+): void {
+  writer.vec((fieldWriter, index) => {
+    const field = descriptor[index]!;
+    fieldWriter.u64(field.kind === "stored-column" ? 0 : field.kind === "result-field" ? 1 : 2);
+    if (field.kind === "stored-column") {
+      fieldWriter.u64(field.id);
+      fieldWriter.string(field.outputName);
+    } else {
+      fieldWriter.string(field.name);
+    }
+    writeValueType(fieldWriter, field.valueType);
+  }, descriptor.length);
+}
+
+export function readNativeRowDescriptor(reader: PostcardReaderLike): NativeRowDescriptorField[] {
+  return reader.readVec((fieldReader) => {
+    const kindTag = fieldReader.u64();
+    if (kindTag === 0) {
+      return {
+        kind: "stored-column",
+        id: fieldReader.u64(),
+        outputName: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    if (kindTag === 1) {
+      return {
+        kind: "result-field",
+        name: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    if (kindTag === 2) {
+      return {
+        kind: "hidden-metadata",
+        name: fieldReader.string(),
+        valueType: readValueType(fieldReader),
+      };
+    }
+    return invalidNativeRowDescriptorFieldKind(kindTag);
+  });
+}
+
+function invalidNativeRowDescriptorFieldKind(kindTag: number): never {
+  throw new Error(`unknown native row descriptor field kind ${kindTag}`);
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {
@@ -112,12 +196,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
 
 function readResultKey(reader: PostcardReaderLike): Uint8Array {
   const key = reader.bytes();
-  if (key[0] === 1) {
-    if (key.length <= 1 || (key.length - 1) % 16 !== 0) throw new Error("malformed v1 ResultKey");
-    return key;
-  }
-  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
-    throw new Error("malformed v2 ResultKey");
+  if (key[0] !== 1 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed ResultKey v1");
   }
   return key;
 }
@@ -137,9 +217,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
   cursor += joined * 16;
   const discriminators = readU32(cursor);
   cursor += 4;
-  // v2 is reserved for typed union occurrences. A zero-arm v2 value would
-  // normalize to the same ordered UUID key as a v1 occurrence.
-  if (discriminators === 0 || discriminators > joined) return false;
+  if (discriminators > joined + 1) return false;
   let previousPosition = -1;
   for (let index = 0; index < discriminators; index++) {
     if (cursor + 8 > bytes.length) return false;
@@ -147,7 +225,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     const length = readU32(cursor + 4);
     cursor += 8;
     if (
-      position >= joined ||
+      position > joined ||
       position <= previousPosition ||
       length === 0 ||
       length > 4096 ||
@@ -329,9 +407,7 @@ function createRecordWithLayout(
 }
 
 export function fieldIndex(descriptor: DescriptorField[], name: string): number {
-  const index = descriptor.findIndex(
-    (field) => field.name === name || field.name === `user_${name}`,
-  );
+  const index = descriptor.findIndex((field) => field.name === name);
   if (index < 0) {
     throw new Error(
       `missing ${name} field in [${descriptor.map((field) => field.name ?? "<anonymous>").join(", ")}]`,
@@ -578,7 +654,7 @@ function terminalLayoutValueTypeMatchesColumn(
   // `sparse` describes the TS wildcard/storage carrier, not the declared
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
-  // Provenance lives in fixed CurrentRow system fields, not nullable user_
+  // Provenance lives in fixed CurrentRow system fields, not nullable _app_
   // carriers. Author subjects are already canonical text at the native/public
   // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
@@ -620,7 +696,7 @@ export function assertTerminalRootDescriptorCompatible(
     false,
   );
   // CurrentRow is a distinct physical layout. Its row key is named row_uuid
-  // and its nullable application-cell carriers live in the user_ namespace.
+  // and its nullable application-cell carriers live in the _app_ namespace.
   // Do not accept a nullable logical descriptor here: doing so would make an
   // arbitrary reordering of same-typed fields indistinguishable from a native
   // CurrentRow record.
@@ -628,7 +704,7 @@ export function assertTerminalRootDescriptorCompatible(
     descriptor,
     "row_uuid",
     publicColumns,
-    (column) => `user_${column.name}`,
+    (column) => `_app_${column.name}`,
     true,
   );
   if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {

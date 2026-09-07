@@ -93,8 +93,8 @@ pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::collect_by_ordered_scalar;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
-    VariantRegistry, decode_record_descriptor, encode_record_descriptor,
-    variant_registry_id_for_path,
+    VariantRegistry, decode_persisted_record_descriptor, decode_record_descriptor,
+    encode_persisted_record_descriptor, encode_record_descriptor, variant_registry_id_for_path,
 };
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.
@@ -137,11 +137,16 @@ impl RecordDescriptor {
             .into_iter()
             .map(|(name, value_type)| DescriptorField {
                 name: Some(name.into()),
+                identity: None,
                 value_type,
             })
             .collect::<Vec<_>>();
 
-        Self::from_logical_fields(fields)
+        Self::new_with_fields(fields)
+    }
+
+    pub fn new_with_fields(fields: impl IntoIterator<Item = DescriptorField>) -> Self {
+        Self::from_logical_fields(fields.into_iter().collect())
     }
 
     pub fn fields(&self) -> &[DescriptorField] {
@@ -172,7 +177,13 @@ impl RecordDescriptor {
     pub fn field_index(&self, field_name: &str) -> Option<usize> {
         self.fields
             .iter()
-            .position(|field| field.name.as_deref() == Some(field_name))
+            .position(|field| field.logical_name() == Some(field_name))
+    }
+
+    pub fn field_index_by_identity(&self, identity: &FieldIdentity) -> Option<usize> {
+        self.fields
+            .iter()
+            .position(|field| field.identity.as_ref() == Some(identity))
     }
 
     pub fn create(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
@@ -490,6 +501,10 @@ impl RecordDescriptor {
     }
 
     fn from_logical_fields(fields: Vec<DescriptorField>) -> Self {
+        let fields = fields
+            .into_iter()
+            .map(DescriptorField::with_default_identity)
+            .collect::<Vec<_>>();
         for field in &fields {
             validate_schema_value_type(&field.value_type)
                 .unwrap_or_else(|err| panic!("invalid record field {:?}: {err}", field.name));
@@ -1682,9 +1697,53 @@ fn u32_to_usize(value: u32) -> Result<usize, Error> {
 
 /// One field in canonical record layout order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum FieldIdentity {
+    /// Logical or derived field keyed by an explicit semantic name.
+    Name(String),
+    /// Opaque stable slot identity. Jazz uses this for physical column ids,
+    /// while Groove keeps the carrier generic and independent from display
+    /// names.
+    Slot(u64),
+    /// Stable slot identity paired with a distinct logical/public field name.
+    NamedSlot { name: String, slot: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct DescriptorField {
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<FieldIdentity>,
     pub value_type: ValueType,
+}
+
+impl DescriptorField {
+    pub fn new(name: impl Into<String>, value_type: ValueType) -> Self {
+        Self {
+            name: Some(name.into()),
+            identity: None,
+            value_type,
+        }
+    }
+
+    pub fn with_identity(mut self, identity: FieldIdentity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    pub fn logical_name(&self) -> Option<&str> {
+        match self.identity.as_ref() {
+            Some(FieldIdentity::Name(name)) => Some(name.as_str()),
+            Some(FieldIdentity::NamedSlot { name, .. }) => Some(name.as_str()),
+            _ => self.name.as_deref(),
+        }
+    }
+
+    fn with_default_identity(mut self) -> Self {
+        if self.identity.is_none() {
+            self.identity = self.name.clone().map(FieldIdentity::Name);
+        }
+        self
+    }
 }
 
 /// Owned encoded record tied to the descriptor that decodes it.

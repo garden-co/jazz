@@ -588,7 +588,7 @@ impl NodeState {
             || project.expressions.iter().any(|expression| {
                 matches!(
                     expression.expression,
-                    PlanExpr::RecursiveEnumRemap {
+                    ProjectExpr::RecursiveEnumRemap {
                         omit_unrepresentable: true,
                         ..
                     }

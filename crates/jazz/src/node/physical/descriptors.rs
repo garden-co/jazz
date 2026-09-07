@@ -1172,16 +1172,29 @@ fn physical_descriptor_with_enum_registries(
     physical_names: Vec<String>,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    Ok(records::RecordDescriptor::new(
+    fn physical_user_slot(name: &str) -> Option<PhysicalColumnId> {
+        name.strip_prefix("_app_")
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(PhysicalColumnId)
+    }
+
+    Ok(records::RecordDescriptor::new_with_fields(
         physical_names
             .into_iter()
             .zip(logical.fields())
             .map(|(name, field)| {
-                let value_type = if let Some(id) = name
-                    .strip_prefix("user_")
-                    .and_then(|id| id.parse::<u64>().ok())
-                {
-                    let id = PhysicalColumnId(id);
+                let identity = if let Some(id) = physical_user_slot(&name) {
+                    Some(match field.logical_name() {
+                        Some(logical) if logical != name => records::FieldIdentity::NamedSlot {
+                            name: logical.to_owned(),
+                            slot: id.0,
+                        },
+                        _ => records::FieldIdentity::Slot(id.0),
+                    })
+                } else {
+                    field.identity.clone()
+                };
+                let value_type = if let Some(id) = physical_user_slot(&name) {
                     if let Some(cases) = mapping.scalar_enum_cases.get(&id) {
                         physical_scalar_enum_schema(id, cases)
                             .map(|schema| records::ValueType::EnumTag(schema).nullable())?
@@ -1215,7 +1228,11 @@ fn physical_descriptor_with_enum_registries(
                 } else {
                     field.value_type.clone()
                 };
-                Ok((name, value_type))
+                Ok(records::DescriptorField {
+                    name: Some(name),
+                    identity,
+                    value_type,
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))

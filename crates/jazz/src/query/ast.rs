@@ -46,6 +46,71 @@ pub struct Query {
     /// Number of rows to skip after filtering.
     #[serde(default)]
     pub offset: usize,
+    /// Retained output-changing relation facade. This is normalized directly
+    /// into the row-set algebra; `table` remains the real-row materialization
+    /// table for the result.
+    #[serde(default, with = "relation_query_wire")]
+    pub relation: Option<RelationQuery>,
+}
+
+/// Human-readable query JSON retains the relation tree. Non-human serializers
+/// carry the typed Postcard relation tree.
+pub(crate) mod relation_query_wire {
+    use super::{
+        relation_query_from_wire, relation_query_to_wire, RelationQuery, WireRelationQuery,
+    };
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<RelationQuery>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+        value
+            .as_ref()
+            .map(relation_query_to_wire)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<RelationQuery>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<RelationQuery>::deserialize(deserializer);
+        }
+        Option::<WireRelationQuery>::deserialize(deserializer)?
+            .map(|wire| relation_query_from_wire(wire).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+
+    pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            relation_query_to_wire(value)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer)
+        }
+    }
+    pub fn deserialize_required<'de, D>(deserializer: D) -> Result<RelationQuery, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            RelationQuery::deserialize(deserializer)
+        } else {
+            relation_query_from_wire(WireRelationQuery::deserialize(deserializer)?)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 /// Output-changing relational join syntax.
@@ -104,7 +169,7 @@ pub enum RelationExpr {
         predicate: RelationPredicate,
     },
     Union {
-        inputs: Vec<RelationExpr>,
+        inputs: Vec<RelationUnionArm>,
     },
     Join {
         left: Box<RelationExpr>,
@@ -140,6 +205,13 @@ pub enum RelationExpr {
         input: Box<RelationExpr>,
         limit: usize,
     },
+}
+
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RelationUnionArm {
+    pub label: String,
+    pub input: RelationExpr,
 }
 
 #[allow(missing_docs)]

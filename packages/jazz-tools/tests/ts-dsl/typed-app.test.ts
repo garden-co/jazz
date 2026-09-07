@@ -279,20 +279,26 @@ describe("typed app prototype", () => {
           union: {
             inputs: [
               {
-                table: "team_edges",
-                conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
-                hops: ["parent_team"],
+                label: "derived:1305159ebbe387ef62c9b24b7ee2823fe2181cb4e1c6be16282ff393c7fe2fbf",
+                input: {
+                  table: "team_edges",
+                  conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
+                  hops: ["parent_team"],
+                },
               },
               {
-                table: "teams",
-                conditions: [],
-                hops: [],
-                gather: {
-                  max_depth: 2,
-                  step_table: "team_edges",
-                  step_current_column: "child_team",
-                  step_conditions: [],
-                  step_hops: ["parent_team"],
+                label: "derived:1b79e5056c01cd288d096b23cbc4e17bf07f6484e03cfc14ded25553810026fe",
+                input: {
+                  table: "teams",
+                  conditions: [],
+                  hops: [],
+                  gather: {
+                    max_depth: 2,
+                    step_table: "team_edges",
+                    step_current_column: "child_team",
+                    step_conditions: [],
+                    step_hops: ["parent_team"],
+                  },
                 },
               },
             ],

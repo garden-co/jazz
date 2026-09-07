@@ -23,7 +23,9 @@ import {
   nativeAcceptancePhase,
   recordDeviceDiagnostic,
   recordDeviceReceipt,
+  recordNativeSeedBoundary,
   switchNativeRelayAuthScope,
+  waitForNativeCoreObservation,
 } from "./src/native-fixture";
 import {
   decodeNativeForegroundResponse,
@@ -116,7 +118,13 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("native-admission-failed");
   const scopeA = await admittedNativeRelay();
   markFailure("public-client-seed-failed");
-  await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce, markFailure);
+  await seedHighLevelForegroundRuntime(
+    scopeA.capability,
+    receipt.runNonce,
+    markFailure,
+    waitForNativeCoreObservation,
+    recordNativeSeedBoundary,
+  );
   // The first client is now fully shut down. A new public foreground must
   // read the run-bound row through the persistent relay before the driver
   // terminates the whole app; this keeps the later restart receipt from being
@@ -138,7 +146,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
   markFailure("auth-switch-failed");
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
-  markFailure("foreground-byte-abi-failed");
+  markFailure("foreground-revocation-failed");
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   markFailure("scope-isolation-failed");

@@ -97,6 +97,8 @@ jobs:
             ${{ env.JAZZ_DEVICE_DERIVED_DATA }}
           key: rn-device-ios-macos-15-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
+      - name: Verify synthetic scope authorization and generated native fixture
+        run: cargo test -p jazz-native-relay --example rn_edge_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Build and stage the relay XCFramework
@@ -180,6 +182,8 @@ jobs:
           path: .cache/android-device-acceptance
           key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
+      - name: Verify synthetic scope authorization and generated native fixture
+        run: cargo test -p jazz-native-relay --example rn_edge_session_harness --no-fail-fast
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Bootstrap pinned lane-local Android toolchain
@@ -235,3 +239,15 @@ jobs:
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android
+      - name: Retain matching Android crash-symbol artifacts
+        if: failure()
+        env:
+          JAZZ_ANDROID_FAILURE_ARTIFACT: ${{ runner.temp }}/jazz-rn-android-failure-artifact
+        run: node dev/rn-device-acceptance/scripts/stage-android-failure-artifact.mjs
+      - name: Upload synthetic Android failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rn-device-android-failure-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jazz-rn-android-failure-artifact
+          if-no-files-found: ignore

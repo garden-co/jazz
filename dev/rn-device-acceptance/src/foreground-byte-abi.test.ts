@@ -7,6 +7,7 @@ import {
   proveSameJsiRuntimeWriteSubscription,
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
+import { todosQuery } from "./scope-fixture.ts";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import {
   createRecord,
@@ -63,6 +64,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
   );
   assert.deepEqual(commands, [0, 1, 2, 0]);
   assert.deepEqual(stages, [
+    "foreground-abi-version-failed",
     "foreground-open-failed",
     "foreground-probe-failed",
     "foreground-tick-failed",
@@ -79,6 +81,38 @@ test("foreground receipt treats a native revocation as an execution error", () =
     close: () => false,
   };
   proveForegroundRevoked(revokedForeground, codec.encode);
+});
+
+test("foreground receipt rejects a live alias after claimed revocation", () => {
+  const liveForeground = {
+    execute: () => Uint8Array.of(0, NATIVE_RELAY_ABI_V1),
+    tick() {},
+    close: () => false,
+  };
+  assert.throws(
+    () => proveForegroundRevoked(liveForeground, codec.encode),
+    /revoked foreground accepted Probe/,
+  );
+});
+
+test("foreground ABI mismatch records its boundary before any open", () => {
+  const stages: string[] = [];
+  assert.throws(
+    () =>
+      proveForegroundByteAbi(
+        {
+          abiVersion: NATIVE_RELAY_ABI_V1 + 1,
+          openAttached() {
+            throw new Error("must not open");
+          },
+        },
+        capability,
+        codec,
+        (stage) => stages.push(stage),
+      ),
+    /unexpected ABI/,
+  );
+  assert.deepEqual(stages, ["foreground-abi-version-failed"]);
 });
 
 test("scope-isolation receipt keeps both native-selected scope stores disjoint", async () => {
@@ -105,7 +139,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         commitTransaction: 15,
         rollbackTransaction: 16,
       } as const;
-      if (command.type === "poll") return Uint8Array.of(tags.poll, command.operation);
+      if (command.type === "poll" || command.type === "cancel")
+        return Uint8Array.of(tags[command.type], command.operation);
       return Uint8Array.of(tags[command.type]);
     },
     decode(bytes) {
@@ -114,6 +149,27 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
           return { type: "preparedQuery", query: bytes[1]! };
         case 3:
           return { type: "rows", rows: bytes.subarray(2) };
+        case 4:
+          return { type: "subscribed", subscription: 1 };
+        case 5:
+          return {
+            type: "subscriptionEvents",
+            events: bytes[1]
+              ? [
+                  {
+                    type: "delta",
+                    reset: true,
+                    settled: true,
+                    tier: "local",
+                    delta: new Uint8Array(),
+                  },
+                ]
+              : [],
+          };
+        case 6:
+          return { type: "unsubscribed", closed: true };
+        case 9:
+          return { type: "cancelled", cancelled: true };
         case 7:
           return { type: "closed", closed: bytes[1] === 1 };
         case 11:
@@ -149,6 +205,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
       let stagedWrite = false;
+      let subscribed = false;
+      let published = false;
       let scheduler: ((urgency: string) => void) | undefined;
       return {
         execute(command: Uint8Array) {
@@ -164,7 +222,19 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
               return Uint8Array.of(14, ...new Uint8Array(16).fill(1));
             case 2:
               return Uint8Array.of(2, 1); // PreparedQuery { 1 }
+            case 4:
+              subscribed = true;
+              return Uint8Array.of(4);
+            case 5:
+              return Uint8Array.of(5, published ? 1 : 0);
+            case 6:
+              assert.equal(subscribed, true);
+              subscribed = false;
+              return Uint8Array.of(6);
             case 3:
+              // A separate foreground has no local rows until its retained
+              // subscription actually receives a relay publication.
+              if (!subscribed || !published) return rows(false, false);
               if (isA && delayedAReads > 0) {
                 delayedAReads -= 1;
                 return rows(false, false);
@@ -177,6 +247,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
           }
         },
         tick() {
+          if (subscribed) published = true;
           if (!stagedWrite) return;
           if (writerMustYield) {
             stagedWrite = false;
@@ -293,6 +364,9 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         const role = opens === 1 ? "writer" : "reader";
         return {
           execute(command: Uint8Array) {
+            if (command[0] === 4) return Uint8Array.of(4);
+            if (command[0] === 5) return Uint8Array.of(5, 1);
+            if (command[0] === 6) return Uint8Array.of(6);
             if (role === "writer") {
               if (command[0] === 10) return Uint8Array.of(11, 1);
               if (command[0] === 13) return Uint8Array.of(13);
@@ -347,7 +421,13 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     );
   }
 
-  const pendingReceipt = (settles: boolean, emitsWake = true, settlesImmediately = false) => {
+  const pendingReceipt = (
+    settles: boolean,
+    emitsWake = true,
+    settlesImmediately = false,
+    pendingDrain = false,
+  ) => {
+    const cleanup: string[] = [];
     const metrics = { all: 0, poll: 0, tick: 0, close: 0 };
     let scheduler: ((urgency: string) => void) | undefined;
     const scheduleWake = () => {
@@ -370,6 +450,21 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
             switch (command[0]) {
               case 2:
                 return Uint8Array.of(2, 1);
+              case 4:
+                return Uint8Array.of(4);
+              case 5:
+                if (pendingDrain) {
+                  scheduleWake();
+                  return Uint8Array.of(15, 42);
+                }
+                return Uint8Array.of(5, 1);
+              case 6:
+                cleanup.push("unsubscribe");
+                return Uint8Array.of(6);
+              case 9:
+                assert.equal(command[1], 42);
+                cleanup.push("cancel");
+                return Uint8Array.of(9);
               case 3:
                 metrics.all += 1;
                 if (metrics.all > 1)
@@ -402,7 +497,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         };
       },
     };
-    return { factory, metrics };
+    return { factory, metrics, cleanup };
   };
 
   const pendingThenVisible = pendingReceipt(true);
@@ -411,6 +506,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     excludes: ["b"],
   });
   assert.deepEqual(pendingThenVisible.metrics, { all: 1, poll: 2, tick: 3, close: 1 });
+  assert.deepEqual(pendingThenVisible.cleanup, ["unsubscribe"]);
 
   const pendingForever = pendingReceipt(false);
   let pendingClock = 0;
@@ -437,6 +533,30 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     /did not settle before its bounded deadline/,
   );
   assert.deepEqual(pendingForever.metrics, { all: 1, poll: 94, tick: 96, close: 1 });
+  assert.deepEqual(pendingForever.cleanup, ["cancel", "unsubscribe"]);
+
+  const pendingPublication = pendingReceipt(false, true, false, true);
+  let publicationClock = 0;
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      pendingPublication.factory,
+      scopeA,
+      scopeCodec,
+      { contains: ["a"], excludes: ["b"] },
+      undefined,
+      {
+        timeoutMs: 3,
+        now: () => publicationClock,
+        yieldTurn: async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          publicationClock += 1;
+        },
+      },
+    ),
+    /did not settle before its bounded deadline/,
+  );
+  assert.equal(pendingPublication.metrics.all, 0);
+  assert.deepEqual(pendingPublication.cleanup, ["cancel", "unsubscribe"]);
 
   const missingNativeWake = pendingReceipt(true, false);
   let missingWakeClock = 0;
@@ -498,7 +618,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         undefined,
         {
           timeoutMs: 1,
-          now: () => (clockReads++ < 3 ? 0 : 1),
+          now: () => (clockReads++ < 4 ? 0 : 1),
           yieldTurn: async () => {},
         },
       ),
@@ -534,6 +654,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", async () => {
   let insertedRowId: Uint8Array | undefined;
   let insertedCells: Uint8Array | undefined;
+  let preparedQuery: Uint8Array | undefined;
   const command = {
     encode(value: unknown) {
       if (
@@ -546,6 +667,16 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       ) {
         insertedRowId = value.rowId;
         if ("cells" in value && value.cells instanceof Uint8Array) insertedCells = value.cells;
+      }
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "type" in value &&
+        value.type === "prepareQuery" &&
+        "query" in value &&
+        value.query instanceof Uint8Array
+      ) {
+        preparedQuery = value.query;
       }
       return new TextEncoder().encode(JSON.stringify(value));
     },
@@ -670,6 +801,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     subscriptionRowId,
     "the receipt inserts the host-run row instead of upserting a retained fixed id",
   );
+  assert.deepEqual(preparedQuery, todosQuery, "the receipt uses the Rust-generated todos query");
   assert.equal(
     insertedCells?.[9],
     insertedCells ? insertedCells.byteLength - 10 : undefined,
@@ -1231,7 +1363,7 @@ function encodeSubscriptionDelta({
   writer.vec(() => undefined, 0);
   for (const rows of [added, updated]) {
     writer.vec((key, index) => {
-      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId]));
+      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId, 0, 0, 0, 0, 0, 0, 0, 0]));
     }, rows.length);
   }
   writer.vec(() => undefined, 0);
@@ -1241,3 +1373,18 @@ function encodeSubscriptionDelta({
   writer.vec(() => undefined, 0);
   return writer.finish();
 }
+
+test("queries and owner cells match the Rust-generated fixture", async () => {
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(
+    readFileSync(new URL("../native/device-fixture.json", import.meta.url), "utf8"),
+  );
+  const {
+    scopeQuery,
+    scopeCells,
+    todosQuery: generatedTodosQuery,
+  } = await import("./scope-fixture.ts");
+  assert.deepEqual([...scopeQuery], fixture.scopeQuery);
+  assert.deepEqual([...generatedTodosQuery], fixture.todosQuery);
+  assert.deepEqual(scopeCells, fixture.scopeCells);
+});

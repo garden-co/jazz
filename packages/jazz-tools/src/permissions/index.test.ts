@@ -1773,8 +1773,8 @@ describe("permissions DSL", () => {
       throw new Error("Expected union seed relation IR.");
     }
     expect(ir.seed.inputs).toHaveLength(2);
-    expect(ir.seed.inputs[0]?.type).toBe("Project");
-    expect(ir.seed.inputs[1]?.type).toBe("Gather");
+    expect(ir.seed.inputs[0]?.input.type).toBe("Project");
+    expect(ir.seed.inputs[1]?.input.type).toBe("Gather");
   });
 
   it("supports qualified gather(...) start columns via implicit related-table joins", () => {

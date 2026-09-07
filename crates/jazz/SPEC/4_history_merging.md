@@ -196,6 +196,18 @@ a distinct durable root composes this base with its own root-local codec family
 before opening. Adding a new Jazz-owned durable byte family requires a new
 storage epoch, golden fixtures, and an explicit decoder/migration decision.
 
+`server-catalogue-entry.v1` is an existing member of this profile. Its outer
+`JCAT` entry and all catalogue payload outer version bytes remain v1. Within
+the existing nested relation-tree grammar, a public `UNION ALL` is the
+explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in
+declared order, then the matching arm trees. Labels are unique, NUL-free, and
+1 through 4096 bytes. The former unlabeled tag `3` is retired and rejected;
+recovery must never synthesize a traversal-position label. The exact positive
+grammar receipt and retired-tag rejection live in
+`catalogue_payload_codec::tests::labeled_relation_union_uses_explicit_canonical_wire_grammar`.
+This changes a nested grammar of the existing family, not its outer profile or
+a new durable-root family.
+
 The native whole-root compatibility receipt is
 `fixtures/native_storage_corpus.md` and its executable tests in
 `node/tests/native_storage_corpus.rs`. It complements the per-family goldens:

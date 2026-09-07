@@ -80,9 +80,9 @@ pub struct OutputOccurrenceId {
     joined: SmallVec<[ObjectId; 2]>,
     /// Stable typed derivation discriminators keyed by joined-source position.
     /// Empty for the ordinary row-only identity and omitted from its wire form.
-    // The legacy OutputOccurrenceId wire value is exactly `(root, joined)`.
-    // Typed discriminators travel in ResultKey v2 / maintained sidecars and
-    // must never add a positional postcard field here.
+    // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
+    // ResultKey owns the complete typed V1 sidecar envelope and must never add
+    // a positional postcard field here.
     #[serde(skip)]
     union_arms: SmallVec<[(usize, String); 1]>,
 }
@@ -122,7 +122,7 @@ impl OutputOccurrenceId {
         union_arms.sort_by_key(|(position, _)| *position);
         let valid = union_arms
             .iter()
-            .all(|(position, label)| *position < joined.len() && !label.is_empty())
+            .all(|(position, label)| *position <= joined.len() && !label.is_empty())
             && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
         valid.then_some(Self {
             root,
@@ -209,20 +209,15 @@ impl PartialEq<OutputOccurrenceId> for ObjectId {
 pub struct ResultKey(OutputOccurrenceId);
 
 const RESULT_KEY_WIRE_VERSION: u8 = 1;
-const TYPED_RESULT_KEY_WIRE_VERSION: u8 = 2;
 
 impl Serialize for ResultKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let identity = self.0.canonical_bytes();
+        let identity = self.0.typed_canonical_bytes();
         let mut encoded = Vec::with_capacity(identity.len() + 1);
-        encoded.push(if self.0.union_arms.is_empty() {
-            RESULT_KEY_WIRE_VERSION
-        } else {
-            TYPED_RESULT_KEY_WIRE_VERSION
-        });
+        encoded.push(RESULT_KEY_WIRE_VERSION);
         encoded.extend_from_slice(&identity);
         serde_bytes::Bytes::new(&encoded).serialize(serializer)
     }
@@ -238,24 +233,13 @@ impl<'de> Deserialize<'de> for ResultKey {
             return Err(serde::de::Error::custom("unsupported ResultKey version"));
         };
         let identity = &encoded[1..];
-        if version == TYPED_RESULT_KEY_WIRE_VERSION {
-            return decode_typed_result_key(identity)
-                .ok_or_else(|| serde::de::Error::custom("malformed typed ResultKey identity"));
-        }
-        if version != RESULT_KEY_WIRE_VERSION || identity.is_empty() || identity.len() % 16 != 0 {
+        if version != RESULT_KEY_WIRE_VERSION {
             return Err(serde::de::Error::custom(
                 "unsupported or malformed ResultKey identity",
             ));
         }
-        let mut rows = identity.chunks_exact(16).map(|bytes| {
-            let mut uuid = [0_u8; 16];
-            uuid.copy_from_slice(bytes);
-            ObjectId::from_uuid(Uuid::from_bytes(uuid))
-        });
-        let root = rows
-            .next()
-            .ok_or_else(|| serde::de::Error::custom("ResultKey is missing its root"))?;
-        Ok(Self(OutputOccurrenceId::new(root, rows)))
+        decode_typed_result_key(identity)
+            .ok_or_else(|| serde::de::Error::custom("malformed ResultKey V1 identity"))
     }
 }
 
@@ -287,10 +271,7 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
     }
     let discriminator_count =
         u32::from_be_bytes(take(identity, &mut cursor, 4)?.try_into().ok()?) as usize;
-    // v2 is reserved for union-discriminated occurrences. A zero-arm v2
-    // representation would deserialize to a plain occurrence that serializes
-    // as v1, so reject it rather than accepting a noncanonical alias.
-    if discriminator_count == 0 || discriminator_count > joined_count {
+    if discriminator_count > joined_count.checked_add(1)? {
         return None;
     }
     let mut union_arms = Vec::with_capacity(discriminator_count);
@@ -303,8 +284,7 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         {
             return None;
         }
-        if position >= joined_count
-            || previous_position.is_some_and(|previous| position <= previous)
+        if position > joined_count || previous_position.is_some_and(|previous| position <= previous)
         {
             return None;
         }
@@ -422,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_result_key_codec_preserves_union_arm_and_row_only_v1() {
+    fn result_key_v1_is_complete_for_ordinary_joined_and_union_occurrences() {
         let root = ObjectId::from_uuid(Uuid::from_u128(1));
         let joined = ObjectId::from_uuid(Uuid::from_u128(2));
         let plain = ResultKey(OutputOccurrenceId::new(root, [joined]));
@@ -431,7 +411,9 @@ mod tests {
                 .expect("inspect plain key");
         assert_eq!(plain_wire[0], RESULT_KEY_WIRE_VERSION);
         let mut expected_v1 = Vec::from(root.uuid().as_bytes());
+        expected_v1.extend_from_slice(&1_u32.to_be_bytes());
         expected_v1.extend_from_slice(joined.uuid().as_bytes());
+        expected_v1.extend_from_slice(&0_u32.to_be_bytes());
         assert_eq!(&plain_wire[1..], expected_v1);
 
         let typed = ResultKey(
@@ -441,7 +423,7 @@ mod tests {
         let typed_encoded = serde_json::to_vec(&typed).expect("encode typed key");
         let typed_wire: Vec<u8> =
             serde_json::from_slice(&typed_encoded).expect("inspect typed key");
-        assert_eq!(typed_wire[0], TYPED_RESULT_KEY_WIRE_VERSION);
+        assert_eq!(typed_wire[0], RESULT_KEY_WIRE_VERSION);
         assert_eq!(
             serde_json::from_slice::<ResultKey>(&typed_encoded).expect("decode typed key"),
             typed
@@ -513,21 +495,23 @@ mod tests {
 
         let valid = OutputOccurrenceId::with_union_arms(root, [joined], [(0, "a".to_owned())])
             .expect("valid typed occurrence");
-        let mut malformed = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        let mut malformed = vec![RESULT_KEY_WIRE_VERSION];
         malformed.extend_from_slice(&valid.typed_canonical_bytes());
         malformed.push(0);
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!(malformed)).is_err());
 
-        let mut zero_arm = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        let mut zero_arm = vec![RESULT_KEY_WIRE_VERSION];
         zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
         zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
-        assert!(
-            serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm)).is_err(),
-            "zero-arm v2 aliases the v1 occurrence representation"
+        zero_arm.truncate(41);
+        assert_eq!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm))
+                .expect("ordinary joined V1 is valid"),
+            ResultKey(OutputOccurrenceId::new(root, [joined]))
         );
 
         let second_joined = ObjectId::from_uuid(Uuid::from_u128(3));
-        let mut reordered = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        let mut reordered = vec![RESULT_KEY_WIRE_VERSION];
         reordered.extend_from_slice(root.uuid().as_bytes());
         reordered.extend_from_slice(&2_u32.to_be_bytes());
         reordered.extend_from_slice(joined.uuid().as_bytes());
@@ -544,7 +528,7 @@ mod tests {
             "typed discriminator records must use strictly ascending positions"
         );
 
-        let mut invalid_utf8 = vec![TYPED_RESULT_KEY_WIRE_VERSION];
+        let mut invalid_utf8 = vec![RESULT_KEY_WIRE_VERSION];
         invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
         *invalid_utf8.last_mut().expect("typed key has arm label") = 0xff;
         assert!(
@@ -558,6 +542,14 @@ mod tests {
                 .expect("inspect typed key fixture");
         oversized[17..21].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!(oversized)).is_err());
+
+        let mut superseded_uuid_vector = vec![RESULT_KEY_WIRE_VERSION];
+        superseded_uuid_vector.extend_from_slice(root.uuid().as_bytes());
+        superseded_uuid_vector.extend_from_slice(joined.uuid().as_bytes());
+        assert!(
+            serde_json::from_value::<ResultKey>(serde_json::json!(superseded_uuid_vector)).is_err()
+        );
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!([2_u8])).is_err());
     }
 
     #[test]
@@ -574,5 +566,21 @@ mod tests {
         assert_eq!(maintained.len(), 2, "UNION ALL arms retain multiplicity");
         assert!(maintained.remove(&direct));
         assert_eq!(maintained, std::collections::BTreeSet::from([inherited]));
+    }
+
+    #[test]
+    fn union_arm_can_discriminate_the_root_source_position() {
+        let root = ObjectId::from_uuid(Uuid::from_u128(1));
+        let occurrence = OutputOccurrenceId::with_union_arms(
+            root,
+            std::iter::empty(),
+            [(0, "direct".to_owned())],
+        )
+        .expect("root source position is addressable");
+        let key = ResultKey::from_occurrence(occurrence);
+        assert_eq!(
+            serde_json::from_slice::<ResultKey>(&serde_json::to_vec(&key).unwrap()).unwrap(),
+            key
+        );
     }
 }

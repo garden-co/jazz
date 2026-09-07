@@ -7,6 +7,8 @@ import type {
   ColumnBuilderValue,
   ColumnTransform,
 } from "./dsl.js";
+import { blake3 } from "@noble/hashes/blake3.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
@@ -281,7 +283,7 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
       ne?: MaybeNullableWhere<T, TOptional>;
     } & TExtra);
 type Membership<T> = { in?: T[]; notIn?: T[] };
-type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
+type NumberWhere<T extends number | bigint, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
   { gt?: T; gte?: T; lt?: T; lte?: T } & Membership<T>
@@ -312,44 +314,46 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
       ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, Membership<boolean>>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
-        : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
-          ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
-          : ColumnBuilderSqlType<TBuilder> extends "UUID"
-            ? UuidWhere<ColumnBuilderOptional<TBuilder>>
-            : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? WhereEqNe<
-                  Uint8Array,
-                  ColumnBuilderOptional<TBuilder>,
-                  Membership<Uint8Array | number[]>
-                >
-              : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        : ColumnBuilderSqlType<TBuilder> extends "BIGINT"
+          ? NumberWhere<bigint, ColumnBuilderOptional<TBuilder>>
+          : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
+            ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
+            : ColumnBuilderSqlType<TBuilder> extends "UUID"
+              ? UuidWhere<ColumnBuilderOptional<TBuilder>>
+              : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
                 ? WhereEqNe<
-                    StoredColumnValue<TBuilder>,
+                    Uint8Array,
                     ColumnBuilderOptional<TBuilder>,
-                    Membership<StoredColumnValue<TBuilder>>
+                    Membership<Uint8Array | number[]>
                   >
-                : ColumnBuilderSqlType<TBuilder> extends {
-                      kind: "ENUM";
-                      variants: readonly (infer TVariant extends string)[];
-                    }
-                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
+                : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+                  ? WhereEqNe<
+                      StoredColumnValue<TBuilder>,
+                      ColumnBuilderOptional<TBuilder>,
+                      Membership<StoredColumnValue<TBuilder>>
+                    >
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ENUM";
-                        cases: readonly unknown[];
+                        variants: readonly (infer TVariant extends string)[];
                       }
-                    ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                    ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
                     : ColumnBuilderSqlType<TBuilder> extends {
-                          kind: "ARRAY";
-                          element: infer TElementSql extends SqlType;
+                          kind: "ENUM";
+                          cases: readonly unknown[];
                         }
-                      ? WhereEqNe<
-                          StoredColumnValue<TBuilder>,
-                          ColumnBuilderOptional<TBuilder>,
-                          { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
-                            StoredColumnValue<TBuilder>
+                      ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                      : ColumnBuilderSqlType<TBuilder> extends {
+                            kind: "ARRAY";
+                            element: infer TElementSql extends SqlType;
+                          }
+                        ? WhereEqNe<
+                            StoredColumnValue<TBuilder>,
+                            ColumnBuilderOptional<TBuilder>,
+                            { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
+                              StoredColumnValue<TBuilder>
+                            >
                           >
-                        >
-                      : never;
+                        : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -948,9 +952,10 @@ type BuiltRelation = {
   hops?: string[];
   gather?: BuiltGather;
   union?: {
-    inputs: BuiltRelation[];
+    inputs: BuiltUnionArm[];
   };
 };
+type BuiltUnionArm = { label: string; input: BuiltRelation };
 type BuiltGather = {
   seed?: BuiltRelation;
   max_depth: number;
@@ -965,7 +970,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 }
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
-  return value instanceof Uint8Array ? [...value] : value;
+  if (value instanceof Uint8Array) return [...value];
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
@@ -977,7 +983,10 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.union
       ? {
           union: {
-            inputs: relation.union.inputs.map(cloneBuiltRelation),
+            inputs: relation.union.inputs.map((arm) => ({
+              label: arm.label,
+              input: cloneBuiltRelation(arm.input),
+            })),
           },
         }
       : {}),
@@ -1055,6 +1064,7 @@ export class TypedTableQueryBuilder<
   select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
   ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("select(...)");
     const clone = this._clone<TInclude, NewSelection, TRequired>();
     const first = selection[0];
     clone._select =
@@ -1067,12 +1077,14 @@ export class TypedTableQueryBuilder<
   include<NewInclude extends BuilderInclude<TMeta>>(
     relations: NewInclude,
   ): MetaQueryHandle<TMeta, TInclude & NewInclude, TSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("include(...)");
     const clone = this._clone<TInclude & NewInclude, TSelection, TRequired>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
   requireIncludes(): MetaQueryHandle<TMeta, TInclude, TSelection, true> {
+    this._rejectUnsupportedUnionModifier("requireIncludes()");
     const clone = this._clone<TInclude, TSelection, true>();
     clone._requireIncludes = true;
     return clone;
@@ -1100,6 +1112,7 @@ export class TypedTableQueryBuilder<
   }
 
   includeDeleted(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    this._rejectUnsupportedUnionModifier("includeDeleted()");
     const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._includeDeleted = true;
     return clone;
@@ -1287,6 +1300,14 @@ export class TypedTableQueryBuilder<
     return built;
   }
 
+  private _rejectUnsupportedUnionModifier(modifier: string): void {
+    if (this._unionVal) {
+      throw new Error(
+        `union(...) currently supports only orderBy(...), offset(...), limit(...), and gather(...); ${modifier} is not supported.`,
+      );
+    }
+  }
+
   _serializeRelation(): BuiltRelation {
     if (this._unionVal) {
       return cloneBuiltRelation(this._unionVal);
@@ -1382,9 +1403,22 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
-    union<TTable extends string>(
+    union<TTable extends TableName<TSchema>>(
       relations: readonly RelationSeedQuery<TTable>[],
-    ): TypedTableQueryBuilder<any, any, any, any>;
+    ): TypedTableQueryBuilder<
+      SchemaMeta<TTable, TSchema>,
+      {},
+      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      false
+    >;
+    union<TTable extends TableName<TSchema>>(
+      relations: Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    ): TypedTableQueryBuilder<
+      SchemaMeta<TTable, TSchema>,
+      {},
+      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      false
+    >;
     wasmSchema: WasmSchema;
     /** Authoring metadata retained for local tooling; not a runtime contract. */
     schemaAst?: SchemaAst;
@@ -1665,12 +1699,30 @@ function createAppForTables(
 
   return {
     ...tables,
-    union<TTable extends string>(relations: readonly RelationSeedQuery<TTable>[]) {
-      if (relations.length === 0) {
+    union<TTable extends string>(
+      relations:
+        | readonly RelationSeedQuery<TTable>[]
+        | Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    ) {
+      const arms = Array.isArray(relations)
+        ? relations.map((relation) => ({
+            relation,
+            label: derivedUnionArmLabel(relation._serializeRelation()),
+          }))
+        : Object.entries(relations).map(([label, relation]) => ({ label, relation }));
+      if (arms.length === 0) {
         throw new Error("union(...) requires at least one relation.");
       }
-
-      const first = relations[0]!;
+      const labels = new Set<string>();
+      for (const { label } of arms) {
+        if (!label || utf8ByteLength(label) > 4096 || label.includes("\0") || labels.has(label)) {
+          throw new Error(
+            "union(...) arm labels must be 1..=4096 bytes, NUL-free, and unique; use named arms for duplicate relations.",
+          );
+        }
+        labels.add(label);
+      }
+      const first = arms[0]!.relation;
       const builder = new TypedTableQueryBuilder(
         first._table,
         wasmSchema,
@@ -1679,7 +1731,10 @@ function createAppForTables(
       );
       (builder as any)._unionVal = {
         union: {
-          inputs: relations.map((relation) => relation._serializeRelation() as BuiltRelation),
+          inputs: arms.map(({ label, relation }) => ({
+            label,
+            input: relation._serializeRelation() as BuiltRelation,
+          })),
         },
       };
       return builder;
@@ -1687,6 +1742,78 @@ function createAppForTables(
     wasmSchema,
     schemaAst,
   } as App<Schema<SchemaDefinition>>;
+}
+
+const utf8 = new TextEncoder();
+
+function utf8ByteLength(value: string): number {
+  return utf8.encode(value).byteLength;
+}
+
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function derivedUnionArmLabel(relation: BuiltRelation): string {
+  // Labels are public durable input and therefore have a fixed small bound.
+  // Hash the typed canonical relation instead of embedding JSON: Date, bigint
+  // and byte values have non-JSON semantics, and a large literal must not turn
+  // a valid array union into an overlong inferred label.
+  return `derived:${bytesToHex(blake3(utf8.encode(canonicalUnionRelation(relation))))}`;
+}
+
+function canonicalUnionRelation(relation: BuiltRelation): string {
+  const normalized = {
+    ...(relation.table ? { table: relation.table } : {}),
+    conditions: [...(relation.conditions ?? [])]
+      .map((condition) => canonicalJson(condition))
+      .sort(),
+    hops: relation.hops ?? [],
+    ...(relation.gather ? { gather: relation.gather } : {}),
+    ...(relation.union
+      ? {
+          union: relation.union.inputs
+            .map((arm) => ({ label: arm.label, input: canonicalUnionRelation(arm.input) }))
+            .sort((left, right) => compareUtf8(left.label, right.label)),
+        }
+      : {}),
+  };
+  return canonicalJson(normalized);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+  if (typeof value === "boolean") return `bool:${value}`;
+  if (typeof value === "bigint") return `bigint:${value}`;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? `number:${value}` : `number:${String(value)}`;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "date:invalid" : `date:${value.toISOString()}`;
+  }
+  if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;
+  if (value instanceof ArrayBuffer) return `bytes:${bytesToHex(new Uint8Array(value))}`;
+  if (ArrayBuffer.isView(value)) {
+    return `typed:${value.constructor.name}:${bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))}`;
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return `unknown:${String(value)}`;
 }
 
 export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

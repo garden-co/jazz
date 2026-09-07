@@ -19,6 +19,52 @@ const run = (command, args) => {
   const value = spawnSync(command, args, { cwd: root, encoding: "utf8" });
   return value.status === 0 ? value.stdout.trim() : "unavailable";
 };
+const isPlainMap = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const inventoryStatuses = new Set(["matches", "mismatch"]);
+const selectedInventory = (output) => {
+  let document;
+  try {
+    document = JSON.parse(output);
+  } catch {
+    throw new Error("Nextest inventory did not return JSON");
+  }
+  if (
+    !isPlainMap(document) ||
+    !Number.isInteger(document["test-count"]) ||
+    document["test-count"] < 0
+  )
+    throw new Error("Nextest inventory is missing a non-negative test-count");
+  if (!isPlainMap(document["rust-suites"]))
+    throw new Error("Nextest inventory is missing rust-suites");
+  const all = new Set(),
+    selected = new Set(),
+    ignored = new Set();
+  for (const suite of Object.values(document["rust-suites"])) {
+    if (
+      !isPlainMap(suite) ||
+      typeof suite["binary-id"] !== "string" ||
+      !isPlainMap(suite.testcases)
+    )
+      throw new Error("Nextest inventory has an invalid rust suite");
+    for (const [test, testcase] of Object.entries(suite.testcases)) {
+      if (!isPlainMap(testcase) || !isPlainMap(testcase["filter-match"]))
+        throw new Error("Nextest inventory has an invalid testcase");
+      const status = testcase["filter-match"].status;
+      if (!inventoryStatuses.has(status))
+        throw new Error(`Nextest inventory has unsupported filter status: ${String(status)}`);
+      if (typeof testcase.ignored !== "boolean")
+        throw new Error("Nextest inventory testcase is missing boolean ignored");
+      const id = `${suite["binary-id"]}=${test}`;
+      if (all.has(id)) throw new Error(`Nextest inventory has duplicate testcase: ${id}`);
+      all.add(id);
+      if (testcase.ignored) ignored.add(id);
+      else if (status === "matches") selected.add(id);
+    }
+  }
+  if (all.size !== document["test-count"])
+    throw new Error("Nextest inventory test-count disagrees with testcases");
+  return { selected, ignored };
+};
 const usage = () =>
   console.log(`Usage: node dev/gates/run-rust-tests.mjs [options] -- [cargo test arguments]
 
@@ -29,6 +75,8 @@ Options:
   --nextest-profile N   Nextest profile (default: jazz)
   --receipt PATH        JSON receipt path (default: target/test-receipts/...)
   --require-nextest     fail rather than use the Cargo fallback
+  --require-nextest-test BINARY=TEST
+                       require this exact selected Nextest test (repeatable)
 
 Install the optional faster runner with: cargo install cargo-nextest --locked`);
 
@@ -38,7 +86,8 @@ let shardIndex = 1,
   timeoutSeconds = 900,
   nextestProfile = "jazz",
   receiptPath,
-  requireNextest = false;
+  requireNextest = false,
+  requiredNextestTests = [];
 let split = args.indexOf("--");
 if (args.includes("--help") || args.includes("-h")) {
   usage();
@@ -54,7 +103,16 @@ for (let i = 0; i < options.length; i += 1) {
   else if (option === "--nextest-profile") nextestProfile = options[++i];
   else if (option === "--receipt") receiptPath = options[++i];
   else if (option === "--require-nextest") requireNextest = true;
-  else {
+  else if (option === "--require-nextest-test") {
+    const requirement = options[++i];
+    const separator = requirement?.indexOf("=") ?? -1;
+    if (separator <= 0 || separator === requirement.length - 1)
+      throw new Error("--require-nextest-test must be BINARY=TEST");
+    requiredNextestTests.push({
+      binary: requirement.slice(0, separator),
+      test: requirement.slice(separator + 1),
+    });
+  } else {
     usage();
     throw new Error(`Unknown option: ${option}`);
   }
@@ -80,6 +138,8 @@ const nextestAvailable =
   spawnSync("cargo", ["nextest", "--version"], { cwd: root, stdio: "ignore" }).status === 0;
 if (requireNextest && !nextestAvailable)
   throw new Error("cargo-nextest is required; install: cargo install cargo-nextest --locked");
+if (requiredNextestTests.length && !nextestAvailable)
+  throw new Error("--require-nextest-test requires cargo-nextest");
 const useNextest = nextestAvailable;
 // Nextest's default 2 MiB test-thread stack is smaller than Cargo test's and
 // is insufficient for several broad async integration futures. Keep the
@@ -87,6 +147,26 @@ const useNextest = nextestAvailable;
 const rustMinStack = process.env.RUST_MIN_STACK ?? String(4 * 1024 * 1024);
 if (!useNextest && shardCount !== 1)
   throw new Error("sharding requires cargo-nextest; install: cargo install cargo-nextest --locked");
+if (requiredNextestTests.length) {
+  // The inventory is compiled with precisely the upcoming run's Cargo selection.
+  // This makes removing a target, test, or CI feature a hard failure before the
+  // broad Nextest run can make an accidental coverage deletion look green.
+  const inventory = spawnSync(
+    "cargo",
+    ["nextest", "list", ...cargoArgs, "--message-format", "json"],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (inventory.status !== 0)
+    throw new Error(`Nextest inventory failed: ${inventory.stderr.trim()}`);
+  const { selected, ignored } = selectedInventory(inventory.stdout);
+  for (const { binary, test } of requiredNextestTests) {
+    const id = `${binary}=${test}`;
+    if (selected.has(id)) continue;
+    if (ignored.has(id))
+      throw new Error(`required Nextest test is ignored in selected inventory: ${id}`);
+    throw new Error(`required Nextest test is absent from selected inventory: ${id}`);
+  }
+}
 const command = "cargo";
 const commandArgs = useNextest
   ? [

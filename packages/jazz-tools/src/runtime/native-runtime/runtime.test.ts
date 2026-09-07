@@ -11,7 +11,9 @@ import {
   PostcardWriter,
   queryWithPredicates,
   readNativeSubscriptionDelta,
-  writeDescriptor,
+  writeNativeRowDescriptor,
+  type DescriptorField,
+  type NativeRowDescriptorField,
 } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -60,6 +62,41 @@ const RESERVED_TEST_ISSUERS = [
   ANONYMOUS_JWT_ISSUER,
 ];
 
+/** Test fixtures must state the same producer provenance as Rust bindings. */
+function physicalNativeDescriptor(
+  descriptor: readonly DescriptorField[],
+): NativeRowDescriptorField[] {
+  return descriptor.map((field, index) => {
+    if (field.name === undefined) throw new Error("test native descriptor field requires a name");
+    return {
+      id: index + 1,
+      outputName: field.name.startsWith("_app_") ? field.name.slice("_app_".length) : field.name,
+      valueType: field.valueType,
+      kind: "stored-column",
+    };
+  });
+}
+
+/** Current-row fixtures declare public names independently of carrier spelling. */
+function currentNativeDescriptor(
+  descriptor: readonly DescriptorField[],
+  sourceNames: Readonly<Record<string, string>>,
+): NativeRowDescriptorField[] {
+  return descriptor.map((field, index) => {
+    const name = field.name;
+    if (name === undefined) throw new Error("current fixture field requires a name");
+    const outputName = sourceNames[name];
+    if (outputName !== undefined) {
+      return { id: index + 1, outputName, valueType: field.valueType, kind: "stored-column" };
+    }
+    if (name === "row_uuid") return { name, valueType: field.valueType, kind: "hidden-metadata" };
+    if (["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"].includes(name)) {
+      return { name, valueType: field.valueType, kind: "result-field" };
+    }
+    throw new Error(`current fixture field has no declared publication role: ${name}`);
+  });
+}
+
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
     tables: WasmSchema;
@@ -96,7 +133,12 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 }
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
-  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  if (
+    occurrenceKey.length === 25 &&
+    occurrenceKey[0] === 1 &&
+    occurrenceKey.subarray(17).every((byte) => byte === 0)
+  )
+    return sourceId;
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
@@ -368,7 +410,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -428,7 +470,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -519,7 +561,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.waitForUpstreamServerConnection();
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }), null, "edge"),
+      runtime.query(
+        JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+        null,
+        "edge",
+      ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.[1]).toEqual({ tier: "edge" });
@@ -566,7 +612,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -618,7 +664,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -662,7 +708,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     const read = runtime.query(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "edge",
     );
@@ -2381,6 +2427,40 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual(["prepareQuery", "all"]);
   });
 
+  it("preserves raw subscription literal number spellings in native relation bytes", () => {
+    let relationBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (bytes: Uint8Array, kind: "query" | "relation") => {
+              if (kind === "relation") relationBytes = bytes;
+              return {};
+            },
+            subscribe: () => new ReadableStream(),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.createSubscription(
+      '{"relation_ir":{"Union":{"inputs":[{"label":"source","input":{"Filter":{"input":{"TableScan":{"table":"todos"}},"predicate":{"Cmp":{"left":{"column":"priority"},"op":"Eq","right":{"Literal":1.0}}}}}}]}}}',
+    );
+
+    expect(relationBytes).toBeDefined();
+    expect(Array.from(relationBytes!.slice(-10))).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    ]);
+  });
+
   it("lowers simple Project relation IR while preparing the original subscription query", () => {
     const calls: string[] = [];
     let preparedBytes: Uint8Array | undefined;
@@ -2995,11 +3075,15 @@ describe("NativeRuntimeAdapter server transport", () => {
                       left: { TableScan: { table: "todos" } },
                       right: { TableScan: { table: "todos" } },
                       on: [{ left: { column: "parent_id" }, right: { column: "id" } }],
+                      join_kind: "Inner",
                     },
                   },
+                  columns: [],
                 },
               },
+              frontier_key: { RowId: "Current" },
               bound: { MaxDepth: 3 },
+              dedupe_key: [],
             },
           },
         }),
@@ -3096,7 +3180,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await runtime.query(JSON.stringify({ table: "todos" }));
-    await runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    await runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+    );
     await runtime.query(
       JSON.stringify({
         table: "todos",
@@ -3111,7 +3197,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
     runtime.createSubscription(JSON.stringify({ table: "todos" }));
-    runtime.createSubscription(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }));
+    runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
+    );
     runtime.beginTransaction("mergeable", "backend-read-tx" as never);
     await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -3699,7 +3787,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await expect(
       runtime.query(
-        JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+        JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
         undefined,
         undefined,
         opts,
@@ -4276,7 +4364,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const writer = new PostcardWriter();
     writer.vec((batch) => {
       batch.string("todos");
-      writeDescriptor(batch, descriptor);
+      writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
       batch.vec((row) => {
         row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
         row.bool(false);
@@ -4712,7 +4800,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
       const bytes = new Uint8Array(50);
-      bytes[0] = 2;
+      bytes[0] = 1;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -4743,8 +4831,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:02"),
-      expect.stringContaining("result:02"),
+      expect.stringContaining("result:01"),
+      expect.stringContaining("result:01"),
     ]);
     runtime.close();
   });
@@ -4771,7 +4859,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       null,
       null,
@@ -4835,7 +4923,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
       "global",
       null,
@@ -4885,7 +4973,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -4936,7 +5024,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -4983,7 +5071,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5054,7 +5142,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks, teamsSchema);
     const callbacks: unknown[][] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
       null,
       null,
       null,
@@ -5147,7 +5235,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
-      JSON.stringify({ table: "notes", relation_ir: { Gather: {} } }),
+      JSON.stringify({ table: "notes", relation_ir: supportedGatherRelationIr("notes") }),
       null,
       null,
       null,
@@ -6517,10 +6605,25 @@ function unsupportedJoinRelationIr(): unknown {
     Join: {
       left: { TableScan: { table: "todos" } },
       right: { TableScan: { table: "projects" } },
-      on: {
-        left: { column: "todos.project_id" },
-        right: { column: "projects.id" },
-      },
+      on: [
+        {
+          left: { column: "todos.project_id" },
+          right: { column: "projects.id" },
+        },
+      ],
+      join_kind: "Inner",
+    },
+  };
+}
+
+function supportedGatherRelationIr(table: string): unknown {
+  return {
+    Gather: {
+      seed: { TableScan: { table } },
+      step: { TableScan: { table } },
+      frontier_key: { RowId: "Current" },
+      bound: "Fixpoint",
+      dedupe_key: [{ RowId: "Current" }],
     },
   };
 }
@@ -6728,7 +6831,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   writer.u64(1);
   writer.vec((batch) => {
     batch.string("users");
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
       row.bool(false);
@@ -6738,7 +6841,11 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   return writer.finish();
 }
 
-function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
+function writeRowBatches(
+  writer: PostcardWriter,
+  rows: EncodedTestRow[],
+  fieldKind: "stored-column" | "result-field" = "stored-column",
+): void {
   const rowsByTable = new Map<string, EncodedTestRow[]>();
   for (const row of rows) {
     const tableRows = rowsByTable.get(row.table) ?? [];
@@ -6762,7 +6869,23 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
       ...(hasTxTime ? [{ name: "tx_time", valueType: { tag: 3 } }] : []),
     ];
     batch.string(table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(
+      batch,
+      descriptor.map((field, index) =>
+        fieldKind === "stored-column"
+          ? {
+              id: index + 1,
+              outputName: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            }
+          : {
+              name: field.name,
+              valueType: field.valueType,
+              kind: fieldKind,
+            },
+      ),
+    );
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
@@ -6800,7 +6923,7 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
-  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const keys of [
     delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
     delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
@@ -6824,7 +6947,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
     const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 2;
+    key[0] = 1;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(8, 21, 37);
@@ -6852,8 +6975,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const firstDelta = runtimeDeltaChanges(first.rootDelta);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:02"),
-    expect.stringContaining("result:02"),
+    expect.stringContaining("result:01"),
+    expect.stringContaining("result:01"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
@@ -7043,7 +7166,10 @@ function encodeUserWrappedSubscriptionDelta(row: {
   const delta = new PostcardWriter();
   delta.vec((batch) => {
     batch.string(row.table);
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(
+      batch,
+      currentNativeDescriptor(descriptor, { user_title: "title", user_note: "note" }),
+    );
     batch.vec((encodedRow) => {
       encodedRow.bytes(row.rowId);
       encodedRow.bool(false);
@@ -7060,7 +7186,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
-  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
+  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec((index) => index.u64(0), 1);
@@ -7093,8 +7219,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writeTeamGatherBatches(writer, updated, descriptor);
   writer.vec(() => undefined, 0);
   for (const keys of [
-    delta.addedOccurrenceKeys ?? added.map((row) => Uint8Array.from([1, ...row.rowId])),
-    delta.updatedOccurrenceKeys ?? updated.map((row) => Uint8Array.from([1, ...row.rowId])),
+    delta.addedOccurrenceKeys ??
+      added.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+    delta.updatedOccurrenceKeys ??
+      updated.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
     [],
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
@@ -7114,7 +7242,14 @@ function writeTeamGatherBatches(
   writer.vec(
     (batch) => {
       batch.string("teams");
-      writeDescriptor(batch, descriptor);
+      writeNativeRowDescriptor(
+        batch,
+        currentNativeDescriptor(descriptor, {
+          user_name: "name",
+          user_org_id: "org_id",
+          user_parent_id: "parent_id",
+        }),
+      );
       batch.vec((row, index) => {
         const source = rows[index]!;
         row.bytes(source.rowId);
@@ -7142,7 +7277,7 @@ function writeTeamGatherBatches(
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
   const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-  key[0] = 2;
+  key[0] = 1;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);
   key.fill(2, 21, 37);
@@ -7172,7 +7307,7 @@ function encodeArrayRows(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec((batch) => {
     batch.string("arrays");
-    writeDescriptor(batch, descriptor);
+    writeNativeRowDescriptor(batch, physicalNativeDescriptor(descriptor));
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));
       row.bool(false);

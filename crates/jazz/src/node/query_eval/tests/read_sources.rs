@@ -31,6 +31,11 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
         &BTreeMap::from([("title".to_owned(), Value::String("inline".to_owned()))]),
     )
     .unwrap();
+    assert_eq!(
+        candidate.cell(table, "title"),
+        Some(Value::String("inline".to_owned())),
+        "app-facing positional rows retain their logical column identity when reused as sources",
+    );
 
     let (_graph, descriptor, metadata) = inline_current_graph_with_source_metadata_for_test(
         table,

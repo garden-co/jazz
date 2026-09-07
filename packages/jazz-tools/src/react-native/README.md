@@ -54,3 +54,21 @@ Useful pointers:
 - Tracking issue: [#1756](https://github.com/garden-co/jazz/issues/1756).
 - Owning spec: `crates/jazz/SPEC/13_db_api.md`, open questions for binding
   storage and React Native runtime reuse.
+
+Native authentication is admitted by trusted platform code. Pass only the
+opaque `nativeRelay.capability` to `createDb`; the public session identity is
+read back from native admission, without returning a bearer or private claims.
+Caller `cookieSession` metadata cannot replace that identity. `updateAuthToken`
+is rejected for attached native foregrounds. To switch accounts, trusted
+platform code revokes every capability for the old scope, admits the new
+scope, and supplies its new capability to a newly created Db. Revocation
+invalidates old foregrounds and pending native operations. `db.logout()` closes
+the UI foreground; sign out and revoke the native session separately through
+your platform auth integration. Storage retention/deletion is a separate choice.
+
+For an upstream admitted by native code, `await db.disconnect()` stops the
+native socket before publishing explicit offline state. `await db.reconnect()`
+restarts it with native-owned credentials. These calls work before the first
+query and require no JavaScript server URL. Only explicit disconnect permits
+`ReadTier.RemoteIfPossible` to fall back locally; a transient socket failure
+does not grant that fallback.

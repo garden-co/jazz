@@ -86,6 +86,18 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
+#### Relation-query Postcard grammar in peer and binding envelopes
+
+Where a peer `ShapeAst` or binding `Query.relation`/`ShapeBody::Relation`
+contains a relation subtree, it uses the one typed Postcard relation-query
+grammar specified in [§19, Relation-query Postcard carrier](19_native_relays.md#relation-query-postcard-carrier).
+The direct native relation-read `WireRelationQuery` uses that same grammar; no
+WireFrame- or binding-specific relation subcodec exists. The committed
+`fixtures/relation_query_postcard.json` corpus pins its semantic-to-byte cases,
+the Rust receipt rejects noncanonical payloads, and TypeScript independently
+encodes the corpus and rejects malformed relation input. It is compatibility
+evidence, not a migration input.
+
 **Decision, 2026-08-28 — the sole wire protocol is v1.** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
@@ -242,6 +254,19 @@ then verifies that digest before decompression or semantic decode. The resource
 limits and expiry/deduplication rules are normative in
 `SPEC/13_transport_message_fragmentation.md`.
 
+JSON version cells use the schema-derived `StoredScalar(Json)` descriptor,
+including inline cells. This is the same existing scalar codec used by local
+physical JSON columns. The pre-freeze correction tracked with #2461 changes
+the serialized `VersionRecord` descriptor for inline JSON, but leaves its raw
+inline scalar bytes unchanged; the old `String` descriptor could not encode
+indirect JSON at all. Receivers reject old inline JSON records whose descriptor
+no longer matches the authored schema. This correction must be shared by the
+contained and typed identity candidates before freezing v1; it introduces no
+new durable storage encoding or compatibility fallback.
+`fixtures/large_json_wire_v1.json` pins the old inline descriptor and the corrected
+inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
+and rejection of the old descriptor before storage.
+
 The wire-protocol v1 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
@@ -311,6 +336,54 @@ view-scoped bundle carries only the row/version witnesses admitted by that
 selected view and MUST redact `tx.n_total_writes` to `versions.len()`. It never
 establishes complete-payload coverage, even when those numbers happen to equal
 the authored transaction's true cardinality.
+
+### 8.1.2 WebSocket admission prelude (SPEC08)
+
+Before the binary `WireFrame` carrier begins, a client sends exactly one
+UTF-8 JSON object as its first WebSocket message. The server accepts that
+prelude as either a WebSocket text message or a binary message containing the
+same UTF-8 bytes. It then requires one binary WebSocket message that decodes to
+exactly one `WireFrame::Hello`. The ordinary writer form is a complete
+postcard `Vec<Vec<u8>>` singleton batch; the route also accepts its documented
+complete raw-postcard `WireFrame` handshake form. The prelude and that first
+wire message each have the ordinary two-second handshake read deadline. Only
+the first message is parsed as a prelude; later text messages have no admission
+effect.
+
+The prelude object has these server-owned fields:
+
+- `peer_identity`: required canonical `AuthorSubject` JSON string.
+- `auth`: required `AuthConfig` object. Its current fields are `jwt_token`,
+  `backend_secret`, `admin_secret`, and `backend_session`.
+- `bootstrap_catalogue`: optional boolean; omission means `false`.
+- `requested_link`: optional string enum; omission means `ordinary_session`.
+  The only admitted values are `ordinary_session` and
+  `scope_isolated_client_relay`. The latter produces its scoped-link admission
+  only for an authenticated session that negotiated
+  `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`; a session missing that feature
+  receives `UnsupportedFeature/Never`. Admin and backend credentials retain
+  their ordinary-link admission when they send this client-only request.
+
+The JSON object is an evolution envelope, not an authority grant. Unknown
+top-level fields and unknown fields nested in `auth` are ignored. An unknown
+`requested_link` is rejected, because it requests an authority-bearing link
+mode. Missing required fields, non-UTF-8 bytes, malformed JSON, a trailing JSON
+suffix, or an invalid known field are rejected before admission.
+
+The native Rust writer serializes only `peer_identity`, `auth`, and a true
+`bootstrap_catalogue`; its optional `AuthConfig` members currently serialize as
+explicit JSON nulls. The TypeScript native-runtime writer preserves its
+existing top-level auth and `sub` compatibility fields while also writing the
+nested `auth` object; those extra top-level fields are ignored by the server.
+Neither representation is a second protocol nor an authorization alias. The
+shared `jazz-websocket-prelude-v1` fixture pins the exact writer strings and
+server parse result.
+
+Axum applies a 2 MiB ceiling to both inbound WebSocket frame and message size,
+including the initial text or binary prelude. An exactly 2 MiB valid prelude
+may proceed to the wire Hello; a valid prelude of 2 MiB plus one byte must not
+reach admission. This is the physical carrier ceiling, not a reduced logical
+sync or catalogue limit.
 
 ### 8.2 Upstream: commit units
 

@@ -2,7 +2,7 @@
 
 This is the first-party **Expo development-build / bare-host** acceptance app for the native relay. It is intentionally not an Expo Go test: native relay code and the trusted fixture must be compiled into the Android APK or iOS simulator app.
 
-The host-only topology receipt is `cargo test -p jazz-native-relay tests::private_session_edge_core_write_survives_worker_and_relay_restart -- --exact`. It continuously drives a local Core and Edge, mints a runtime JWT, authenticates the native worker through Edge, and verifies SQLite readback after relay/worker recreation. It establishes host readiness only; it is not an Android device or emulator receipt. Android's driver starts the same local Edge/Core harness and supplies its endpoint plus ephemeral bearer inputs directly to the compiled native fixture for its two launches.
+The host-only topology receipt is `cargo test -p jazz-native-relay tests::private_session_edge_core_write_survives_worker_and_relay_restart -- --exact`. It continuously drives a local Core and Edge, mints a runtime JWT, authenticates the native worker through Edge, and verifies SQLite readback after relay/worker recreation. The companion `tests::private_session_edge_core_write_survives_offline_relay_restart` shuts down Edge/Core before reopening the same SQLite scope. These establish host readiness only; it is not an Android device or emulator receipt. Both platform drivers start the same local Edge/Core harness and supply its endpoint plus ephemeral bearer inputs directly to the compiled native fixture for their two launches.
 
 The app has one durable native relay and a scenario plan requiring two UI peers. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages automatically on launch. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. Linked relay admission, foreground JSI byte-ABI execution, foreground mergeable/exclusive transaction commands, local A→B subscription observation, logout revocation, trusted A→B auth-scope switching, and native path-selected data isolation are implemented receipts. The transaction receipt sends canonical fixture cell bytes through JSI to Rust for insert/update/upsert/delete, checks commit `txId`, rollback, and terminal/cross-foreground handle rejection. The local-write-subscription receipt opens two foreground aliases in **one installed JSI runtime** against one admitted relay, starts B's subscription, commits A's fixed row, and requires B to observe the Rust-produced binding delta. It is not a proof of two physical JSI runtimes: that installed-device scenario remains explicit acceptance debt. The isolation receipt makes the two native-selected auth scopes write distinct fixed rows, then proves each foreground can materialize only its own row after trusted native A→B replacement. The device driver terminates the full process and a verification launch repeats both directions through a fresh JS bridge and native relay owner. JavaScript never selects a scope, path, schema, identity, or row payload.
 
@@ -42,7 +42,8 @@ The Expo config plugin copies and registers the Android template during prebuild
 - `reopen`: the seed client writes through the public API, shuts down, and a
   fresh public foreground first reads that run-bound row through the live
   persistent relay. The drivers then deliberately terminate the full
-  Android/iOS app process and run a verification launch, where a newly
+  Android/iOS app process, stop upstream, prove its endpoint refuses connections,
+  and run a verification launch, where a newly
   admitted public foreground must read the same row from the recreated relay
   and SQLite owner.
 - `scope-isolation`: persists canonical A and B fixture rows through separate installed JSI foregrounds. Trusted Android/iOS code alone replaces A with B (whose SQLite path is chosen in compiled native code); both directions must reject the other scope's row, both before and after a full process restart. It never exposes a generic host-reset or path-selection API to JavaScript.
@@ -80,3 +81,28 @@ Neither is a host-supplied intent echo. App-scoped Android IDs and adb transport
 serials are intentionally not used. Bootstrap checks pinned SHA-256 values for
 the Temurin, Android command-line-tools, and NDK archives and fails closed on a
 corrupt pre-existing cache archive.
+
+## Core observation handshake (#2291)
+
+Before the seed foreground shuts down, a fixture-only native HTTP request waits
+for the host's independent read-only client connected directly to Core to see
+`high-level-foreground-row:<run nonce>`. The host validates platform, device
+identity, installed-artifact hash, and run nonce before acknowledging. The
+request has a bounded timeout and carries no session bearer. This control
+channel never writes database data and does not change the public RN
+`write.wait({ tier: "local" })` contract.
+
+Each driver separately requires the Core observation before killing the seed
+process, then stops the Edge/Core harness and requires a refused TCP connection
+to its Edge port before launching verification. The endpoint and native session
+scope inputs stay identical, so the reopened SQLite path is unchanged. The
+`JAZZ_DEVICE_REOPEN_PROVENANCE` line records that ordering. The fresh public
+foreground waits for its run-bound marker subscription before reading locally:
+LocalFirst initially permits empty knowledge while the native relay publishes.
+This strengthens the previous live-upstream restart receipt to offline SQLite
+persistence; remote refetch cannot supply a lost store. Both
+success and failure clean up the host control listener and harness process.
+Missing, wrong-run and wrong-source observations, as well as foreign native
+identity, are planted negatives in the source contract tests. These source
+checks do not establish Android or iOS device execution: exact-head installed
+app jobs remain required. Multi-root fan-out stays in #2532.

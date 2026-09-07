@@ -106,10 +106,7 @@ fn maintained_multi_index_query_tracks_either_index_transition() {
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
-        removed
-            .into_iter()
-            .map(|row| row.row_uuid)
-            .collect::<Vec<_>>(),
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
         vec![inactive]
     );
 }
@@ -803,6 +800,131 @@ fn relation_query_one_shot_hop_uses_unified_query_path() {
 
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
+}
+
+/// Internal relation-IR construction is necessary here because the Rust DB
+/// integration surface is the public relation-query API exercised by WASM and
+/// NAPI; the assertion is the user-visible one-shot membership result.
+#[test]
+fn relation_union_all_preserves_labeled_same_row_derivations() {
+    let schema = relation_schema();
+    let db = open_db(0xca, AuthorSubject::for_test_bytes([0xca; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("alice".to_owned())),
+            },
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![alice, alice]);
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added: opened, .. } =
+        subscription.try_next_event().expect("opened event")
+    else {
+        panic!("subscription opening must be a delta")
+    };
+    assert_eq!(
+        opened
+            .iter()
+            .map(|output| output.row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(opened[0].occurrence_id, opened[1].occurrence_id);
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, _, removed) = delta_rows(subscription.try_next_event().expect("removal event"));
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(removed[0].occurrence_id, removed[1].occurrence_id);
+
+    // Global order/window stays outside the UNION ALL arms. Rows from the
+    // same physical source tie on the user order and UUID, so the semantic
+    // arm carrier is the final deterministic page key.
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let windowed_query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                offset: 1,
+            }),
+            limit: 1,
+        },
+    };
+    let mut windowed =
+        block_on(db.subscribe_relation_query(&windowed_query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta {
+        added: windowed_opened,
+        ..
+    } = windowed.try_next_event().expect("windowed opening event")
+    else {
+        panic!("windowed subscription opening must be a delta");
+    };
+    assert_eq!(windowed_opened.len(), 1);
+    assert_eq!(
+        windowed_opened[0].occurrence_id.union_arms(),
+        &[(0, "second".to_owned())],
+        "the offset crosses the first physical-row occurrence into the second union arm",
+    );
 }
 
 #[test]
@@ -2600,6 +2722,129 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
         ),
         vec![write.row_uuid()]
     );
+}
+
+#[test]
+fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joined_rows() {
+    use crate::binding_codec::{
+        RowDescriptorFieldName, encode_relation_snapshot, encode_rows, row_batches,
+    };
+    let schema = relation_schema();
+    let db = open_db(0x91, AuthorSubject::for_test_bytes([0x91; 16]), &schema);
+    for (table, id, fields) in [
+        (
+            "users",
+            0xa1,
+            BTreeMap::from([("name".to_owned(), Value::String("reader".to_owned()))]),
+        ),
+        (
+            "todos",
+            0x11,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("task".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        ),
+    ] {
+        db.insert(
+            table,
+            fields,
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let current = prepared_all(&db, &Query::from("todos"), ReadOpts::default());
+    let current_batches = row_batches(&current).expect("ordinary producer resolves physical IDs");
+    let title_id = current_batches[0]
+        .descriptor
+        .iter()
+        .find_map(|field| match field.name {
+            RowDescriptorFieldName::StoredColumn {
+                id,
+                output_name: "title",
+            } => Some(id),
+            _ => None,
+        })
+        .expect("title has a stored binding");
+    let grouped = prepared_all(
+        &db,
+        &Query::from("todos").count().group_by("title"),
+        ReadOpts::default(),
+    );
+    let grouped_batches =
+        row_batches(&grouped).expect("grouped source binding preserves catalogue ID");
+    assert!(
+        grouped_batches[0]
+            .descriptor
+            .iter()
+            .any(|field| matches!(field.name,
+        RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id))
+    );
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::HiddenMetadata { name: "tx_time" }
+    )));
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name: "$createdAt" }
+    )));
+    for query in [
+        Query::from("todos").count().group_by("title"),
+        Query::from("todos").select(["title", "$createdAt", "$updatedBy"]),
+        Query::from("todos").aggregate([crate::query::Aggregate::count().alias("schema_version")]),
+        Query::from("users").array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id")),
+        Query::from("users").join_via_column("todos", "owner_id", "id", []),
+    ] {
+        let rows = prepared_all(&db, &query, ReadOpts::default());
+        assert!(!rows.is_empty());
+        assert!(
+            !encode_rows(&rows)
+                .expect("all returned rows have finalized native bindings")
+                .is_empty()
+        );
+        if let Some(aggregate) = &query.aggregate {
+            let batches = row_batches(&rows).unwrap();
+            if aggregate.group_by.is_some() {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                    RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id)));
+            }
+            assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                RowDescriptorFieldName::ResultField { name } if name == aggregate.aggregates[0].alias)));
+        }
+        if query.table == "todos" && query.aggregate.is_none() {
+            let batches = row_batches(&rows).unwrap();
+            for name in ["$createdAt", "$updatedBy"] {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name, RowDescriptorFieldName::ResultField { name: published } if published == name)), "projected public provenance {name} remains visible");
+            }
+        }
+        let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+        let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+        assert!(!snapshot.rows.is_empty());
+        if let Some(aggregate) = &query.aggregate {
+            assert_eq!(snapshot.rows.len(), 1);
+            assert_eq!(
+                snapshot.rows[0].application_field(&aggregate.aggregates[0].alias),
+                Some(Value::U64(1)),
+                "aggregate reset preserves the computed count",
+            );
+            if aggregate.group_by.is_some() {
+                assert!(snapshot.rows[0].application_field("title").is_some());
+                assert_eq!(
+                    snapshot.rows[0].application_field("title"),
+                    Some(Value::String("task".to_owned()))
+                );
+            }
+        }
+
+        assert!(
+            !encode_relation_snapshot(&snapshot)
+                .expect("reset producer retains finalized bindings")
+                .is_empty()
+        );
+    }
 }
 
 /// Alice's admitted team-A subscription keeps its claims when a live catalogue

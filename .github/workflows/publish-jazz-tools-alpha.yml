@@ -29,6 +29,7 @@ on:
         type: string
 
 env:
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
@@ -635,10 +636,7 @@ jobs:
           TMP_DIR=$(mktemp -d)
           pnpm --filter jazz-napi pack --pack-destination "${TMP_DIR}"
           TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
-          tar -tf "${TARBALL}" | grep -q "package/index.js"
-          tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64","@garden-co/jazz-napi-win32-x64-msvc"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
-          tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\((["\x27])((?!\.\/)jazz-napi-[^"\x27)]+)\1\)/g)].map((m)=>m[2]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
+          node dev/artifacts/verify-packed-napi.mjs "${TARBALL}"
 
       - name: Verify packed jazz-rn relay payload
         env: *release-artifact-source-revision-env

@@ -3,7 +3,7 @@
 // and does not add a low-level helper to the public React Native API.
 import {
   decodeRecordBytes,
-  fieldIndex,
+  nativeRowDescriptorPublicName,
   PostcardReader,
   readNativeSubscriptionDelta,
 } from "jazz-tools/_dev/native-binding-codec";
@@ -32,12 +32,10 @@ export function nativeSubscriptionDeltaHasFieldBytes(
 ): boolean {
   const delta = readNativeSubscriptionDelta(new PostcardReader(payload));
   return [...delta.added, ...delta.updated].some((batch) => {
-    let index: number;
-    try {
-      index = fieldIndex(batch.descriptor, field);
-    } catch {
-      return false;
-    }
+    const index = batch.descriptor.findIndex(
+      (entry) => nativeRowDescriptorPublicName(entry) === field,
+    );
+    if (index < 0) return false;
     return batch.rows.some((row) =>
       sameBytes(decodeRecordBytes(batch.descriptor, row.raw, index), expected),
     );

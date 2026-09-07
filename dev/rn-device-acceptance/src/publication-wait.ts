@@ -1,15 +1,22 @@
-const PUBLICATION_TURNS = 8;
+const PUBLICATION_DEADLINE_MS = 30_000;
 
 function yieldEventLoopTurn(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Give a native CallInvoker wake a bounded number of event-loop turns. */
+/**
+ * Keep servicing native CallInvoker wakes until a concrete subscription
+ * marker arrives or the device receipt's bounded propagation allowance ends.
+ * This waits for the marker itself, never a nominal number of relay turns or
+ * an empty LocalFirst opening.
+ */
 export async function waitForPublication(
   observed: () => boolean,
   yieldTurn: () => Promise<void> = yieldEventLoopTurn,
+  now: () => number = Date.now,
 ): Promise<boolean> {
-  for (let attempt = 0; attempt < PUBLICATION_TURNS && !observed(); attempt += 1) {
+  const deadline = now() + PUBLICATION_DEADLINE_MS;
+  while (!observed() && now() < deadline) {
     await yieldTurn();
   }
   return observed();

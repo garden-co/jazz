@@ -811,6 +811,24 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     client
 }
 
+/// Dynamic edges admit downstream clients only after their authoritative
+/// catalogue has bootstrapped. The testkit helper retries that explicit
+/// `NotReady/Later` bootstrap response and then proves the edge can serve the
+/// table; any other connection failure remains terminal.
+async fn connect_user_after_catalogue_bootstrap(
+    server: &JazzServer,
+    schema: Schema,
+    user_id: &str,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema)
+        .with_user_id(user_id)
+        .ready_on("todos", Duration::from_secs(30))
+        .connect_after_retry_later(Duration::from_secs(30))
+        .await
+}
+
 async fn wait_for_row(
     client: &JazzClient,
     tier: DurabilityTier,
@@ -1309,9 +1327,13 @@ async fn core_write_reaches_clients_on_both_edges() {
                 .start()
                 .await;
 
-            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us").await;
-            let bob = connect_user(&edge_eu, schema.clone(), "bob-edge-eu").await;
-            let carol = connect_user(&core, schema, "carol-core").await;
+            let alice =
+                connect_user_after_catalogue_bootstrap(&edge_us, schema.clone(), "alice-edge-us")
+                    .await;
+            let bob =
+                connect_user_after_catalogue_bootstrap(&edge_eu, schema.clone(), "bob-edge-eu")
+                    .await;
+            let carol = connect_user_after_catalogue_bootstrap(&core, schema, "carol-core").await;
             let mut alice_stream = alice
                 .subscribe(todo_query())
                 .await

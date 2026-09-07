@@ -84,6 +84,7 @@ function fixture(label, wasmFingerprint, napiFingerprint) {
   const napiManifest = {
     kind: "napi",
     profile: "release",
+    features: "default",
     nativeArtifactFingerprint: napiFingerprint,
     artifacts: [{ file: "binding.node", sha256: hash(napiBytes) }],
   };
@@ -651,6 +652,29 @@ test("Vite serves the validated snapshot without allowing paths outside the work
     assert.equal(denied.status, 403);
   } finally {
     await server?.close();
+    removeFixture(root);
+  }
+});
+
+test("consumer rejects an RN bridge feature-mode mismatch", () => {
+  const root = fixture("rn-recipe", "a".repeat(64), "b".repeat(64));
+  const previous = process.env.JAZZ_RN_TEST_BRIDGE;
+  try {
+    delete process.env.JAZZ_RN_TEST_BRIDGE;
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    assert.doesNotThrow(() => correctnessArtifactConsumerEnvironment(root));
+    process.env.JAZZ_RN_TEST_BRIDGE = "1";
+    assert.throws(() => correctnessArtifactConsumerEnvironment(root), /feature recipe differs/);
+  } finally {
+    if (previous === undefined) delete process.env.JAZZ_RN_TEST_BRIDGE;
+    else process.env.JAZZ_RN_TEST_BRIDGE = previous;
     removeFixture(root);
   }
 });

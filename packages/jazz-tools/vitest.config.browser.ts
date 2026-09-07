@@ -1,3 +1,8 @@
+import {
+  liveEdgeBackendOpen,
+  liveEdgeBackendInsert,
+  liveEdgeBackendClose,
+} from "./tests/browser/live-edge-replay-node.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
@@ -106,6 +111,18 @@ export default defineConfig({
         },
       ],
       commands: {
+        writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {
+          const output = process.env.JAZZ_BROWSER_CORPUS_OUT;
+          if (!output) return null;
+          // A reviewed source run exports to a new external candidate, never
+          // overwriting a checked-in or previously produced physical receipt.
+          writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, { flag: "wx" });
+          return output;
+        },
+        liveEdgeBackendOpen: async (_context, info) => liveEdgeBackendOpen(info),
+        liveEdgeBackendInsert: async (_context, appId, seed, title) =>
+          liveEdgeBackendInsert(appId, seed, title),
+        liveEdgeBackendClose: async (_context, appId) => liveEdgeBackendClose(appId),
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },

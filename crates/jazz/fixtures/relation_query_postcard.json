@@ -1,0 +1,426 @@
+{
+  "fixture_set": "jazz-relation-query-postcard-v1",
+  "cases": [
+    {
+      "name": "table_scan",
+      "relation": {
+        "rel": {
+          "TableScan": {
+            "table": "t"
+          }
+        }
+      },
+      "postcard_hex": "00017400"
+    },
+    {
+      "name": "filter",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": "True"
+          }
+        }
+      },
+      "postcard_hex": "010001740009"
+    },
+    {
+      "name": "predicate_cmp_literal",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Cmp": {
+                "left": {
+                  "column": "c"
+                },
+                "op": "Eq",
+                "right": {
+                  "Literal": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "01000174000000016300000202"
+    },
+    {
+      "name": "predicate_cmp_float_literal",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Cmp": {
+                "left": {
+                  "column": "c"
+                },
+                "op": "Eq",
+                "right": {
+                  "Literal": 1.5
+                }
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "01000174000000016300000480808080808080fc3f"
+    },
+    {
+      "name": "predicate_cmp_nested_unicode_literal",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Cmp": {
+                "left": {
+                  "column": "c"
+                },
+                "op": "Eq",
+                "right": {
+                  "Literal": {
+                    "é": [null, true, -4, 1.5],
+                    "猫": {
+                      "nested": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "0100017400000001630000070202c3a9060400010102070480808080808080fc3f03e78cab0701066e65737465640100"
+    },
+    {
+      "name": "predicate_nulls",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "And": [
+                {
+                  "IsNull": {
+                    "column": {
+                      "column": "a"
+                    }
+                  }
+                },
+                {
+                  "IsNotNull": {
+                    "column": {
+                      "column": "b"
+                    }
+                  }
+                },
+                "False"
+              ]
+            }
+          }
+        }
+      },
+      "postcard_hex": "0100017400060301000161020001620a"
+    },
+    {
+      "name": "predicate_in_values",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "In": {
+                "left": {
+                  "column": "c"
+                },
+                "values": [
+                  {
+                    "Literal": "x"
+                  },
+                  {
+                    "Param": "p"
+                  },
+                  {
+                    "SessionRef": ["actor"]
+                  },
+                  {
+                    "OuterColumn": {
+                      "column": "o"
+                    }
+                  },
+                  {
+                    "FrontierColumn": {
+                      "column": "f"
+                    }
+                  },
+                  {
+                    "RowId": "Outer"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "01000174000300016306000501780101700201056163746f720300016f040001660501"
+    },
+    {
+      "name": "predicate_contains_enum_or_not",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "Or": [
+                {
+                  "Contains": {
+                    "left": {
+                      "column": "tags"
+                    },
+                    "right": {
+                      "Literal": "x"
+                    }
+                  }
+                },
+                {
+                  "EnumMatch": {
+                    "case": "A",
+                    "column": {
+                      "column": "kind"
+                    },
+                    "payload": "True"
+                  }
+                },
+                {
+                  "Not": "False"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "postcard_hex": "0100017400070304000474616773000501780500046b696e64014109080a"
+    },
+    {
+      "name": "union",
+      "relation": {
+        "rel": {
+          "Union": {
+            "inputs": [
+              {
+                "input": {
+                  "TableScan": {
+                    "table": "a"
+                  }
+                },
+                "label": "a"
+              },
+              {
+                "input": {
+                  "TableScan": {
+                    "table": "b"
+                  }
+                },
+                "label": "b"
+              }
+            ]
+          }
+        }
+      },
+      "postcard_hex": "0202016100016100016200016200"
+    },
+    {
+      "name": "join",
+      "relation": {
+        "rel": {
+          "Join": {
+            "join_kind": "Inner",
+            "left": {
+              "TableScan": {
+                "table": "a"
+              }
+            },
+            "on": [
+              {
+                "left": {
+                  "column": "id"
+                },
+                "right": {
+                  "column": "id"
+                }
+              }
+            ],
+            "right": {
+              "TableScan": {
+                "table": "b"
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "03000161000001620001000269640002696400"
+    },
+    {
+      "name": "project",
+      "relation": {
+        "rel": {
+          "Project": {
+            "columns": [
+              {
+                "alias": "id",
+                "expr": {
+                  "Column": {
+                    "column": "id"
+                  }
+                }
+              }
+            ],
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "0400017400010269640000026964"
+    },
+    {
+      "name": "gather",
+      "relation": {
+        "rel": {
+          "Gather": {
+            "bound": {
+              "MaxDepth": 1
+            },
+            "dedupe_key": [
+              {
+                "RowId": "Current"
+              }
+            ],
+            "frontier_key": {
+              "RowId": "Current"
+            },
+            "seed": {
+              "TableScan": {
+                "table": "seed"
+              }
+            },
+            "step": {
+              "TableScan": {
+                "table": "step"
+              }
+            }
+          }
+        }
+      },
+      "postcard_hex": "05000473656564000004737465700001000101010100"
+    },
+    {
+      "name": "distinct",
+      "relation": {
+        "rel": {
+          "Distinct": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "key": [
+              {
+                "RowId": "Current"
+              }
+            ]
+          }
+        }
+      },
+      "postcard_hex": "0600017400010100"
+    },
+    {
+      "name": "order_by",
+      "relation": {
+        "rel": {
+          "OrderBy": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "terms": [
+              {
+                "column": {
+                  "column": "id"
+                },
+                "direction": "Asc"
+              }
+            ]
+          }
+        }
+      },
+      "postcard_hex": "0700017400010002696400"
+    },
+    {
+      "name": "offset",
+      "relation": {
+        "rel": {
+          "Offset": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "offset": 2
+          }
+        }
+      },
+      "postcard_hex": "080001740002"
+    },
+    {
+      "name": "limit",
+      "relation": {
+        "rel": {
+          "Limit": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "limit": 3
+          }
+        }
+      },
+      "postcard_hex": "090001740003"
+    }
+  ]
+}

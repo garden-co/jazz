@@ -673,7 +673,17 @@ impl IvmRuntime {
                     .collect::<Result<Vec<_>, _>>()?;
                 let group_key = group_field_indices
                     .iter()
-                    .map(|field| Ok(PlanExpr::Field(field_name_at(&input_output, *field)?)))
+                    .map(|field| {
+                        let carrier = FieldRef::stored_name(field_name_at(&input_output, *field)?);
+                        if resolve_field_ref(&input_output, &carrier)? != *field {
+                            return Err(IvmRuntimeError::AmbiguousGraphFieldReference(
+                                carrier.display_name(),
+                            ));
+                        }
+                        // Aggregate evaluation still consumes PlanExpr names.
+                        // Only use a spelling that resolves back to this group slot.
+                        Ok(PlanExpr::Field(field_ref_name(&input_output, &carrier)?))
+                    })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 let aggregates = aggregates
                     .iter()
@@ -755,6 +765,7 @@ impl IvmRuntime {
                                         ProjectionExpr {
                                             expression,
                                             output_name: Some(field.output_name.clone()),
+                                            output_identity: field.output_identity.clone(),
                                         }
                                     })
                                 })
@@ -1461,8 +1472,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(column)
+                super::record_projection::resolve_field_name(&table_descriptor, column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1474,8 +1484,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(&column.column)
+                super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1513,8 +1522,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(column)
+                super::record_projection::resolve_field_name(&table_descriptor, column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1526,8 +1534,7 @@ impl IvmRuntime {
             .columns
             .iter()
             .map(|column| {
-                table_descriptor
-                    .field_index(&column.column)
+                super::record_projection::resolve_field_name(&table_descriptor, &column.column)
                     .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(column.column.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;

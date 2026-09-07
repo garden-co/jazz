@@ -21,6 +21,8 @@ blake3 = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+stacker = "0.1"
+libc = "0.2"
 tempfile = "3.27.0"
 base64 = "0.22"
 jazz-server = { path = "../jazz-server", features = ["test"] }

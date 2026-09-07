@@ -153,8 +153,9 @@ fn reachable_root_reference_field(source: &ResolvedSource, field: &str) -> Strin
     if source
         .row_shape
         .descriptor
-        .field_index(&user_field)
-        .is_some()
+        .fields()
+        .iter()
+        .any(|candidate| candidate.name.as_deref() == Some(user_field.as_str()))
         || field != "id"
     {
         user_field
@@ -467,13 +468,21 @@ pub(super) fn flat_join_contribution_membership_graph(
                 .unwrap_or(1),
         );
     }
-    Ok(
-        GraphBuilder::join(visible_root, relation_graph, [visible_key], [relation_key])
-            .project_fields(project_join_contribution_fields_with_root_routes(
-                contribution_source,
-                route_fields,
-            )),
+    // Public projections retain authored nullability even when the query join
+    // used an unwrapped key. The contributor equality uses the declared public
+    // key type to remove those wrappers on this private frontier only.
+    let (visible_graph, _) =
+        unwrap_nullable_layers(visible_root, visible_key.name.clone(), &visible_key.ty);
+    Ok(GraphBuilder::join(
+        visible_graph,
+        relation_graph,
+        [visible_key.name],
+        [relation_key],
     )
+    .project_fields(project_join_contribution_fields_with_root_routes(
+        contribution_source,
+        route_fields,
+    )))
 }
 
 /// A contributor is selected by joining its relation to the authority's
@@ -509,7 +518,7 @@ pub(super) fn project_join_contribution_fields_with_root_routes(
 fn flat_join_visible_field(
     value: &NormalizedValueRef,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
-) -> Result<String, UnsupportedReason> {
+) -> Result<TypedOutputField, UnsupportedReason> {
     // The rendered flat root is the compiler-owned `flat_join:output`
     // projection. Its field names intentionally preserve the query's public
     // aliases (`root.title`, `peer.title`, …), which cannot be recovered from
@@ -527,7 +536,7 @@ fn flat_join_visible_field(
     columns
         .iter()
         .find(|column| &column.value == value)
-        .map(|column| column.output.name.clone())
+        .map(|column| column.output.clone())
         .ok_or_else(|| {
             UnsupportedReason::Operator(
                 "flat join contribution key is not retained by the output projection".to_owned(),

@@ -62,9 +62,9 @@ const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
-const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v3";
+const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v1";
 const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
-const ROCKSDB_VALUE_FORMAT_V3: &[u8] = b"raw-v3";
+const ROCKSDB_VALUE_FORMAT_V1: &[u8] = b"raw-v1";
 const ROCKSDB_EPOCH_MANIFEST_KEY: &[u8] = b"epoch-manifest";
 
 /// RocksDB durability tier used for writes.
@@ -291,7 +291,7 @@ impl RocksDbStorage {
         let initialize_format = match &listed_column_families {
             Some(existing) => {
                 validate_physical_storage_names(existing)?;
-                validate_raw_v3_store(
+                validate_raw_v1_store(
                     &path,
                     existing,
                     &block_cache,
@@ -339,7 +339,7 @@ impl RocksDbStorage {
             batch.put_cf(
                 internal_cf,
                 ROCKSDB_VALUE_FORMAT_KEY,
-                ROCKSDB_VALUE_FORMAT_V3,
+                ROCKSDB_VALUE_FORMAT_V1,
             );
             batch.put_cf(
                 internal_cf,
@@ -513,7 +513,7 @@ fn inspect_existing_column_families(path: &Path) -> Result<Option<Vec<String>>, 
         })
 }
 
-fn validate_raw_v3_store(
+fn validate_raw_v1_store(
     path: &Path,
     column_families: &[String],
     block_cache: &Cache,
@@ -540,7 +540,7 @@ fn validate_raw_v3_store(
             .storage()?
             .as_deref()
         {
-            Some(ROCKSDB_VALUE_FORMAT_V3) => {
+            Some(ROCKSDB_VALUE_FORMAT_V1) => {
                 let manifest = db
                     .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
                     .storage()?
@@ -575,7 +575,7 @@ fn validate_raw_v3_store(
         Ok(true)
     } else {
         Err(Error::InvalidStorageLayout(
-            "unmarked non-empty RocksDB store cannot be opened as raw-v3".to_owned(),
+            "unmarked non-empty RocksDB store cannot be opened as raw-v1".to_owned(),
         ))
     }
 }
@@ -583,7 +583,7 @@ fn validate_raw_v3_store(
 fn rocksdb_manifest(codec_profile: &StorageCodecProfile) -> Result<StorageEpochManifest, Error> {
     StorageEpochManifest::epoch_1_with_codec_profile(
         "rocksdb",
-        3,
+        1,
         BTreeMap::from([
             (
                 "internal-cf".to_owned(),
@@ -594,7 +594,7 @@ fn rocksdb_manifest(codec_profile: &StorageCodecProfile) -> Result<StorageEpochM
                 "rocksdb-comparator".to_owned(),
                 b"rocksdb.bytewise.v1".to_vec(),
             ),
-            ("value-format".to_owned(), ROCKSDB_VALUE_FORMAT_V3.to_vec()),
+            ("value-format".to_owned(), ROCKSDB_VALUE_FORMAT_V1.to_vec()),
         ]),
         codec_profile,
     )
@@ -1030,7 +1030,7 @@ mod tests {
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, Durability, ROCKSDB_EPOCH_MANIFEST_KEY,
-        ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V3,
+        ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V1,
         RocksDbClassProfile, RocksDbStorage, any_available, inspect_existing_column_families,
         rocksdb_class_profile, rocksdb_manifest, sum_available,
     };
@@ -1110,7 +1110,7 @@ mod tests {
             .expect("the authoritative logical pack must be canonical")
     }
 
-    fn settled_epoch_1_rocksdb_manifest_bytes() -> Vec<u8> {
+    fn superseded_epoch_1_rocksdb_manifest_bytes() -> Vec<u8> {
         // This is intentionally spelled as fixed wire bytes instead of
         // calling the current manifest encoder: the fixture proves a release
         // baseline, not that the current implementation agrees with itself.
@@ -1159,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_epoch_1_rocksdb_fixture_read_only_snapshot_mixed_write_and_reopen() {
+    fn superseded_raw_v3_fixture_is_preserved_as_negative_open_evidence() {
         let directory = tempfile::tempdir().unwrap();
         let historical_path =
             unpack_historical_epoch_1_rocksdb(directory.path(), EPOCH_1_ROCKSDB_FIXTURE_BASE64)
@@ -1170,22 +1170,22 @@ mod tests {
         let read_only = DB::open_cf_for_read_only(
             &Options::default(),
             &historical_path,
-            ["indices", "records", ROCKSDB_INTERNAL_CF],
+            ["indices", "records", "__groove_storage_internal_v3"],
             false,
         )
         .unwrap();
-        let internal = read_only.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+        let internal = read_only.cf_handle("__groove_storage_internal_v3").unwrap();
         assert_eq!(
             read_only
                 .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
                 .unwrap(),
-            Some(ROCKSDB_VALUE_FORMAT_V3.to_vec())
+            Some(b"raw-v3".to_vec())
         );
         assert_eq!(
             read_only
                 .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
                 .unwrap(),
-            Some(settled_epoch_1_rocksdb_manifest_bytes())
+            Some(superseded_epoch_1_rocksdb_manifest_bytes())
         );
         let mut snapshot = Vec::new();
         for family in ["indices", "records"] {
@@ -1202,39 +1202,10 @@ mod tests {
         assert_eq!(snapshot, epoch_1_ordered_kv_pack());
         drop(read_only);
 
-        let current = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        ready(current.write_many(vec![
-            groove::storage::OwnedWriteOperation::Set {
-                cf: "records".into(),
-                key: b"user:3".to_vec(),
-                value: b"Lin".to_vec(),
-            },
-            groove::storage::OwnedWriteOperation::Delete {
-                cf: "indices".into(),
-                key: b"name:Ada".to_vec(),
-            },
-            groove::storage::OwnedWriteOperation::Set {
-                cf: "indices".into(),
-                key: b"name:Lin".to_vec(),
-                value: b"3".to_vec(),
-            },
-        ]))
-        .unwrap();
-        drop(current);
-
-        let reopened = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
-        assert_eq!(
-            ready(reopened.get("records".into(), b"user:3".to_vec())).unwrap(),
-            Some(b"Lin".to_vec())
-        );
-        assert_eq!(
-            ready(reopened.get("indices".into(), b"name:Ada".to_vec())).unwrap(),
-            None
-        );
-        assert_eq!(
-            ready(reopened.get("indices".into(), b"name:Lin".to_vec())).unwrap(),
-            Some(b"3".to_vec())
-        );
+        assert!(matches!(
+            RocksDbStorage::open(&historical_path, &["records", "indices"]),
+            Err(Error::InvalidStorageLayout(_))
+        ));
     }
 
     fn ready<F: Future>(future: F) -> F::Output {
@@ -1466,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_v3_round_trips_arbitrary_bytes_and_hides_its_marker() {
+    fn raw_v1_round_trips_arbitrary_bytes_and_hides_its_marker() {
         use groove::storage::OrderedKvStorage;
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
@@ -1510,7 +1481,7 @@ mod tests {
         let internal = db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
         assert_eq!(
             db.get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY).unwrap(),
-            Some(ROCKSDB_VALUE_FORMAT_V3.to_vec())
+            Some(ROCKSDB_VALUE_FORMAT_V1.to_vec())
         );
         assert_eq!(
             db.get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY).unwrap(),

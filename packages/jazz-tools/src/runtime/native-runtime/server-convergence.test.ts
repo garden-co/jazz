@@ -46,7 +46,12 @@ function normalizeTestDelta(delta: RuntimeSubscriptionDelta, _testSchema: WasmSc
 }
 
 function resultId(sourceId: string, occurrenceKey: Uint8Array): string {
-  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  if (
+    occurrenceKey.length === 25 &&
+    occurrenceKey[0] === 1 &&
+    occurrenceKey.subarray(17).every((byte) => byte === 0)
+  )
+    return sourceId;
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 

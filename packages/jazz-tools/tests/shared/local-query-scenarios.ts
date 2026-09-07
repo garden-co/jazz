@@ -1,0 +1,437 @@
+import { expect } from "vitest";
+import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { WasmSchema } from "../../src/drivers/types.js";
+
+export const schema: WasmSchema = {
+  orgs: {
+    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+  },
+  teams: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
+      {
+        name: "parent_id",
+        column_type: { type: "Uuid" },
+        nullable: true,
+        references: "teams",
+      },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
+    ],
+  },
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "priority", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
+      {
+        name: "tags",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  bundle_items: {
+    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+  },
+  bundles: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "items",
+        column_type: { type: "Array", element: { type: "Uuid" } },
+        nullable: false,
+        references: "bundle_items",
+      },
+    ],
+  },
+};
+
+export interface Org {
+  id: string;
+  name: string;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  org_id?: string;
+  parent_id?: string;
+}
+
+export interface User {
+  id: string;
+  name: string;
+  team_id?: string;
+  todosViaOwner?: Todo[];
+}
+
+export interface Todo {
+  id: string;
+  title: string;
+  done: boolean;
+  priority?: number;
+  owner_id?: string;
+  tags: string[];
+  payload?: Uint8Array;
+  owner?: User;
+}
+
+export interface BundleItem {
+  id: string;
+  label: string;
+}
+
+export interface Bundle {
+  id: string;
+  name: string;
+  items: string[];
+}
+
+export const orgs: TableProxy<Org, Omit<Org, "id">> = {
+  _table: "orgs",
+  _schema: schema,
+  _rowType: {} as Org,
+  _initType: {} as Omit<Org, "id">,
+};
+
+export const teams: TableProxy<Team, Omit<Team, "id">> = {
+  _table: "teams",
+  _schema: schema,
+  _rowType: {} as Team,
+  _initType: {} as Omit<Team, "id">,
+};
+
+export const users: TableProxy<User, Omit<User, "id">> = {
+  _table: "users",
+  _schema: schema,
+  _rowType: {} as User,
+  _initType: {} as Omit<User, "id">,
+};
+
+export const todos: TableProxy<Todo, Omit<Todo, "id" | "owner">> = {
+  _table: "todos",
+  _schema: schema,
+  _rowType: {} as Todo,
+  _initType: {} as Omit<Todo, "id" | "owner">,
+};
+
+export const bundleItems: TableProxy<BundleItem, Omit<BundleItem, "id">> = {
+  _table: "bundle_items",
+  _schema: schema,
+  _rowType: {} as BundleItem,
+  _initType: {} as Omit<BundleItem, "id">,
+};
+
+export const bundles: TableProxy<Bundle, Omit<Bundle, "id">> = {
+  _table: "bundles",
+  _schema: schema,
+  _rowType: {} as Bundle,
+  _initType: {} as Omit<Bundle, "id">,
+};
+
+export const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000101";
+export const CONDITION_ALPHA_ID = "00000000-0000-0000-0000-000000000102";
+export const CONDITION_BETA_ID = "00000000-0000-0000-0000-000000000103";
+export const CONDITION_GAMMA_ID = "00000000-0000-0000-0000-000000000104";
+
+export function makeQuery<T>(
+  table: string,
+  body: {
+    conditions?: Array<{ column: string; op: string; value?: unknown }>;
+    includes?: Record<string, boolean | object>;
+    orderBy?: Array<[string, "asc" | "desc"]>;
+    limit?: number;
+    offset?: number;
+    hops?: string[];
+    gather?: {
+      max_depth: number;
+      step_table: string;
+      step_current_column: string;
+      step_conditions: Array<{ column: string; op: string; value: unknown }>;
+      step_hops: string[];
+    };
+  },
+): QueryBuilder<T> {
+  return {
+    _table: table,
+    _schema: schema,
+    _rowType: {} as T,
+    _build() {
+      return JSON.stringify({
+        table,
+        conditions: body.conditions ?? [],
+        includes: body.includes ?? {},
+        orderBy: body.orderBy ?? [],
+        limit: body.limit,
+        offset: body.offset,
+        hops: body.hops,
+        gather: body.gather,
+      });
+    },
+  };
+}
+export const conditionCases: Array<{
+  name: string;
+  conditions: Array<{ column: string; op: string; value?: unknown }>;
+  expectedTitles: string[];
+}> = [
+  {
+    name: "eq",
+    conditions: [{ column: "title", op: "eq", value: "alpha" }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "ne",
+    conditions: [{ column: "title", op: "ne", value: "alpha" }],
+    expectedTitles: ["beta", "gamma"],
+  },
+  {
+    name: "gt",
+    conditions: [{ column: "priority", op: "gt", value: 1 }],
+    expectedTitles: ["beta"],
+  },
+  {
+    name: "gte",
+    conditions: [{ column: "priority", op: "gte", value: 2 }],
+    expectedTitles: ["beta"],
+  },
+  {
+    name: "lt",
+    conditions: [{ column: "priority", op: "lt", value: 2 }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "lte",
+    conditions: [{ column: "priority", op: "lte", value: 1 }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "isNull",
+    conditions: [{ column: "priority", op: "isNull" }],
+    expectedTitles: ["gamma"],
+  },
+  {
+    name: "contains-array",
+    conditions: [{ column: "tags", op: "contains", value: "work" }],
+    expectedTitles: ["alpha", "gamma"],
+  },
+  {
+    name: "in-array-element",
+    conditions: [{ column: "tags", op: "in", value: ["work"] }],
+    expectedTitles: ["alpha", "gamma"],
+  },
+  {
+    name: "contains-text",
+    conditions: [{ column: "title", op: "contains", value: "alp" }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "contains-text-empty",
+    conditions: [{ column: "title", op: "contains", value: "" }],
+    expectedTitles: ["alpha", "beta", "gamma"],
+  },
+  {
+    name: "in-id",
+    conditions: [
+      {
+        column: "id",
+        op: "in",
+        value: [CONDITION_ALPHA_ID, "00000000-0000-0000-0000-000000000199"],
+      },
+    ],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "in-text",
+    conditions: [{ column: "title", op: "in", value: ["alpha", "gamma"] }],
+    expectedTitles: ["alpha", "gamma"],
+  },
+  {
+    name: "in-boolean",
+    conditions: [{ column: "done", op: "in", value: [false] }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "in-number",
+    conditions: [{ column: "priority", op: "in", value: [1, 999] }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "in-reference",
+    conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+    expectedTitles: ["alpha", "beta", "gamma"],
+  },
+  {
+    name: "in-array-whole-value",
+    conditions: [{ column: "tags", op: "in", value: [["work", "backend"]] }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "in-bytea",
+    conditions: [{ column: "payload", op: "in", value: [[1, 2, 3]] }],
+    expectedTitles: ["alpha"],
+  },
+  {
+    name: "in-empty",
+    conditions: [{ column: "title", op: "in", value: [] }],
+    expectedTitles: [],
+  },
+  {
+    name: "eq-bytea",
+    conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+    expectedTitles: ["alpha"],
+  },
+];
+export async function seedTodosForConditions(db: Db): Promise<void> {
+  const {
+    value: { id: orgId },
+  } = await db.insert(orgs, { name: "Acme" });
+  const {
+    value: { id: teamId },
+  } = await db.insert(teams, {
+    name: "Core",
+    org_id: orgId,
+    parent_id: undefined,
+  });
+  const {
+    value: { id: userId },
+  } = await db.insert(users, { name: "Alice", team_id: teamId }, { id: CONDITION_OWNER_ID });
+
+  await db.insert(
+    todos,
+    {
+      title: "alpha",
+      done: false,
+      priority: 1,
+      owner_id: userId,
+      tags: ["work", "backend"],
+      payload: new Uint8Array([1, 2, 3]),
+    },
+    { id: CONDITION_ALPHA_ID },
+  );
+  await db.insert(
+    todos,
+    {
+      title: "beta",
+      done: true,
+      priority: 2,
+      owner_id: userId,
+      tags: ["home"],
+      payload: new Uint8Array([4, 5, 6]),
+    },
+    { id: CONDITION_BETA_ID },
+  );
+  await db.insert(
+    todos,
+    {
+      title: "gamma",
+      done: true,
+      priority: undefined,
+      owner_id: userId,
+      tags: ["work", "urgent"],
+      payload: undefined,
+    },
+    { id: CONDITION_GAMMA_ID },
+  );
+}
+export async function assertByteaQuery(db: Db): Promise<void> {
+  const {
+    value: { id },
+  } = await db.insert(todos, {
+    title: "has-bytes",
+    done: false,
+    priority: 1,
+    owner_id: undefined,
+    tags: ["x"],
+    payload: new Uint8Array([0, 1, 2, 255]),
+  });
+
+  const rows = await db.all<Todo>(
+    makeQuery<Todo>("todos", {
+      conditions: [{ column: "id", op: "eq", value: id }],
+    }),
+  );
+
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.payload).toBeInstanceOf(Uint8Array);
+  expect(Array.from(rows[0]?.payload ?? [])).toEqual([0, 1, 2, 255]);
+}
+
+export async function assertUuidOrderQuery(db: Db): Promise<void> {
+  const ids: string[] = [];
+  for (const title of ["first", "second", "third"]) {
+    const result = await db.insert(todos, {
+      title,
+      done: false,
+      priority: undefined,
+      owner_id: undefined,
+      tags: [],
+      payload: undefined,
+    });
+    ids.push(result.value.id);
+  }
+
+  for (const id of ids) {
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  }
+  const generatedAtMs = Number.parseInt(ids[0]!.replaceAll("-", "").slice(0, 12), 16);
+  expect(Math.abs(Date.now() - generatedAtMs)).toBeLessThan(60_000);
+  expect(ids).toEqual([...ids].sort());
+
+  const rows = await db.all<Todo>(makeQuery<Todo>("todos", {}));
+  expect(rows.map((row) => row.id)).toEqual(ids);
+}
+
+export async function assertWindowQuery(db: Db): Promise<void> {
+  await db.insert(todos, {
+    title: "p1",
+    done: false,
+    priority: 1,
+    owner_id: undefined,
+    tags: ["x"],
+  });
+  await db.insert(todos, {
+    title: "p2",
+    done: false,
+    priority: 2,
+    owner_id: undefined,
+    tags: ["x"],
+  });
+  await db.insert(todos, {
+    title: "p3",
+    done: false,
+    priority: 3,
+    owner_id: undefined,
+    tags: ["x"],
+  });
+
+  const rows = await db.all<Todo>(
+    makeQuery<Todo>("todos", {
+      orderBy: [["priority", "desc"]],
+      offset: 1,
+      limit: 1,
+    }),
+  );
+
+  expect(rows).toHaveLength(1);
+  expect(rows[0].priority).toBe(2);
+  expect(rows[0].title).toBe("p2");
+}
+
+export async function assertConditionQuery(
+  db: Db,
+  testCase: (typeof conditionCases)[number],
+): Promise<void> {
+  const rows = await db.all<Todo>(makeQuery<Todo>("todos", { conditions: testCase.conditions }));
+  const actual = rows.map((row) => row.title).sort();
+  const expected = [...testCase.expectedTitles].sort();
+  expect(actual).toEqual(expected);
+}

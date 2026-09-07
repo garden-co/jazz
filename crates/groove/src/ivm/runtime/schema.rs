@@ -430,6 +430,7 @@ impl IvmRuntime {
                     project_field_expr(&source, field).map(|expression| ProjectionExpr {
                         expression,
                         output_name: Some(field.output_name.clone()),
+                        output_identity: field.output_identity.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
@@ -625,6 +626,7 @@ impl IvmRuntime {
                         project_field_expr(&source, field).map(|expression| ProjectionExpr {
                             expression,
                             output_name: Some(field.output_name.clone()),
+                            output_identity: field.output_identity.clone(),
                         })
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?,

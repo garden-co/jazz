@@ -7,7 +7,7 @@
 //! borrowed/owned record access. Query expressions and schemas refer to these
 //! value types but do not perform byte-level encoding themselves.
 
-use super::{DescriptorField, Error, OwnedRecord, RecordDescriptor};
+use super::{DescriptorField, Error, FieldIdentity, OwnedRecord, RecordDescriptor};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -317,6 +317,7 @@ fn assign_record_variant_registries(
             .enumerate()
             .map(|(index, field)| super::DescriptorField {
                 name: field.name.clone(),
+                identity: field.identity.clone(),
                 value_type: {
                     let mut value_type = field.value_type.clone();
                     value_type.assign_variant_registries(&format!("{path}/field/{index}"), replace);
@@ -465,6 +466,8 @@ const DESCRIPTOR_NODE_ENUM_CASE: u8 = 24;
 struct DescriptorCodecNode {
     tag: u8,
     name: Option<String>,
+    identity_name: Option<String>,
+    identity_slot: Option<u64>,
     registry_id: u64,
     children: u32,
     strings: Vec<String>,
@@ -478,6 +481,14 @@ fn descriptor_codec_node_descriptor() -> &'static RecordDescriptor {
             (
                 "name",
                 ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            (
+                "identity_name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            (
+                "identity_slot",
+                ValueType::Nullable(Box::new(ValueType::U64)),
             ),
             ("registry_id", ValueType::U64),
             ("children", ValueType::U32),
@@ -506,6 +517,8 @@ fn descriptor_codec_node_value(node: DescriptorCodecNode) -> Result<Value, Error
     let raw = descriptor.create(&[
         Value::U8(node.tag),
         Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
+        Value::Nullable(node.identity_name.map(|name| Box::new(Value::String(name)))),
+        Value::Nullable(node.identity_slot.map(|slot| Box::new(Value::U64(slot)))),
         Value::U64(node.registry_id),
         Value::U32(node.children),
         Value::Array(node.strings.into_iter().map(Value::String).collect()),
@@ -524,6 +537,8 @@ fn descriptor_codec_node_from_value(value: Value) -> Result<DescriptorCodecNode,
     let [
         Value::U8(tag),
         Value::Nullable(name),
+        Value::Nullable(identity_name),
+        Value::Nullable(identity_slot),
         Value::U64(registry_id),
         Value::U32(children),
         Value::Array(strings),
@@ -536,6 +551,16 @@ fn descriptor_codec_node_from_value(value: Value) -> Result<DescriptorCodecNode,
         Some(Value::String(name)) => Some(name.clone()),
         Some(_) => return Err(Error::NonCanonicalRecord),
     };
+    let identity_name = match identity_name.as_deref() {
+        None => None,
+        Some(Value::String(name)) => Some(name.clone()),
+        Some(_) => return Err(Error::NonCanonicalRecord),
+    };
+    let identity_slot = match identity_slot.as_deref() {
+        None => None,
+        Some(Value::U64(slot)) => Some(*slot),
+        Some(_) => return Err(Error::NonCanonicalRecord),
+    };
     let strings = strings
         .iter()
         .map(|value| match value {
@@ -546,6 +571,8 @@ fn descriptor_codec_node_from_value(value: Value) -> Result<DescriptorCodecNode,
     Ok(DescriptorCodecNode {
         tag: *tag,
         name,
+        identity_name,
+        identity_slot,
         registry_id: *registry_id,
         children: *children,
         strings,
@@ -572,6 +599,8 @@ fn descriptor_codec_push_descriptor(
         DescriptorCodecNode {
             tag: DESCRIPTOR_NODE_DESCRIPTOR,
             name: None,
+            identity_name: None,
+            identity_slot: None,
             registry_id: 0,
             children: u32::try_from(descriptor.fields().len())
                 .map_err(|_| Error::LengthOverflow)?,
@@ -584,6 +613,16 @@ fn descriptor_codec_push_descriptor(
             DescriptorCodecNode {
                 tag: DESCRIPTOR_NODE_FIELD,
                 name: field.name.clone(),
+                identity_name: match field.identity.as_ref() {
+                    Some(FieldIdentity::Name(name)) => Some(name.clone()),
+                    Some(FieldIdentity::NamedSlot { name, .. }) => Some(name.clone()),
+                    _ => None,
+                },
+                identity_slot: match field.identity.as_ref() {
+                    Some(FieldIdentity::Slot(slot)) => Some(*slot),
+                    Some(FieldIdentity::NamedSlot { slot, .. }) => Some(*slot),
+                    _ => None,
+                },
                 registry_id: 0,
                 children: 1,
                 strings: Vec::new(),
@@ -601,6 +640,8 @@ fn descriptor_codec_push_value_type(
     let scalar = |tag| DescriptorCodecNode {
         tag,
         name: None,
+        identity_name: None,
+        identity_slot: None,
         registry_id: 0,
         children: 0,
         strings: Vec::new(),
@@ -637,6 +678,8 @@ fn descriptor_codec_push_value_type(
             DescriptorCodecNode {
                 tag: DESCRIPTOR_NODE_ENUM_TAG,
                 name: Some(schema.name.clone()),
+                identity_name: None,
+                identity_slot: None,
                 registry_id: schema.registry_id,
                 children: 0,
                 strings: schema.variants.clone(),
@@ -648,6 +691,8 @@ fn descriptor_codec_push_value_type(
                 DescriptorCodecNode {
                     tag: DESCRIPTOR_NODE_TUPLE,
                     name: None,
+                    identity_name: None,
+                    identity_slot: None,
                     registry_id: 0,
                     children: u32::try_from(members.len()).map_err(|_| Error::LengthOverflow)?,
                     strings: Vec::new(),
@@ -669,6 +714,8 @@ fn descriptor_codec_push_value_type(
                 DescriptorCodecNode {
                     tag,
                     name: None,
+                    identity_name: None,
+                    identity_slot: None,
                     registry_id: 0,
                     children: 1,
                     strings: Vec::new(),
@@ -682,6 +729,8 @@ fn descriptor_codec_push_value_type(
                 DescriptorCodecNode {
                     tag: DESCRIPTOR_NODE_RECORD,
                     name: None,
+                    identity_name: None,
+                    identity_slot: None,
                     registry_id: 0,
                     children: 1,
                     strings: Vec::new(),
@@ -695,6 +744,8 @@ fn descriptor_codec_push_value_type(
                 DescriptorCodecNode {
                     tag: DESCRIPTOR_NODE_ENUM,
                     name: Some(schema.name.clone()),
+                    identity_name: None,
+                    identity_slot: None,
                     registry_id: schema.registry_id,
                     children: u32::try_from(schema.cases.len())
                         .map_err(|_| Error::LengthOverflow)?,
@@ -707,6 +758,8 @@ fn descriptor_codec_push_value_type(
                     DescriptorCodecNode {
                         tag: DESCRIPTOR_NODE_ENUM_CASE,
                         name: Some(case.name.clone()),
+                        identity_name: None,
+                        identity_slot: None,
                         registry_id: 0,
                         children: 1,
                         strings: Vec::new(),
@@ -729,11 +782,30 @@ fn descriptor_codec_take<'a>(
 }
 
 fn descriptor_codec_metadata_empty(node: &DescriptorCodecNode) -> Result<(), Error> {
-    if node.name.is_none() && node.registry_id == 0 && node.children == 0 && node.strings.is_empty()
+    if node.name.is_none()
+        && node.identity_name.is_none()
+        && node.identity_slot.is_none()
+        && node.registry_id == 0
+        && node.children == 0
+        && node.strings.is_empty()
     {
         Ok(())
     } else {
         Err(Error::NonCanonicalRecord)
+    }
+}
+
+fn descriptor_codec_field_identity(
+    node: &DescriptorCodecNode,
+) -> Result<Option<FieldIdentity>, Error> {
+    match (&node.identity_name, node.identity_slot) {
+        (Some(name), Some(slot)) => Ok(Some(FieldIdentity::NamedSlot {
+            name: name.clone(),
+            slot,
+        })),
+        (Some(name), None) => Ok(Some(FieldIdentity::Name(name.clone()))),
+        (None, Some(slot)) => Ok(Some(FieldIdentity::Slot(slot))),
+        (None, None) => Ok(None),
     }
 }
 
@@ -744,6 +816,8 @@ fn descriptor_codec_decode_descriptor(
     let node = descriptor_codec_take(nodes, cursor)?;
     if node.tag != DESCRIPTOR_NODE_DESCRIPTOR
         || node.name.is_some()
+        || node.identity_name.is_some()
+        || node.identity_slot.is_some()
         || node.registry_id != 0
         || !node.strings.is_empty()
     {
@@ -762,6 +836,7 @@ fn descriptor_codec_decode_descriptor(
         }
         fields.push(DescriptorField {
             name: field.name.clone(),
+            identity: descriptor_codec_field_identity(field)?,
             value_type: descriptor_codec_decode_value_type(nodes, cursor)?,
         });
     }
@@ -815,7 +890,11 @@ fn descriptor_codec_decode_value_type(
         ),
         DESCRIPTOR_NODE_UUID => scalar(DESCRIPTOR_NODE_UUID, ValueType::Uuid),
         DESCRIPTOR_NODE_ENUM_TAG => {
-            if node.name.as_deref().is_none() || node.children != 0 {
+            if node.name.as_deref().is_none()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.children != 0
+            {
                 return Err(Error::NonCanonicalRecord);
             }
             if node.strings.len() > 256 {
@@ -831,7 +910,12 @@ fn descriptor_codec_decode_value_type(
             }))
         }
         DESCRIPTOR_NODE_TUPLE => {
-            if node.name.is_some() || node.registry_id != 0 || !node.strings.is_empty() {
+            if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.registry_id != 0
+                || !node.strings.is_empty()
+            {
                 return Err(Error::NonCanonicalRecord);
             }
             let mut members = Vec::with_capacity(
@@ -852,6 +936,8 @@ fn descriptor_codec_decode_value_type(
         }
         DESCRIPTOR_NODE_ARRAY | DESCRIPTOR_NODE_NULLABLE => {
             if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
                 || node.registry_id != 0
                 || node.children != 1
                 || !node.strings.is_empty()
@@ -867,6 +953,8 @@ fn descriptor_codec_decode_value_type(
         }
         DESCRIPTOR_NODE_RECORD => {
             if node.name.is_some()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
                 || node.registry_id != 0
                 || node.children != 1
                 || !node.strings.is_empty()
@@ -878,7 +966,11 @@ fn descriptor_codec_decode_value_type(
             )))
         }
         DESCRIPTOR_NODE_ENUM => {
-            if node.name.as_deref().is_none() || !node.strings.is_empty() {
+            if node.name.as_deref().is_none()
+                || node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || !node.strings.is_empty()
+            {
                 return Err(Error::NonCanonicalRecord);
             }
             let mut cases = Vec::with_capacity(
@@ -888,6 +980,8 @@ fn descriptor_codec_decode_value_type(
                 let case = descriptor_codec_take(nodes, cursor)?;
                 if case.tag != DESCRIPTOR_NODE_ENUM_CASE
                     || case.name.as_deref().is_none()
+                    || case.identity_name.is_some()
+                    || case.identity_slot.is_some()
                     || case.registry_id != 0
                     || case.children != 1
                     || !case.strings.is_empty()
@@ -941,6 +1035,129 @@ pub fn decode_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Erro
     let mut cursor = 0;
     let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
     if cursor != nodes.len() || encode_record_descriptor(&descriptor)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    Ok(descriptor)
+}
+
+// The persisted descriptor grammar is distinct from execution bindings. Its
+// node record is frozen: tag, name, registry_id, children, strings. FieldIdentity
+// is compiler state and never adds a field to this authoritative encoding.
+fn persisted_descriptor_node() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("tag", ValueType::U8),
+            (
+                "name",
+                ValueType::Nullable(Box::new(ValueType::raw_string())),
+            ),
+            ("registry_id", ValueType::U64),
+            ("children", ValueType::U32),
+            (
+                "strings",
+                ValueType::Array(Box::new(ValueType::raw_string())),
+            ),
+        ])
+    })
+}
+
+fn persisted_descriptor_envelope() -> &'static RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([(
+            "nodes",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *persisted_descriptor_node(),
+            )))),
+        )])
+    })
+}
+
+/// Encode a canonical persisted descriptor using exact durable field names and
+/// types. Names are taken from `DescriptorField::name`, never inferred from
+/// execution identities or stripped prefixes. Callers must establish that these
+/// names/types are the authoritative value schema before crossing this boundary.
+/// Runtime Name/Slot/NamedSlot bindings are not persisted. Nested descriptors
+/// follow the same rule, preserving enum registry identities and field order.
+pub fn encode_persisted_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, Error> {
+    let mut nodes = Vec::new();
+    descriptor_codec_push_descriptor(&mut nodes, descriptor)?;
+    let node_descriptor = *persisted_descriptor_node();
+    let nodes = nodes
+        .into_iter()
+        .map(|node| {
+            let raw = node_descriptor.create(&[
+                Value::U8(node.tag),
+                Value::Nullable(node.name.map(|name| Box::new(Value::String(name)))),
+                Value::U64(node.registry_id),
+                Value::U32(node.children),
+                Value::Array(node.strings.into_iter().map(Value::String).collect()),
+            ])?;
+            Ok(Value::Record(OwnedRecord::new(raw, node_descriptor)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    persisted_descriptor_envelope().create(&[Value::Array(nodes)])
+}
+
+/// Decode the canonical persisted descriptor grammar. Execution bindings are
+/// reconstructed by their owning catalogue/query boundary, not by this reader.
+/// The reader accepts one exact canonical tree and rejects trailing bytes.
+pub fn decode_persisted_record_descriptor(encoded: &[u8]) -> Result<RecordDescriptor, Error> {
+    let envelope = persisted_descriptor_envelope();
+    let values = envelope.bind(encoded).to_values()?;
+    if envelope.create(&values)? != encoded {
+        return Err(Error::NonCanonicalRecord);
+    }
+    let [Value::Array(records)] = values.as_slice() else {
+        return Err(Error::NonCanonicalRecord);
+    };
+    if records.len() > DESCRIPTOR_CODEC_MAX_NODES {
+        return Err(Error::LengthOverflow);
+    }
+    let nodes = records
+        .iter()
+        .map(|record| {
+            let Value::Record(record) = record else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let values = record.to_values()?;
+            let [
+                Value::U8(tag),
+                Value::Nullable(name),
+                Value::U64(registry_id),
+                Value::U32(children),
+                Value::Array(strings),
+            ] = values.as_slice()
+            else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            let name = match name.as_deref() {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(Error::NonCanonicalRecord),
+            };
+            let strings = strings
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => Ok(value.clone()),
+                    _ => Err(Error::NonCanonicalRecord),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DescriptorCodecNode {
+                tag: *tag,
+                name,
+                identity_name: None,
+                identity_slot: None,
+                registry_id: *registry_id,
+                children: *children,
+                strings,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut cursor = 0;
+    let descriptor = descriptor_codec_decode_descriptor(&nodes, &mut cursor)?;
+    if cursor != nodes.len() || encode_persisted_record_descriptor(&descriptor)? != encoded {
         return Err(Error::NonCanonicalRecord);
     }
     Ok(descriptor)
@@ -2215,3 +2432,7 @@ pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
 fn u32_to_usize(value: u32) -> Result<usize, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
 }
+
+#[cfg(test)]
+#[path = "typed_identity_compatibility_proof.rs"]
+mod typed_identity_compatibility_proof;

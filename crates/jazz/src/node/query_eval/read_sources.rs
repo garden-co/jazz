@@ -8,6 +8,14 @@
 use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
+
+fn current_row_column_field(
+    column: &crate::schema::ColumnSchema,
+    value_type: ValueType,
+) -> records::DescriptorField {
+    records::DescriptorField::new(user_column_field(&column.name), value_type)
+        .with_identity(records::FieldIdentity::Name(column.name.clone()))
+}
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
@@ -61,6 +69,35 @@ impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn stored_column_ids_for_read_table(
+        &self,
+        request: &SourceRequest,
+        table: &TableSchema,
+    ) -> Result<BTreeMap<String, PhysicalColumnId>, SourceResolutionError> {
+        let mapping = self
+            .node
+            .catalogue
+            .physical_mappings
+            .get(&self.read_view.read_schema)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let table_mapping = mapping
+            .tables
+            .get(&table.name)
+            .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        table
+            .columns
+            .iter()
+            .map(|column| {
+                table_mapping
+                    .columns
+                    .get(&column.name)
+                    .copied()
+                    .map(|id| (column.name.clone(), id))
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::SchemaProjection))
+            })
+            .collect()
+    }
+
     /// The complete source-family dispatcher. Keep uncommon historical and
     /// branch paths out of the ordinary inline policy-evaluation frame.
     async fn prepare_source_graph_dispatch(
@@ -146,6 +183,7 @@ where
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph: GraphBuilder::input_source(input_source, descriptor.clone()),
                 row_shape: SourceRowShape {
@@ -281,6 +319,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
+                stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph,
                 row_shape: SourceRowShape {
@@ -409,6 +448,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -562,6 +602,7 @@ where
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -779,6 +820,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
                     row_shape: SourceRowShape {
@@ -1584,6 +1626,7 @@ where
             graph
         };
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1683,6 +1726,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1842,6 +1886,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -1921,6 +1966,7 @@ where
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
+            stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
             row_shape: SourceRowShape {
@@ -3386,10 +3432,7 @@ fn resolved_current_source_graph<S>(
 where
     S: OrderedKvStorage,
 {
-    let mut fields = current_row_fields(table)
-        .into_iter()
-        .map(ProjectField::named)
-        .collect::<Vec<_>>();
+    let mut fields = canonical_current_source_fields(table, false);
     let mut metadata = BTreeMap::new();
     let needs_version_witnesses = requirements
         .metadata
@@ -3596,12 +3639,12 @@ fn canonical_current_source_fields(
     include_version: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(
-            table
-                .columns
-                .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
-        )
+        .chain(table.columns.iter().map(|column| {
+            ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            )
+        }))
         .chain([
             ProjectField::named("$createdBy"),
             ProjectField::named("$createdAt"),
@@ -3636,12 +3679,12 @@ fn storage_to_canonical_current_source_fields(
     include_settle_position: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(
-            table
-                .columns
-                .iter()
-                .map(|column| ProjectField::named(user_column_field(&column.name))),
-        )
+        .chain(table.columns.iter().map(|column| {
+            ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            )
+        }))
         .chain([
             ProjectField::renamed("created_by", "$createdBy"),
             ProjectField::renamed("created_at", "$createdAt"),
@@ -3687,12 +3730,16 @@ fn branch_view_storage_source_fields(
                 .map_err(|_| {
                     Error::InvalidBranchKey("invalid head branch value encoding".to_owned())
                 })?;
-            fields.push(ProjectField::literal(
+            fields.push(ProjectField::literal_with_identity(
                 user_column_field(&column.name),
                 value,
+                records::FieldIdentity::Name(column.name.clone()),
             ));
         } else {
-            fields.push(ProjectField::named(user_column_field(&column.name)));
+            fields.push(ProjectField::named_with_identity(
+                user_column_field(&column.name),
+                records::FieldIdentity::Name(column.name.clone()),
+            ));
         }
     }
     fields.extend([
@@ -3729,25 +3776,58 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
         .columns
         .iter()
         .filter_map(|column| {
-            let storage_name = format!("user_{}", column.name);
+            let storage_name = crate::schema::app_storage_column_name(&column.name);
             current
                 .field_index(&storage_name)
                 .and_then(|index| current.fields().get(index))
-                .map(|field| (user_column_field(&column.name), field.value_type.clone()))
+                .map(|field| {
+                    (
+                        user_column_field(&column.name),
+                        (field.identity.clone(), field.value_type.clone()),
+                    )
+                })
         })
         .collect::<BTreeMap<_, _>>();
-    RecordDescriptor::new(logical.fields().iter().map(|field| {
+    RecordDescriptor::new_with_fields(logical.fields().iter().map(|field| {
         let name = field
             .name
             .clone()
             .expect("compiler-owned current source descriptor fields are named");
-        (
-            name.clone(),
-            current_types
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| field.value_type.clone()),
-        )
+        let (identity, value_type) = current_types
+            .get(&name)
+            .map(|(identity, value_type)| {
+                let merged_identity = match (field.identity.clone(), identity.clone()) {
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::Slot(slot)),
+                    ) => Some(records::FieldIdentity::NamedSlot {
+                        name: logical_name,
+                        slot,
+                    }),
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::NamedSlot { slot, .. }),
+                    ) => Some(records::FieldIdentity::NamedSlot {
+                        name: logical_name,
+                        slot,
+                    }),
+                    (
+                        Some(records::FieldIdentity::Name(logical_name)),
+                        Some(records::FieldIdentity::Name(storage_name)),
+                    ) if storage_name == name && logical_name != storage_name => {
+                        Some(records::FieldIdentity::Name(logical_name))
+                    }
+                    (_, Some(storage_identity)) => Some(storage_identity),
+                    (logical_identity, None) => logical_identity,
+                };
+                (merged_identity, value_type.clone())
+            })
+            .unwrap_or_else(|| (field.identity.clone(), field.value_type.clone()));
+        records::DescriptorField {
+            name: Some(name),
+            identity,
+            value_type,
+        }
     }))
 }
 
@@ -3770,7 +3850,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     branch_columns_nonnullable: bool,
     include_deletion_marker: bool,
 ) -> RecordDescriptor {
-    let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
+    let mut fields = std::iter::once(records::DescriptorField::new("row_uuid", ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
@@ -3778,64 +3858,73 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             } else {
                 ValueType::Nullable(Box::new(column.column_type.clone()))
             };
-            (user_column_field(&column.name), value_type)
+            current_row_column_field(column, value_type)
         }))
         .chain([
-            ("$createdBy".to_owned(), ValueType::String),
-            ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::String),
-            ("$updatedAt".to_owned(), ValueType::U64),
-            ("tx_time".to_owned(), ValueType::U64),
-            ("tx_node_id".to_owned(), ValueType::U64),
+            records::DescriptorField::new("$createdBy", ValueType::String),
+            records::DescriptorField::new("$createdAt", ValueType::U64),
+            records::DescriptorField::new("$updatedBy", ValueType::String),
+            records::DescriptorField::new("$updatedAt", ValueType::U64),
+            records::DescriptorField::new("tx_time", ValueType::U64),
+            records::DescriptorField::new("tx_node_id", ValueType::U64),
         ])
         .collect::<Vec<_>>();
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
-            ("table".to_owned(), ValueType::String),
-            ("layer".to_owned(), ValueType::String),
-            ("schema_version".to_owned(), ValueType::U64),
-            (
-                "parents".to_owned(),
+            records::DescriptorField::new("table", ValueType::String),
+            records::DescriptorField::new("layer", ValueType::String),
+            records::DescriptorField::new("schema_version", ValueType::U64),
+            records::DescriptorField::new(
+                "parents",
                 ValueType::Array(Box::new(ValueType::Tuple(vec![
                     ValueType::U64,
                     ValueType::Uuid,
                 ]))),
             ),
-            (
-                "authored_columns".to_owned(),
+            records::DescriptorField::new(
+                "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
-            ("created_by".to_owned(), ValueType::String),
-            ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::String),
-            ("updated_at".to_owned(), ValueType::U64),
+            records::DescriptorField::new("created_by", ValueType::String),
+            records::DescriptorField::new("created_at", ValueType::U64),
+            records::DescriptorField::new("updated_by", ValueType::String),
+            records::DescriptorField::new("updated_at", ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
             branch_or_prefix_field: Some(field),
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((field.clone(), ValueType::Bytes));
+            fields.push(records::DescriptorField::new(
+                field.clone(),
+                ValueType::Bytes,
+            ));
         }
     }
     if branch_columns_nonnullable
         && !metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses)
     {
-        fields.push(("supplying_branch_key".to_owned(), ValueType::Bytes));
+        fields.push(records::DescriptorField::new(
+            "supplying_branch_key",
+            ValueType::Bytes,
+        ));
     }
     if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
-        fields.push((
-            "settle_position".to_owned(),
+        fields.push(records::DescriptorField::new(
+            "settle_position",
             ValueType::Nullable(Box::new(ValueType::U64)),
         ));
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
-        fields.push(("coverage".to_owned(), ValueType::String));
+        fields.push(records::DescriptorField::new("coverage", ValueType::String));
     }
     if include_deletion_marker {
-        fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
+        fields.push(records::DescriptorField::new(
+            "__jazz_deleted",
+            ValueType::Bool,
+        ));
     }
-    RecordDescriptor::new(fields)
+    RecordDescriptor::new_with_fields(fields)
 }
 
 impl<S> NodeState<S>
@@ -4428,23 +4517,9 @@ pub(super) fn global_current_storage_fields(
 }
 
 fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
-    RecordDescriptor::new(
-        std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
-            .chain(table.columns.iter().map(|column| {
-                (
-                    user_column_field(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
-                )
-            }))
-            .chain([
-                ("$createdBy".to_owned(), ValueType::String),
-                ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::String),
-                ("$updatedAt".to_owned(), ValueType::U64),
-                ("tx_time".to_owned(), ValueType::U64),
-                ("tx_node_id".to_owned(), ValueType::U64),
-            ]),
-    )
+    // Source metadata and the executable canonical-row projection must carry
+    // the same logical identities before subsequent joins restore this shape.
+    current_row_descriptor_with_hidden_source_fields(table, &BTreeMap::new())
 }
 
 pub(super) fn empty_authorized_row_id_graph() -> GraphBuilder {

@@ -511,8 +511,40 @@ where
         std::future::pending::<()>().await;
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Count unfinished core upload journals for lifecycle cancellation receipts.
+    pub async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .pending_upload_count_for_test()
+            .await
+            .map_err(Into::into)
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
+        self.detach_query_using(attachment, |subscription| {
+            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+        });
+    }
+
+    /// Release binding-owned coverage after asynchronously acquiring its owner.
+    /// A cancelled binding read may share the node with another suspended read.
+    #[doc(hidden)]
+    pub async fn detach_query_async(&self, attachment: QueryAttachment) {
+        let mut owner = self.node.node.lock().await;
+        self.detach_query_using(attachment, |subscription| {
+            owner.apply_unsubscribe(subscription);
+        });
+    }
+
+    fn detach_query_using(
+        &self,
+        attachment: QueryAttachment,
+        mut unsubscribe: impl FnMut(SubscriptionKey),
+    ) {
         let mut removed_subscriptions = Vec::new();
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         for subscription in attachment.registrations {
@@ -556,7 +588,7 @@ where
                 .coverage_refresh_generations
                 .borrow_mut()
                 .remove(&coverage);
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+            unsubscribe(subscription);
             let mut latest = self.node.latest_coverage_subscriptions.borrow_mut();
             if latest.get(&coverage) == Some(&subscription) {
                 latest.remove(&coverage);

@@ -22,6 +22,17 @@ export interface JazzTopologyBrowserCommands {
   ): Promise<void>;
 }
 
+export interface JazzStorageCorpusBrowserCommands {
+  writeBrowserStorageCorpus(records: Record<string, string>): Promise<string | null>;
+}
+
+export function jazzStorageCorpusBrowserCommands(): JazzStorageCorpusBrowserCommands {
+  if (!hasFunction(commands, "writeBrowserStorageCorpus")) {
+    throw new Error("Browser test project is missing the storage corpus export command.");
+  }
+  return commands as unknown as JazzStorageCorpusBrowserCommands;
+}
+
 function hasFunction(value: object, key: string): boolean {
   return key in value && typeof Reflect.get(value, key) === "function";
 }
