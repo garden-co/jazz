@@ -10,6 +10,7 @@ import {
   isWireHello,
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
+import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { type TxId, type WriteReceipt } from "../client.js";
 
@@ -1153,6 +1154,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBeGreaterThan(0);
     expect(dbTicks).toBeLessThanOrEqual(4);
     runtime.close();
+  });
+
+  it("yields recurring deferred core work with an attached peer pump to the host task", async () => {
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let dbTicks = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedulerCallback) => {
+              schedulerCallback = callback;
+            },
+            tick: () => {
+              dbTicks += 1;
+              // Bound a broken implementation without relying on a timeout that
+              // cannot fire while microtasks starve the host task queue.
+              if (dbTicks < 64) schedulerCallback?.("deferred");
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const errors: unknown[] = [];
+    const hostTask = new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const pump = new BrowserWorkerTransportPump(
+      runtime,
+      new FakeTransport([]),
+      () => undefined,
+      (error) => errors.push(error),
+    );
+    try {
+      schedulerCallback?.("deferred");
+      await hostTask;
+      expect(errors).toEqual([]);
+      expect(dbTicks).toBeGreaterThan(0);
+      expect(dbTicks).toBeLessThanOrEqual(4);
+    } finally {
+      pump.close();
+      await runtime.close();
+    }
   });
 
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {
