@@ -3,6 +3,7 @@ import type {
   RemoteBrowserDbCreateInput,
   RemoteBrowserDbWaitForTitleInput,
 } from "./remote-db-harness.js";
+import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 
 interface RemoteBrowserDbHandle {
   context: BrowserContext;
@@ -58,6 +59,16 @@ export async function createRemoteBrowserDb(
 ): Promise<string> {
   await closeRemoteBrowserDb(input.id);
 
+  // Every page in a Playwright BrowserContext has its own ES-module realm.
+  // The browser fixture's implicit-account cache is consequently page-local;
+  // relying on it here would make tabs pointed at one physical root present
+  // different account owners to the SharedWorker. Give this remote fixture one
+  // opaque local-first credential for its whole lifetime instead.
+  const resolvedInput =
+    input.jwtToken || input.localFirstSecret
+      ? input
+      : { ...input, localFirstSecret: generateAuthSecret() };
+
   const browser = getBrowserFromContext(currentContext);
   const remoteContext = await browser.newContext();
   await remoteContext.addInitScript((key) => {
@@ -79,12 +90,12 @@ export async function createRemoteBrowserDb(
     });
   }
   const pages: Page[] = [];
-  for (let index = 0; index < (input.tabCount ?? 1); index += 1) {
+  for (let index = 0; index < (resolvedInput.tabCount ?? 1); index += 1) {
     const page = await remoteContext.newPage();
     await page.goto(harnessUrlFromPage(currentPage), { waitUntil: "domcontentloaded" });
     await evaluateHarness(page, "createRemoteBrowserDb", {
-      ...input,
-      initialRow: index === 0 ? input.initialRow : undefined,
+      ...resolvedInput,
+      initialRow: index === 0 ? resolvedInput.initialRow : undefined,
     });
     pages.push(page);
   }
@@ -93,7 +104,7 @@ export async function createRemoteBrowserDb(
     context: remoteContext,
     anchorPage,
     pages,
-    input,
+    input: resolvedInput,
     harnessUrl: harnessUrlFromPage(currentPage),
   });
 }
@@ -131,10 +142,15 @@ export async function restartRemoteBrowserDb(id: string): Promise<void> {
 
 export async function deleteRemoteBrowserIndexedDbAndWaitForReload(
   id: string,
-  dbName: string,
+  _dbName: string,
 ): Promise<void> {
   const handle = remoteBrowserDbs.get(id);
   if (!handle) throw new Error(`Remote browser db "${id}" is not open`);
+  const physicalDbName = await evaluateHarness<string, string>(
+    handle.pages[0]!,
+    "remoteBrowserDbPhysicalName",
+    id,
+  );
   const previousLoads = await Promise.all(
     handle.pages.map((page) =>
       page.evaluate((key) => Number(sessionStorage.getItem(key) ?? 0), HARNESS_LOAD_COUNT_KEY),
@@ -142,7 +158,7 @@ export async function deleteRemoteBrowserIndexedDbAndWaitForReload(
   );
   await handle.pages[0]!.evaluate((name) => {
     indexedDB.deleteDatabase(name);
-  }, dbName);
+  }, physicalDbName);
   await Promise.all(
     handle.pages.map((page, index) =>
       page.waitForFunction(

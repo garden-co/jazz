@@ -211,3 +211,29 @@ export async function closeRemoteBrowserDb(id: string): Promise<void> {
   await state.db.shutdown();
   store.delete(id);
 }
+
+/** Return the account-scoped physical root currently owned by this fixture. */
+export async function remoteBrowserDbPhysicalName(id: string): Promise<string> {
+  const state = getRemoteStateStore().get(id);
+  if (!state) throw new Error(`Remote browser db "${id}" was not initialized`);
+  const port = await state.db.openInspectorControlPort();
+  port.start();
+  const requestId = crypto.randomUUID();
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const onMessage = (
+        event: MessageEvent<{ type?: string; id?: string; contexts?: { dbName: string }[] }>,
+      ) => {
+        if (event.data.type !== "contexts" || event.data.id !== requestId) return;
+        port.removeEventListener("message", onMessage);
+        const dbName = event.data.contexts?.[0]?.dbName;
+        if (dbName) resolve(dbName);
+        else reject(new Error(`Remote browser db "${id}" has no worker context`));
+      };
+      port.addEventListener("message", onMessage);
+      port.postMessage({ type: "list-contexts", id: requestId });
+    });
+  } finally {
+    port.postMessage({ type: "close" });
+  }
+}
