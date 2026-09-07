@@ -154,17 +154,22 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         case 5:
           return {
             type: "subscriptionEvents",
-            events: bytes[1]
-              ? [
-                  {
-                    type: "delta",
-                    reset: true,
-                    settled: true,
-                    tier: "local",
-                    delta: new Uint8Array(),
-                  },
-                ]
-              : [],
+            events:
+              bytes[1] === 2
+                ? [{ type: "rejected", message: "fixed fixture rejection" }]
+                : bytes[1] === 3
+                  ? [{ type: "closed" }]
+                  : bytes[1]
+                    ? [
+                        {
+                          type: "delta",
+                          reset: true,
+                          settled: true,
+                          tier: "local",
+                          delta: new Uint8Array(),
+                        },
+                      ]
+                    : [],
           };
         case 6:
           return { type: "unsubscribed", closed: true };
@@ -200,6 +205,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     delayedAReads = 0,
     writerMustProgress = false,
     writerMustYield = false,
+    writerTerminal?: "rejected" | "closed",
   ) => ({
     abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached(capability: Uint8Array) {
@@ -226,7 +232,16 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
               subscribed = true;
               return Uint8Array.of(4);
             case 5:
-              return Uint8Array.of(5, published ? 1 : 0);
+              return Uint8Array.of(
+                5,
+                writerTerminal === "rejected"
+                  ? 2
+                  : writerTerminal === "closed"
+                    ? 3
+                    : published
+                      ? 1
+                      : 0,
+              );
             case 6:
               assert.equal(subscribed, true);
               subscribed = false;
@@ -356,7 +371,25 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     /did not settle before its bounded deadline/,
   );
   assert.deepEqual(writerDetails, [
-    "scope-isolation-writer-read-detail:last-rows-wakes-0-polls-0-rows-2-ready-no",
+    "scope-isolation-writer-read-detail:last-rows-wakes-0-polls-0-row-responses-2-ready-no",
+  ]);
+
+  const rejectedWriter = scopeFactory(false, false, 0, false, false, "rejected");
+  const rejectedWriterDetails: string[] = [];
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      rejectedWriter,
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      (detail) => rejectedWriterDetails.push(detail),
+    ),
+    /subscription ended before its read/,
+  );
+  assert.deepEqual(rejectedWriterDetails, [
+    "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no",
   ]);
 
   aWasWritten = false;

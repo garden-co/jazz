@@ -4,6 +4,7 @@ import {
   androidAcceptanceFailure,
   androidDeviceDiagnostic,
   androidCoreObservationDiagnostic,
+  androidScopeWriterReadDiagnostic,
 } from "./android-diagnostics.mjs";
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
@@ -23,13 +24,15 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
 
 test("Android timeout reports only the bounded scope writer-read counters", () => {
   const detail =
-    "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-rows-0-ready-no";
+    "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no";
   const output = [
-    "08-29 22:52:21.495  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
-    `08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: ${detail}`,
-    "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-rows-0-ready-no-secret",
+    `08-29 22:52:21.495  4268  4288 E JazzScopeWriterRead: ${detail}`,
+    "08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
+    "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
+    "08-29 22:52:21.498  4268  4288 E JazzScopeWriterRead: scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no-secret",
   ].join("\n");
-  assert.equal(androidDeviceDiagnostic(output), detail);
+  assert.equal(androidDeviceDiagnostic(output), "scope-isolation-writer-read-failed");
+  assert.equal(androidScopeWriterReadDiagnostic(output), detail);
   assert.match(androidAcceptanceFailure("timeout", "seed", output), new RegExp(detail));
 });
 

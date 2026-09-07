@@ -156,7 +156,7 @@ export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promis
 export async function recordScopeWriterReadDiagnostic(detail: string): Promise<void> {
   if (NativePlatform.OS !== "android") return;
   if (
-    !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-\d{1,6}-polls-\d{1,6}-rows-\d{1,6}-ready-(yes|no)$/.test(
+    !/^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/.test(
       detail,
     )
   )

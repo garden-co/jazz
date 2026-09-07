@@ -34,6 +34,7 @@ const acceptanceLogcat = () =>
     "threadtime",
     "ReactNativeJS:I",
     "JazzDeviceAcceptance:E",
+    "JazzScopeWriterRead:E",
     "JazzCoreObservation:E",
     "*:S",
   ]);

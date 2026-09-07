@@ -386,7 +386,7 @@ export async function proveForegroundScopeIsolation(
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
   readTiming: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
-  reportWriterReadDiagnostic: (detail: string) => void = () => {},
+  reportWriterReadDiagnostic: (detail: string) => void | Promise<void> = () => {},
 ): Promise<void> {
   let writer: ScopeForeground | undefined;
   try {
@@ -433,7 +433,7 @@ export async function proveForegroundScopeIsolation(
         last: "none",
         wakes: 0,
         polls: 0,
-        rows: 0,
+        rowResponses: 0,
         ready: false,
       };
       try {
@@ -447,8 +447,8 @@ export async function proveForegroundScopeIsolation(
           observation,
         );
       } catch (error) {
-        reportWriterReadDiagnostic(
-          `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-rows-${observation.rows}-ready-${observation.ready ? "yes" : "no"}`,
+        await reportWriterReadDiagnostic(
+          `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}`,
         );
         throw error;
       }
@@ -494,10 +494,10 @@ type ScopeForeground = {
 };
 
 type ScopeReadObservation = {
-  last: "none" | "pending" | "subscription" | "rows";
+  last: "none" | "pending" | "subscription" | "rejected" | "closed" | "rows";
   wakes: number;
   polls: number;
-  rows: number;
+  rowResponses: number;
   ready: boolean;
 };
 
@@ -611,8 +611,14 @@ async function readScopeRows(
       observeResponse(response);
       if (timing.now() >= deadline) break;
       if (response.type === "subscriptionEvents") {
-        if (response.events.some((event) => event.type === "rejected" || event.type === "closed"))
+        if (response.events.some((event) => event.type === "rejected")) {
+          if (observation) observation.last = "rejected";
           throw new Error("scope isolation fixture subscription ended before its read");
+        }
+        if (response.events.some((event) => event.type === "closed")) {
+          if (observation) observation.last = "closed";
+          throw new Error("scope isolation fixture subscription ended before its read");
+        }
         if (!response.events.some((event) => event.type === "delta")) continue;
         published = true;
         response = execute({ type: "all", query: prepared.query });
@@ -621,7 +627,7 @@ async function readScopeRows(
         if (timing.now() >= deadline) break;
       }
       if (response.type === "rows") {
-        if (observation) observation.rows += 1;
+        if (observation) observation.rowResponses += 1;
         if (ready(response.rows)) {
           if (observation) observation.ready = true;
           failed = false;

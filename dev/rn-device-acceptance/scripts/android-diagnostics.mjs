@@ -5,7 +5,9 @@ import { isDeviceDiagnosticCode } from "../src/device-diagnostics.ts";
 // ReactNativeJS console line must never impersonate the native diagnostic tag.
 const THREADTIME_DIAGNOSTIC =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzDeviceAcceptance\s*:\s*(\S+)\s*$/;
-const WRITER_READ_DETAIL = /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-\d{1,6}-polls-\d{1,6}-rows-\d{1,6}-ready-(yes|no)$/;
+const WRITER_READ_DETAIL = /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
+const THREADTIME_WRITER_READ_DETAIL =
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
 
 // A separate tag preserves the HTTP outcome when JS re-emits its generic stage.
 const THREADTIME_CORE_OBSERVATION =
@@ -27,7 +29,16 @@ export function androidDeviceDiagnostic(output) {
   for (const line of String(output).split(/\r?\n/)) {
     const candidate = THREADTIME_DIAGNOSTIC.exec(line)?.[1];
     if (!candidate) continue;
-    if (isDeviceDiagnosticCode(candidate) || WRITER_READ_DETAIL.test(candidate)) latest = candidate;
+    if (isDeviceDiagnosticCode(candidate)) latest = candidate;
+  }
+  return latest;
+}
+
+export function androidScopeWriterReadDiagnostic(output) {
+  let latest;
+  for (const line of String(output).split(/\r?\n/)) {
+    const detail = THREADTIME_WRITER_READ_DETAIL.exec(line)?.[1];
+    if (detail && WRITER_READ_DETAIL.test(detail)) latest = detail;
   }
   return latest;
 }
@@ -46,5 +57,12 @@ export function androidAcceptanceFailure(kind, phase, output) {
     ? `${summary}; device stage: ${diagnostic}`
     : `${summary}; no device stage`;
   const coreObservation = androidCoreObservationDiagnostic(output);
-  return coreObservation ? `${stage}; native Core acknowledgement: ${coreObservation}` : stage;
+  const writerRead =
+    diagnostic === "scope-isolation-writer-read-failed"
+      ? androidScopeWriterReadDiagnostic(output)
+      : undefined;
+  const detailedStage = writerRead ? `${stage}; scope writer read: ${writerRead}` : stage;
+  return coreObservation
+    ? `${detailedStage}; native Core acknowledgement: ${coreObservation}`
+    : detailedStage;
 }

@@ -240,9 +240,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
 
   @ReactMethod fun recordScopeWriterReadDiagnostic(detail: String, promise: Promise) {
     try {
-      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-rows-[0-9]{1,6}-ready-(yes|no)$").matches(detail)) { "invalid scope writer read diagnostic" }
-      writeAtomicDiagnostic(detail)
-      Log.e("JazzDeviceAcceptance", detail)
+      require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)$").matches(detail)) { "invalid scope writer read diagnostic" }
+      Log.e("JazzScopeWriterRead", detail)
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }

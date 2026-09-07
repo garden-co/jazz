@@ -46,7 +46,7 @@ async function observeTrustedAdmissionLifecycleInner(
 ) {
   const reportWriterReadDiagnostic = (detail: string) => {
     try {
-      void recordScopeWriterReadDiagnostic(detail).catch(() => {});
+      return recordScopeWriterReadDiagnostic(detail).catch(() => {});
     } catch {}
   };
   // The native fixture returns the same host-issued nonce from both launches.
