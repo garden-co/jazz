@@ -173,10 +173,14 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     }
   });
 
-  // List todos as a specific session user (for policy verification/testing)
+  // Verify the caller before checking that the requested account is their own.
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userDb = await client.forRequest(req);
+      const userDb = await client.forRequest(req).catch(() => undefined);
+      if (!userDb) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
       if (userDb.getAuthState().session?.user.account !== req.params.userId) {
         res.status(403).json({ error: "Account mismatch" });
         return;

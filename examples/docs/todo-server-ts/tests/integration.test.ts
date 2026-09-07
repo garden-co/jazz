@@ -206,6 +206,12 @@ describe("Todo Server Integration", () => {
       const bob = await admit();
       const aliceId = alice.id;
       const bobId = bob.id;
+      const unauthenticated = await fetch(`${baseUrl}/todos/as/${aliceId}`);
+      expect(unauthenticated.status).toBe(401);
+      const impersonation = await fetch(`${baseUrl}/todos/as/${bobId}`, {
+        headers: { Authorization: `Bearer ${alice.token}` },
+      });
+      expect(impersonation.status).toBe(403);
       const aliceOwner = aliceId;
       const bobOwner = bobId;
 

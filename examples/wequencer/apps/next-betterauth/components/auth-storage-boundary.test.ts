@@ -25,7 +25,7 @@ describe("Better Auth storage boundary", () => {
       permissions,
     });
 
-    const openContext = () =>
+    const openSession = () =>
       createJazzSession({
         appId: server!.appId,
         app,
@@ -36,7 +36,7 @@ describe("Better Auth storage boundary", () => {
         env: "test",
       });
 
-    session = await openContext();
+    session = await openSession();
     const backend = session.getSnapshot().client!;
     const stored = await backend.db
       .insert(app.better_auth_user, {
@@ -72,7 +72,7 @@ describe("Better Auth storage boundary", () => {
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     await session.close();
-    session = await openContext();
+    session = await openSession();
     await expect
       .poll(
         async () =>
