@@ -2232,6 +2232,8 @@ fn encode_stored_scalar_canonical(
     kind: LargeValueKind,
     value: &StoredScalar,
 ) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let schema = stored_scalar_schema(kind);
     let enum_value = match value {
         StoredScalar::Primitive(bytes) => {
@@ -2272,6 +2274,7 @@ fn encode_stored_scalar_canonical(
 #[cfg(test)]
 std::thread_local! {
     static STORED_SCALAR_ENCODE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static STORED_SCALAR_CANONICAL_ENCODE_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2292,7 +2295,14 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     let decoded = match tag {
-        2 => decode_primitive_payload(kind, payload).map(StoredScalar::Primitive),
+        2 => {
+            // split_variant_record has checked every tag byte for canonical
+            // framing. The primitive decoder reconstructs the complete payload
+            // exactly, checks reserved slots and validates the declared logical
+            // kind. Together those checks cover the entire envelope; rebuilding
+            // that same envelope would repeat payload decoding and allocation.
+            return decode_primitive_payload(kind, payload).map(StoredScalar::Primitive);
+        }
         3 => {
             // This deliberately reads only the outer tag and the first static
             // descriptor byte. An unknown format must win before the current
@@ -7733,6 +7743,94 @@ mod tests {
             stored_scalar_encode_calls(),
             0,
             "an already-inline current row must pass through without scalar re-encoding"
+        );
+    }
+
+    #[test]
+    fn primitive_scalar_decode_preserves_exact_validation_without_reencoding() {
+        // Exercise the persisted byte boundary, including logical errors that
+        // a public write correctly refuses to produce. Primitive payloads have
+        // one final raw field: there are no offsets or reserved payload slots.
+        // Extra bytes are valid Bytes data, but invalid after a JSON document.
+        fn reference(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
+            let (tag, payload) = crate::records::split_variant_record(encoded)
+                .map_err(|_| Error::MalformedScalar)?;
+            if tag != 2 {
+                return Err(Error::MalformedScalar);
+            }
+            let decoded = StoredScalar::Primitive(decode_primitive_payload(kind, payload)?);
+            if encode_stored_scalar_canonical(kind, &decoded)? != encoded {
+                return Err(Error::MalformedScalar);
+            }
+            Ok(decoded)
+        }
+
+        for (kind, logical) in [
+            (LargeValueKind::Bytes, b"abc".as_slice()),
+            (LargeValueKind::String, "text 🙂".as_bytes()),
+            (LargeValueKind::Json, br#" {"a":1,"a":2} "#.as_slice()),
+        ] {
+            let encoded =
+                encode_stored_scalar(kind, &StoredScalar::Primitive(logical.to_vec())).unwrap();
+            assert_eq!(encoded, [b"\x02".as_slice(), logical].concat());
+            STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| calls.set(0));
+            assert_eq!(
+                decode_stored_scalar(kind, &encoded),
+                Ok(StoredScalar::Primitive(logical.to_vec()))
+            );
+            STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| {
+                assert_eq!(
+                    calls.get(),
+                    0,
+                    "canonical primitive decoding must not reconstruct the envelope again"
+                )
+            });
+
+            for length in 0..=encoded.len() {
+                let bytes = &encoded[..length];
+                assert_eq!(decode_stored_scalar(kind, bytes), reference(kind, bytes));
+            }
+            for index in 1..encoded.len() {
+                for byte in [0, 1, 0x7f, 0x80, 0xff] {
+                    let mut changed = encoded.clone();
+                    changed[index] = byte;
+                    assert_eq!(
+                        decode_stored_scalar(kind, &changed),
+                        reference(kind, &changed)
+                    );
+                }
+            }
+            for prefix in [
+                vec![0],
+                vec![1],
+                vec![4],
+                vec![0x82, 0],
+                vec![0x82, 0x80, 0],
+                vec![0x82, 0x80, 0x80, 0x80, 0x10],
+            ] {
+                let invalid = [prefix.as_slice(), logical].concat();
+                assert_eq!(
+                    decode_stored_scalar(kind, &invalid),
+                    Err(Error::MalformedScalar)
+                );
+            }
+        }
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::String, &[2, 0xff]),
+            Err(Error::InvalidUtf8)
+        );
+        for payload in [b"not json".as_slice(), b"{}x", b"{}\0"] {
+            assert!(
+                decode_stored_scalar(
+                    LargeValueKind::Json,
+                    &[b"\x02".as_slice(), payload].concat()
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &[2, 0, 0xff]),
+            Ok(StoredScalar::Primitive(vec![0, 0xff]))
         );
     }
 
