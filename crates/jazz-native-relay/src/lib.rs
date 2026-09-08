@@ -7647,35 +7647,26 @@ mod tests {
                 panic!("foreground subscription preparation must return a handle");
             };
 
+            // Keep the same asynchronous read until it completes. Starting a
+            // second All after a Pending reply leaks the first observation and
+            // can exhaust the intentionally bounded native operation capacity.
+            let mut request = ForegroundDbCommandRequest::All {
+                query,
+                options_json: "{}".into(),
+                transaction: None,
+            };
             for _ in 0..120 {
                 self.tick(foreground);
                 std::thread::sleep(Duration::from_millis(25));
-                match self.execute(
-                    foreground,
-                    ForegroundDbCommandRequest::All {
-                        query,
-                        options_json: "{}".into(),
-                        transaction: None,
-                    },
-                ) {
+                match self.execute(foreground, request) {
                     ForegroundDbCommandResponse::Rows { rows } => return rows,
                     ForegroundDbCommandResponse::Pending { operation } => {
-                        self.tick(foreground);
-                        match self
-                            .execute(foreground, ForegroundDbCommandRequest::Poll { operation })
-                        {
-                            ForegroundDbCommandResponse::Rows { rows } => return rows,
-                            ForegroundDbCommandResponse::Pending { .. } => self.tick(foreground),
-                            response => {
-                                panic!("foreground read failed after native tick: {response:?}")
-                            }
-                        }
+                        request = ForegroundDbCommandRequest::Poll { operation };
                     }
                     response => {
                         panic!("foreground All returned an unexpected response: {response:?}")
                     }
                 }
-                self.tick(foreground);
             }
             panic!("foreground read did not settle after bounded native relay ticks");
         }
