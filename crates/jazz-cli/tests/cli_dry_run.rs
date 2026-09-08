@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -64,7 +64,7 @@ fn jazz_server_command() -> Command {
     command
 }
 
-fn server_command_report(command: &mut Command) -> String {
+fn server_command_output(command: &mut Command) -> Output {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -88,7 +88,11 @@ fn server_command_report(command: &mut Command) -> String {
             }
         }
     }
-    let output = child.wait_with_output().expect("collect server report");
+    child.wait_with_output().expect("collect server report")
+}
+
+fn server_command_report(command: &mut Command) -> String {
+    let output = server_command_output(command);
     assert!(
         output.status.success(),
         "server failed: {}",
@@ -717,6 +721,262 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
             .iter()
             .any(|line| line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/custom-ws"))
     );
+}
+
+#[test]
+fn server_command_isolates_implicit_data_directories_between_apps() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dirs = ["app-a", "app-b"].map(|app_id| {
+        let stdout = server_command_report(
+            jazz_server_command()
+                .args([
+                    "server",
+                    app_id,
+                    "--listen",
+                    "127.0.0.1:0",
+                    "--auth-static-bearer",
+                    "secret",
+                ])
+                .current_dir(temp_dir.path()),
+        );
+        let reported_path = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("data_dir="))
+            .unwrap_or_else(|| panic!("{app_id} must report durable storage:\n{stdout}"));
+        let data_dir = temp_dir.path().join(reported_path);
+        assert!(
+            data_dir.join("CURRENT").is_file(),
+            "{app_id} must initialise the reported store root: {}\n{stdout}",
+            data_dir.display()
+        );
+        data_dir
+            .canonicalize()
+            .expect("canonicalise initialised store root")
+    });
+
+    assert_ne!(
+        data_dirs[0], data_dirs[1],
+        "different apps must not reuse the same implicit store in a shared working directory"
+    );
+}
+
+fn app_storage_command(cwd: &Path, app_id: &str) -> Command {
+    let mut command = jazz_server_command();
+    command
+        .args([
+            "server",
+            app_id,
+            "--listen",
+            "127.0.0.1:0",
+            "--auth-static-bearer",
+            "secret",
+        ])
+        .current_dir(cwd);
+    command
+}
+
+fn reported_data_directory(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("data_dir="))
+        .unwrap_or_else(|| panic!("server must report durable storage:\n{stdout}"))
+}
+
+fn storage_snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in std::fs::read_dir(path).expect("read storage directory") {
+            let path = entry.expect("read storage entry").path();
+            let key = path.strip_prefix(root).unwrap().to_owned();
+            if path.is_dir() {
+                entries.insert(key, None);
+                visit(root, &path, entries);
+            } else {
+                entries.insert(key, Some(std::fs::read(path).expect("read storage bytes")));
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+#[test]
+fn server_command_reopens_canonical_app_storage_without_changing_raw_app_identity() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let named = server_command_report(&mut app_storage_command(temp_dir.path(), "stable-app"));
+    let named_again =
+        server_command_report(&mut app_storage_command(temp_dir.path(), "stable-app"));
+    assert_eq!(
+        reported_data_directory(&named),
+        reported_data_directory(&named_again)
+    );
+    let named_path = Path::new(reported_data_directory(&named));
+    assert_eq!(named_path.parent(), Some(Path::new("./data/apps")));
+    assert!(temp_dir.path().join(named_path).join("CURRENT").is_file());
+
+    // Reopening by the reported canonical identity must address the named app's store.
+    let canonical_name = named_path.file_name().unwrap().to_str().unwrap();
+    let by_id = server_command_report(&mut app_storage_command(temp_dir.path(), canonical_name));
+    assert_eq!(
+        reported_data_directory(&named),
+        reported_data_directory(&by_id)
+    );
+
+    let uuid = "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c";
+    for spelling in [uuid, "7C5FD0DA4BD14BA9920341E1F0DA142C"] {
+        let stdout = server_command_report(&mut app_storage_command(temp_dir.path(), spelling));
+        assert_eq!(
+            reported_data_directory(&stdout),
+            format!("./data/apps/{uuid}")
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("app_id={spelling}"))
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("websocket_path=/apps/{spelling}/ws"))
+        );
+    }
+    assert!(
+        temp_dir
+            .path()
+            .join(format!("data/apps/{uuid}/CURRENT"))
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_dir(temp_dir.path().join("data/apps"))
+            .unwrap()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn server_command_keeps_path_separator_app_names_inside_canonical_storage_root() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let stdout = server_command_report(&mut app_storage_command(temp_dir.path(), "../nested/app"));
+    let relative = Path::new(reported_data_directory(&stdout));
+    assert_eq!(relative.parent(), Some(Path::new("./data/apps")));
+    let child = relative.file_name().unwrap().to_str().unwrap();
+    let id = uuid::Uuid::parse_str(child).expect("storage child is a UUID, not a raw app name");
+    assert_eq!(child, id.to_string());
+    assert!(temp_dir.path().join(relative).join("CURRENT").is_file());
+    assert!(!temp_dir.path().join("data/nested").exists());
+}
+
+#[test]
+fn server_command_refuses_legacy_default_without_mutation_but_allows_explicit_reopen() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    server_command_report(
+        app_storage_command(temp_dir.path(), "legacy-app").args(["--data-dir", "./data"]),
+    );
+    let before = storage_snapshot(temp_dir.path());
+    let output = server_command_output(
+        app_storage_command(temp_dir.path(), "new-app").env("JAZZ_SERVER_IN_MEMORY", "false"),
+    );
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ws_url="));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("legacy_default_storage"), "{stderr}");
+    assert!(stderr.contains("--data-dir ./data"), "{stderr}");
+    assert!(stderr.contains("JAZZ_SERVER_DATA_DIR=./data"), "{stderr}");
+    assert_eq!(storage_snapshot(temp_dir.path()), before);
+    assert!(!temp_dir.path().join("data/apps").exists());
+
+    let cli = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app")
+            .env("JAZZ_SERVER_IN_MEMORY", "true")
+            .args(["--memory", "--data-dir", "./data"]),
+    );
+    assert_eq!(reported_data_directory(&cli), "./data");
+    let env = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app").env("JAZZ_SERVER_DATA_DIR", "./data"),
+    );
+    assert_eq!(reported_data_directory(&env), "./data");
+    assert!(!temp_dir.path().join("data/apps").exists());
+}
+
+#[test]
+fn server_command_explicit_storage_bypasses_legacy_guard_without_touching_legacy_data() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data = temp_dir.path().join("data");
+    // Any existing CURRENT entry is legacy evidence, even a directory.
+    std::fs::create_dir_all(data.join("CURRENT")).unwrap();
+    std::fs::write(data.join("CURRENT/keep"), b"do not adopt").unwrap();
+    let before = storage_snapshot(&data);
+    let refused = server_command_output(&mut app_storage_command(temp_dir.path(), "new-app"));
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy_default_storage"));
+    assert_eq!(storage_snapshot(&data), before);
+
+    let env = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app").env("JAZZ_SERVER_DATA_DIR", "./env-data"),
+    );
+    assert_eq!(reported_data_directory(&env), "./env-data");
+    assert!(temp_dir.path().join("env-data/CURRENT").is_file());
+    let cli = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app")
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-env")
+            .args(["--in-memory", "--dataDir=./cli-data"]),
+    );
+    assert_eq!(reported_data_directory(&cli), "./cli-data");
+    assert!(temp_dir.path().join("cli-data/CURRENT").is_file());
+    let env_memory = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app")
+            .env("JAZZ_SERVER_IN_MEMORY", "true")
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-env"),
+    );
+    let cli_memory = server_command_report(
+        app_storage_command(temp_dir.path(), "new-app")
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-env")
+            .args(["--dataDir", "./unused-cli", "--memory"]),
+    );
+    for stdout in [env_memory, cli_memory] {
+        assert!(stdout.lines().any(|line| line == "storage=in-memory"));
+        assert!(!stdout.lines().any(|line| line.starts_with("data_dir=")));
+    }
+    assert!(!temp_dir.path().join("unused-env").exists());
+    assert!(!temp_dir.path().join("unused-cli").exists());
+    assert_eq!(storage_snapshot(&data), before);
+    assert!(!data.join("apps").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn server_command_refuses_dangling_legacy_marker_without_mutation() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data = temp_dir.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    std::os::unix::fs::symlink("missing-manifest", data.join("CURRENT")).unwrap();
+    let output = server_command_output(&mut app_storage_command(temp_dir.path(), "new-app"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("legacy_default_storage"));
+    assert_eq!(
+        std::fs::read_link(data.join("CURRENT")).unwrap(),
+        Path::new("missing-manifest")
+    );
+    assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+    assert!(!data.join("apps").exists());
+}
+
+#[test]
+fn server_command_fails_closed_when_legacy_probe_parent_is_not_a_directory() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    std::fs::write(temp_dir.path().join("data"), b"not a directory").unwrap();
+    let before = storage_snapshot(temp_dir.path());
+    let output = server_command_output(&mut app_storage_command(temp_dir.path(), "new-app"));
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ws_url="));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("legacy_default_storage_probe_failed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("./data/CURRENT"), "{stderr}");
+    assert_eq!(storage_snapshot(temp_dir.path()), before);
 }
 
 #[test]

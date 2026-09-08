@@ -12,6 +12,7 @@ use jazz::serving::{
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
 };
+use jazz::tools::AppId;
 use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 
 fn empty_runtime_schema() -> JazzSchema {
@@ -146,6 +147,10 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Err(error) = options.reject_legacy_implicit_storage() {
+        eprintln!("error={error}");
+        return ExitCode::FAILURE;
+    }
     let schema = empty_runtime_schema();
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
@@ -297,16 +302,20 @@ fn print_usage_stderr(program: &str) {
     );
 }
 
+const SERVER_STORAGE_HELP: &str = "storage_default=./data/apps/<canonical-app-uuid> (UUID APP_ID spellings are canonicalised; other names use a deterministic UUID). Explicit storage paths are unchanged. If ./data/CURRENT exists, the implicit default refuses to start: deliberately use --data-dir ./data or JAZZ_SERVER_DATA_DIR=./data to reopen that store, or migrate it manually. No legacy data is moved or adopted automatically.";
+
 fn print_server_usage(program: &str) {
     println!(
         "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
+    println!("{SERVER_STORAGE_HELP}");
 }
 
 fn print_server_usage_stderr(program: &str) {
     eprintln!(
         "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--loopback-admitted-account <uuid>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
+    eprintln!("{SERVER_STORAGE_HELP}");
 }
 
 fn print_serve_usage(program: &str, command: &str) {
@@ -522,6 +531,7 @@ struct CliOptions {
     listen: SocketAddr,
     websocket_path: String,
     storage: StorageConfig,
+    implicit_app_storage: bool,
     auth_admission: AuthAdmissionConfig,
     admitted_account: Option<AccountId>,
     upstream_url: Option<String>,
@@ -544,10 +554,13 @@ impl CliOptions {
         if app_id.trim().is_empty() {
             return Err("empty_app_id".to_owned());
         }
+        let canonical_app_id =
+            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
         let mut options = Self::defaults(
-            StorageConfig::data_dir("./data"),
+            StorageConfig::data_dir(format!("./data/apps/{canonical_app_id}")),
             format!("/apps/{app_id}/ws"),
         );
+        options.implicit_app_storage = true;
         Self::apply_env(&mut options)?;
         Self::parse_into(&mut options, args, program)?;
         options.auth_admission.expected_audience = Some(app_id.to_owned());
@@ -569,10 +582,10 @@ impl CliOptions {
                     options.listen.set_port(port);
                 }
                 "--data-dir" | "--dataDir" => {
-                    options.storage = StorageConfig::data_dir(next_value(&mut args, &arg)?);
+                    options.select_storage(StorageConfig::data_dir(next_value(&mut args, &arg)?));
                 }
                 "--in-memory" | "--memory" => {
-                    options.storage = StorageConfig::InMemory;
+                    options.select_storage(StorageConfig::InMemory);
                 }
                 "--websocket-path" | "--ws-path" => {
                     options.websocket_path = next_value(&mut args, &arg)?;
@@ -627,7 +640,7 @@ impl CliOptions {
                     options.listen.set_port(port);
                 }
                 _ if arg.starts_with("--data-dir=") || arg.starts_with("--dataDir=") => {
-                    options.storage = StorageConfig::data_dir(value_after_equals(&arg)?);
+                    options.select_storage(StorageConfig::data_dir(value_after_equals(&arg)?));
                 }
                 _ if arg.starts_with("--websocket-path=") || arg.starts_with("--ws-path=") => {
                     options.websocket_path = value_after_equals(&arg)?.to_owned();
@@ -685,9 +698,32 @@ impl CliOptions {
             listen: SocketAddr::from(([127, 0, 0, 1], 0)),
             websocket_path,
             storage,
+            implicit_app_storage: false,
             auth_admission: AuthAdmissionConfig::default(),
             admitted_account: None,
             upstream_url: None,
+        }
+    }
+
+    fn select_storage(&mut self, storage: StorageConfig) {
+        self.storage = storage;
+        self.implicit_app_storage = false;
+    }
+
+    fn reject_legacy_implicit_storage(&self) -> Result<(), String> {
+        if !self.implicit_app_storage {
+            return Ok(());
+        }
+        // Inspect the entry itself: even a dangling CURRENT link is legacy evidence.
+        // Do not create or open the app root until this read-only check succeeds.
+        match std::fs::symlink_metadata("./data/CURRENT") {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(format!(
+                "legacy_default_storage: ./data/CURRENT exists; {SERVER_STORAGE_HELP}"
+            )),
+            Err(error) => Err(format!(
+                "legacy_default_storage_probe_failed: cannot inspect ./data/CURRENT: {error}; resolve this filesystem error before using the implicit default. {SERVER_STORAGE_HELP}"
+            )),
         }
     }
 
@@ -703,9 +739,9 @@ impl CliOptions {
             options.listen.set_port(port);
         }
         if env_truthy("JAZZ_SERVER_IN_MEMORY") {
-            options.storage = StorageConfig::InMemory;
+            options.select_storage(StorageConfig::InMemory);
         } else if let Ok(value) = env::var("JAZZ_SERVER_DATA_DIR") {
-            options.storage = StorageConfig::data_dir(value);
+            options.select_storage(StorageConfig::data_dir(value));
         }
         if let Ok(value) = env::var("JAZZ_SERVER_WEBSOCKET_PATH") {
             options.websocket_path = value;
@@ -809,17 +845,6 @@ fn parse_bool(value: &str, name: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn server_app_parse_defaults_to_data_dir_and_app_ws_path() {
-        let options = CliOptions::parse_for_server_app(Vec::new(), "jazz-server", "demo").unwrap();
-
-        assert_eq!(options.listen, SocketAddr::from(([127, 0, 0, 1], 0)));
-        assert_eq!(options.websocket_path, "/apps/demo/ws");
-        assert!(
-            matches!(options.storage, StorageConfig::RocksDb { ref path } if path == std::path::Path::new("./data"))
-        );
-    }
 
     #[test]
     fn server_app_parse_accepts_alpha_flags_and_in_memory_opt_out() {
