@@ -1267,3 +1267,53 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         "an old same-named inline body does not cover the registered shape's reintroduced lineage"
     );
 }
+/// Alice restores a row with new content in one transaction. Bob receives the
+/// content body but needs the distinct deletion-register body before accepting
+/// the complete supporting set. A matching content body is not that witness.
+///
+/// Alice ──content + restore──► Core ──content only──► Bob
+/// Bob ──exact row/transaction repair──► Core ──both layers──► Bob
+#[test]
+fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(0xc7);
+    let open = OpenTransactionId::new();
+    core.open_exclusive(open).unwrap();
+    core.tx_write(open, "todos", row_uuid, title_cells("restored"), None).unwrap();
+    core.tx_write(open, "todos", row_uuid, BTreeMap::<String, Value>::new(), Some(DeletionEvent::Restored)).unwrap();
+    let (tx_id, _) = core.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
+    core.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let SyncMessage::ViewUpdate(payload) = &mut update else { panic!("expected supporting snapshot") };
+    // A complete input set may retain both independently stored layers.
+    let mut restore = payload.supporting_rows.iter().find(|row| row.version.tx == tx_id).unwrap().clone();
+    restore.version.layer = crate::protocol::ResultRowLayer::Deletion;
+    payload.supporting_rows = vec![restore];
+    let mut bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    for bundle in &mut bundles {
+        bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
+        bundle.versions.retain(|version| version.deletion().is_none());
+        bundle.tx.n_total_writes = bundle.versions.len().try_into().unwrap();
+    }
+    payload.version_carriers = bundles.into_iter().map(crate::protocol::VersionCarrier::Bundle).collect();
+    let expected = vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)];
+    assert_eq!(reader.missing_known_state_row_version_refs(&update).unwrap(), expected,
+        "an inline content sibling must not hide the missing deletion witness");
+    let SyncMessage::ViewUpdate(payload) = &mut update else { unreachable!() };
+    let content_only = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    reader.apply_row_version_payloads_for_requests(&expected, content_only).unwrap();
+    payload.version_carriers.clear();
+    assert_eq!(reader.missing_known_state_row_version_refs(&update).unwrap(), expected,
+        "a resident content sibling must not hide the missing deletion witness");
+    let repaired = core.row_version_payloads_for_refs(&expected, RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM)).unwrap();
+    assert!(repaired.iter().flat_map(|bundle| &bundle.versions).any(|version| version.deletion() == Some(DeletionEvent::Restored)),
+        "repair must return every layer of the requested physical row/transaction");
+    reader.apply_row_version_payloads_for_requests(&expected, repaired).unwrap();
+    assert!(reader.missing_known_state_row_version_refs(&update).unwrap().is_empty());
+    reader.apply_sync_message_settled(update).unwrap();
+    assert_eq!(reader.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+}

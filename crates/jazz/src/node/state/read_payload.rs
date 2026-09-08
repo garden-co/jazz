@@ -288,7 +288,7 @@ where
         authorization: RowVersionRepairAuthorization<'_>,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
-        for request in requests {
+        for request in requests.iter().collect::<BTreeSet<_>>() {
             // A repair request names the receiver's projected table.  The
             // stored body, however, remains canonically authored under the
             // table name from its source schema.  Match the two through the
@@ -398,8 +398,10 @@ where
             }
             for (table_id, version) in matching_versions {
                 if table_id == requested_table_id {
+                    // Content and the deletion register can share a transaction.
+                    // The repair coordinate names the row/transaction, so return
+                    // every matching layer rather than whichever sorts first.
                     by_tx.entry(tx_id).or_default().push(version);
-                    break;
                 }
             }
         }
@@ -569,7 +571,7 @@ where
             .filter_map(|(tx, version)| {
                 self.physical_table_id_for_schema(version.schema_version(), version.table())
                     .ok()
-                    .map(|table| (tx, version.row_uuid(), table))
+                    .map(|table| (tx, version.row_uuid(), table, if version.deletion().is_some() { crate::protocol::ResultRowLayer::Deletion } else { crate::protocol::ResultRowLayer::Content }, version.branch_key().canonical_bytes()))
             })
             .collect::<BTreeSet<_>>();
         let Some(registered_shape) = self.registered_shape(subscription.shape_id) else {
@@ -580,22 +582,29 @@ where
             return Ok(Vec::new());
         };
         let result_schema_version = registered_shape.schema_version();
+        let table_names = self.catalogue.physical_mappings.get(&result_schema_version)
+            .map(|mapping| mapping.identities.tables.iter()
+                .map(|(name, identity)| (identity.id, name.clone())).collect::<BTreeMap<_, _>>())
+            .unwrap_or_default();
         let mut missing = BTreeSet::new();
         // Every referenced native body must be available, including retained rows
         // whose bytes may have been evicted since the previous complete snapshot.
-        for (table, row_uuid, tx_id) in program_fact_adds
-            .iter().map(|row| (row.version_table.to_string(), row.row, row.version.tx))
-        {
-            let version_ref = RowVersionRef::new(table, row_uuid, tx_id);
+        for row in program_fact_adds {
+            let tx_id = row.version.tx;
+            let version_ref = RowVersionRef::new(row.version_table.to_string(), row.row, tx_id);
             if self.inline_version_bundle_covers(
                 &version_ref,
                 result_schema_version,
+                &row.version,
                 &incoming_versions,
             )? {
                 continue;
             }
-            if self.local_version_row_for_ref(&version_ref).await?.is_none()
-                || !self.transaction_exists(tx_id).await?
+            let resident = match table_names.get(&row.physical_table) {
+                Some(table) => self.local_supporting_row_version(row, result_schema_version, table).await?,
+                None => None,
+            };
+            if resident.is_none() || !self.transaction_exists(tx_id).await?
             {
                 missing.insert(version_ref);
             }
@@ -611,7 +620,8 @@ where
         &self,
         request: &RowVersionRef,
         result_schema_version: SchemaVersionId,
-        incoming_versions: &BTreeSet<(TxId, RowUuid, PhysicalTableId)>,
+        version: &crate::protocol::RowVersionRefEntry,
+        incoming_versions: &BTreeSet<(TxId, RowUuid, PhysicalTableId, crate::protocol::ResultRowLayer, Vec<u8>)>,
     ) -> Result<bool, Error> {
         // Unlike a standalone RowVersionRef repair request, an inline witness
         // is carried by a registered subscription whose schema version makes
@@ -649,30 +659,29 @@ where
             request.tx_id(),
             request.row_uuid,
             requested_table_id,
+            version.layer,
+            version.branch_or_prefix.clone().unwrap_or_default(),
         )))
     }
 
-    async fn local_version_row_for_ref(
+    async fn local_supporting_row_version(
         &mut self,
-        version_ref: &RowVersionRef,
+        row: &crate::protocol::SupportingRow,
+        read_schema: SchemaVersionId,
+        table: &str,
     ) -> Result<Option<VersionRow>, Error> {
-        let Some(tx_node_alias) = self.node_aliases.get(&version_ref.tx_node_id).copied() else {
-            return Ok(None);
-        };
-        for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-            if let Some(version) = self.query_version_by_alias(
-                &version_ref.table,
-                version_ref.row_uuid,
-                layer,
-                version_ref.tx_time,
-                tx_node_alias,
-            )
-            .await?
-            {
-                return Ok(Some(version));
-            }
-        }
-        Ok(None)
+        // Reuse admission's exact physical-table, layer and branch lookup.
+        // This local source name is only a lookup coordinate, not a new claim
+        // about which compiled query occurrence the peer supplied.
+        self.covered_input_version(&crate::protocol::CoveredInputEntry {
+            source: crate::protocol::ProgramSourceId {
+                table: table.to_owned().into(),
+                path: vec![crate::protocol::ProgramSourceRole::Root],
+            },
+            version_table: row.version_table.clone(),
+            source_row: row.row,
+            version: row.version.clone(),
+        }, read_schema).await
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {
