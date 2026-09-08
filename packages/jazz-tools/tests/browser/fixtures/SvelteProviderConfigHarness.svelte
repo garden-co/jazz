@@ -7,31 +7,12 @@
     replacementConfig: DbConfig;
   }
 
-  function initialConfigSnapshot(): DbConfig {
-    return { ...initialConfig };
-  }
-
   let { initialConfig, replacementConfig }: Props = $props();
   let useReplacement = $state(false);
-  const initial = initialConfigSnapshot();
-  let jwtToken = $state<string | undefined>(initial.jwtToken);
-  let config: DbConfig = {
-    ...initial,
-    get jwtToken() {
-      return jwtToken;
-    },
-    set jwtToken(value) {
-      jwtToken = value;
-    },
-  };
-  let effectiveConfig = $derived(useReplacement ? replacementConfig : config);
+  let effectiveConfig = $derived(useReplacement ? replacementConfig : initialConfig);
 
   export function useReplacementConfig(): void {
     useReplacement = true;
-  }
-
-  export function mutateJwtToken(jwtToken: string): void {
-    config.jwtToken = jwtToken;
   }
 </script>
 

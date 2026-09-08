@@ -82,11 +82,12 @@ describe("JazzSvelteProvider config handover", () => {
     );
   });
 
-  it("hands over when an external-JWT config changes in place", async () => {
+  it("hands over when storage configuration changes in place", async () => {
     const appId = `svelte-provider-${crypto.randomUUID()}`;
-    const dbName = crypto.randomUUID();
-    const alice = makeJwt({ sub: "alice", iss: "https://auth.example.com" });
-    const bob = makeJwt({ sub: "bob", iss: "https://auth.example.com" });
+    const initialDbName = crypto.randomUUID();
+    const replacementDbName = crypto.randomUUID();
+    const accounts = await createTestAccountManager(appId);
+    const account = accounts.createLocalFirst();
     target = document.createElement("div");
     document.body.appendChild(target);
 
@@ -95,43 +96,39 @@ describe("JazzSvelteProvider config handover", () => {
       props: {
         initialConfig: {
           appId,
-          driver: { type: "persistent", dbName },
-          jwtToken: alice,
+          driver: { type: "persistent", dbName: initialDbName },
+          account,
         },
         replacementConfig: {
           appId,
-          driver: { type: "persistent", dbName },
-          jwtToken: bob,
+          driver: { type: "persistent", dbName: replacementDbName },
+          account,
         },
       },
     });
 
     await waitForCondition(
-      async () =>
-        target?.querySelector("[data-provider-user]")?.getAttribute("data-provider-user") ===
-        '["https://auth.example.com","alice"]',
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
       10_000,
-      "the Alice client to become ready",
+      "the initial account client to become ready",
     );
 
-    // The fixture exports this method from its public component instance.
-    const harness = component as { mutateJwtToken(jwtToken: string): void };
-    harness.mutateJwtToken(bob);
+    const harness = component as { useReplacementConfig(): void };
+    harness.useReplacementConfig();
     flushSync();
     expect(target.querySelector('[data-provider-state="loading"]')).not.toBeNull();
 
     await waitForCondition(
-      async () =>
-        target?.querySelector("[data-provider-user]")?.getAttribute("data-provider-user") ===
-        '["https://auth.example.com","bob"]',
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
       10_000,
-      "the replacement Bob client to become ready",
+      "the replacement account client to become ready",
     );
   });
   it("keeps the client for a semantically equivalent replacement config", async () => {
     const appId = `svelte-provider-${crypto.randomUUID()}`;
     const dbName = crypto.randomUUID();
-    const alice = makeJwt({ sub: "alice", iss: "https://auth.example.com" });
+    const accounts = await createTestAccountManager(appId);
+    const account = accounts.createLocalFirst();
     const initialDate = new Date("2026-01-01T00:00:00.000Z");
     const equivalentDate = new Date("2026-01-01T00:00:00.000Z");
     target = document.createElement("div");
@@ -143,34 +140,29 @@ describe("JazzSvelteProvider config handover", () => {
         initialConfig: {
           appId,
           driver: { type: "persistent", dbName },
-          jwtToken: alice,
+          account,
           date: initialDate,
-        } as DbConfig,
+        },
         replacementConfig: {
           appId,
           driver: { type: "persistent", dbName },
-          jwtToken: alice,
+          account,
           date: equivalentDate,
-        } as DbConfig,
+        },
       },
     });
 
     await waitForCondition(
-      async () =>
-        target?.querySelector("[data-provider-user]")?.getAttribute("data-provider-user") ===
-        '["https://auth.example.com","alice"]',
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
       10_000,
-      "the Alice client to become ready",
+      "the account client to become ready",
     );
 
-    // The fixture exports this method from its public component instance.
     const harness = component as { useReplacementConfig(): void };
     harness.useReplacementConfig();
     flushSync();
     expect(target.querySelector('[data-provider-state="loading"]')).toBeNull();
-    expect(target.querySelector("[data-provider-user]")?.getAttribute("data-provider-user")).toBe(
-      '["https://auth.example.com","alice"]',
-    );
+    expect(target.querySelector("[data-provider-account]")?.textContent).toBe(account.id);
   });
 });
 
