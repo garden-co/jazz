@@ -74,7 +74,7 @@ function Root() {
 
 function SignOut() {
   const auth = useJazzAuth();
-  return <button onClick={() => void auth.logout().catch(() => {})}>Sign out</button>;
+  return <button onClick={() => void auth.logout()}>Sign out</button>;
 }
 ```
 
