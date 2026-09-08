@@ -395,7 +395,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -455,7 +455,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -544,7 +544,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -597,7 +597,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => {
               relationQueries += 1;
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -2523,7 +2523,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => {
               calls.push("all");
-              return encodeRows([
+              return encodeRelationSnapshot([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -3278,7 +3278,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         if (author) throw new Error("backend authority must be implicit in its native open");
         if (query.kind === "relation") {
           calls.push("relation");
-          return encodeRows([]);
+          return encodeRelationSnapshot([]);
         }
         if (query.sequence === 2) {
           calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
