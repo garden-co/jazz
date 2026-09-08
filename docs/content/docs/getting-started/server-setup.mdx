@@ -94,6 +94,15 @@ Request scopes do not change the shared session's selected account, so concurren
 
 `forRequest` reads standard HTTP headers from Express, Hono, Fastify, or a Web Fetch API `Request`. Configure `jwksUrl` or `jwtPublicKey` on `createJazzSession(...)` for external IdP tokens, but not both. Without either, it accepts only Jazz local-first tokens; `allowLocalFirstAuth: false` disables those too. Application cookies must first be resolved to an admitted account by your auth integration.
 
+The TypeScript backend's `jwksUrl` must use HTTPS, except for development HTTP
+with a WHATWG-canonical hostname of `localhost`, `[::1]`, or an IPv4 address in
+`127.0.0.0/8`. For example, `http://localhost:3000/api/auth/jwks` is allowed;
+`http://localhost.:3000/api/auth/jwks` (the trailing-dot spelling) and
+`http://keys.example/api/auth/jwks` are rejected before fetching keys.
+Every redirect is rejected, including redirects to HTTPS. Use the provider's
+final JWKS URL directly. This policy applies to TypeScript request authentication,
+not the separate Rust server's `--jwks-url` verifier.
+
 ### Attribution without impersonation
 
 Use `await client.withAttribution(account)` or `await client.withAttributionForRequest(req)` to retain backend access while recording verified user provenance. Raw session objects and issuer/subject strings are not public authority inputs. See [Sessions &gt; Attribution without impersonation](/docs/auth/sessions#attribution-without-impersonation).

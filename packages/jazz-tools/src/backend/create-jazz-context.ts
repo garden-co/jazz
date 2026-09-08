@@ -58,7 +58,14 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   driver: BackendDriver;
   /** Optional node durability tier identity. */
   tier?: "local" | "edge" | "global";
-  /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
+  /**
+   * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
+   * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
+   * localhost, [::1], or an IPv4 address in 127/8.
+   * HTTP with the trailing-dot spelling localhost., other schemes, and remote
+   * HTTP are rejected before fetching. Redirects are
+   * rejected, including redirects to HTTPS; configure the final URL directly.
+   */
   jwksUrl?: string;
   /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
   jwtPublicKey?: BackendJwtPublicKey;
