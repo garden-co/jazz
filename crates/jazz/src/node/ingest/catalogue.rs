@@ -67,6 +67,32 @@ where
     where
         S: ReopenableStorage,
     {
+        // Dispatch the commit before constructing the general message future.
+        // A commit's policy evaluation must not keep the inactive catalogue,
+        // chunk-upload and other message arms on the executor's stack.
+        if let SyncMessage::CommitUnit { tx, versions } = message {
+            return Box::pin(async move {
+                self.require_catalogue_ready()?;
+                if self.catalogue_activation_failed {
+                    return Err(Error::CatalogueActivationFailed);
+                }
+                    if ingest_context.is_some() {
+                        let descriptors = version_indirect_descriptors(&versions);
+                        self.current_staged_ids_for_descriptors(&descriptors, true)
+                            .await?;
+                    }
+                    let now_ms = if ingest_context.is_some() {
+                        authority_wall_clock_ms()?
+                    } else {
+                        tx.tx_id.time.physical_ms()
+                    };
+                    // Commit admission owns a large policy/storage state machine.
+                    // Keep it out of the catalogue dispatcher's inline state.
+                    Box::pin(self.ingest_commit_unit_with_context(
+                        tx, versions, now_ms, ingest_context,
+                    )).await
+            });
+        }
         Box::pin(async move {
             // A dynamic edge has exactly one admissible pre-ready transition: the
             // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
@@ -251,20 +277,7 @@ where
                     }
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::CommitUnit { tx, versions } => {
-                    if ingest_context.is_some() {
-                        let descriptors = version_indirect_descriptors(&versions);
-                        self.current_staged_ids_for_descriptors(&descriptors, true)
-                            .await?;
-                    }
-                    let now_ms = if ingest_context.is_some() {
-                        authority_wall_clock_ms()?
-                    } else {
-                        tx.tx_id.time.physical_ms()
-                    };
-                    self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
-                        .await
-                }
+                SyncMessage::CommitUnit { .. } => unreachable!("commit units dispatch before the general message future"),
                 SyncMessage::FateUpdate {
                     tx_id,
                     fate,
