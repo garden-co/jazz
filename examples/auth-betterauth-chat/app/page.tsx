@@ -75,6 +75,8 @@ async function getToken(): Promise<string> {
 export default function Page() {
   const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
   const [providerError, setProviderError] = React.useState<Error>();
+  // Keep retry intent above the provider: its ready and fallback trees remount.
+  const recovery = React.useRef<(() => Promise<void>) | undefined>(undefined);
   React.useEffect(() => {
     if (!session) return;
     void (async () => {
@@ -92,7 +94,13 @@ export default function Page() {
     ) : (
       <p>Preparing account…</p>
     );
-  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
+  const screen = (
+    <SessionScreen
+      providerError={providerError}
+      reportError={setProviderError}
+      recovery={recovery}
+    />
+  );
   return (
     <JazzSessionProvider session={session} fallback={screen}>
       {screen}
@@ -103,16 +111,15 @@ export default function Page() {
 function SessionScreen({
   providerError,
   reportError,
+  recovery,
 }: {
   providerError?: Error;
   reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+  recovery: React.RefObject<(() => Promise<void>) | undefined>;
 }) {
   const session = useJazzSession();
   // This is the manual hybrid escape hatch: no automatic enrollment connector
   // runs while signup links the provider identity to this local-first account.
-  const recovery = React.useRef<() => Promise<void>>(() =>
-    session.loginOrRegisterJWT({ getToken: getToken }),
-  );
   async function perform(action: () => Promise<void>) {
     recovery.current = action;
     try {
@@ -149,9 +156,12 @@ function SessionScreen({
           <p>{error.message}</p>
           <button
             onClick={() =>
-              void perform(session.status === "error" ? session.retry : recovery.current).catch(
-                () => {},
-              )
+              void perform(
+                session.status === "error"
+                  ? session.retry
+                  : (recovery.current ??
+                      (() => session.loginOrRegisterJWT({ getToken: getToken }))),
+              ).catch(() => {})
             }
           >
             Retry

@@ -13,7 +13,8 @@ export default function DashboardPage() {
   async function handleSignOut() {
     try {
       await actions.signOut();
-    } catch (cause) {
+      window.location.assign("/");
+    } catch {
       // Shared auth state exposes logout failures and retry.
     }
   }
