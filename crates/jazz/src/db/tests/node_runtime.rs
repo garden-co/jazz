@@ -1403,11 +1403,16 @@ fn backend_pending_writes_barrier_includes_recovered_attributed_writes() {
     })
     .unwrap();
     let tx_id = client
-        .insert_with_id_attributed(
-            AuthorSubject::for_test_bytes([0xd3; 16]),
+        .insert(
             "todos",
-            row(0xd3),
             cells("graceful attributed handoff", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd3)),
+                identity: crate::db::WriteIdentity::Attribution(AuthorSubject::for_test_bytes(
+                    [0xd3; 16],
+                )),
+                ..Default::default()
+            },
         )
         .unwrap()
         .mergeable_tx_id();

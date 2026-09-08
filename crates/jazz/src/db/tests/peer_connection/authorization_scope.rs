@@ -88,7 +88,15 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
         let cached = row(0x75);
         if seed_cache {
             relay
-                .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+                .insert(
+                    "todos",
+                    cells("saved", false, author),
+                    crate::db::InsertOptions {
+                        row_id: Some(cached),
+                        identity: crate::db::WriteIdentity::Attribution(author),
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
         }
         let foreground = open_db(0x76, author, &schema);
@@ -284,7 +292,15 @@ fn assert_initial_opening_backpressure(
     relay.set_relay_authority_session_owner_for_test();
     let cached = row(0x78);
     relay
-        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(cached),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let foreground = open_db(0x79, author, &schema);
     foreground.set_non_durable_client();
@@ -345,11 +361,14 @@ fn assert_initial_opening_backpressure(
         if !previously_rejected && rejected.get() {
             if write_while_pending {
                 relay
-                    .insert_with_id_attributed(
-                        author,
+                    .insert(
                         "todos",
-                        later,
                         cells("later", false, author),
+                        crate::db::InsertOptions {
+                            row_id: Some(later),
+                            identity: crate::db::WriteIdentity::Attribution(author),
+                            ..Default::default()
+                        },
                     )
                     .unwrap();
             }
@@ -432,7 +451,15 @@ fn incremental_local_update_retries_after_transport_backpressure() {
     relay.set_relay_authority_session_owner_for_test();
     let cached = row(0x78);
     relay
-        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .insert(
+            "todos",
+            cells("saved", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(cached),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let foreground = open_db(0x79, author, &schema);
     foreground.set_non_durable_client();
@@ -467,7 +494,15 @@ fn incremental_local_update_retries_after_transport_backpressure() {
     assert!(foreground.query_attachment_is_covered(&attachment));
     let later = row(0x7a);
     relay
-        .insert_with_id_attributed(author, "todos", later, cells("later", false, author))
+        .insert(
+            "todos",
+            cells("later", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(later),
+                identity: crate::db::WriteIdentity::Attribution(author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     for _ in 0..16 {
         foreground.tick().unwrap();

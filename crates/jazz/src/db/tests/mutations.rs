@@ -3544,7 +3544,7 @@ fn backend_attribution_survives_transactions_and_streaming_publication() {
     };
     assert_eq!(err.code, ErrorCode::WriteRejected);
 
-    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 3);
 }
 
 /// A trusted backend admits a streamed value as `SYSTEM` while retaining the

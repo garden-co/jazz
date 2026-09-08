@@ -5813,9 +5813,8 @@ mod tests {
         backend.set_identity_claims(bytes(), None).unwrap();
         let batch = CoreOpenTransactionId::new().to_string();
         backend
-            .begin_transaction_attributed(batch.clone(), bytes())
+            .begin_transaction(batch.clone(), "mergeable".into(), None, Some(bytes()))
             .unwrap();
-        let mut tx = backend.attach_mergeable_tx(batch.clone()).unwrap();
         let descriptor = RecordDescriptor::new([("label", ValueType::String)]);
         let raw = descriptor
             .create(&[CoreValue::String("admitted Tx".to_owned())])
@@ -5824,18 +5823,20 @@ mod tests {
             &jazz::groove::records::OwnedRecord::new(raw, descriptor),
         )
         .unwrap();
-        tx.insert_encoded_with_options(
-            "items".into(),
-            Uint8Array::from(cells),
-            Some(InsertOptions {
-                row_id: None,
-                author: Some(bytes()),
-                branch: None,
-                updated_at_ms: None,
-            }),
-        )
-        .unwrap();
-        tx.close();
+        backend
+            .insert_in_transaction(
+                batch.clone(),
+                "items".into(),
+                Uint8Array::from(cells),
+                Some(InsertOptions {
+                    row_id: None,
+                    author: None,
+                    attribution: None,
+                    branch: None,
+                    updated_at_ms: None,
+                }),
+            )
+            .unwrap();
         backend
             .commit_transaction(batch, Some("mergeable".into()))
             .unwrap();
