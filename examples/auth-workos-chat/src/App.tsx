@@ -1,13 +1,6 @@
 import * as React from "react";
 import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import {
-  JazzSessionProvider,
-  useJazzSessionOwner,
-  useAuthProvider,
-  useAuthState,
-  type JazzSession,
-  type JazzClient,
-} from "jazz-tools/react";
+import { JazzProvider, jwtAuth, useJazzAuth, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, WORKOS_CLIENT_ID } from "../constants.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
@@ -60,51 +53,27 @@ const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
 function JazzApp() {
-  const { session, error, retry } = useJazzSessionOwner({ appId, serverUrl });
-  if (error)
-    return (
-      <section>
-        <p role="alert">{error.message}</p>
-        <button onClick={() => void retry().catch(() => {})}>Retry</button>
-      </section>
-    );
-  if (!session) return <p>Preparing Jazz...</p>;
-  return <WorkOSSession session={session} />;
-}
-function WorkOSSession({ session }: { session: JazzSession<JazzClient> }) {
   const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
-  const auth = useAuthProvider(
-    session,
-    { key: user?.id ?? null, isPending: isLoading },
-    {
-      getToken: () => getAccessToken({ forceRefresh: true }),
-    },
-  );
-  const fallback = auth.error ? (
-    <section>
-      <p role="alert">{auth.error.message}</p>
-      <button onClick={() => void auth.retry().catch(() => {})}>Retry</button>
-    </section>
-  ) : auth.isPending ? (
-    <p>Resolving account...</p>
-  ) : (
-    <button onClick={() => void signIn()}>Sign in with WorkOS</button>
-  );
   return (
-    <JazzSessionProvider session={session} fallback={fallback}>
-      {auth.ready && user ? (
-        <ChatShell
-          user={user}
-          onSignIn={signIn}
-          onSignOut={() =>
-            auth.logout(() => signOut({ returnTo: window.location.href })).catch(() => {})
-          }
-        />
-      ) : (
-        fallback
-      )}
-    </JazzSessionProvider>
+    <JazzProvider
+      appId={appId}
+      serverUrl={serverUrl}
+      auth={jwtAuth({
+        key: user?.id ?? null,
+        isPending: isLoading,
+        getToken: () => getAccessToken({ forceRefresh: true }),
+        logout: () => signOut({ returnTo: window.location.href }),
+      })}
+      signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
+    >
+      <SignedInChat user={user} onSignIn={signIn} />
+    </JazzProvider>
   );
+}
+
+function SignedInChat({ user, onSignIn }: Pick<ChatShellProps, "user" | "onSignIn">) {
+  const { logout } = useJazzAuth();
+  return <ChatShell user={user} onSignIn={onSignIn} onSignOut={logout} />;
 }
 
 export function App() {
