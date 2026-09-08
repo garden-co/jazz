@@ -1826,9 +1826,12 @@ describe("broker worker context initialization", () => {
       },
       "mismatch-tab",
     );
-    expect(mismatch.outcome).toEqual({
+    expect(mismatch.outcome).toMatchObject({
       type: "runtime-error",
-      message: "incompatible persistent browser telemetry configuration",
+      error: {
+        name: "Error",
+        message: "incompatible persistent browser telemetry configuration",
+      },
     });
     expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
     expect(mismatch.port.close).toHaveBeenCalledOnce();
@@ -1849,9 +1852,12 @@ describe("broker worker context initialization", () => {
       { ...options("telemetry-enabled-reuse"), logLevel: "debug" },
       "mismatch-tab",
     );
-    expect(mismatch.outcome).toEqual({
+    expect(mismatch.outcome).toMatchObject({
       type: "runtime-error",
-      message: "incompatible persistent browser telemetry configuration",
+      error: {
+        name: "Error",
+        message: "incompatible persistent browser telemetry configuration",
+      },
     });
     expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
     expect(mismatch.port.close).toHaveBeenCalledOnce();
@@ -1872,9 +1878,12 @@ describe("broker worker context initialization", () => {
       { ...enabledTelemetryOptions("telemetry-level-reuse"), logLevel: "trace" },
       "mismatch-tab",
     );
-    expect(mismatch.outcome).toEqual({
+    expect(mismatch.outcome).toMatchObject({
       type: "runtime-error",
-      message: "incompatible persistent browser telemetry configuration",
+      error: {
+        name: "Error",
+        message: "incompatible persistent browser telemetry configuration",
+      },
     });
     expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
     expect(mismatch.port.close).toHaveBeenCalledOnce();
