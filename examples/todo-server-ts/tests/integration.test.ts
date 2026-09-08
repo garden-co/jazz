@@ -229,7 +229,7 @@ describe("Todo Server Integration", () => {
       const address = occupied.address();
       if (!address || typeof address === "string") throw new Error("expected TCP listener");
 
-      const candidate = await createServer(undefined, jazzOptions());
+      const candidate = await createServer({ type: "memory" }, jazzOptions());
       try {
         await expect(startServer(candidate, address.port)).rejects.toMatchObject({
           code: "EADDRINUSE",
@@ -327,10 +327,7 @@ describe("Todo Server Integration", () => {
 
       // --- First boot: create some todos ---
       const server1 = await startServer(
-        await createServer(
-          { type: "persistent", dataPath: dbPath },
-          jazzOptions(),
-        ),
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
 
@@ -356,10 +353,7 @@ describe("Todo Server Integration", () => {
 
       // --- Second boot: same data path, fresh server ---
       const server2 = await startServer(
-        await createServer(
-          { type: "persistent", dataPath: dbPath },
-          jazzOptions(),
-        ),
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
 
@@ -392,7 +386,10 @@ describe("Todo Server Integration", () => {
     it("returns the current value after dense update history and a restart", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
       const dbPath = join(dataDir, "jazz.db");
-      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server1 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
 
       let todoId: string | undefined;
       try {
@@ -417,7 +414,10 @@ describe("Todo Server Integration", () => {
         await stopServer(server1);
       }
 
-      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server2 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
       try {
         const response = await authenticatedFetch(`${server2.baseUrl}/todos/${todoId}`);
         expect(response.status).toBe(200);
