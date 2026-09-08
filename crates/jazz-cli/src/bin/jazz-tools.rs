@@ -66,6 +66,13 @@ fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn parse_app_id(value: &str) -> Result<String, String> {
+    jazz::tools::AppId::from_string(value).map_err(|_| {
+        "Application ID must be a UUID, not an app name. Generate one with `jazz-tools create app` and reuse it for the server and client.".to_owned()
+    })?;
+    Ok(value.to_owned())
+}
+
 fn parse_shutdown_timeout_secs(value: &str) -> Result<u64, String> {
     let seconds = value
         .parse::<u64>()
@@ -99,7 +106,8 @@ enum Commands {
     },
     /// Run a Jazz server
     Server {
-        /// Application ID (from `jazz-tools create app`)
+        /// Application UUID (from `jazz-tools create app`)
+        #[arg(value_parser = parse_app_id)]
         app_id: String,
 
         /// Port to listen on
@@ -416,6 +424,27 @@ fn shutdown_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_app_id_explains_uuid_requirement() {
+        let error = Cli::try_parse_from(["jazz-tools", "server", "my-app"])
+            .err()
+            .expect("invalid app name must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("Application ID must be a UUID"),
+            "{message}"
+        );
+        assert!(message.contains("jazz-tools create app"), "{message}");
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+            ])
+            .is_ok()
+        );
+    }
 
     // Clap reads env-backed args during parsing, so every Cli::try_parse_from
     // test in this module holds this lock. The tests that mutate env vars keep
