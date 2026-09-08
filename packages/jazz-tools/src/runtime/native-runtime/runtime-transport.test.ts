@@ -244,6 +244,86 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("reconnects an established upstream after a retryable server restart without publishing a terminal error", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitServerClose();
+    await runtime.waitForUpstreamServerConnection();
+    expect(sockets).toHaveLength(2);
+    expect(transports).toHaveLength(2);
+    expect(transports[0]!.closed).toBe(true);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
+  it.each(["disconnect", "close"] as const)(
+    "cancels an established-network retry on %s",
+    async (action) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      sockets[0]!.emitServerClose();
+      await runtime[action]();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(sockets).toHaveLength(1);
+      expect(terminal).not.toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
+
   it("identifies a missing wire mask as a generic native-runtime artifact mismatch", () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -1432,6 +1512,7 @@ class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
+  private readonly closeListeners: Array<(event: { data: unknown }) => void> = [];
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
@@ -1460,6 +1541,13 @@ class FakeWebSocket {
 
   addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
     if (type === "message") this.messageListeners.push(listener);
+    if (type === "close") this.closeListeners.push(listener);
+  }
+
+  emitServerClose(): void {
+    this.closed = true;
+    for (const listener of this.closeListeners)
+      listener({ code: 1012, reason: "server shutting down" } as never);
   }
 
   emitMessage(data: Uint8Array): void {
