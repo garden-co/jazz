@@ -456,3 +456,107 @@ async fn relayed_scalar_exit_with_simultaneous_dependency_revocation_withholds_s
         .run_until(run_revoked_exit(true, true))
         .await;
 }
+
+/// Alice reconnects with a retained scalar result after bob changes its filter.
+/// No upstream predecessor survives the detached subscription. The ordinary
+/// query must revalidate the extra local input through a partial relay.
+/// alice caches -> disconnect/drop -> bob updates -> alice subscribes/reconnects
+#[tokio::test]
+async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = schema();
+            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let relay = JazzServer::builder()
+                .with_schema(schema.clone())
+                .with_app_id(authority.app_id())
+                .with_backend_secret(authority.backend_secret())
+                .with_upstream_url(authority.base_url())
+                .with_native_transport_connector(jazz_testkit::native_connector())
+                .start()
+                .await;
+            let bob = TestingClient::builder()
+                .with_server(&authority)
+                .with_schema(schema.clone())
+                .with_user_id("bob")
+                .as_admin()
+                .ready_on("tasks", TIMEOUT)
+                .connect()
+                .await;
+            let (task, _, tx) = bob
+                .insert(
+                    "tasks",
+                    row_input!("owner" => "alice", "done" => false, "title" => "before"),
+                )
+                .unwrap();
+            jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+            let alice = TestingClient::builder()
+                .with_server(&relay)
+                .with_schema(schema)
+                .with_user_id("alice")
+                .as_user()
+                .connect()
+                .await;
+            let mut initial = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::Remote)
+                .await
+                .unwrap();
+            let mut log = Vec::new();
+            wait_for_subscription_update(
+                &mut initial,
+                &mut log,
+                TIMEOUT,
+                "alice caches original row",
+                |log| has_added_id(log, task),
+            )
+            .await;
+            assert!(jazz::tools::test_support::disconnect_client(&alice));
+            drop(initial);
+            let tx = bob
+                .update(
+                    task,
+                    vec![
+                        ("done".into(), Value::Boolean(true)),
+                        ("title".into(), Value::Text("after reconnect".into())),
+                    ],
+                )
+                .unwrap()
+                .unwrap();
+            jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+            assert_eq!(local_rows(&alice, filtered()).await.len(), 1);
+            let mut local = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let mut local_log = Vec::new();
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "offline local-first row",
+                |log| has_added_id(log, task),
+            )
+            .await;
+            assert!(
+                jazz::tools::test_support::reconnect_client(&alice)
+                    .await
+                    .unwrap()
+            );
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "reconnected query repairs stale local input",
+                |log| has_removed(log, task),
+            )
+            .await;
+            let cached = local_rows(&alice, Query::from("tasks")).await;
+            assert!(cached.iter().any(|(id, values)| *id == task
+                && values.contains(&Value::Text("after reconnect".into()))));
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+            relay.shutdown().await;
+            authority.shutdown().await;
+        })
+        .await;
+}
