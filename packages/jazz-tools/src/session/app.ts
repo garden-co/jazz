@@ -54,6 +54,7 @@ export function createJazzAppOwner<Config, Client>(
       })
     | undefined;
   let jwtConnection: AuthProviderConnection | undefined;
+  let jwtSource: { value: Extract<JazzAuth, { kind: "jwt" }> } | undefined;
   let unsubscribeSession: (() => void) | undefined;
   let unsubscribeConnection: (() => void) | undefined;
   let pending: Promise<void> | undefined;
@@ -64,12 +65,12 @@ export function createJazzAppOwner<Config, Client>(
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = new Set<() => void>();
   const consumers = new Set<{ lease?: JazzSessionConsumer<Client> }>();
-  function publish() {
-    if (disposed) return;
+  function publish(force = false) {
+    if (disposed && !force) return;
     const current = session?.getSnapshot();
     const provider = connection?.getSnapshot();
     const error = failure ?? provider?.error ?? current?.error;
-    const ready = current?.status === "ready" && (!auth || provider?.ready);
+    const ready = !disposed && current?.status === "ready" && (!auth || provider?.ready);
     const status: JazzAppSnapshot<Client>["status"] = error
       ? "error"
       : !current
@@ -110,17 +111,15 @@ export function createJazzAppOwner<Config, Client>(
     connection?.dispose();
     connection = undefined;
     jwtConnection = undefined;
+    jwtSource = undefined;
   }
   function connect() {
     if (!session || !auth || disposed) return;
     if (auth.kind === "better-auth") connection = connectBetterAuth(session, auth.client);
     else {
-      jwtConnection = connectAuthProvider(session, {
-        getToken: () => {
-          if (auth?.kind !== "jwt") return Promise.reject(new Error("Jazz auth provider changed"));
-          return auth.getToken();
-        },
-      });
+      const source = { value: auth };
+      jwtSource = source;
+      jwtConnection = connectAuthProvider(session, { getToken: () => source.value.getToken() });
       connection = jwtConnection;
       jwtConnection.update(auth);
     }
@@ -169,7 +168,7 @@ export function createJazzAppOwner<Config, Client>(
           }
           session = created;
           for (const consumer of consumers) consumer.lease = attachJazzSessionConsumer(created);
-          unsubscribeSession = created.subscribe(publish);
+          unsubscribeSession = created.subscribe(() => publish(disposed));
           connect();
           publish();
         })
@@ -191,8 +190,11 @@ export function createJazzAppOwner<Config, Client>(
         (auth?.kind !== "better-auth" ||
           (next?.kind === "better-auth" && auth.client === next.client));
       auth = next;
-      if (same && next?.kind === "jwt") jwtConnection?.update(next);
-      else if (!same) {
+      if (session) failure = undefined;
+      if (same && next?.kind === "jwt") {
+        if (jwtSource) jwtSource.value = next;
+        jwtConnection?.update(next);
+      } else if (!same) {
         disconnect();
         connect();
       }
@@ -216,9 +218,12 @@ export function createJazzAppOwner<Config, Client>(
       const current = requireSession();
       failure = undefined;
       try {
-        if (jwtConnection)
-          await jwtConnection.logout(() => (auth?.kind === "jwt" ? auth.logout?.() : undefined));
-        else if (connection) await connection.logout();
+        if (jwtConnection) {
+          const leaving = auth;
+          await jwtConnection.logout(() =>
+            leaving?.kind === "jwt" ? leaving.logout?.() : undefined,
+          );
+        } else if (connection) await connection.logout();
         else await current.logout();
       } catch (cause) {
         failure = asError(cause);
@@ -231,13 +236,21 @@ export function createJazzAppOwner<Config, Client>(
       if (disposal) return disposal;
       disposed = true;
       disconnect();
-      unsubscribeSession?.();
-      for (const consumer of consumers) consumer.lease?.release();
-      consumers.clear();
-      listeners.clear();
+      publish(true);
       disposal = (async () => {
-        await pending?.catch(() => {});
-        await session?.close();
+        try {
+          await pending;
+          await session?.close();
+        } catch (cause) {
+          failure = asError(cause);
+          publish(true);
+          throw cause;
+        } finally {
+          unsubscribeSession?.();
+          for (const consumer of consumers) consumer.lease?.release();
+          consumers.clear();
+          listeners.clear();
+        }
       })();
       return disposal;
     },
