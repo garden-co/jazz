@@ -5,6 +5,8 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createAccountManager } from "jazz-tools";
+
 import {
   deploy,
   startLocalJazzServer,
@@ -43,6 +45,24 @@ async function startUpstream(): Promise<void> {
     permissions,
   });
 }
+async function registerToken(token: string): Promise<void> {
+  let stored: string | null = null;
+  const accounts = await createAccountManager({
+    appId: APP_ID,
+    serverUrl: upstream.url,
+    env: `todo-cli-${crypto.randomUUID()}`,
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
+  });
+  await accounts.registerJWT(token);
+}
+
 async function startChild(cwd: string): Promise<RunningChild> {
   const childEnv = {
     ...process.env,
@@ -151,6 +171,7 @@ describe("Todo server CLI", () => {
     let second: RunningChild | undefined;
 
     try {
+      await registerToken(token);
       first = await startChild(cwd);
       const createResponse = await fetch(`${first.baseUrl}/todos`, {
         method: "POST",
