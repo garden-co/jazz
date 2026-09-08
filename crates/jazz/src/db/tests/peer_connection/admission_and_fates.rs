@@ -5948,11 +5948,14 @@ fn foreground_local_only_reads_never_emit_remote_query_requests() {
     foreground.set_non_durable_client();
     let target = row(0x7a);
     foreground
-        .insert_with_id_attributed(
-            alice,
+        .insert(
             "todos",
-            target,
             cells("foreground pending", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(target),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
         )
         .unwrap();
     let (transport, mut remote) = duplex();
