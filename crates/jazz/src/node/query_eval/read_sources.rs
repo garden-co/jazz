@@ -1995,23 +1995,29 @@ where
         request: &'a SourceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
+            let exclusion_scope = (!matches!(
+                request.authorization,
+                SourceAuthorizationRequest::PolicyProof { .. }
+            ) && self
+                .read_view
+                .sources
+                .get(&request.source)
+                .is_some_and(unavailable_inputs::is_current_app_source))
+            .then(|| self.local_unavailable_scope.clone())
+            .flatten();
+            // A physical limit is valid only when no later source filter can
+            // remove candidates. Unavailability is a mutable anti-join, so
+            // retain the logical query limit after it instead.
+            if exclusion_scope.is_some()
+                && let Some(CurrentAccessPath::Index { source_limit, .. }) =
+                    self.access_paths.get_mut(&request.source)
+            {
+                *source_limit = None;
+            }
             let mut resolved = self
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
-            if request.visibility == RowVisibility::Visible
-                && !matches!(
-                    request.authorization,
-                    SourceAuthorizationRequest::PolicyProof { .. }
-                )
-                && self
-                    .read_view
-                    .sources
-                    .get(&request.source)
-                    .is_some_and(|source| {
-                        unavailable_inputs::is_current_app_source(self.node, source)
-                    })
-                && let Some(scope) = self.local_unavailable_scope.clone()
-            {
+            if let Some(scope) = exclusion_scope {
                 self.node.exclude_local_unavailable_rows(
                     &scope,
                     self.read_view.read_schema,

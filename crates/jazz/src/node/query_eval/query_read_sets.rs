@@ -11,7 +11,7 @@ pub(super) fn current_query_read_set(
     tier: DurabilityTier,
     settled_binding_view: Option<BindingViewKey>,
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
-    _settled_requires_result_payload: bool,
+    settled_current_default: bool,
 ) -> RequestedReadSet {
     let projection = SchemaProjection {
         schema_family: SchemaFamilySelection::Current,
@@ -26,6 +26,7 @@ pub(super) fn current_query_read_set(
                 source.clone(),
                 if let Some(binding_view) = settled_binding_view {
                     SourceExpr::SettledBindingView {
+                        current_default: settled_current_default,
                         projection: projection.clone(),
                         binding_view,
                         authority_result_key: settled_authority_result_key.clone(),
@@ -46,6 +47,7 @@ pub(super) fn current_query_read_set(
             sources.insert(
                 source.clone(),
                 SourceExpr::SettledBindingView {
+                    current_default: settled_current_default,
                     projection: projection.clone(),
                     binding_view,
                     authority_result_key: settled_authority_result_key.clone(),
@@ -198,7 +200,7 @@ pub(super) fn query_read_set_for_read_view(
             tier,
             settled_binding_view,
             settled_authority_result_key,
-            matches!(read_view.source, ReadViewSourceSpec::BranchView { .. }),
+            matches!(read_view.source, ReadViewSourceSpec::Current),
         ));
     }
     match &read_view.source {

@@ -305,3 +305,169 @@ fn local_unavailable_inputs_do_not_reinterpret_historical_snapshots() {
         .unwrap();
     assert_eq!(after.rows.len(), 2);
 }
+
+/// Alice's includeDeleted read must not reveal an unavailable live cached row;
+/// the same row returns after fresh admission. Bob keeps his independent view.
+#[test]
+fn local_unavailable_inputs_also_filter_include_deleted_app_sources() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    node.set_local_row_unavailable(&scope, "parents", row(1), true)
+        .unwrap();
+    let read = |node: &mut NodeState<RocksDbStorage>, identity| {
+        node.query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            None,
+            identity,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(read(&mut node, alice), BTreeSet::from([row(2)]));
+    assert_eq!(read(&mut node, author(2)), BTreeSet::from([row(1), row(2)]));
+    node.set_local_row_unavailable(&scope, "parents", row(1), false)
+        .unwrap();
+    assert_eq!(read(&mut node, alice), BTreeSet::from([row(1), row(2)]));
+}
+
+/// Alice opens a cold Edge receiver before RegisterShape. Later authority
+/// inputs and local unavailable markers must both reach its existing graph.
+/// cold [] ──admitted row──► [1] ──unavailable──► [] ──readmit──► [1]
+#[test]
+fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (mut subscription, _) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert!(
+        node.query.registered_shape_options.is_empty(),
+        "cold opening has no registration metadata"
+    );
+    let current = node
+        .current_rows("parents", DurabilityTier::Local)
+        .unwrap()
+        .into_iter()
+        .find(|current| current.row_uuid() == row(1))
+        .unwrap();
+    let alias = node
+        .ensure_schema_version_alias(node.catalogue.current_schema_version_id)
+        .unwrap();
+    // Internal setup supplies one synthetic admitted covered input. Receipt
+    // verification is intentionally outside this source primitive's scope.
+    let replacements = subscription
+        .covered_input_receiver
+        .sources
+        .values()
+        .map(|source| InputSourceReplacement {
+            id: source.id,
+            descriptor: source.descriptor.clone(),
+            records: vec![
+                covered_input_record(
+                    node.table("parents").unwrap(),
+                    &source.descriptor,
+                    &current,
+                    alias,
+                    &BranchKey::default(),
+                )
+                .unwrap(),
+            ],
+        })
+        .collect::<Vec<_>>();
+    node.database.replace_input_sources(replacements).unwrap();
+    assert!(
+        node.drain_local_maintained_view_subscription(&mut subscription, None)
+            .unwrap()
+            .is_some()
+    );
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    for (unavailable, removing) in [(true, true), (false, false)] {
+        node.set_local_row_unavailable(&scope, "parents", row(1), unavailable)
+            .unwrap();
+        let update = node
+            .drain_local_maintained_view_subscription(&mut subscription, None)
+            .unwrap()
+            .expect("cold receiver keeps its unavailable input connected");
+        let LocalMaintainedViewSubscriptionUpdate::Structured {
+            terminal_operations,
+        } = update
+        else {
+            panic!("parent output uses structured terminals");
+        };
+        assert_eq!(terminal_operations.len(), 1);
+        assert_eq!(
+            matches!(
+                terminal_operations[0].edit,
+                groove::ivm::TerminalEdit::Remove { .. }
+            ),
+            removing
+        );
+    }
+}
+
+/// Alice's current includeDeleted take must find the next readable index
+/// candidate after the first physical candidate becomes unavailable.
+#[test]
+fn local_unavailable_inputs_keep_include_deleted_limit_after_exclusion() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("bucket", PublicColumnType::Text)
+                .index_only(["bucket"]),
+        ),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([92; 16]), schema.clone());
+    for n in 1..=3 {
+        commit_global_cells(
+            &mut node,
+            "docs",
+            row(n),
+            BTreeMap::from([("bucket".to_owned(), Value::String("same".to_owned()))]),
+            n as u64,
+            n as u64,
+        );
+    }
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    node.set_local_row_unavailable(&scope, "docs", row(1), true)
+        .unwrap();
+    let query = Query::from("docs")
+        .filter(eq(col("bucket"), lit("same")))
+        .limit(1);
+    for query in [query.clone(), query.order_by("id", OrderDirection::Asc)] {
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = node
+            .query_rows_including_deleted_in_authorization_mode(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                None,
+                alice,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+            vec![row(2)]
+        );
+    }
+}

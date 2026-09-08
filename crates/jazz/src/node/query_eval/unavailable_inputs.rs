@@ -46,27 +46,19 @@ fn policy_binding(policy: &PolicyContext) -> Option<PolicyBindingKey> {
     }
 }
 
-pub(super) fn is_current_app_source<S>(
-    node: &NodeState<S>,
-    source: &SourceExpr<RequestedSourceStage>,
-) -> bool {
+pub(super) fn is_current_app_source(source: &SourceExpr<RequestedSourceStage>) -> bool {
     match source {
         SourceExpr::VisibleCurrent {
             data: DataSource::Current,
             ..
         } => true,
-        SourceExpr::SettledBindingView { binding_view, .. } => {
-            binding_view.read_view == crate::protocol::ReadViewKey::default()
-                || node
-                    .query
-                    .registered_shape_options
-                    .get(&(binding_view.shape_id, binding_view.read_view))
-                    .is_some_and(|options| options.read_view == ReadViewSpec::default())
-        }
+        SourceExpr::SettledBindingView {
+            current_default, ..
+        } => *current_default,
         SourceExpr::WithOverlays { input, overlays }
             if overlays.entries == [OverlayRef::PendingLocal] =>
         {
-            is_current_app_source(node, input)
+            is_current_app_source(input)
         }
         _ => false,
     }
