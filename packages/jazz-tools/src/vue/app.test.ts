@@ -143,10 +143,11 @@ describe("Vue ergonomic app", () => {
       await flush();
       await expect(auth.logout()).resolves.toBeUndefined();
       expect(auth.snapshot.value.status).toBe("error");
-      expect(auth.snapshot.value.error?.message).toContain("flush failed");
+      const errorMessage = failure === "graceful" ? "could not synchronize" : "flush failed";
+      expect(auth.snapshot.value.error?.message).toContain(errorMessage);
       await flush();
       expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));
-      expect(node.textContent).toContain("flush failed");
+      expect(node.textContent).toContain(errorMessage);
       await auth.retry();
       await flush();
       expect(node.textContent).toBe("signed out");
