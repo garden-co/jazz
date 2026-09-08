@@ -27,6 +27,7 @@ import {
   type BrowserWorkerLifecycleTrace,
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
+  type BrowserSharedWorkerBootstrapCancelRequest,
   type BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
@@ -93,6 +94,8 @@ type RuntimeContext = {
   fingerprint: string;
   options: BrowserWorkerInitOptions;
   peers: Map<string, TabPeer>;
+  admissionClaims: Set<symbol>;
+  pendingAdmissionTasks: number;
   runtime: NativeRuntimeAdapter | null;
   initialize: Promise<void>;
   closing: Promise<void> | null;
@@ -200,6 +203,7 @@ const workerGlobal = globalThis as SharedWorkerGlobal;
 const workerRealmId = crypto.randomUUID();
 let foregroundLeaseTestHooks: ForegroundLeaseTestHooks | null = null;
 const contexts = new Map<string, RuntimeContext>();
+const pendingRuntimeOwnerRetirements = new Map<string, PhysicalDatabaseOwner>();
 const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
 const physicalDatabaseOwners = new Map<string, PhysicalDatabaseOwner>();
 const physicalDatabaseOwnerAdmissions = new Map<string, Promise<PhysicalDatabaseOwner>>();
@@ -377,6 +381,9 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
         owner.disposeInvalidation = null;
         owner.pageStore.close();
         await owner.epoch.release();
+        if (pendingRuntimeOwnerRetirements.get(dbName) === owner) {
+          pendingRuntimeOwnerRetirements.delete(dbName);
+        }
         physicalDatabaseOwners.delete(dbName);
       }
     })();
@@ -417,23 +424,26 @@ function attachBootstrapPort(
   // new liveness claim before any message task can run; otherwise that old
   // close can terminate this exact admission mid-flight. Do not merely
   // cancel the old close token here: the bootstrap reservation is the
-  // durable fact that remains true until this port has either completed its
-  // first operation or failed it.
+  // durable fact that remains true until this port has completed its first
+  // operation, failed it, or expired without starting one.
   pendingBootstrapOperations += 1;
   let bootstrapFinished = false;
   let bootstrapPortClosed = false;
   let probedLeaseAttemptId: string | null = null;
   let operationStarted = false;
+  let runtimeAdmission = false;
   const parentLifetime = new AbortController();
-  // A vanished iframe may never deliver a close message. Only expire the
-  // unclaimed bootstrap; allocation has its own cancellation protocol.
-  const idleTimer = scope ? setTimeout(() => closeBootstrapPort(), 30_000) : undefined;
+  // A vanished page or iframe may never deliver a close message. Probe-only
+  // ports remain unclaimed; starting runtime admission or lease allocation
+  // clears this timer and uses that operation's own cancellation protocol.
+  const idleTimer = setTimeout(() => closeBootstrapPort(), 30_000);
   const finishBootstrap = () => {
     if (bootstrapFinished) return;
     bootstrapFinished = true;
     clearTimeout(idleTimer);
     pendingBootstrapOperations -= 1;
     maybeCloseWorker();
+    retireUnclaimedRuntimeOwners();
   };
   const detachBootstrapListeners = () => {
     port.removeEventListener("message", onBootstrapMessage);
@@ -442,6 +452,7 @@ function attachBootstrapPort(
   const closeBootstrapPort = () => {
     if (bootstrapPortClosed) return;
     bootstrapPortClosed = true;
+    parentLifetime.abort();
     detachBootstrapListeners();
     finishBootstrap();
     port.close();
@@ -449,12 +460,23 @@ function attachBootstrapPort(
   function onBootstrapMessage(
     messageEvent: MessageEvent<
       | BrowserSharedWorkerConnectRequest
+      | BrowserSharedWorkerBootstrapCancelRequest
       | BrowserForegroundNodeLeaseProbeRequest
       | BrowserForegroundNodeLeaseAcquireRequest
       | BrowserForegroundNodeLeaseCancelRequest
     >,
   ) {
     const message = messageEvent.data;
+    if (message?.type === "cancel-runtime-bootstrap" && runtimeAdmission) {
+      // Fence this attempt synchronously. Shared initialization is not aborted;
+      // its eventual completion still owns retirement of an unclaimed context.
+      parentLifetime.abort();
+      post(port, { type: "runtime-bootstrap-cancelled" });
+      detachBootstrapListeners();
+      finishBootstrap();
+      return;
+    }
+    if (operationStarted) return;
     if (
       scope &&
       (message.type === "connect-runtime" ||
@@ -507,16 +529,20 @@ function attachBootstrapPort(
     }
     operationStarted = true;
     clearTimeout(idleTimer);
-    detachBootstrapListeners();
     if (message.type === "connect-runtime") {
+      runtimeAdmission = true;
       recordWorkerLifecycle(
         "bootstrap-start",
         message.options.dbName,
         message.options.authSessionKey,
       );
       post(port, { type: "worker-alive" });
-      void connectTab(port, message, finishBootstrap);
+      void connectTab(port, message, parentLifetime.signal, () => {
+        detachBootstrapListeners();
+        finishBootstrap();
+      });
     } else {
+      detachBootstrapListeners();
       if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
         finishBootstrap();
         post(port, {
@@ -877,12 +903,56 @@ async function retireForegroundNodeLease(
   }
 }
 
+/**
+ * Lease bootstraps also claim physical owners before their lease bookkeeping
+ * exists. Wait for those reservations, then retire only the captured owner,
+ * never a replacement or an owner adopted by another admission.
+ */
+function retireUnclaimedRuntimeOwners(): void {
+  if (pendingBootstrapOperations !== 0) return;
+  for (const [dbName, owner] of pendingRuntimeOwnerRetirements) {
+    pendingRuntimeOwnerRetirements.delete(dbName);
+    if (physicalDatabaseOwners.get(dbName) !== owner) continue;
+    if (contexts.has(dbName)) continue;
+    const leaseOwner = foregroundLeaseOwners.get(dbName);
+    if (
+      leaseOwner &&
+      (leaseOwner.activeLeaseIds.size > 0 ||
+        leaseOwner.pendingLeaseAllocations > 0 ||
+        leaseOwner.pendingLeaseFinalizations > 0)
+    )
+      continue;
+    foregroundLeaseOwners.delete(dbName);
+    void releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
+  }
+}
+
 async function connectTab(
   port: MessagePort,
   message: BrowserSharedWorkerConnectRequest,
+  signal: AbortSignal,
   finishBootstrap: () => void,
 ): Promise<void> {
+  const claim = Symbol("runtime-admission");
+  let claimedContext: RuntimeContext | undefined;
+  let claimHeld = false;
+  const releaseClaim = () => {
+    if (!claimHeld) return;
+    claimHeld = false;
+    claimedContext?.admissionClaims.delete(claim);
+  };
+  const assertAdmission = () => {
+    signal.throwIfAborted();
+    if (
+      claimedContext &&
+      (claimedContext.closing || contexts.get(claimedContext.key) !== claimedContext)
+    ) {
+      throw new Error("Shared browser runtime context closed during initialization");
+    }
+  };
+  signal.addEventListener("abort", releaseClaim, { once: true });
   try {
+    assertAdmission();
     const key = runtimeKey(message.options);
     let context = contexts.get(key);
     if (context?.idleReleaseTimer) {
@@ -891,13 +961,10 @@ async function connectTab(
     }
     if (context?.closing) {
       await context.closing;
+      assertAdmission();
       context = contexts.get(key);
     }
-    // `runtimeKey` intentionally names the physical root alone. Do not let a
-    // caller with a stale or forged compatible fingerprint attach a different
-    // auth scope to that already-open root: this path bypasses a fresh
-    // IndexedDbPageStore.open, so the durable marker cannot perform its usual
-    // owner comparison for us.
+    // A reused root still admits the durable owner and complete configuration.
     if (context && context.options.storageOwner !== message.options.storageOwner) {
       throw new Error(
         `IndexedDB database ${message.options.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
@@ -913,21 +980,49 @@ async function connectTab(
       context = createContext(key, message.fingerprint, message.options);
       contexts.set(key, context);
     }
+    claimedContext = context;
+    context.admissionClaims.add(claim);
+    claimHeld = true;
+    context.pendingAdmissionTasks += 1;
     await context.initialize;
-    await enqueueTransportTransition(context, () => configureServer(context, message.options));
+    assertAdmission();
+    await enqueueTransportTransition(context, () => {
+      assertAdmission();
+      return configureServer(context, message.options);
+    });
+    assertAdmission();
+    // No await between the final fence, peer publication and listener handoff.
     attachTab(context, message.tabId, port);
-    // The peer now owns a durable runtime context.  Drop the bootstrap
-    // reservation before publishing readiness so an immediately closing tab
-    // still sees normal idle cleanup ordering.
+    releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
   } catch (error) {
-    // Failed connection setup has already cleaned any partial context; clear
-    // the bootstrap reservation before surfacing the terminal result so its
-    // physical owner can be released without a follow-on admission race.
     finishBootstrap();
-    post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
-    port.close();
+    if (!signal.aborted) {
+      post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
+      port.close();
+    }
+  } finally {
+    signal.removeEventListener("abort", releaseClaim);
+    releaseClaim();
+    if (claimedContext) {
+      claimedContext.pendingAdmissionTasks -= 1;
+      // A cancelled claim cannot retire a sibling admission or attached peer.
+      // Keep the exact context alive until all async admission phases settle.
+      if (
+        claimedContext.pendingAdmissionTasks === 0 &&
+        claimedContext.admissionClaims.size === 0 &&
+        claimedContext.peers.size === 0
+      ) {
+        const owner = physicalDatabaseOwners.get(message.options.dbName);
+        await releaseIdleContext(claimedContext);
+        if (owner && physicalDatabaseOwners.get(message.options.dbName) === owner) {
+          pendingRuntimeOwnerRetirements.set(message.options.dbName, owner);
+        }
+        retireUnclaimedRuntimeOwners();
+        maybeCloseWorker();
+      }
+    }
   }
 }
 
@@ -941,6 +1036,8 @@ function createContext(
     fingerprint,
     options,
     peers: new Map(),
+    admissionClaims: new Set(),
+    pendingAdmissionTasks: 0,
     runtime: null,
     pageStore: null,
     disposePageStoreInvalidation: null,
@@ -1276,6 +1373,16 @@ function attachTab(
 
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
+  // Answer outside runtime, storage and transport queues: a healthy worker
+  // can legitimately be waiting indefinitely for an upstream acknowledgement.
+  if (message.type === "runtime-probe") {
+    post(peer.port, {
+      type: "runtime-pong",
+      connectionId: message.connectionId,
+      nonce: message.nonce,
+    });
+    return;
+  }
   if (message.type === "frames") {
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
@@ -1297,7 +1404,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "close") {
-    const releaseWhenIdle = peer.context.peers.size === 1 && message.releaseContext;
+    const releaseWhenIdle =
+      peer.context.peers.size === 1 &&
+      peer.context.pendingAdmissionTasks === 0 &&
+      message.releaseContext;
     // The requester owns graceful port closure. Closing this endpoint in the
     // same task as the acknowledgement can discard that queued message in
     // WebKit, leaving shutdown pending forever. Detach runtime ownership now;
@@ -1862,6 +1972,7 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
+  if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
   if (!context.closing) {
     context.closing = (async () => {
       for (const peer of context.peers.values()) {
@@ -1892,7 +2003,7 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
   if (context.idleReleaseTimer) clearTimeout(context.idleReleaseTimer);
   context.idleReleaseTimer = setTimeout(() => {
     context.idleReleaseTimer = null;
-    if (context.peers.size !== 0) return;
+    if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
     void releaseIdleContext(context).then(() => {
       maybeCloseWorker();
     });

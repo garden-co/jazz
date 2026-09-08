@@ -40,7 +40,7 @@ function assertOutputMayBePublished(outputDir) {
     );
 }
 
-export async function bundleBrokerWorker(outputDir = canonicalOutputDir) {
+export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPoint = entry) {
   assertOutputMayBePublished(outputDir);
   await mkdir(outputDir, { recursive: true });
   // Prepare the complete pair privately. Publication below only renames fully
@@ -53,7 +53,7 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir) {
   const wasmOutfile = resolve(outputDir, "jazz_wasm_bg.wasm");
   try {
     await build({
-      entryPoints: [entry],
+      entryPoints: [entryPoint],
       outfile: stagedWorker,
       // Correctness consumers pin both wasm-bindgen glue and the binary.  A
       // binary-only override would still let esbuild follow a mutable package

@@ -4,18 +4,21 @@ import {
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
 import {
+  BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
+  type BrowserSharedWorkerBootstrapCancelRequest,
   type BrowserForegroundNodeLeaseAcquireResponse,
   type BrowserForegroundNodeLeasePortEvent,
   type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type {
-  ForegroundNodeLease,
+  BrowserForegroundNodeLease,
   BrowserWorkerConnection,
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
@@ -41,6 +44,8 @@ const MAX_SHARED_WORKER_GENERATION_ATTEMPTS = 8;
 const MAX_FOREGROUND_NODE_LEASE_BUSY_ATTEMPTS = 8;
 const FOREGROUND_NODE_LEASE_RETRY_INITIAL_DELAY_MS = 25;
 const FOREGROUND_NODE_LEASE_RETRY_MAX_DELAY_MS = 250;
+const RUNTIME_STARTUP_TIMEOUT_MS = 5 * 60_000;
+const RUNTIME_STARTUP_CLOCK_INTERVAL_MS = 1_000;
 
 type ForegroundNodeLeaseAttemptOutcome =
   | { type: "ready"; lease: SharedBrowserForegroundNodeLease }
@@ -79,10 +84,15 @@ function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): st
  * exists. Its port stays open as the durable owner's liveness witness until
  * explicit clean return or retirement.
  */
-export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
+export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLease {
   private worker: Pick<SharedWorker, "port"> | null = null;
   private port: MessagePort | null = null;
   private closed = false;
+  private abandonedError: Error | null = null;
+  private finishPromise: Promise<void> | null = null;
+  private finishWaiter: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  private listeningForFinish = false;
+  private terminalRequestSent = false;
 
   private constructor(
     readonly node: Uint8Array,
@@ -312,6 +322,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
   }
 
   async returnWithHighWater(highWater: bigint): Promise<void> {
+    if (this.abandonedError) throw this.abandonedError;
     if (highWater < 0n) throw new Error("Invalid foreground transaction high-water");
     await this.finish({
       type: "return-foreground-node-lease",
@@ -320,40 +331,81 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
   }
 
   async retire(): Promise<void> {
+    if (this.abandonedError) throw this.abandonedError;
     if (this.closed) return;
     await this.finish({ type: "retire-foreground-node-lease" });
   }
 
-  private async finish(message: BrowserForegroundNodeLeasePortRequest): Promise<void> {
-    if (this.closed) throw new Error("Shared browser foreground lease is already closed");
+  abandonAfterWorkerFailure(error: Error): void {
+    if (this.abandonedError) return;
+    this.abandonedError = error;
+    this.finishWaiter?.reject(error);
+    this.finishWaiter = null;
+    if (this.closed || !this.port) return;
+    this.listenForFinish();
+    // A quiesced return may already have committed. Retain its one outcome;
+    // another command cannot retrospectively retire an identity already reused.
+    if (this.terminalRequestSent) return;
+    this.terminalRequestSent = true;
+    try {
+      this.port.postMessage({ type: "retire-foreground-node-lease" });
+    } catch {
+      this.closeFinishPort();
+    }
+    // Do not close after posting: WebKit can discard a queued retirement.
+    // The late result only releases this background witness, not durable success.
+  }
+
+  private finish(message: BrowserForegroundNodeLeasePortRequest): Promise<void> {
+    if (this.abandonedError) return Promise.reject(this.abandonedError);
+    if (this.closed)
+      return Promise.reject(new Error("Shared browser foreground lease is already closed"));
+    if (this.finishPromise) return this.finishPromise;
     const port = this.port;
-    if (!port) throw new Error("Shared browser foreground lease port is unavailable");
-    await new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        port.removeEventListener("message", onMessage);
-        port.removeEventListener("messageerror", onMessageError);
-      };
-      const onMessage = (event: MessageEvent<BrowserForegroundNodeLeasePortEvent>) => {
-        const result = event.data;
-        if (result?.type !== "foreground-node-lease-result") return;
-        cleanup();
-        if (result.error) reject(deserializeBrowserRelayError(result.error));
-        else resolve();
-      };
-      const onMessageError = () => {
-        cleanup();
-        reject(new Error("Shared browser foreground lease port message error"));
-      };
-      port.addEventListener("message", onMessage);
-      port.addEventListener("messageerror", onMessageError);
-      port.postMessage(message);
-    }).finally(() => {
-      this.closed = true;
-      this.port?.close();
-      this.port = null;
-      this.worker?.port.close();
-      this.worker = null;
+    if (!port)
+      return Promise.reject(new Error("Shared browser foreground lease port is unavailable"));
+    this.listenForFinish();
+    this.finishPromise = new Promise<void>((resolve, reject) => {
+      this.finishWaiter = { resolve, reject };
     });
+    this.terminalRequestSent = true;
+    try {
+      port.postMessage(message);
+    } catch (error) {
+      this.finishWaiter?.reject(error instanceof Error ? error : new Error(String(error)));
+      this.closeFinishPort();
+    }
+    return this.finishPromise;
+  }
+
+  private listenForFinish(): void {
+    if (this.listeningForFinish) return;
+    this.listeningForFinish = true;
+    this.port?.addEventListener("message", this.onFinishResult);
+    this.port?.addEventListener("messageerror", this.onFinishError);
+  }
+
+  private readonly onFinishResult = (event: MessageEvent<BrowserForegroundNodeLeasePortEvent>) => {
+    const result = event.data;
+    if (result?.type !== "foreground-node-lease-result") return;
+    if (result.error) this.finishWaiter?.reject(deserializeBrowserRelayError(result.error));
+    else this.finishWaiter?.resolve();
+    this.closeFinishPort();
+  };
+
+  private readonly onFinishError = () => {
+    this.finishWaiter?.reject(new Error("Shared browser foreground lease port message error"));
+    this.closeFinishPort();
+  };
+
+  private closeFinishPort(): void {
+    this.finishWaiter = null;
+    this.closed = true;
+    this.port?.removeEventListener("message", this.onFinishResult);
+    this.port?.removeEventListener("messageerror", this.onFinishError);
+    this.worker?.port.close();
+    this.port = null;
+    this.worker = null;
   }
 }
 
@@ -366,6 +418,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private closed = false;
   private readonly workerName: string;
   private connectedGeneration: number | null = null;
+  private cancelBootstrap: (() => void) | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -439,8 +492,8 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         generationName,
         createWorker,
       );
-      if (this.closed) return;
       if (outcome.error) throw outcome.error;
+      if (this.closed) return;
       if (outcome.connected) {
         this.connectedGeneration = generation;
         return;
@@ -462,50 +515,136 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const port = worker.port;
     port.start();
     return new Promise<{ connected: boolean; error?: Error }>((resolve) => {
-      let bootstrapTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-        cleanup();
-        port.close();
+      let settled = false;
+      let cancelled = false;
+      let closingLatePeer = false;
+      let alive = false;
+      let lastTick = Date.now();
+      let deadline = lastTick + 1_000;
+      let suspended = typeof document !== "undefined" && document.hidden;
+      let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (outcome: { connected: boolean; error?: Error }) => {
+        if (settled) return;
+        settled = true;
+        stopClock();
+        if (this.cancelBootstrap === cancelForShutdown) this.cancelBootstrap = null;
+        resolve(outcome);
+      };
+      const cancel = (outcome: { connected: boolean; error?: Error }) => {
+        if (settled) return;
+        cancelled = true;
+        settle(outcome);
+        // Keep the listener until the worker fences admission or publishes a
+        // late peer. Public readiness/shutdown must not await this cleanup.
         if (this.worker === worker) this.worker = null;
-        resolve({ connected: false });
-      }, 1000);
-      const onMessage = (event: MessageEvent<BrowserSharedWorkerConnectResponse>) => {
+        try {
+          port.postMessage({
+            type: "cancel-runtime-bootstrap",
+          } satisfies BrowserSharedWorkerBootstrapCancelRequest);
+        } catch {
+          cleanup();
+          port.close();
+        }
+      };
+      const cancelForShutdown = () =>
+        cancel({
+          connected: false,
+          error: new Error("Shared browser runtime connection is closed"),
+        });
+      this.cancelBootstrap = cancelForShutdown;
+      const refreshGrace = () => {
+        lastTick = Date.now();
+        deadline = lastTick + (alive ? RUNTIME_STARTUP_TIMEOUT_MS : 1_000);
+      };
+      const onVisibilityChange = () => {
+        const hidden = typeof document !== "undefined" && document.hidden;
+        if (suspended && !hidden) refreshGrace();
+        suspended = hidden;
+      };
+      const onPageShow = () => refreshGrace();
+      const tick = () => {
+        const now = Date.now();
+        // A delayed task cannot distinguish a dead worker from a suspended
+        // page. Give a resumed page one fresh complete admission grace.
+        if (suspended || now - lastTick > RUNTIME_STARTUP_CLOCK_INTERVAL_MS * 2) refreshGrace();
+        lastTick = now;
+        if (now >= deadline) {
+          cancel(
+            alive
+              ? {
+                  connected: false,
+                  error: new BrowserWorkerUnresponsiveError(
+                    "Shared browser runtime did not finish initialization within five minutes",
+                  ),
+                }
+              : { connected: false },
+          );
+          return;
+        }
+        bootstrapTimer = setTimeout(
+          tick,
+          Math.min(RUNTIME_STARTUP_CLOCK_INTERVAL_MS, deadline - now),
+        );
+      };
+      const stopClock = () => {
+        clearTimeout(bootstrapTimer);
+        bootstrapTimer = undefined;
+        if (typeof document !== "undefined")
+          document.removeEventListener("visibilitychange", onVisibilityChange);
+        if (typeof window !== "undefined") window.removeEventListener("pageshow", onPageShow);
+      };
+      const onMessage = (
+        event: MessageEvent<BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent>,
+      ) => {
+        if (cancelled) {
+          if (event.data?.type === "runtime-ready") {
+            if (closingLatePeer) return;
+            closingLatePeer = true;
+            port.postMessage({
+              type: "close",
+              id: 0,
+              releaseContext: true,
+            } satisfies BrowserFollowerPortRequest);
+            return;
+          } else if (
+            event.data?.type !== "runtime-bootstrap-cancelled" &&
+            event.data?.type !== "runtime-error" &&
+            event.data?.type !== "worker-closing" &&
+            !(event.data?.type === "result" && event.data.id === 0)
+          )
+            return;
+          cleanup();
+          port.close();
+          return;
+        }
         if (event.data?.type === "worker-alive") {
-          if (bootstrapTimer) clearTimeout(bootstrapTimer);
-          bootstrapTimer = null;
+          if (!alive) {
+            alive = true;
+            refreshGrace();
+          }
           return;
         }
         if (event.data?.type === "runtime-error") {
           cleanup();
           port.close();
           if (this.worker === worker) this.worker = null;
-          // Do not reject a bare MessagePort callback promise. A browser can
-          // report that rejection before the caller's operation has observed
-          // readiness. The outer, constructor-owned state machine turns this
-          // into the same explicit error after it has installed containment.
           const error = deserializeBrowserRelayError(event.data.error);
           this.initialConfigurationAdmissionRejected =
             error.message === "incompatible persistent browser configuration";
-          resolve({ connected: false, error });
+          settle({ connected: false, error });
           return;
         }
         if (event.data?.type === "worker-closing") {
           cleanup();
           port.close();
           if (this.worker === worker) this.worker = null;
-          resolve({ connected: false });
+          settle({ connected: false });
           return;
         }
         if (event.data?.type !== "runtime-ready") return;
         cleanup();
-        if (this.closed) {
-          port.postMessage({
-            type: "close",
-            releaseContext: true,
-          } satisfies BrowserFollowerPortRequest);
-          port.close();
-          resolve({ connected: true });
-          return;
-        }
+        // The installed follower owns liveness from this synchronous handoff.
+        if (this.cancelBootstrap === cancelForShutdown) this.cancelBootstrap = null;
         const connection = new MessagePortBrowserFollowerConnection(
           runtime,
           port,
@@ -523,12 +662,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         );
         this.connection = connection;
         void connection.ready().then(
-          () => resolve({ connected: true }),
+          () => settle({ connected: true }),
           (error: unknown) => {
             port.close();
             if (this.connection === connection) this.connection = null;
             if (this.worker === worker) this.worker = null;
-            resolve({
+            settle({
               connected: false,
               error: error instanceof Error ? error : new Error(String(error)),
             });
@@ -539,19 +678,22 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         cleanup();
         port.close();
         if (this.worker === worker) this.worker = null;
-        resolve({
+        settle({
           connected: false,
           error: new Error("Shared browser runtime port message error"),
         });
       };
       const cleanup = () => {
-        if (bootstrapTimer) clearTimeout(bootstrapTimer);
-        bootstrapTimer = null;
+        stopClock();
         port.removeEventListener("message", onMessage);
         port.removeEventListener("messageerror", onMessageError);
       };
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
+      if (typeof document !== "undefined")
+        document.addEventListener("visibilitychange", onVisibilityChange);
+      if (typeof window !== "undefined") window.addEventListener("pageshow", onPageShow);
+      bootstrapTimer = setTimeout(tick, 1_000);
       try {
         port.postMessage({
           type: "connect-runtime",
@@ -563,7 +705,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         cleanup();
         port.close();
         if (this.worker === worker) this.worker = null;
-        resolve({
+        settle({
           connected: false,
           error: error instanceof Error ? error : new Error(String(error)),
         });
@@ -607,7 +749,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await this.readyPromise.catch(() => undefined);
+    this.cancelBootstrap?.();
     await this.connection?.shutdown(true);
     this.connection = null;
     this.worker?.port.close();

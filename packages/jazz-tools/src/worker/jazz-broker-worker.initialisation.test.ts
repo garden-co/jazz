@@ -283,7 +283,7 @@ class TestPort {
     }
     // Bootstrap liveness is intentionally not a follower event or a runtime
     // connection outcome; tests only retain the latter two protocol classes.
-    if (message.type === "worker-alive") return;
+    if (message.type === "worker-alive" || message.type === "runtime-bootstrap-cancelled") return;
     if (
       message.type === "foreground-node-lease-worker-alive" ||
       message.type === "foreground-node-lease-worker-closing"
@@ -533,6 +533,54 @@ async function connect(
   return { outcome: await outcome, port };
 }
 
+function connectRuntimeChannel(initOptions: BrowserWorkerInitOptions, tabId: string) {
+  const channel = new MessageChannel();
+  const messages: Array<BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent> = [];
+  const waiters = new Set<() => void>();
+  channel.port1.addEventListener("message", (event) => {
+    messages.push(event.data);
+    for (const notify of waiters) notify();
+  });
+  channel.port1.start();
+  const onconnect = (globalThis as WorkerGlobal).onconnect;
+  if (!onconnect) throw new Error("broker worker did not install its connect handler");
+  onconnect({ ports: [channel.port2] } as MessageEvent & { ports: MessagePort[] });
+  channel.port1.postMessage({
+    type: "connect-runtime",
+    tabId,
+    fingerprint: "shared-fingerprint",
+    options: initOptions,
+  } satisfies BrowserSharedWorkerConnectRequest);
+  return {
+    port: channel.port1,
+    messages,
+    async waitFor(type: string, id?: number) {
+      const matches = () =>
+        messages.find(
+          (message) =>
+            message.type === type && (id === undefined || ("id" in message && message.id === id)),
+        );
+      const existing = matches();
+      if (existing) return existing;
+      const response = deferred<BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent>();
+      const notify = () => {
+        const message = matches();
+        if (message) response.resolve(message);
+      };
+      waiters.add(notify);
+      try {
+        return await bounded(response.promise);
+      } finally {
+        waiters.delete(notify);
+      }
+    },
+    dispose() {
+      channel.port1.close();
+      channel.port2.close();
+    },
+  };
+}
+
 async function initializeFollower(port: TestPort, id: number): Promise<void> {
   const result = port.waitForEvent((event) => event.type === "result" && event.id === id);
   port.emitMessage({ type: "init", id, sessionClaims: {} });
@@ -602,6 +650,75 @@ describe("broker worker context initialization", () => {
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
   });
+
+  it.each(["wait-server", "flush-pending-writes"] as const)(
+    "answers real MessageChannel probes while %s is held",
+    async (operation) => {
+      const channel = new MessageChannel();
+      const receive = (predicate: (event: TestPortResponse) => boolean) =>
+        bounded(
+          new Promise<TestPortResponse>((resolve) => {
+            const listener = (event: MessageEvent<TestPortResponse>) => {
+              if (!predicate(event.data)) return;
+              channel.port1.removeEventListener("message", listener);
+              resolve(event.data);
+            };
+            channel.port1.addEventListener("message", listener);
+          }),
+        );
+      const send = (message: TestPortRequest) => channel.port1.postMessage(message);
+      channel.port1.start();
+      const held = deferred<void>();
+      const entered = deferred<void>();
+      try {
+        (globalThis as WorkerGlobal).onconnect!({
+          ports: [channel.port2],
+        } as MessageEvent & { ports: MessagePort[] });
+        const ready = receive((event) => event.type === "runtime-ready");
+        send({
+          type: "connect-runtime",
+          tabId: "real-channel",
+          fingerprint: "real-channel",
+          options: { ...options(`held-${operation}`), serverUrl: "ws://server.test" },
+        });
+        await ready;
+        const initialized = receive((event) => event.type === "result" && event.id === 1);
+        send({ type: "init", id: 1, sessionClaims: {} });
+        await initialized;
+        const runtime = mocks.runtimes[0]!;
+        const wait = vi.fn(() => {
+          entered.resolve();
+          return held.promise;
+        });
+        if (operation === "wait-server") runtime.waitForUpstreamServerConnection = wait;
+        else runtime.waitForPendingWrites = wait;
+        let completed = false;
+        const result = receive((event) => event.type === "result" && event.id === 2).then(
+          (event) => {
+            completed = true;
+            return event;
+          },
+        );
+        send({ type: operation, id: 2 });
+        await bounded(entered.promise);
+        for (let nonce = 1; nonce <= 3; nonce++) {
+          const pong = receive((event) => event.type === "runtime-pong" && event.nonce === nonce);
+          send({ type: "runtime-probe", connectionId: "held-rpc", nonce });
+          expect(await pong).toEqual({ type: "runtime-pong", connectionId: "held-rpc", nonce });
+          expect(completed).toBe(false);
+        }
+        held.resolve();
+        expect(await result).toEqual({ type: "result", id: 2 });
+        const closed = receive((event) => event.type === "result" && event.id === 3);
+        send({ type: "close", id: 3 });
+        await closed;
+      } finally {
+        held.resolve();
+        channel.port1.close();
+        channel.port2.close();
+      }
+    },
+  );
 
   it("retires admission completed after close without publishing frames or an init result", async () => {
     const initOptions = { ...options("close-pending-admission"), serverUrl: "ws://server.test" };
@@ -2103,6 +2220,302 @@ describe("broker worker context initialization", () => {
     });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
+  });
+
+  it("retires a lone cancelled runtime after late initialization and reopens the same physical root", async () => {
+    const gate = deferred<typeof mocks.wasmModule>();
+    mocks.loadWasmModule.mockReturnValueOnce(gate.promise);
+    const initOptions = options("cancelled-lone-runtime");
+    const first = connectRuntimeChannel(initOptions, "cancelled");
+    try {
+      await first.waitFor("worker-alive");
+      await vi.waitFor(() => expect(mocks.loadWasmModule).toHaveBeenCalledOnce());
+      first.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await first.waitFor("runtime-bootstrap-cancelled");
+      first.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      gate.resolve(mocks.wasmModule);
+      await vi.waitFor(() => expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce());
+      const reopened = connectRuntimeChannel(initOptions, "reopened");
+      try {
+        await reopened.waitFor("runtime-ready");
+        reopened.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
+        expect(await reopened.waitFor("result", 1)).not.toHaveProperty("error");
+        reopened.port.postMessage({ type: "close", id: 2, releaseContext: true });
+        expect(await reopened.waitFor("result", 2)).not.toHaveProperty("error");
+        expect(first.messages.map((message) => message.type)).toEqual([
+          "worker-alive",
+          "runtime-bootstrap-cancelled",
+        ]);
+        expect(mocks.runtimes[0]?.discard).toHaveBeenCalledOnce();
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      gate.resolve(mocks.wasmModule);
+      first.dispose();
+    }
+  });
+
+  it("preserves a sibling claim sharing initialization when another runtime admission cancels", async () => {
+    const gate = deferred<typeof mocks.wasmModule>();
+    mocks.loadWasmModule.mockReturnValueOnce(gate.promise);
+    const initOptions = options("cancelled-sibling-runtime");
+    const first = connectRuntimeChannel(initOptions, "cancelled");
+    const sibling = connectRuntimeChannel(initOptions, "sibling");
+    try {
+      await Promise.all([first.waitFor("worker-alive"), sibling.waitFor("worker-alive")]);
+      first.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await first.waitFor("runtime-bootstrap-cancelled");
+      gate.resolve(mocks.wasmModule);
+      await sibling.waitFor("runtime-ready");
+      sibling.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
+      expect(await sibling.waitFor("result", 1)).not.toHaveProperty("error");
+      // Exercise an admitted follower operation rather than only its ready envelope.
+      sibling.port.postMessage({ type: "disconnect", id: 2 });
+      expect(await sibling.waitFor("result", 2)).not.toHaveProperty("error");
+      expect(mocks.runtimes[0]?.discard).not.toHaveBeenCalled();
+      expect(mocks.openBrowser).toHaveBeenCalledOnce();
+      expect(first.messages.map((message) => message.type)).toEqual([
+        "worker-alive",
+        "runtime-bootstrap-cancelled",
+      ]);
+      sibling.port.postMessage({ type: "close", id: 3, releaseContext: true });
+      await sibling.waitFor("result", 3);
+    } finally {
+      gate.resolve(mocks.wasmModule);
+      first.dispose();
+      sibling.dispose();
+    }
+  });
+
+  it("fences cancellation during server configuration without releasing the established peer", async () => {
+    const initOptions = {
+      ...options("cancelled-configure-runtime"),
+      serverUrl: "wss://example.test",
+    };
+    const owner = await connect(initOptions, "owner");
+    await initializeFollower(owner.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    const entered = deferred<void>();
+    const configured = deferred<void>();
+    runtime.updateAuth.mockImplementationOnce(() => {
+      entered.resolve();
+      return configured.promise;
+    });
+    const attempt = connectRuntimeChannel(initOptions, "cancelled");
+    try {
+      await bounded(entered.promise);
+      attempt.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await attempt.waitFor("runtime-bootstrap-cancelled");
+      configured.resolve();
+      // This queued transition acknowledges only after the cancelled
+      // configureServer phase has settled and its publication fence has run.
+      expect(await followerResult(owner.port, { type: "disconnect", id: 2 })).not.toHaveProperty(
+        "error",
+      );
+      await nextTask();
+      expect(attempt.messages.map((message) => message.type)).toEqual([
+        "worker-alive",
+        "runtime-bootstrap-cancelled",
+      ]);
+      expect(runtime.discard).not.toHaveBeenCalled();
+      await followerResult(owner.port, { type: "close", id: 3, releaseContext: true });
+    } finally {
+      configured.resolve();
+      attempt.dispose();
+    }
+  });
+
+  it("cancels a reopening admission while the former physical owner is still releasing", async () => {
+    const initOptions = options("cancelled-reopen-runtime");
+    const owner = await connect(initOptions, "owner");
+    const releaseStarted = deferred<void>();
+    const released = deferred<void>();
+    mocks.pageStores[0]!.releaseBrowserWorkerEpoch.mockImplementationOnce(() => {
+      releaseStarted.resolve();
+      return released.promise;
+    });
+    await followerResult(owner.port, { type: "close", id: 1, releaseContext: true });
+    await bounded(releaseStarted.promise);
+    const attempt = connectRuntimeChannel(initOptions, "cancelled-reopen");
+    try {
+      await attempt.waitFor("worker-alive");
+      attempt.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await attempt.waitFor("runtime-bootstrap-cancelled");
+      released.resolve();
+      await vi.waitFor(() => expect(mocks.pageStores[1]?.close).toHaveBeenCalledOnce());
+      const successor = connectRuntimeChannel(initOptions, "successor");
+      try {
+        await successor.waitFor("runtime-ready");
+        successor.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
+        expect(await successor.waitFor("result", 1)).not.toHaveProperty("error");
+        expect(attempt.messages.map((message) => message.type)).toEqual([
+          "worker-alive",
+          "runtime-bootstrap-cancelled",
+        ]);
+        successor.port.postMessage({ type: "close", id: 2, releaseContext: true });
+        await successor.waitFor("result", 2);
+      } finally {
+        successor.dispose();
+      }
+    } finally {
+      released.resolve();
+      attempt.dispose();
+    }
+  });
+
+  it("retires a cancelled physical root while an unrelated runtime remains usable", async () => {
+    const unrelated = await connect(options("unrelated-live-root"), "unrelated");
+    await initializeFollower(unrelated.port, 1);
+    const db = mocks.createBrowserDb();
+    const opened = deferred<typeof db>();
+    mocks.openBrowser.mockReturnValueOnce(opened.promise);
+    const targetOptions = options("cancelled-independent-root");
+    const cancelled = connectRuntimeChannel(targetOptions, "cancelled");
+    try {
+      await cancelled.waitFor("worker-alive");
+      await vi.waitFor(() => expect(mocks.openBrowser).toHaveBeenCalledTimes(2));
+      cancelled.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await cancelled.waitFor("runtime-bootstrap-cancelled");
+      opened.resolve(db);
+      await vi.waitFor(() => expect(mocks.pageStores[1]?.close).toHaveBeenCalledOnce());
+      expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+      expect(mocks.runtimes[0]?.discard).not.toHaveBeenCalled();
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 2 }),
+      ).not.toHaveProperty("error");
+      const reopened = connectRuntimeChannel(targetOptions, "reopened");
+      try {
+        await reopened.waitFor("runtime-ready");
+        reopened.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
+        expect(await reopened.waitFor("result", 1)).not.toHaveProperty("error");
+        reopened.port.postMessage({ type: "close", id: 2, releaseContext: true });
+        await reopened.waitFor("result", 2);
+      } finally {
+        reopened.dispose();
+      }
+      await followerResult(unrelated.port, { type: "close", id: 3, releaseContext: true });
+    } finally {
+      opened.resolve(db);
+      cancelled.dispose();
+    }
+  });
+
+  it("expires an unclaimed production bootstrap so a cancelled root can retire beside a healthy root", async () => {
+    const unrelated = await connect(options("unclaimed-bootstrap-healthy-root"), "unrelated");
+    await initializeFollower(unrelated.port, 1);
+    const db = mocks.createBrowserDb();
+    const opened = deferred<typeof db>();
+    mocks.openBrowser.mockReturnValueOnce(opened.promise);
+    const targetOptions = options("unclaimed-bootstrap-cancelled-root");
+    const cancelled = connectRuntimeChannel(targetOptions, "cancelled");
+    let unclaimed: TestPort | undefined;
+    try {
+      await cancelled.waitFor("worker-alive");
+      await vi.waitFor(() => expect(mocks.openBrowser).toHaveBeenCalledTimes(2));
+      const pageStore = mocks.pageStores[1]!;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      // This helper only delivers ordinary production onconnect. No probe,
+      // scope, or operation message ever arrives on this abandoned port.
+      unclaimed = connectLeaseProbe().port;
+      cancelled.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await cancelled.waitFor("runtime-bootstrap-cancelled");
+      opened.resolve(db);
+      await nextTask();
+      expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce();
+      expect(pageStore.close).not.toHaveBeenCalled();
+      expect(pageStore.releaseBrowserWorkerEpoch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(unclaimed.close).not.toHaveBeenCalled();
+      expect(pageStore.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      // Assert the resource outcome directly: the old scope-only timer leaves
+      // this owner retained, rather than making the test wait for a timeout.
+      expect(pageStore.close).toHaveBeenCalledOnce();
+      expect(pageStore.releaseBrowserWorkerEpoch).toHaveBeenCalledOnce();
+      expect(unclaimed.close).toHaveBeenCalledOnce();
+      expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+      expect(mocks.runtimes[0]?.discard).not.toHaveBeenCalled();
+      vi.useRealTimers();
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 2 }),
+      ).not.toHaveProperty("error");
+
+      const reopened = connectRuntimeChannel(targetOptions, "reopened");
+      try {
+        await reopened.waitFor("runtime-ready");
+        reopened.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
+        expect(await reopened.waitFor("result", 1)).not.toHaveProperty("error");
+        expect(mocks.openPageStore).toHaveBeenCalledTimes(3);
+        expect(mocks.openPageStore).toHaveBeenLastCalledWith(targetOptions.dbName, {
+          owner: targetOptions.storageOwner,
+        });
+        expect(mocks.pageStores[2]?.close).not.toHaveBeenCalled();
+        expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+        expect(
+          await followerResult(unrelated.port, { type: "disconnect", id: 3 }),
+        ).not.toHaveProperty("error");
+      } finally {
+        reopened.port.postMessage({ type: "close", id: 2, releaseContext: true });
+        try {
+          await reopened.waitFor("result", 2);
+        } finally {
+          reopened.dispose();
+        }
+      }
+    } finally {
+      opened.resolve(db);
+      // Only clean up the baseline's still-unclaimed reservation after the
+      // expiry assertion, using its existing cancellation protocol.
+      unclaimed?.emitMessage({ type: "cancel-foreground-node-lease" });
+      vi.useRealTimers();
+      cancelled.dispose();
+      await followerResult(unrelated.port, { type: "close", id: 4, releaseContext: true });
+    }
+  });
+
+  it("preserves a cancelled root for a foreground lease bootstrap before lease bookkeeping exists", async () => {
+    const unrelated = await connect(options("unrelated-lease-control-root"), "unrelated");
+    await initializeFollower(unrelated.port, 1);
+    const db = mocks.createBrowserDb();
+    const opened = deferred<typeof db>();
+    mocks.openBrowser.mockReturnValueOnce(opened.promise);
+    const targetOptions = options("cancelled-pending-lease-root");
+    const cancelled = connectRuntimeChannel(targetOptions, "cancelled");
+    // onconnect reserves liveness before the lease's first request can create
+    // a ForegroundLeaseOwner or increment pendingLeaseAllocations.
+    const pendingLease = connectLeaseProbe();
+    try {
+      await cancelled.waitFor("worker-alive");
+      await vi.waitFor(() => expect(mocks.openBrowser).toHaveBeenCalledTimes(2));
+      const pageStore = mocks.pageStores[1]!;
+      cancelled.port.postMessage({ type: "cancel-runtime-bootstrap" });
+      await cancelled.waitFor("runtime-bootstrap-cancelled");
+      opened.resolve(db);
+      await vi.waitFor(() => expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce());
+      expect(pageStore.close).not.toHaveBeenCalled();
+      expect(pageStore.releaseBrowserWorkerEpoch).not.toHaveBeenCalled();
+      pendingLease.port.emitMessage({
+        type: "acquire-foreground-node-lease",
+        dbName: targetOptions.dbName,
+        storageOwner: targetOptions.storageOwner,
+      });
+      const lease = await bounded(pendingLease.port.waitForLeaseOutcome());
+      expect(lease.type).toBe("foreground-node-lease-ready");
+      expect(pageStore.close).not.toHaveBeenCalled();
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 2 }),
+      ).not.toHaveProperty("error");
+      pendingLease.port.emitMessage({ type: "retire-foreground-node-lease" });
+      await vi.waitFor(() => expect(pageStore.retireForegroundNodeLease).toHaveBeenCalledOnce());
+      await followerResult(unrelated.port, { type: "close", id: 3, releaseContext: true });
+      await vi.waitFor(() => expect(pageStore.close).toHaveBeenCalledOnce());
+    } finally {
+      opened.resolve(db);
+      cancelled.dispose();
+      pendingLease.port.close();
+    }
   });
 
   it("rejects a tab whose policy claims differ from the worker upstream session", async () => {

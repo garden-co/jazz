@@ -31,6 +31,12 @@ export interface ForegroundNodeLease {
   retire(): Promise<void>;
 }
 
+/** Browser-only terminal cleanup; the durable retirement outcome remains unknown. */
+export interface BrowserForegroundNodeLease extends ForegroundNodeLease {
+  /** The caller must first disable the foreground lifetime that can mint this node's TxIds. */
+  abandonAfterWorkerFailure(error: Error): void;
+}
+
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   collectorUrl: string;
@@ -162,7 +168,7 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return undefined;
   }
 
-  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<ForegroundNodeLease> {
+  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<BrowserForegroundNodeLease> {
     return Promise.reject(
       new Error("Db runtime source does not support browser foreground leases"),
     );

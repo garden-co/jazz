@@ -1,12 +1,14 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
-import type { DurabilityTier } from "../client.js";
+import type { WasmSchema } from "../../drivers/types.js";
+import type { DurabilityTier, JazzClient } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
-import type { BrowserWorkerConnection } from "../runtime-source.js";
+import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
+import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -38,6 +40,12 @@ export class BrowserConnectionManager extends ConnectionManager {
   private observedConfigurationAdmissionFailure: BrowserWorkerConnection | null = null;
   private configurationAdmissionRetry: Promise<BrowserWorkerConnection | null> | null = null;
   private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
+  declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
+  private shutdownStarted = false;
+  private shutdownFailure: {
+    connection: BrowserWorkerConnection | null;
+    abandon: (error: Error) => void;
+  } | null = null;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -52,12 +60,18 @@ export class BrowserConnectionManager extends ConnectionManager {
     );
   }
 
+  override getClient(schema: WasmSchema): JazzClient {
+    if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
+    return super.getClient(schema);
+  }
+
   protected override onClientCreated(input: ConnectionManagerClientInput): void {
     this.browserConnectionInput = input;
     this.openBrowserWorkerConnection();
   }
 
   private openBrowserWorkerConnection(): BrowserWorkerConnection {
+    if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
     const input = this.browserConnectionInput;
     if (!input) throw new Error("Browser worker connection requires an initialized client");
     // An Inspector receipt authenticates one worker connection, not a durable
@@ -74,11 +88,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
-      onFailure: (error) => {
-        if (this.connection !== connection) return;
-        this.connectionError = asError(error);
-        this.recoverableConnectionFailure = true;
-      },
+      onFailure: (error) => this.observeConnectionFailure(connection, asError(error)),
       onStorageReset: () => this.beginStorageReset(connection),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
@@ -108,9 +118,8 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.recoverableConnectionFailure = false;
       },
       (error: unknown) => {
+        this.observeConnectionFailure(connection, asError(error));
         if (this.connection !== connection) return;
-        this.connectionError = asError(error);
-        this.recoverableConnectionFailure = true;
         // `connectionReady` is also observed by passive readiness consumers
         // (for example the initial offline-state probe). Keep it a settled
         // notification, not a detached rejected promise. Public operations
@@ -125,6 +134,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       }).catch(() => undefined);
     }
     return connection;
+  }
+
+  private observeConnectionFailure(connection: BrowserWorkerConnection, error: Error): void {
+    if (this.shutdownFailure?.connection === connection) {
+      if (error instanceof BrowserWorkerUnresponsiveError) this.shutdownFailure.abandon(error);
+      return;
+    }
+    if (this.connection !== connection) return;
+    this.connectionError = error;
+    this.recoverableConnectionFailure = true;
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -233,6 +252,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
+      if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
       if (this.recoverableConnectionFailure) this.reopenFailedFollower();
       await this.connectionReady;
       if (this.connectionError) throw this.connectionError;
@@ -327,10 +347,13 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   override async shutdown(): Promise<void> {
+    if (this.shutdownStarted) return;
+    this.shutdownStarted = true;
     const connection = this.connection;
-    const admissionFailed = this.connectionError !== null;
+    const admissionError = this.connectionError;
     this.connection = null;
     this.connectionReady = null;
+    this.browserConnectionInput = null;
     this.initialExplicitOfflineStateKnown = false;
     this.resolveReconnectWaiters();
     const unregisterInspectorControl = this.unregisterInspectorControl;
@@ -339,43 +362,101 @@ export class BrowserConnectionManager extends ConnectionManager {
     const lease = this.foregroundNodeLease;
     this.foregroundNodeLease = undefined;
     const client = this.getCurrentClient();
-    await runCleanupSteps([
-      () => unregisterInspectorControl?.(),
-      // A rejected physical-root admission created no follower and therefore
-      // has nothing to flush. Shutdown remains idempotent after a caller has
-      // already received that operation-level error.
-      () => (admissionFailed ? undefined : connection?.flushLocal()),
-      async () => {
-        if (!lease) return;
-        // The native value includes identities minted for rolled-back and
-        // unsubmitted writes. Any failure in this readout or its atomic worker
-        // persistence retires the node rather than risking reuse.
-        try {
-          const runtime = client?.getRuntime();
-          if (!runtime) {
-            // No foreground client existed, hence no transaction identity was
-            // minted after the lease was acquired.
-            await lease.returnWithHighWater(lease.confirmedTxTime);
-            return;
-          } else if (!(runtime instanceof NativeRuntimeAdapter)) {
-            await lease.retire();
-            return;
-          }
-          await lease.returnWithHighWater(await runtime.quiesceForegroundTxTimeHighWater());
-        } catch {
-          await lease.retire().catch(() => undefined);
-        }
-      },
-      () => {
-        // The tab runtime is explicitly non-durable; once its worker peer has
-        // flushed, graceful evaluator teardown cannot add durability and may wait
-        // on suspended recursive/include work. Abandon that view and let the
-        // durable worker own orderly persistence shutdown.
+    let workerFailure: Error | null = null;
+    let flushFailed = false;
+    let notifyAbandoned!: () => void;
+    const abandoned = new Promise<void>((resolve) => {
+      notifyAbandoned = resolve;
+    });
+    const abandon = (error: Error) => {
+      if (workerFailure) return;
+      workerFailure = error;
+      // Shutdown owns this lifetime now. Disable minting before even a best-effort
+      // retirement can transfer ownership; a mere reconnect never reaches here.
+      try {
         this.detachClient()?.discard();
-      },
-      () => super.shutdown(),
-      () => connection?.shutdown(),
-    ]);
+      } catch {
+        // The causal worker failure remains first even if local disposal fails.
+      } finally {
+        lease?.abandonAfterWorkerFailure(error);
+        notifyAbandoned();
+      }
+    };
+    this.shutdownFailure = { connection, abandon };
+    if (admissionError instanceof BrowserWorkerUnresponsiveError) abandon(admissionError);
+
+    try {
+      await runCleanupSteps([
+        () => {
+          if (workerFailure) throw workerFailure;
+        },
+        () => unregisterInspectorControl?.(),
+        async () => {
+          if (workerFailure) throw workerFailure;
+          // Configuration rejection is not a dead realm: skip the absent follower
+          // flush, but retain the lease's ordinary clean-return semantics.
+          if (admissionError) return;
+          try {
+            await connection?.flushLocal();
+          } catch (error) {
+            flushFailed = true;
+            if (workerFailure) throw workerFailure;
+            if (error instanceof BrowserWorkerUnresponsiveError) abandon(error);
+            throw error;
+          }
+        },
+        async () => {
+          if (workerFailure) throw workerFailure;
+          if (!lease) return;
+          let finishFailed = false;
+          let finishError: unknown;
+          const finish = async () => {
+            try {
+              const runtime = client?.getRuntime();
+              if (!runtime) {
+                if (flushFailed) await lease.retire();
+                else await lease.returnWithHighWater(lease.confirmedTxTime);
+              } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+                await lease.retire();
+              } else {
+                // Even after an ordinary flush failure, close mutation admission
+                // and drain started writes before releasing this identity. A
+                // failed flush cannot establish a clean durable handoff.
+                const highWater = await runtime.quiesceForegroundTxTimeHighWater();
+                if (flushFailed) await lease.retire();
+                else await lease.returnWithHighWater(highWater);
+              }
+            } catch (error) {
+              finishFailed = true;
+              finishError = workerFailure ?? error;
+              // Abandonment rejects this fallback too; never replace the first
+              // failure or retry an unknown clean return.
+              await lease.retire().catch(() => undefined);
+              throw finishError;
+            }
+          };
+          // A causal failure may arrive while high-water capture or lease finish
+          // is already in flight. Its background work cannot hold shutdown open.
+          await Promise.race([
+            finish(),
+            abandoned.then(() => {
+              throw finishFailed ? finishError : workerFailure;
+            }),
+          ]);
+        },
+        () => {
+          // The tab view is non-durable; only its worker owns persistence shutdown.
+          this.detachClient()?.discard();
+        },
+        () => super.shutdown(),
+        () => connection?.shutdown(),
+        () => {
+          if (workerFailure) throw workerFailure;
+        },
+      ]);
+    } finally {
+      this.shutdownFailure = null;
+    }
   }
 
   private resolveReconnectWaiters(): void {

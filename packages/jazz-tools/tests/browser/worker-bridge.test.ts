@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 /**
  * Browser integration tests for the SharedWorker + IndexedDB runtime.
  *
@@ -10,6 +12,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createBrowserTestDb as createDb } from "./support.js";
 import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
+import { commands } from "vitest/browser";
 import {
   Db,
   getDbSubscriptionSource,
@@ -31,6 +34,9 @@ import {
   createBrowserSharedWorkerBaseName,
   SharedBrowserForegroundNodeLease,
 } from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
+import { NativeRuntimeAdapter } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
+import { createOpenTransactionId } from "../../src/runtime/client.js";
+import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
 import {
   TestCleanup,
@@ -63,6 +69,11 @@ import {
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
+  BrowserWorkerUnresponsiveError,
+  serializeBrowserRelayError,
+  type BrowserForegroundNodeLeaseAcquireRequest,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
   type BrowserInspectorControlEvent,
@@ -71,6 +82,18 @@ import {
 } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 
 declare const __JAZZ_BROWSER_SOAK__: string;
+
+async function workerFaultBundleUrl(): Promise<string> {
+  if (
+    !("workerFaultBundleUrl" in commands) ||
+    typeof commands.workerFaultBundleUrl !== "function"
+  ) {
+    throw new Error("Browser test project is missing the worker fault bundle command.");
+  }
+  const url: unknown = await commands.workerFaultBundleUrl();
+  if (typeof url !== "string") throw new Error("Worker fault bundle command did not return a URL.");
+  return url;
+}
 
 let nextInspectorRequestId = 1;
 
@@ -389,6 +412,231 @@ function startRawForegroundLease(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("foreground lease terminal policy with real IndexedDB and WASM", () => {
+  async function storeBackedLease() {
+    const dbName = uniqueDbName("terminal-lease-store");
+    const store = await IndexedDbPageStore.open(dbName);
+    const channel = new MessageChannel();
+    let runtime: NativeRuntimeAdapter | undefined;
+    try {
+      const allocation = await store.acquireForegroundNodeLease();
+      const wasm = await loadWasmModule();
+      runtime = new NativeRuntimeAdapter(
+        wasm.WasmDb,
+        app.wasmSchema,
+        allocation.node,
+        new TextEncoder().encode('["urn:jazz:test","terminal-lease"]'),
+        1,
+        true,
+        { backendMode: true },
+      );
+      runtime.seedForegroundTxTimeHighWater(allocation.confirmedTxTime);
+      let committed!: () => void;
+      let failed!: (error: unknown) => void;
+      const terminalCommitted = new Promise<void>((resolve, reject) => {
+        committed = resolve;
+        failed = reject;
+      });
+      void terminalCommitted.catch(() => undefined);
+      const terminalOperations: Promise<void>[] = [];
+      channel.port2.onmessage = (
+        event: MessageEvent<
+          | BrowserForegroundNodeLeaseProbeRequest
+          | BrowserForegroundNodeLeaseAcquireRequest
+          | BrowserForegroundNodeLeasePortRequest
+        >,
+      ) => {
+        const message = event.data;
+        if (message.type === "probe-foreground-node-lease-worker") {
+          channel.port2.postMessage({
+            type: "foreground-node-lease-worker-alive",
+            attemptId: message.attemptId,
+          });
+        } else if (message.type === "acquire-foreground-node-lease") {
+          channel.port2.postMessage({
+            type: "foreground-node-lease-ready",
+            ...allocation,
+            confirmedTxTime: allocation.confirmedTxTime.toString(),
+          });
+        } else {
+          // Only transport delivery is controlled. A successful result cannot
+          // be released until the real IndexedDB transaction has committed.
+          const operation =
+            message.type === "return-foreground-node-lease"
+              ? store.returnForegroundNodeLease(allocation.leaseId, BigInt(message.confirmedTxTime))
+              : store.retireForegroundNodeLease(allocation.leaseId);
+          terminalOperations.push(operation);
+          void operation.then(committed, (error) => {
+            failed(error);
+            channel.port2.postMessage({
+              type: "foreground-node-lease-result",
+              error: serializeBrowserRelayError(error),
+            });
+          });
+        }
+      };
+      const lease = await SharedBrowserForegroundNodeLease.acquireFromPort(channel.port1, {
+        dbName,
+        storageOwner: "terminal-lease-control",
+      });
+      const post = vi.spyOn(channel.port1, "postMessage");
+      const close = vi.spyOn(channel.port1, "close");
+      return {
+        dbName,
+        store,
+        lease,
+        runtime,
+        post,
+        close,
+        terminalCommitted,
+        acknowledge() {
+          channel.port2.postMessage({ type: "foreground-node-lease-result" });
+        },
+        async dispose() {
+          channel.port1.close();
+          channel.port2.close();
+          await Promise.allSettled(terminalOperations);
+          await runtime!.close();
+          store.close();
+          await IndexedDbPageStore.destroy(dbName);
+        },
+      };
+    } catch (error) {
+      channel.port1.close();
+      channel.port2.close();
+      await runtime?.close();
+      store.close();
+      await IndexedDbPageStore.destroy(dbName);
+      throw error;
+    }
+  }
+
+  it("retains a committed quiesced return and its final durable HWM after local abandonment", async () => {
+    const fixture = await storeBackedLease();
+    const { runtime, lease } = fixture;
+    let releaseSource!: () => void;
+    const sourceGate = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    let sourceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sourceStarted = resolve;
+    });
+    let write: Promise<unknown> | undefined;
+    try {
+      const initialHighWater = runtime.foregroundTxTimeHighWater();
+      const oldBatch = createOpenTransactionId();
+      runtime.beginTransaction("mergeable", oldBatch);
+      write = runtime.streamingMutation(
+        "insert",
+        "projects",
+        {},
+        "name",
+        (async function* () {
+          sourceStarted();
+          await sourceGate;
+          yield "write admitted before handoff";
+        })(),
+      );
+      await withTimeout(
+        Promise.race([started, write]),
+        5_000,
+        "real native streaming write did not start",
+      );
+      let captured = false;
+      const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
+        captured = true;
+        return value;
+      });
+      await Promise.resolve();
+      expect(captured).toBe(false);
+      expect(fixture.post).not.toHaveBeenCalled();
+      releaseSource();
+      await write;
+      const highWater = await handoff;
+      expect(highWater).toBeGreaterThan(initialHighWater);
+      expect(() => runtime.commitTransaction(oldBatch)).toThrow("native runtime is closed");
+      expect(() => runtime.beginTransaction("mergeable", createOpenTransactionId())).toThrow(
+        "native runtime is closed",
+      );
+      expect(() =>
+        runtime.insert("projects", { name: { type: "Text", value: "too late" } }),
+      ).toThrow("native runtime is closed");
+
+      const failure = new BrowserWorkerUnresponsiveError("worker reply was lost after commit");
+      const returned = lease.returnWithHighWater(highWater);
+      const rejected = expect(returned).rejects.toBe(failure);
+      await withTimeout(fixture.terminalCommitted, 5_000, "real return transaction did not commit");
+      expect(await fixture.store.foregroundNodeLeaseNodeState(lease.node)).toBe("reusable");
+      // Reuse may happen before the old page detects failure. An old-page
+      // abandonment cannot revoke this successor or lower its final floor.
+      const reopened = await IndexedDbPageStore.open(fixture.dbName);
+      try {
+        const successor = await reopened.acquireForegroundNodeLease();
+        expect(successor.node).toEqual(lease.node);
+        expect(successor.confirmedTxTime).toBe(highWater);
+        lease.abandonAfterWorkerFailure(failure);
+        await rejected;
+        expect(fixture.post).toHaveBeenCalledExactlyOnceWith({
+          type: "return-foreground-node-lease",
+          confirmedTxTime: highWater.toString(),
+        });
+        expect(await reopened.foregroundNodeLeaseNodeState(successor.node)).toBe("active");
+        expect(fixture.close).not.toHaveBeenCalled();
+        fixture.acknowledge();
+        await vi.waitFor(() => expect(fixture.close).toHaveBeenCalledOnce());
+        await expect(lease.returnWithHighWater(highWater + 1n)).rejects.toBe(failure);
+        await expect(lease.retire()).rejects.toBe(failure);
+        expect(runtime.foregroundTxTimeHighWater()).toBe(highWater);
+        await reopened.returnForegroundNodeLease(successor.leaseId, highWater);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      releaseSource();
+      await write?.catch(() => undefined);
+      await fixture.dispose();
+    }
+  }, 15_000);
+
+  it("durably retires a quiesced foreground abandoned before any terminal request", async () => {
+    const fixture = await storeBackedLease();
+    try {
+      await fixture.runtime.quiesceForegroundTxTimeHighWater();
+      const failure = new BrowserWorkerUnresponsiveError("worker stopped before lease finish");
+      fixture.lease.abandonAfterWorkerFailure(failure);
+      await expect(fixture.lease.retire()).rejects.toBe(failure);
+      await withTimeout(
+        fixture.terminalCommitted,
+        5_000,
+        "real retirement transaction did not commit",
+      );
+      expect(fixture.post).toHaveBeenCalledExactlyOnceWith({
+        type: "retire-foreground-node-lease",
+      });
+      expect(await fixture.store.foregroundNodeLeaseNodeState(fixture.lease.node)).toBe("retired");
+      const reopened = await IndexedDbPageStore.open(fixture.dbName);
+      try {
+        const successor = await reopened.acquireForegroundNodeLease();
+        expect(successor.node).not.toEqual(fixture.lease.node);
+        expect(successor.confirmedTxTime).toBe(0n);
+        expect(() =>
+          fixture.runtime.insert("projects", { name: { type: "Text", value: "too late" } }),
+        ).toThrow("native runtime is closed");
+        expect(fixture.close).not.toHaveBeenCalled();
+        fixture.acknowledge();
+        await vi.waitFor(() => expect(fixture.close).toHaveBeenCalledOnce());
+        await expect(fixture.lease.returnWithHighWater(0n)).rejects.toBe(failure);
+        await reopened.retireForegroundNodeLease(successor.leaseId);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  }, 15_000);
+});
 
 describe("SharedWorker bridge with IndexedDB", () => {
   it("retains a queued first-owner allocation after the preceding lease returns", async () => {
@@ -889,6 +1137,153 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(db).toBeDefined();
     expect(db).toBeInstanceOf(Db);
   });
+
+  it("keeps public shutdown alive with pongs then rejects after silent worker death", async () => {
+    const capability = uniqueDbName("follower-fault");
+    const workerUrl = new URL(await workerFaultBundleUrl(), globalThis.location.href);
+    workerUrl.searchParams.set("followerFault", capability);
+    const control = new BroadcastChannel(capability);
+    const receive = (type: string) =>
+      new Promise<void>((resolve) => {
+        const listener = (event: MessageEvent<{ type: string }>) => {
+          if (event.data.type !== type) return;
+          control.removeEventListener("message", listener);
+          resolve();
+        };
+        control.addEventListener("message", listener);
+      });
+    let db: Db | undefined;
+    try {
+      db = track(
+        await createDb({
+          appId: "follower-silent-death",
+          driver: { type: "persistent", dbName: uniqueDbName("follower-silent-death") },
+          schema: app,
+          runtimeSources: {
+            brokerWorkerUrl: workerUrl.href,
+            wasmVersion: "follower-liveness-test",
+          },
+        }),
+      );
+      await db.all(allTodos, { tier: "local" });
+      const armed = receive("holding-close");
+      control.postMessage({ type: "hold-close" });
+      await withTimeout(armed, 5_000, "test worker did not arm the pending control hold");
+      const held = receive("close-held");
+      let outcome: "pending" | "resolved" | "rejected" = "pending";
+      const shutdown = db.shutdown().then(
+        () => {
+          outcome = "resolved";
+          return undefined;
+        },
+        (error: unknown) => {
+          outcome = "rejected";
+          return error;
+        },
+      );
+      // Ordinary shutdown returns its foreground lease before sending close.
+      // Killing here leaves no unrelated lease-return RPC in test cleanup.
+      await withTimeout(held, 5_000, "public shutdown did not reach the real worker close");
+      // Three real broker replies span more than the entire silent-death
+      // bound. Neither the public operation nor its failure is fabricated.
+      for (let index = 0; index < 3; index++) {
+        await withTimeout(
+          receive("pong-sent"),
+          45_000,
+          "real worker did not answer its liveness probe",
+        );
+        expect(outcome).toBe("pending");
+      }
+      control.postMessage({ type: "die" });
+      const error = await withTimeout(
+        shutdown,
+        75_000,
+        "silent worker death left public shutdown pending",
+      );
+      expect(outcome).toBe("rejected");
+      if (!(error instanceof Error)) throw new Error("Expected public shutdown to reject");
+      expect(error.message).toMatch(/outcomes are unknown.*not retried/);
+    } finally {
+      // Preserve setup/assertion failures without leaving this deliberately
+      // killed fixture in the shared afterEach's unbounded shutdown loop.
+      if (db) {
+        untrack(db);
+        void db.shutdown().catch(() => undefined);
+      }
+      control.postMessage({ type: "die" });
+      control.close();
+    }
+  }, 210_000);
+
+  it("settles public shutdown after a pending follower operation rejects on silent worker death", async () => {
+    const capability = uniqueDbName("follower-death-cleanup");
+    const workerUrl = new URL(await workerFaultBundleUrl(), globalThis.location.href);
+    workerUrl.searchParams.set("followerFault", capability);
+    const control = new BroadcastChannel(capability);
+    const receive = (type: string) =>
+      new Promise<void>((resolve) => {
+        const listener = (event: MessageEvent<{ type: string }>) => {
+          if (event.data.type !== type) return;
+          control.removeEventListener("message", listener);
+          resolve();
+        };
+        control.addEventListener("message", listener);
+      });
+    let db: Db | undefined;
+    try {
+      db = track(
+        await createDb({
+          appId: "follower-death-cleanup",
+          driver: { type: "persistent", dbName: uniqueDbName("follower-death-cleanup") },
+          schema: app,
+          runtimeSources: {
+            brokerWorkerUrl: workerUrl.href,
+            wasmVersion: "follower-liveness-test",
+          },
+        }),
+      );
+      await db.all(allTodos, { tier: "local" });
+      const armed = receive("holding-pending-writes");
+      control.postMessage({ type: "hold-pending-writes" });
+      await withTimeout(armed, 5_000, "test worker did not arm the pending control hold");
+      const held = receive("pending-writes-held");
+      const pending = db.shutdown({ waitForSync: true }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await withTimeout(held, 5_000, "public graceful shutdown did not reach the worker barrier");
+      control.postMessage({ type: "die" });
+      const error = await withTimeout(
+        pending,
+        75_000,
+        "silent worker death left the follower operation pending",
+      );
+      if (!(error instanceof Error) || !(error.cause instanceof Error)) {
+        throw new Error("Expected graceful shutdown to retain the follower failure cause");
+      }
+      expect(error.cause.message).toMatch(/outcomes are unknown.*not retried/);
+
+      // A terminal local cleanup failure is honest; an unanswered companion
+      // lease-return RPC must not keep the public Db alive indefinitely.
+      // Both observers precede the guard so rejection is not confused with a
+      // harness timeout and does not become an unhandled rejection.
+      const cleanup = db.shutdown().catch(() => undefined);
+      await withTimeout(
+        cleanup,
+        5_000,
+        "Db.shutdown remained pending after the follower connection had already failed",
+      );
+    } finally {
+      // Setup failures and the bounded cleanup assertion above remain the
+      // failure signal; never repeat a hanging shutdown in shared afterEach.
+      if (db) {
+        untrack(db);
+        void db.shutdown().catch(() => undefined);
+      }
+      control.postMessage({ type: "die" });
+      control.close();
+    }
+  }, 100_000);
 
   it("exposes a bounded redacted worker lifecycle ledger to the owning inspector", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("worker-lifecycle-ledger");
