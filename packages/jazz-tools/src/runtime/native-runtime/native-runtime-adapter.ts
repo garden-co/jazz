@@ -1835,12 +1835,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
+    const usesNativeRelationApi = queryUsesNativeRelationApi(coreQueryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
     const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
     // Relation IR is normalized by prepareQuery into the same native handle
     // as ordinary queries. Transaction overlays for this syntax remain
     // unsupported until its semantics are defined.
-    if (pendingTx && queryUsesNativeRelationApi(coreQueryJson)) {
+    if (pendingTx && usesNativeRelationApi) {
       throw new Error("Native runtime does not support relation reads inside a transaction");
     }
     // Browser runtimes still materialize row bodies from their in-memory
@@ -1858,7 +1859,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
     this.emitQueryCoverageTrace("attach");
-    if (queryHasArraySubqueries(coreQueryJson)) {
+    if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
         const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
         this.emitQueryCoverageTrace("covered");
@@ -1873,7 +1874,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromRelationSnapshot(
         readRelationSnapshot(payload),
         this.schema,
-        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        usesNativeRelationApi
+          ? undefined
+          : subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;

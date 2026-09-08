@@ -5587,7 +5587,7 @@ impl RelayWorker {
         let owner = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
             let prepared = prepared.await.map_err(RelayError::Db)?;
-            let structured = !is_relation && !prepared.shape().query().array_subqueries.is_empty();
+            let structured = is_relation || !prepared.shape().query().array_subqueries.is_empty();
             foreground_read_future(owner, prepared, opts, open_tx, structured, cleanups).await
         });
         // Admit at command arrival, before a later commit can retire the open
@@ -14129,10 +14129,28 @@ mod tests {
             transaction: None,
         });
         assert_eq!(status, JazzNativeRelayStatus::Ok);
-        let ForegroundDbCommandResponse::Rows { rows } =
-            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
-        else {
-            panic!("all must return the shared row-batch bytes");
+        let mut response = postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap();
+        let mut turns = 0;
+        let rows = loop {
+            match response {
+                ForegroundDbCommandResponse::Rows { rows } => break rows,
+                ForegroundDbCommandResponse::Pending { operation } if turns < 100 => {
+                    let (status, tick) = execute(ForegroundDbCommandRequest::Tick);
+                    assert_eq!(status, JazzNativeRelayStatus::Ok);
+                    assert_eq!(
+                        postcard::from_bytes::<ForegroundDbCommandResponse>(&tick).unwrap(),
+                        ForegroundDbCommandResponse::Ticked
+                    );
+                    let (status, poll) = execute(ForegroundDbCommandRequest::Poll { operation });
+                    assert_eq!(status, JazzNativeRelayStatus::Ok);
+                    response = postcard::from_bytes::<ForegroundDbCommandResponse>(&poll).unwrap();
+                    turns += 1;
+                }
+                ForegroundDbCommandResponse::Pending { .. } => {
+                    panic!("all did not finish after {turns} owner turns")
+                }
+                other => panic!("all returned an unexpected response: {other:?}"),
+            }
         };
         assert!(rows.len() <= 2, "empty foreground read must stay bounded");
         let (status, response) = execute(ForegroundDbCommandRequest::Subscribe {

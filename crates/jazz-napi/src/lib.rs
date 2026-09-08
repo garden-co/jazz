@@ -1582,7 +1582,11 @@ impl NapiDb {
         options: Option<InsertOptions>,
     ) -> napi::Result<Write> {
         let cells = decode_core_cells(&cells)?;
-        let options = core_insert_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_insert_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1617,7 +1621,11 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let cells = decode_core_cells(&cells)?;
-        let options = core_insert_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_insert_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1647,7 +1655,11 @@ impl NapiDb {
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
-        let options = core_update_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_update_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1684,7 +1696,11 @@ impl NapiDb {
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
-        let options = core_update_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_update_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1765,6 +1781,7 @@ impl NapiDb {
         let options = core_upsert_options_with_admissions(
             parse_upsert_options(options)?,
             &self.author_admissions,
+            self.trusted_backend,
         )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
@@ -1803,7 +1820,11 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let options = parse_upsert_options(options)?;
-        let options = core_upsert_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_upsert_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
@@ -1832,7 +1853,11 @@ impl NapiDb {
         options: Option<DeleteOptions>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let options = core_delete_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_delete_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1867,7 +1892,11 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let options = core_delete_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_delete_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1896,7 +1925,11 @@ impl NapiDb {
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
-        let options = core_restore_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_restore_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1933,7 +1966,11 @@ impl NapiDb {
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
-        let options = core_restore_options_with_admissions(options, &self.author_admissions)?;
+        let options = core_restore_options_with_admissions(
+            options,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1993,7 +2030,12 @@ impl NapiDb {
                 ));
             }
         }
-        let identity = core_write_identity(author, attribution, &self.author_admissions)?;
+        let identity = core_write_identity(
+            author,
+            attribution,
+            &self.author_admissions,
+            self.trusted_backend,
+        )?;
         let head = head.map(core_branch_selector_from_json).transpose()?;
         let base = core_branch_base_from_json(base)?;
         if base.is_some() && head.is_none() {
@@ -3487,6 +3529,7 @@ fn core_write_identity(
     author: Option<Uint8Array>,
     attribution: Option<Uint8Array>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::WriteIdentity> {
     match (author, attribution) {
         (Some(_), Some(_)) => Err(napi::Error::from_reason(
@@ -3495,6 +3538,9 @@ fn core_write_identity(
         (Some(author), None) => admissions
             .resolve(&author)
             .map(jazz::db::WriteIdentity::Session),
+        (None, Some(_)) if !trusted_backend => Err(napi::Error::from_reason(
+            "backend attribution requires an explicit backend runtime",
+        )),
         (None, Some(attribution)) => admissions
             .resolve(&attribution)
             .map(jazz::db::WriteIdentity::Attribution),
@@ -3505,6 +3551,7 @@ fn core_write_identity(
 fn core_insert_options_with_admissions(
     options: Option<InsertOptions>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::InsertOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
@@ -3514,7 +3561,12 @@ fn core_insert_options_with_admissions(
             .row_id
             .map(|row_id| core_row_uuid_from_bytes(&row_id))
             .transpose()?,
-        identity: core_write_identity(options.author, options.attribution, admissions)?,
+        identity: core_write_identity(
+            options.author,
+            options.attribution,
+            admissions,
+            trusted_backend,
+        )?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -3530,12 +3582,13 @@ fn core_insert_options_with_admissions(
 
 #[cfg(test)]
 fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db::InsertOptions> {
-    core_insert_options_with_admissions(options, &NativeAuthorAdmissions::default())
+    core_insert_options_with_admissions(options, &NativeAuthorAdmissions::default(), false)
 }
 
 fn core_update_options_with_admissions(
     options: Option<UpdateOptions>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::UpdateOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
@@ -3553,7 +3606,12 @@ fn core_update_options_with_admissions(
         }
     };
     Ok(jazz::db::UpdateOptions {
-        identity: core_write_identity(options.author, options.attribution, admissions)?,
+        identity: core_write_identity(
+            options.author,
+            options.attribution,
+            admissions,
+            trusted_backend,
+        )?,
         target,
         updated_at_ms: options
             .updated_at_ms
@@ -3564,7 +3622,7 @@ fn core_update_options_with_admissions(
 
 #[cfg(test)]
 fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db::UpdateOptions> {
-    core_update_options_with_admissions(options, &NativeAuthorAdmissions::default())
+    core_update_options_with_admissions(options, &NativeAuthorAdmissions::default(), false)
 }
 
 /// Parse upsert options without erasing whether the removed `branch` key was
@@ -3593,6 +3651,7 @@ fn parse_upsert_options(options: Option<Unknown<'_>>) -> napi::Result<Option<Par
 fn core_upsert_options_with_admissions(
     options: Option<ParsedUpsertOptions>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::UpsertOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
@@ -3615,7 +3674,12 @@ fn core_upsert_options_with_admissions(
         }
     };
     Ok(jazz::db::UpsertOptions {
-        identity: core_write_identity(options.author, options.attribution, admissions)?,
+        identity: core_write_identity(
+            options.author,
+            options.attribution,
+            admissions,
+            trusted_backend,
+        )?,
         target,
         updated_at_ms: options
             .updated_at_ms
@@ -3628,12 +3692,13 @@ fn core_upsert_options_with_admissions(
 fn core_upsert_options(
     options: Option<ParsedUpsertOptions>,
 ) -> napi::Result<jazz::db::UpsertOptions> {
-    core_upsert_options_with_admissions(options, &NativeAuthorAdmissions::default())
+    core_upsert_options_with_admissions(options, &NativeAuthorAdmissions::default(), false)
 }
 
 fn core_delete_options_with_admissions(
     options: Option<DeleteOptions>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::DeleteOptions> {
     let options = options.map(|options| UpdateOptions {
         author: options.author,
@@ -3642,7 +3707,7 @@ fn core_delete_options_with_admissions(
         base: options.base,
         updated_at_ms: options.updated_at_ms,
     });
-    let options = core_update_options_with_admissions(options, admissions)?;
+    let options = core_update_options_with_admissions(options, admissions, trusted_backend)?;
     Ok(jazz::db::DeleteOptions {
         identity: options.identity,
         target: options.target,
@@ -3653,12 +3718,18 @@ fn core_delete_options_with_admissions(
 fn core_restore_options_with_admissions(
     options: Option<RestoreOptions>,
     admissions: &NativeAuthorAdmissions,
+    trusted_backend: bool,
 ) -> napi::Result<jazz::db::RestoreOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
     };
     Ok(jazz::db::RestoreOptions {
-        identity: core_write_identity(options.author, options.attribution, admissions)?,
+        identity: core_write_identity(
+            options.author,
+            options.attribution,
+            admissions,
+            trusted_backend,
+        )?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -3674,7 +3745,7 @@ fn core_restore_options_with_admissions(
 
 #[cfg(test)]
 fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::db::RestoreOptions> {
-    core_restore_options_with_admissions(options, &NativeAuthorAdmissions::default())
+    core_restore_options_with_admissions(options, &NativeAuthorAdmissions::default(), false)
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
