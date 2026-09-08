@@ -15,9 +15,23 @@ export class Utf8Decoder {
     if (this.native) return this.native.decode(input);
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     const output: string[] = [];
+    let chunk: string[] = [];
+    let started = false;
+    const emit = (value: string) => {
+      // Default TextDecoder BOM handling applies only to the first code point.
+      if (!started) {
+        started = true;
+        if (value === "\ufeff") return;
+      }
+      chunk.push(value);
+      if (chunk.length === 4096) {
+        output.push(chunk.join(""));
+        chunk = [];
+      }
+    };
     const invalid = () => {
       if (this.fatal) throw new TypeError("The encoded data was not valid UTF-8");
-      output.push("\ufffd");
+      emit("\ufffd");
     };
     let codePoint = 0;
     let remaining = 0;
@@ -28,7 +42,7 @@ export class Utf8Decoder {
     for (let index = 0; index < bytes.length; index++) {
       const byte = bytes[index]!;
       if (remaining === 0) {
-        if (byte <= 0x7f) output.push(String.fromCharCode(byte));
+        if (byte <= 0x7f) emit(String.fromCharCode(byte));
         else if (byte >= 0xc2 && byte <= 0xdf) {
           remaining = 1;
           codePoint = byte & 0x1f;
@@ -53,12 +67,11 @@ export class Utf8Decoder {
         lower = 0x80;
         upper = 0xbf;
         codePoint = (codePoint << 6) | (byte & 0x3f);
-        if (--remaining === 0) output.push(String.fromCodePoint(codePoint));
+        if (--remaining === 0) emit(String.fromCodePoint(codePoint));
       }
     }
     if (remaining !== 0) invalid();
-    // TextDecoder's default ignoreBOM=false strips only an initial UTF-8 BOM.
-    if (output[0] === "\ufeff") output.shift();
+    if (chunk.length) output.push(chunk.join(""));
     return output.join("");
   }
 }

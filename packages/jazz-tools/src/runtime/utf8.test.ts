@@ -43,6 +43,13 @@ describe("UTF-8 decoding on a host without TextDecoder", () => {
     }
   });
 
+  it("decodes large text across bounded output chunks without losing code points", () => {
+    const text = "\ufeff" + "Field notes café 🧭 日本語\n".repeat(100_000);
+    const bytes = encoder.encode(text);
+    vi.stubGlobal("TextDecoder", undefined);
+    expect(new Utf8Decoder({ fatal: true }).decode(bytes)).toBe(text.slice(1));
+  });
+
   it("agrees with the host decoder across every one- and two-byte input", () => {
     vi.stubGlobal("TextDecoder", undefined);
     const fallback = new Utf8Decoder();
