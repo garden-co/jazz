@@ -378,3 +378,36 @@ describe("shared Jazz application lifecycle", () => {
     expect(subscriptions).toBe(0);
   });
 });
+it("rejected overlapping action does not erase failed action retry", async () => {
+  const f = await setup();
+  const app = createJazzAppOwner({}, async () => f.session);
+  await tick();
+  await app.sessionActions.createLocalFirst();
+  f.failLink(true);
+  const first = app.sessionActions.linkJWT({ getToken: async () => "linked" });
+  const second = app.sessionActions.linkJWT({ getToken: async () => "linked" });
+  await expect(second).rejects.toThrow("already pending");
+  await expect(first).rejects.toThrow("link unavailable");
+  expect(app.getSnapshot().recovery).toBe("action");
+  f.failLink(false);
+  await app.retry();
+  expect(f.events.filter((e) => e === "link")).toHaveLength(2);
+  await app.dispose();
+});
+it("rejected manual action during logout preserves logout retry", async () => {
+  const f = await setup();
+  const app = createJazzAppOwner({}, async () => f.session);
+  await tick();
+  await app.sessionActions.createLocalFirst();
+  f.failShutdown(true);
+  const logout = app.logout();
+  await expect(app.sessionActions.linkJWT({ getToken: async () => "linked" })).rejects.toThrow(
+    "already pending",
+  );
+  await expect(logout).rejects.toThrow();
+  f.failShutdown(false);
+  await app.retry();
+  expect(app.getSnapshot().status).toBe("signed-out");
+  expect(f.events).not.toContain("link");
+  await app.dispose();
+});

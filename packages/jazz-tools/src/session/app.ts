@@ -66,6 +66,8 @@ export function createJazzAppOwner<Config, Client>(
   let failure: Error | undefined;
   let manualRetry: (() => Promise<void>) | undefined;
   let actionGeneration = 0;
+  let manualActionPending = false;
+  let pendingLogouts = 0;
   let retrying: Promise<void> | undefined;
   let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
@@ -157,10 +159,15 @@ export function createJazzAppOwner<Config, Client>(
     (sessionActions as any)[name] = async (...args: unknown[]) => {
       if (auth) throw new Error("Manual session actions require an app without managed auth");
       const current = requireSession();
+      if (manualActionPending || pendingLogouts)
+        throw new Error("A Jazz session operation is already pending");
       const generation = ++actionGeneration;
       const invoke = async () => {
         if (disposed || generation !== actionGeneration)
           throw new Error("Jazz app action was superseded");
+        if (manualActionPending || pendingLogouts)
+          throw new Error("A Jazz session operation is already pending");
+        manualActionPending = true;
         manualRetry = undefined;
         failure = undefined;
         try {
@@ -178,6 +185,7 @@ export function createJazzAppOwner<Config, Client>(
             manualRetry = invoke;
           throw cause;
         } finally {
+          manualActionPending = false;
           publish();
         }
       };
@@ -271,6 +279,7 @@ export function createJazzAppOwner<Config, Client>(
     },
     async logout() {
       const current = requireSession();
+      ++pendingLogouts;
       const generation = ++actionGeneration;
       manualRetry = undefined;
       failure = undefined;
@@ -288,6 +297,7 @@ export function createJazzAppOwner<Config, Client>(
         if (generation === actionGeneration) failure = asError(cause);
         throw cause;
       } finally {
+        --pendingLogouts;
         publish();
       }
     },
