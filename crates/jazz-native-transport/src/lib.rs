@@ -11,7 +11,7 @@ use jazz::wire::{
     WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
     negotiate_wire,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
@@ -40,7 +40,6 @@ const POSTCARD_BATCH_LENGTH_RESERVE: usize = 5;
 const WS_CLIENT_INBOUND_FRAME_SLOTS: usize = 64;
 const WS_CLIENT_MAX_QUEUED_BYTES: usize = 8 << 20;
 const WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES: usize = 8 << 20;
-static NEXT_CLIENT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub enum WebSocketClientError {
@@ -468,16 +467,15 @@ impl WebSocketTransport {
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
             .map_err(WebSocketClientError::Send)?;
 
-        let client_endpoint = WireAuthorityEndpoint {
+        let client_endpoint = WireAuthorityEndpoint::fresh(
             // The server authenticates the session subject separately. This
             // endpoint only binds a fresh wire link and is never trusted as a
             // semantic identity.
-            node: NodeUuid(uuid::Uuid::new_v5(
+            NodeUuid(uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_URL,
                 peer_identity.canonical().as_bytes(),
             )),
-            epoch: NEXT_CLIENT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-        };
+        );
         let hello = WireFrame::Hello(
             WireHello::current(WirePeerRole::Client, current_wire_features())
                 .with_authority(client_endpoint.node, client_endpoint.epoch),

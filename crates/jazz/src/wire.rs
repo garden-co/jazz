@@ -160,6 +160,24 @@ pub struct WireAuthorityEndpoint {
     pub epoch: u64,
 }
 
+impl WireAuthorityEndpoint {
+    /// Allocate a nonzero random incarnation, independent of process lifetime.
+    /// Epochs identify connections; their numeric order has no meaning. A
+    /// process-local counter would reuse durable receipt identities on restart.
+    pub fn fresh(node: NodeUuid) -> Self {
+        Self::fresh_with_entropy(node, rand::random::<u64>)
+    }
+
+    fn fresh_with_entropy(node: NodeUuid, mut entropy: impl FnMut() -> u64) -> Self {
+        loop {
+            let epoch = entropy();
+            if epoch != 0 {
+                return Self { node, epoch };
+            }
+        }
+    }
+}
+
 impl WireHello {
     /// Construct a hello frame for the current implementation.
     pub fn current(role: WirePeerRole, features: WireFeatures) -> Self {
@@ -1026,6 +1044,25 @@ pub fn negotiate_wire(
 
 #[cfg(test)]
 mod tests {
+    // The entropy boundary needs a controlled internal test: a real process
+    // restart cannot deterministically assert random allocation or zero retry.
+    #[test]
+    fn authority_incarnations_use_fresh_entropy_across_allocator_restarts() {
+        let node = super::NodeUuid::from_bytes([91; 16]);
+        let mut first_process = [0, 900].into_iter();
+        let old = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            first_process.next().expect("retry zero")
+        });
+        let mut restarted_process = [0, 7].into_iter();
+        let fresh = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            restarted_process.next().expect("retry zero after restart")
+        });
+        assert_eq!(old.epoch, 900);
+        assert_eq!(fresh.epoch, 7);
+        assert_eq!(old.node, fresh.node);
+        assert_ne!(old, fresh);
+    }
+
     use std::collections::BTreeMap;
 
     use groove::schema::ColumnType;

@@ -1,5 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
-import { runtimeRandomBytes } from "../runtime-entropy.js";
+import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import type {
   ColumnDescriptor,
@@ -795,7 +795,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
-  private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
   private serverAuthJson: string | null = null;
   private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2539,7 +2538,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
     if (!authority || !connectWithSession) return await this.db.connectUpstream();
-    const localEpoch = this.nextServerConnectionEpoch++;
+    const localEpoch = runtimeConnectionIncarnation();
     return await connectWithSession.call(
       this.db,
       negotiation.protocolVersion,

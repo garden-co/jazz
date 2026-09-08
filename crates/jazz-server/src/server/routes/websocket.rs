@@ -38,7 +38,6 @@ const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-static WS_NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
 /// Jazz WebSocket endpoint.
@@ -713,10 +712,7 @@ async fn handle_ws_connection(
             let _ = socket.close().await;
             return;
         };
-        let server_endpoint = WireAuthorityEndpoint {
-            node: NodeUuid::from_bytes([0x5e; 16]),
-            epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-        };
+        let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
         let hello = match encode_frame(&WireFrame::Hello(
             WireHello::current(WirePeerRole::Core, negotiated.features)
                 .with_authority(server_endpoint.node, server_endpoint.epoch),
@@ -783,10 +779,7 @@ async fn handle_ws_connection(
     // Every admitted server link receives a fresh server endpoint. A browser
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
-    let server_endpoint = WireAuthorityEndpoint {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-    };
+    let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
     let session_context = if negotiated.features
         & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)

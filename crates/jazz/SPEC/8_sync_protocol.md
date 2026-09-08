@@ -1182,6 +1182,11 @@ ordered revalidation: scanning only currently visible local rows would otherwise
 make exclusion permanent. Readable native payloads are ingested before clearing
 an exclusion. Core evaluation sequence is comparable only in its connection
 epoch; durable per-row cut/catalogue floors survive epoch and Core changes.
+Production wire authority endpoints allocate a nonzero random 64-bit connection
+incarnation, independent of process-local counters, so restarting a Core with the
+same node identity does not reuse an old receipt epoch. Incarnations are compared
+for equality, never numeric order; allocation has the collision probability of
+a random 64-bit nonce. The existing wire `u64` encoding is unchanged.
 
 Native row repair MUST preserve a bundle's ViewScoped transaction cardinality.
 A withheld parent coordinate in an incomplete transaction remains inconclusive;

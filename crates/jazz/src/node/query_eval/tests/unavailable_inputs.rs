@@ -841,3 +841,52 @@ fn cancelled_local_availability_apply_blocks_reads_until_reopen() {
         2
     );
 }
+
+// Controlled receipt injection is needed to model a restarted Core whose new
+// random incarnation is numerically lower and whose evaluation sequence resets.
+#[test]
+fn local_availability_readmission_after_restart_uses_incarnation_not_epoch_order() {
+    let (dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    let old = LocalAvailabilityWatermark {
+        core_epoch: 900,
+        ..availability_watermark(100)
+    };
+    let unavailable = [(table, row(1), LocalRowAvailability::CurrentUnavailable)];
+    let readable = [(table, row(1), LocalRowAvailability::Readable)];
+    node.activate_local_availability_authority(scope.clone(), old.core, old.core_epoch)
+        .unwrap();
+    assert!(
+        node.apply_verified_local_row_availability(&scope, old, &unavailable)
+            .unwrap()
+    );
+    drop(node);
+    let mut node = reopen_availability_node(&dir, &schema);
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    let fresh = LocalAvailabilityWatermark {
+        core_epoch: 7,
+        claims_revision: 1,
+        authorization_progress: 1,
+        ..old
+    };
+    node.activate_local_availability_authority(scope.clone(), fresh.core, fresh.core_epoch)
+        .unwrap();
+    assert!(
+        node.apply_verified_local_row_availability(&scope, fresh, &readable)
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+    assert!(
+        !node
+            .apply_verified_local_row_availability(&scope, old, &unavailable)
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+}
