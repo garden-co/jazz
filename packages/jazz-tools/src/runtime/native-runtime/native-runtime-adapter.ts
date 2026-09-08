@@ -2396,7 +2396,11 @@ export class NativeRuntimeAdapter implements Runtime {
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
-    void this.disconnect({ rejectWaiters: false, preservePreHelloRetry: true });
+    void this.disconnect({
+      rejectWaiters: false,
+      preservePreHelloRetry: true,
+      preserveRemoteWaiters: this.networkRetryCount > 0,
+    });
     const generation = ++this.serverConnectionGeneration;
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     this.serverTransportError = null;
@@ -2433,6 +2437,11 @@ export class NativeRuntimeAdapter implements Runtime {
       onError: (error) => {
         if (error.code === "not_ready" && error.retry === "later") return;
         if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
+        if (
+          this.serverTransportError &&
+          (error.code === "websocket_closed" || error.code === "websocket_error")
+        )
+          return;
         this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
@@ -2444,7 +2453,10 @@ export class NativeRuntimeAdapter implements Runtime {
           const recovery = this.retryNetworkConnection(attempt, error);
           if (recovery) return;
         }
-        this.finishServerConnectionAttempt(attempt, new Error(error.message));
+        this.finishServerConnectionAttempt(
+          attempt,
+          this.serverTransportError ?? new Error(error.message),
+        );
       },
     });
     attempt = {
@@ -2559,7 +2571,11 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   async disconnect(
-    options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
+    options: {
+      rejectWaiters?: boolean;
+      preservePreHelloRetry?: boolean;
+      preserveRemoteWaiters?: boolean;
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.db?.disconnectNativeUpstream) {
@@ -2583,7 +2599,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportError = null;
     if (options.rejectWaiters ?? true) {
       this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
-    } else {
+    } else if (!options.preserveRemoteWaiters) {
       this.clearServerTransportErrorWaiters();
     }
     this.resolveServerTransportWorkWaiters();
@@ -3304,17 +3320,13 @@ export class NativeRuntimeAdapter implements Runtime {
       const terminal =
         attempt?.carrier === this.serverCarrier
           ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
-          : null;
+          : await pendingConnection.then(() => null);
       if (this.closed) return;
       // Reauthentication/reconnect can retire a stalled carrier while this
       // query is waiting. Follow the replacement attempt; only surface a
       // terminal error when this was still the current connection.
       if (terminal) {
-        if (
-          this.serverCarrierPromise !== null &&
-          this.serverCarrierPromise !== pendingConnection &&
-          this.serverConnectionAttempt?.carrier === this.serverCarrier
-        ) {
+        if (this.serverCarrierPromise !== null && this.serverCarrierPromise !== pendingConnection) {
           continue;
         }
         throw terminal;
@@ -4215,6 +4227,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
     return (
       !this.closed &&
+      this.serverTransportError === null &&
       attempt === this.serverConnectionAttempt &&
       attempt.generation === this.serverConnectionGeneration &&
       error.retry === "later" &&
@@ -4239,6 +4252,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionAttempt = null;
     this.serverCarrier = null;
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
       this.serverReconnectReject = reject;
@@ -4247,7 +4261,12 @@ export class NativeRuntimeAdapter implements Runtime {
         this.serverReconnectReject = null;
         void (async () => {
           await attempt.retirement;
-          if (this.closed || this.serverEndpointUrl !== url || this.serverAuthJson !== authJson) {
+          if (
+            this.closed ||
+            generation !== this.serverConnectionGeneration ||
+            this.serverEndpointUrl !== url ||
+            this.serverAuthJson !== authJson
+          ) {
             throw new Error("server transport disconnected");
           }
           this.connect(url, authJson);
