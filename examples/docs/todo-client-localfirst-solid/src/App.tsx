@@ -1,10 +1,9 @@
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/solid";
+import { JazzProvider, type JazzAppConfig } from "jazz-tools/solid";
 import { TodoList } from "./TodoList.js";
 
-export function App(props: { config: DbConfig }) {
+export function App(props: { config: JazzAppConfig }) {
   return (
-    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+    <JazzProvider {...props.config}>
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>

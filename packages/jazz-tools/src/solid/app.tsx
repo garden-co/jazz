@@ -58,7 +58,10 @@ function AppProvider(props: JazzAppProviderProps) {
     logout: () => owner?.logout() ?? Promise.resolve(),
   };
   onMount(() => {
-    const app = createJazzApp(config);
+    const app = createJazzApp({
+      ...config,
+      initial: config.initial ?? (config.auth ? undefined : "local-first"),
+    });
     owner = app;
     const lease = app.attachConsumer();
     const update = () => setSnapshot(app.getSnapshot());
@@ -76,7 +79,8 @@ function AppProvider(props: JazzAppProviderProps) {
     });
   });
   createEffect(() => {
-    owner?.updateAuth(props.auth);
+    const next = props.auth;
+    owner?.updateAuth(next);
   });
   createEffect(() => {
     snapshot();

@@ -22,7 +22,7 @@
   const retry = () => owner?.retry() ?? Promise.resolve();
   setJazzAuth({ subscribe: snapshotStore.subscribe, retry, logout: () => owner?.logout() ?? Promise.resolve() });
   onMount(() => {
-    const app = createJazzApp({ ...initialConfig, auth });
+    const app = createJazzApp({ ...initialConfig, initial: initialConfig.initial ?? (auth ? undefined : "local-first"), auth });
     owner = app;
     const lease = app.attachConsumer();
     const update = () => {
@@ -39,7 +39,7 @@
       void app.dispose().catch(console.error);
     };
   });
-  $effect(() => { owner?.updateAuth(auth as JazzAuth | undefined); });
+  $effect(() => { const next = auth as JazzAuth | undefined; owner?.updateAuth(next); });
 </script>
 
 {#snippet pending()}

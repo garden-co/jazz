@@ -16,10 +16,12 @@ const controls = vi.hoisted(() => ({
   read: undefined as undefined | (() => Promise<ProviderRead>),
   tokenRead: undefined as undefined | (() => Promise<{ data: { token: string } }>),
 }));
-vi.mock("jazz-tools/svelte", async () => ({
-  JazzSessionProvider: (await import("./JazzSessionProvider.svelte")).default,
+vi.mock("../session/create-jazz-session.js", () => ({
   createJazzSession: async () => controls.owner,
-  connectBetterAuth: (await import("../session/better-auth.js")).connectBetterAuth,
+}));
+vi.mock("jazz-tools/svelte", async () => ({
+  JazzProvider: (await import("./JazzProvider.svelte")).default,
+  betterAuth: (await import("../session/app.js")).betterAuth,
 }));
 vi.mock("$lib/auth-client", () => ({
   authClient: {
@@ -39,9 +41,9 @@ vi.mock("$lib/auth-client", () => ({
     },
   },
 }));
-vi.mock("$lib/auth-actions", () => ({
-  setAuthActions: (actions: typeof controls.actions) => {
-    controls.actions = actions;
+vi.mock("./auth-state.js", () => ({
+  setJazzAuth: (auth: { logout(): Promise<void> }) => {
+    controls.actions = { signOut: auth.logout };
   },
 }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
