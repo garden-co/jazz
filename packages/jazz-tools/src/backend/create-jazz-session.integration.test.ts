@@ -56,7 +56,7 @@ describe("Node shared backend session", () => {
       ]);
       const requests = tokens.map((token) => ({ headers: { authorization: `Bearer ${token}` } }));
       await expect(backend.forRequest(requests[0]!)).rejects.toMatchObject({
-        code: "identity_unassigned",
+        code: "identity_not_assigned",
       });
       const scopes = await Promise.all(
         requests.map((request) => backend.forRequest(request, { account: "login-or-register" })),
