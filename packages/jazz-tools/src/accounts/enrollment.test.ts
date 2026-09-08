@@ -233,8 +233,9 @@ it("rejects SYSTEM identities through every ordinary JWT enrollment path", async
 });
 
 it("login-or-register uses one core operation and preserves selection on denial", async () => {
-  const fetcher = vi.fn<typeof fetch>(
-    async () => new Response(JSON.stringify({ account: id, identity })),
+  // Accept every fetch overload while retaining a recorded input for the URL assertion.
+  const fetcher = vi.fn(
+    async (_input: unknown) => new Response(JSON.stringify({ account: id, identity })),
   );
   const manager = setup(fetcher);
   const auth = { getToken: vi.fn(async () => token()) };
