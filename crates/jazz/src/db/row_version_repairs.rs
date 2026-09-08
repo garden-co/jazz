@@ -51,7 +51,17 @@ pub(super) fn enqueue_authority_repair(
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
-    pub(super) async fn drive_pending_authority_repairs(
+    // Repair owns schema resolution and policy-query futures. Erase that
+    // state at this entry boundary so every connection tick has a bounded
+    // repair slot, including ticks with no pending repair.
+    pub(super) fn drive_pending_authority_repairs<'a>(
+        &'a mut self,
+        waker: Option<&'a std::task::Waker>,
+    ) -> futures::future::LocalBoxFuture<'a, Result<(), Error>> {
+        Box::pin(self.drive_pending_authority_repairs_inner(waker))
+    }
+
+    async fn drive_pending_authority_repairs_inner(
         &mut self,
         waker: Option<&std::task::Waker>,
     ) -> Result<(), Error> {
