@@ -15,7 +15,15 @@ export class PlatformURL extends NativeURL {
       verifyDNSLength: false,
       ignoreInvalidPunycode: false,
     });
-    if (!domain || /[\u0000-\u0020#%/:<>?@[\\\]^|\u007f]/.test(domain)) {
+    if (
+      !domain ||
+      Array.from(domain).some(
+        (char) =>
+          char.charCodeAt(0) <= 0x20 ||
+          char.charCodeAt(0) === 0x7f ||
+          "#%/:<>?@[\\]^|".includes(char),
+      )
+    ) {
       throw new TypeError("Invalid URL hostname");
     }
     // The setter runs IPv4 parsing after IDNA (including fullwidth digits).
