@@ -749,7 +749,8 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         state
             .pending_row_version_fetches
             .push_back(PendingRowVersionFetch {
-                requests: vec![request.clone()],
+                requests: VecDeque::from([request.clone()]),
+                sent_count: 0,
                 policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
             });
     }
@@ -766,7 +767,8 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         assert_eq!(
             state.pending_row_version_fetches.front(),
             Some(&PendingRowVersionFetch {
-                requests: vec![request.clone()],
+                requests: VecDeque::from([request.clone()]),
+                sent_count: 0,
                 policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
             }),
             "a rejected byte admission retains the exact upstream repair request"
@@ -783,7 +785,15 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         let ConnectionLink::Upstream(state) = &connection.link else {
             panic!("client connection must be upstream");
         };
-        assert!(state.pending_row_version_fetches.is_empty());
+        assert_eq!(
+            state
+                .pending_row_version_fetches
+                .front()
+                .unwrap()
+                .sent_count,
+            1,
+            "the accepted batch remains owned until its reply arrives"
+        );
     }
     assert_eq!(
         outbound.borrow_mut().pop_front(),

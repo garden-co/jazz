@@ -412,6 +412,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     let mut old = old_upstream.borrow_mut();
     let ConnectionLink::Upstream(UpstreamConnectionState {
         pending_row_version_repairs,
+        pending_row_version_fetches,
         ..
     }) = &mut old.link
     else {
@@ -419,9 +420,19 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     };
     pending_row_version_repairs.push_back(PendingRowVersionRepair {
         superseded: false,
-        requests: Vec::new(),
         update: view_update(old_subscription, GlobalTime(3)),
         authority_receipt_eligible: true,
+    });
+    // Keep the synthetic old repair reply correlated to an outstanding batch;
+    // an unsolicited reply would be dropped before this receipt check.
+    pending_row_version_fetches.push_back(crate::db::peer_connection::PendingRowVersionFetch {
+        requests: std::collections::VecDeque::from([crate::protocol::RowVersionRef::new(
+            "todos",
+            RowUuid::from_bytes([0xfe; 16]),
+            TxId::new(TxTime::from(1), NodeUuid::from_bytes([0xfe; 16])),
+        )]),
+        sent_count: 1,
+        policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
     });
     drop(old);
 

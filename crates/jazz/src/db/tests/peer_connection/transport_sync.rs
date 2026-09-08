@@ -1228,3 +1228,80 @@ fn delayed_row_repair_does_not_replace_a_newer_supporting_snapshot() {
         "late immutable bytes must not reinstall an older supporting set"
     );
 }
+
+/// Alice reopens a scope whose deduplicated bodies were evicted. Bob's serving
+/// node must repair the whole scope using requests within the wire limit.
+/// bob -- complete references, withheld bodies --> alice
+/// bob <-- bounded repair batches -- alice -- complete local result
+/// The transport tap models eviction after the sender chose payload dedup;
+/// it also verifies the actual request boundary before the server consumes it.
+#[test]
+fn known_state_repair_batches_more_than_one_wire_request() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let bob = open_core(0xd2, AuthorSubject::SYSTEM, &schema);
+    let reader = open_db(0xd3, alice, &schema);
+    let count = crate::protocol_limits::MAX_FETCH_ROW_VERSIONS + 1;
+    let expected = (0..count)
+        .map(|index| RowUuid(uuid::Uuid::from_u128(10_000 + index as u128)))
+        .collect::<BTreeSet<_>>();
+    for row in &expected {
+        bob.insert_with_id("todos", *row, cells("repair", false, alice))
+            .unwrap();
+    }
+    let (upstream, downstream, requests, responses) = duplex_with_taps();
+    let _upstream = block_on(reader.connect_upstream(upstream));
+    let subscriber = bob.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&reader, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    reader.tick().unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        if responses.borrow().iter().any(|message| {
+            matches!(message, SyncMessage::ViewUpdate(payload)
+                if payload.supporting_rows.len() == count)
+        }) {
+            break;
+        }
+    }
+    let mut stripped = false;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message
+            && payload.supporting_rows.len() == count
+        {
+            payload.version_carriers.clear();
+            stripped = true;
+        }
+    }
+    assert!(stripped, "serving node produced the complete scope");
+    let mut snapshot = RelationSnapshot::default();
+    let mut repair_batches = 0;
+    for _ in 0..32 {
+        reader.tick().unwrap();
+        for message in requests.borrow().iter() {
+            if let SyncMessage::FetchRowVersions { requests, .. } = message {
+                assert!(
+                    requests.len() <= crate::protocol_limits::MAX_FETCH_ROW_VERSIONS,
+                    "repair request exceeds the wire limit: {}",
+                    requests.len()
+                );
+                repair_batches += 1;
+            }
+        }
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if snapshot.rows.len() == count {
+            break;
+        }
+    }
+    assert!(
+        repair_batches >= 2,
+        "the scope needs multiple repair batches"
+    );
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+}

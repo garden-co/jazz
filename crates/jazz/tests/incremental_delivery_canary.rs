@@ -437,6 +437,15 @@ fn complete_supporting_snapshot_receiver_cost_is_at_most_linear() {
     let small = measure_post_reset_single_insert(500);
     let large = measure_post_reset_single_insert(2_000);
 
+    // A complete snapshot requires checking retained bodies, but that must
+    // not decode every transaction's authorship and metadata just to test
+    // existence. This is cumulative allocation during one receiver tick,
+    // not peak resident memory; leave roughly 2x headroom over the baseline.
+    assert!(
+        large.allocs <= 400_000 && large.bytes <= 60_000_000,
+        "retained-body existence checks allocate too much: {large:?}"
+    );
+
     let alloc_ratio = large.allocs as f64 / small.allocs.max(1) as f64;
     let byte_ratio = large.bytes as f64 / small.bytes.max(1) as f64;
     assert!(

@@ -969,7 +969,6 @@ pub(super) struct PendingCatalogueSubscription {
 }
 
 pub(super) struct PendingRowVersionRepair {
-    pub(super) requests: Vec<crate::protocol::RowVersionRef>,
     pub(super) update: SyncMessage,
     pub(super) authority_receipt_eligible: bool,
     /// A later complete set has arrived for this exact usage. Its immutable
@@ -982,7 +981,9 @@ pub(super) struct PendingRowVersionRepair {
 /// subscriber's request merely because the row-version references coincide.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PendingRowVersionFetch {
-    pub(super) requests: Vec<crate::protocol::RowVersionRef>,
+    pub(super) requests: VecDeque<crate::protocol::RowVersionRef>,
+    /// Only one bounded batch is outstanding until its payload reply arrives.
+    pub(super) sent_count: usize,
     pub(super) policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
 }
 
@@ -1959,17 +1960,23 @@ where
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
-                        if let Some(request) = pending_row_version_fetches.front().cloned() {
+                        if let Some((requests, policy_binding)) = pending_row_version_fetches.front()
+                            .filter(|request| request.sent_count == 0)
+                            .map(|request| (
+                                request.requests.iter().take(crate::protocol_limits::MAX_FETCH_ROW_VERSIONS).cloned().collect::<Vec<_>>(),
+                                request.policy_binding.clone(),
+                            )) {
+                            let sent_count = requests.len();
                             let delegated_session = (permits_delegated_sessions
-                                && request.policy_binding.0 != AuthorSubject::SYSTEM)
+                                && policy_binding.0 != AuthorSubject::SYSTEM)
                                 .then_some(crate::protocol::DelegatedSessionBinding {
-                                    identity: request.policy_binding.0,
-                                    claims: request.policy_binding.1,
+                                    identity: policy_binding.0,
+                                    claims: policy_binding.1,
                                 });
                             if let Err(error) = self
                                 .transport
                                 .send(SyncMessage::FetchRowVersions {
-                                    requests: request.requests,
+                                    requests,
                                     delegated_session,
                                 })
                             {
@@ -1982,7 +1989,7 @@ where
                                 }
                                 return Err(transport_error(error));
                             }
-                            pending_row_version_fetches.pop_front();
+                            pending_row_version_fetches.front_mut().expect("queued fetch").sent_count = sent_count;
                         }
                         if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                             if let Err(error) = self.transport.send(message.clone()) {
@@ -2755,14 +2762,19 @@ where
                                     )
                                     .await?;
                                 }
-                                let Some(repair) = pending_row_version_repairs.pop_front() else {
+                                let Some(repair) = pending_row_version_repairs.front() else {
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
+                                let Some(fetch) = pending_row_version_fetches.front().filter(|fetch| fetch.sent_count > 0) else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let batch = fetch.requests.iter().take(fetch.sent_count).cloned().collect::<Vec<_>>();
                                 {
                                     let mut node = self.node.lock().await;
                                     let applied_bundles = node.apply_row_version_payloads_for_requests(
-                                        &repair.requests,
+                                        &batch,
                                         version_bundles,
                                     )
                                     .await?;
@@ -2776,6 +2788,18 @@ where
                                     )
                                     .await?;
                                 }
+                                let fetch = pending_row_version_fetches.front_mut().expect("active fetch");
+                                fetch.requests.drain(..fetch.sent_count);
+                                fetch.sent_count = 0;
+                                if !fetch.requests.is_empty() && !repair.superseded {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    continue;
+                                }
+                                pending_row_version_fetches.pop_front();
+                                if !pending_row_version_fetches.is_empty() {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                }
+                                let repair = pending_row_version_repairs.pop_front().expect("active repair");
                                 if repair.superseded {
                                     continue;
                                 }
@@ -2886,12 +2910,12 @@ where
                                         continue;
                                     };
                                     pending_row_version_fetches.push_back(PendingRowVersionFetch {
-                                        requests: missing.clone(),
+                                        requests: missing.iter().cloned().collect(),
+                                        sent_count: 0,
                                         policy_binding,
                                     });
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
-                                            requests: missing,
                                             update: message,
                                             authority_receipt_eligible,
                                             superseded: false,

@@ -556,6 +556,8 @@ where
         };
         let normalized_bundles = expand_version_carriers(version_carriers)
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
+        // Index inline witnesses once. Searching every incoming body for
+        // every supporting row makes initial hydration quadratic.
         let incoming_versions = normalized_bundles
             .iter()
             .flat_map(|bundle| {
@@ -564,7 +566,12 @@ where
                     .iter()
                     .map(move |version| (bundle.tx.tx_id, version))
             })
-            .collect::<Vec<_>>();
+            .filter_map(|(tx, version)| {
+                self.physical_table_id_for_schema(version.schema_version(), version.table())
+                    .ok()
+                    .map(|table| (tx, version.row_uuid(), table))
+            })
+            .collect::<BTreeSet<_>>();
         let Some(registered_shape) = self.registered_shape(subscription.shape_id) else {
             // A late update may race a local unsubscribe. There is no live
             // result shape to repair or apply, so preserve the existing
@@ -588,7 +595,7 @@ where
                 continue;
             }
             if self.local_version_row_for_ref(&version_ref).await?.is_none()
-                || self.query_transaction(tx_id).await?.is_none()
+                || !self.transaction_exists(tx_id).await?
             {
                 missing.insert(version_ref);
             }
@@ -604,7 +611,7 @@ where
         &self,
         request: &RowVersionRef,
         result_schema_version: SchemaVersionId,
-        incoming_versions: &[(TxId, &VersionRecord)],
+        incoming_versions: &BTreeSet<(TxId, RowUuid, PhysicalTableId)>,
     ) -> Result<bool, Error> {
         // Unlike a standalone RowVersionRef repair request, an inline witness
         // is carried by a registered subscription whose schema version makes
@@ -638,13 +645,11 @@ where
                 }
                 Err(error) => return Err(error),
             };
-        Ok(incoming_versions.iter().any(|(incoming_tx, version)| {
-            *incoming_tx == request.tx_id()
-                && version.row_uuid() == request.row_uuid
-                && self
-                    .physical_table_id_for_schema(version.schema_version(), version.table())
-                    .is_ok_and(|table_id| table_id == requested_table_id)
-        }))
+        Ok(incoming_versions.contains(&(
+            request.tx_id(),
+            request.row_uuid,
+            requested_table_id,
+        )))
     }
 
     async fn local_version_row_for_ref(
