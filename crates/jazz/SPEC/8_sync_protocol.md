@@ -49,6 +49,14 @@ Invariant digest:
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
 
+- `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
+- `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
+- `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
+- `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
+- `INV-SYNC-41`: A partial Edge MUST NOT authorize query or exact-version repair bytes using stale cached policy inputs. Delegated client scopes remain client-scoped across trusted links; Edge-owned SYSTEM query reconciliation MUST NOT create access-loss markers.
+- `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
+- `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
+
 ## Details
 
 ### 8.1 One protocol, roles not code
@@ -1138,35 +1146,78 @@ path also remains primarily client-to-core; the client-to-edge-to-core topology
 is being exercised incrementally. Worker bridges have not yet converged on the
 network wire-frame batches.
 
-### Bounded readable scalar input reconciliation
+### Query-driven reconciliation of current inputs
 
-A local-first query and an edge's propagated query scope may retain a readable
-row whose new scalar value no longer matches the authority query after reconnect.
-The current pilot compares the original scalar query's locally matching root
-identities against its completed selected-authority root input scope. Each
-accepted source reset/change advances a process-local revision of that exact
-upstream usage, independent of reusable binding-view generation numbers.
+Query-driven sync remains the freshness mechanism. A cached row that does not
+participate in another query need not be refreshed. Applications may maintain
+low-priority propagated queries independently of visible UI when they want
+continued freshness. This contract is not an all-local-rows background scan and
+does not promise bounded wall-clock staleness while disconnected.
 
-Extra local roots are requested in batches of at most 64 using ordinary
-unfiltered-by-original-predicate row-ID queries, with the original request's
-identity, immutable claims, and upstream routing tier. The ordinary authorized
-source/version delivery refreshes the local cache at each hop. A partial edge
-cannot authorize new exit bytes from its cached grants. Auxiliary handles are
-owned by the original query scope and retire on completion, unsubscribe, claim
-replacement, or authority connection replacement. Remaining batches continue;
-source changes do not cancel an in-flight batch on the same connection.
+A completed selected-authority input scope is compared with the eligible local
+inputs of the same query. Missing local inputs follow ordinary delivery. Extra
+local inputs require revalidation; absence from the query scope alone MUST NOT
+be interpreted as deletion or access loss. The initial implementation covers
+current/default scalar roots. It does not establish complete related or negative
+dependency reconciliation merely by making final result sets equal.
 
-The pilot retains O(extra matching scalar roots) transient row IDs, evaluates
-only the original query when a meaningful source receipt changes, and does not
-scan unrelated cached tables. Pending local versions are skipped. Empty complete
-point results remain unresolved: they do not assert deletion or access loss.
-Ordinary tombstone delivery remains the deletion mechanism.
+For example, a cached task changes from `done=false` to `done=true` while its
+reader is offline. An empty unfinished-task scope does not update the cached
+value. Revalidating that extra task obtains its readable current native version;
+local IVM then removes it from the unfinished list while an all-tasks query can
+still show the updated task. A live-exit push is an eager optimization; a missed
+push must not be the only opportunity to repair this query after reconnect.
 
-Eligible shapes are current-view scalar filters without joins, includes,
-projection, aggregate, recursion, relation composition, limit, or offset. Tables
-with a declared user `id` column are excluded because that spelling does not
-identify the physical row. There is no new wire or durable encoding. This pilot
-does not implement related-input or unknown negative-dependency completeness.
+The known-row exchange in chapter 7 uses explicit global physical table and row
+identities, not a public column named `id`. Batches contain at most 64 distinct
+coordinates. The batch cap bounds work in flight, not eventual coverage. Transient
+Unknown answers preserve candidates for bounded retries without tight polling;
+unsupported peers wait for a usable capability/connection. Query closure, claims
+replacement and selected-authority replacement invalidate owned outstanding work.
+Pending local writes are not replaced simply because they are absent upstream.
+
+Fresh authoritative inclusion of a locally unavailable row must also trigger
+ordered revalidation: scanning only currently visible local rows would otherwise
+make exclusion permanent. Readable native payloads are ingested before clearing
+an exclusion. Core evaluation sequence is comparable only in its connection
+epoch; durable per-row cut/catalogue floors survive epoch and Core changes.
+
+### Local propagation is not a remote capability
+
+`Propagation::LocalOnly` is a setting on the calling node. It MUST NOT send a
+remote query and MUST NOT be implemented by telling another node to stop there.
+Every peer subscription with `propagate_upstream=false` MUST be rejected through
+the ordinary subscription rejection path, regardless of trust, SYSTEM identity,
+Core/Edge role or worker transport. This rule covers both RegisterShape and
+Subscribe admission. Local-only API execution remains available on every node.
+
+A browser foreground's strictly local query therefore reads its own cached and
+pending state. It does not fetch worker-only rows. A normal propagated query can
+still receive worker data. Calling the worker a durable owner does not exempt
+its peer protocol from this invariant.
+
+### Both trust boundaries and exact-version repair
+
+An Edge's own SYSTEM query can have a stale extra input after an offline query
+exit just as a client can. The trusted Edge-to-Core path must refresh that input
+without recording an access-loss marker in SYSTEM shared storage. A delegated
+client scope crossing the same trusted connection remains bound to its admitted
+client identity and immutable claims.
+
+On an untrusted client-to-Edge path, shared cache possession is never evidence
+of permission to disclose. A partial Edge may hold a fresh task fetched for
+SYSTEM and an obsolete grant permitting Alice. Neither ordinary query delivery
+nor FetchRowVersions may use that cached grant to authorize fresh bytes for Alice.
+Exact-version repair is subject to the same current read authorization contract
+as ordinary repair at Core. Knowing a row/transaction coordinate is not a grant.
+
+The pilot's bounded Core-backed repair gate must preserve legitimate missing-body
+recovery, rather than silently disabling repair. It may send only the requested
+versions authorized for the exact pending client request after a current
+Core-backed readable decision. Unknown is not authorization or access loss.
+Connection/claims replacement cancels pending repair; trusted SYSTEM and existing
+scope-isolated retained-repair semantics remain distinct. Current authorization
+does not promise recovery of historical bytes after actual access withdrawal.
 
 ### Host-admitted authority query delegation
 
@@ -1193,6 +1244,8 @@ unrelated shared-cache version. This retained state is proportional to the
 selected scope's deletion witnesses and changes only with its source receipt.
 
 ## Open Questions
+
+- 🔶 [#2660](https://github.com/garden-co/jazz/issues/2660) — Query-driven reconciliation pilot and deferred related/negative-input completeness.
 
 - 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Protocol parking, transport state, materialization options, coverage/subsumption, retention, and version tags.

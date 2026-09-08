@@ -494,7 +494,9 @@ must not widen those facts.
 ### Local current-row availability record v1
 
 A verified complete current-row evaluation may mark a known cached row
-`CurrentUnavailable` without distinguishing absence, deletion, or denied access.
+`CurrentUnavailable` without disclosing absence or the cause of denied access.
+A readable deletion instead carries ordinary native content and deletion evidence;
+it is not converted into an access-loss marker.
 Only `ClientLocal` current/default application sources apply this exclusion,
 before joins, aggregates, windows, and logical limits, including `includeDeleted`.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
@@ -637,7 +639,8 @@ The optional `FEATURE_CURRENT_ROW_AVAILABILITY` exchange requires the existing
 admitted authorization-scope link feature. Its three appended semantic variants
 (`CurrentRowsRequest`, `CurrentRowsReceipt`, `CurrentRowsCancel`) use the existing
 named postcard semantic codec and native `VersionCarrier` record encoding. The
-wire-v1 corpus pins their bytes. No durable receipt encoding is introduced.
+wire-v1 corpus pins their bytes. Local persistence uses the native availability
+RecordStore defined above; the wire receipt is not serialized as a durable blob.
 
 A request contains at most 64 distinct known `(current schema, logical table,
 global physical table UUID, row UUID)` coordinates. Only the default root view
@@ -670,5 +673,24 @@ fallback. Receipts are admitted only against the still-selected live upstream
 mapping. Disconnect, cancellation and authority handoff invalidate requests;
 backpressure preserves unsent ownership. This is a trusted Edge forwarding
 contract, not an end-to-end signature protocol. An Edge's cached policy query
-never mints a definitive outcome. The pilot exposes an internal typed result and
-does not yet modify unavailable-row source filters or durable state.
+never mints a definitive outcome.
+
+Raw admitted claims are the wire correlation key. After validation, the owner
+installs that immutable claims snapshot and derives the effective local policy
+key through the normal query policy path before applying durable/source state.
+Default and derived author claims must not be inserted into the raw wire key.
+SYSTEM has no local exclusion key and still ingests readable native versions.
+
+Access can be lost because a row changes, a related grant changes, or policy
+rules change. These causes share one generic unavailable outcome. An empty
+filtered query is not proof of any of them. Offline cached reads remain possible
+before confirmation; applying confirmation suppresses future ordinary current
+results without promising secure deletion of previously disclosed bytes.
+
+The application owner must drive validated durable/source application to
+completion independently of a caller dropping its query/request future, or park
+normal reads until consistent recovery. Runtime errors and cancellation must not
+silently leave a persisted denial paired with still-visible runtime inputs.
+The normative pilot invariants are INV-SYNC-37 through INV-SYNC-43 in chapter 8;
+implementation and acceptance progress are tracked in #2660 and its PR, not
+inferred from the presence of these building blocks.
