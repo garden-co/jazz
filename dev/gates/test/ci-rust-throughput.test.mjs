@@ -117,6 +117,7 @@ const rnNativeArtifactPushPaths = [
   "crates/jazz/**",
   "crates/jazz-compression/**",
   "crates/jazz-native-relay/**",
+  "crates/jazz-native-transport/**",
   "crates/jazz-storage-sqlite/**",
   "crates/jazz-rn/**",
 ];

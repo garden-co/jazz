@@ -2335,6 +2335,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
+      "crates/jazz-native-transport",
       "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
@@ -2523,7 +2524,11 @@ ${
       );
     }
 
-    for (const transitiveInput of ["crates/idb-tree/", "crates/jazz-compression/"]) {
+    for (const transitiveInput of [
+      "crates/idb-tree/",
+      "crates/jazz-compression/",
+      "crates/jazz-native-transport/",
+    ]) {
       const entry = nativeSourceInventory
         .split("\n")
         .find((line) => line.includes(transitiveInput));
@@ -2988,6 +2993,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
+    "crates/jazz-native-transport",
     "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
