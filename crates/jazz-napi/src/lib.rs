@@ -2571,6 +2571,33 @@ impl NapiDb {
                             encode_core_rows(&rows)
                                 .map(Uint8Array::new)
                                 .map_err(napi_error)
+                        } else if is_relation {
+                            // Relation programs change the root row set itself (for example,
+                            // Union + OrderBy). Execute that prepared program through the
+                            // ordinary row path so its occurrence order is retained, then wrap
+                            // those roots in the one canonical relation-result envelope.
+                            let mut rows = match open_tx {
+                                Some(open_tx) => {
+                                    db.all_in_open_transaction(open_tx, &query, opts, author)
+                                        .await
+                                }
+                                None => match author {
+                                    Some(author) => db.all_for_identity(&query, opts, author).await,
+                                    None => db.all(&query, opts).await,
+                                },
+                            }
+                            .map_err(napi_error)?;
+                            db.hydrate_rows_for_binding(&mut rows)
+                                .await
+                                .map_err(napi_error)?;
+                            let snapshot = jazz::node::RelationSnapshot {
+                                root_count: rows.len(),
+                                rows,
+                                edges: Vec::new(),
+                            };
+                            encode_core_relation_snapshot(&snapshot)
+                                .map(Uint8Array::new)
+                                .map_err(napi_error)
                         } else {
                             let in_transaction = open_tx.is_some();
                             let mut snapshot = match open_tx {

@@ -2068,10 +2068,22 @@ impl WasmDb {
 
             if let Some(tx_id) = open_tx {
                 if query.shape().query().array_subqueries.is_empty() {
-                    let rows = inner
+                    let mut rows = inner
                         .transaction_rows(tx_id, query, author, opts)
                         .await
                         .map_err(to_js_error)?;
+                    if is_relation {
+                        inner
+                            .hydrate_rows_for_binding(&mut rows)
+                            .await
+                            .map_err(to_js_error)?;
+                        let snapshot = jazz::node::RelationSnapshot {
+                            root_count: rows.len(),
+                            rows,
+                            edges: Vec::new(),
+                        };
+                        return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+                    }
                     return encode_rows(&rows).map_err(to_js_error);
                 }
                 let snapshot = inner
@@ -2081,7 +2093,29 @@ impl WasmDb {
                 return encode_relation_snapshot(&snapshot).map_err(to_js_error);
             }
 
-            if is_relation || !query.shape().query().array_subqueries.is_empty() {
+            if is_relation {
+                // Relation programs change the root row set itself (for example,
+                // Union + OrderBy). Execute that prepared program through the
+                // ordinary row path so its occurrence order is retained, then wrap
+                // those roots in the one canonical relation-result envelope.
+                let mut rows = match author {
+                    Some(author) => inner.all_for_identity_async(&query, opts, author).await,
+                    None => inner.all_async(&query, opts).await,
+                }
+                .map_err(to_js_error)?;
+                inner
+                    .hydrate_rows_for_binding(&mut rows)
+                    .await
+                    .map_err(to_js_error)?;
+                let snapshot = jazz::node::RelationSnapshot {
+                    root_count: rows.len(),
+                    rows,
+                    edges: Vec::new(),
+                };
+                return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+            }
+
+            if !query.shape().query().array_subqueries.is_empty() {
                 let mut snapshot = match author {
                     Some(author) => {
                         inner
