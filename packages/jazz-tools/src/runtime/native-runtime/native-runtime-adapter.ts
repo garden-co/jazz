@@ -3309,6 +3309,8 @@ export class NativeRuntimeAdapter implements Runtime {
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "edge" && tier !== "global") return;
+    const endpoint = this.serverEndpointUrl;
+    const identity = peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity);
     // `connect()` starts its WebSocket handshake before it can admit the
     // native transport. A strict remote read begun in that interval must
     // await the in-flight connection instead of falling through to a local
@@ -3317,11 +3319,24 @@ export class NativeRuntimeAdapter implements Runtime {
       const pendingConnection = this.serverCarrierPromise;
       if (!pendingConnection) return;
       const attempt = this.serverConnectionAttempt;
+      const connectionOutcome = pendingConnection.then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error : new Error(errorMessage(error))),
+      );
       const terminal =
         attempt?.carrier === this.serverCarrier
-          ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
-          : await pendingConnection.then(() => null);
+          ? await Promise.race([connectionOutcome, attempt.terminal])
+          : await connectionOutcome;
       if (this.closed) return;
+      if (
+        this.serverCarrierPromise &&
+        (this.serverEndpointUrl !== endpoint ||
+          !bytesEqual(
+            identity,
+            peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity),
+          ))
+      )
+        throw new Error("server transport scope changed while waiting for remote query");
       // Reauthentication/reconnect can retire a stalled carrier while this
       // query is waiting. Follow the replacement attempt; only surface a
       // terminal error when this was still the current connection.

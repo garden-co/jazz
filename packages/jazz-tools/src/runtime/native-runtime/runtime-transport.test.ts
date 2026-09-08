@@ -420,7 +420,13 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
-  it("lets a strict remote query begun during backoff wait for the replacement", async () => {
+  it.each([
+    "none",
+    "auth-refresh",
+    "disconnect",
+    "authority-replacement",
+    "account-replacement",
+  ] as const)("settles a strict remote query begun during backoff after %s", async (action) => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -457,15 +463,39 @@ describe("NativeRuntimeAdapter server transport", () => {
     // instead of freezing the test process and preventing the retry timer.
     const internal = runtime as unknown as { hasUpstream(): boolean };
     const hasUpstream = internal.hasUpstream.bind(runtime);
+    const entered = deferred<void>();
     let probes = 0;
     internal.hasUpstream = () => {
       if (++probes > 1000) throw new Error("remote gate spun without yielding");
+      entered.resolve();
       return hasUpstream();
     };
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
-      [],
-    );
-    expect(sockets).toHaveLength(2);
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const result =
+      action === "disconnect"
+        ? expect(read).rejects.toThrow("server transport disconnected")
+        : action === "authority-replacement" || action === "account-replacement"
+          ? expect(read).rejects.toThrow("server transport scope changed")
+          : expect(read).resolves.toEqual([]);
+    await entered.promise;
+    if (action === "auth-refresh")
+      await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    if (action === "disconnect") await runtime.disconnect();
+    if (action === "authority-replacement")
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    if (action === "account-replacement")
+      await runtime.updateAuth(
+        JSON.stringify({
+          jwt_token:
+            "e30." +
+            Buffer.from(JSON.stringify({ iss: "urn:jazz:test", sub: "another" })).toString(
+              "base64url",
+            ) +
+            ".signature",
+        }),
+      );
+    await result;
+    expect(sockets).toHaveLength(action === "disconnect" ? 1 : 2);
     await runtime.close();
   });
 
