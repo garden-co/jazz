@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, it, vi } from "vitest";
-import type { createJazzSession } from "jazz-tools/client";
-type JazzSession = Awaited<ReturnType<typeof createJazzSession>>;
+import {
+  AccountManager,
+  type AccountHandle,
+} from "../../../packages/jazz-tools/dist/accounts/state.js";
+import { createJazzSessionOwner } from "../../../packages/jazz-tools/dist/session/state.js";
+import { betterAuth, createJazzAppOwner } from "../../../packages/jazz-tools/dist/session/app.js";
+import type { Db } from "jazz-tools";
 const fixture = vi.hoisted(() => {
   type State = {
     isPending: boolean;
@@ -46,49 +51,71 @@ vi.mock("./auth-client.js", () => ({
 }));
 vi.mock("./todo-widget.js", () => ({ mountTodoWidget: vi.fn(() => () => {}) }));
 import { mountApp } from "./app.js";
+import { authClient } from "./auth-client.js";
 import { mountTodoWidget } from "./todo-widget.js";
 beforeEach(() => {
   fixture.listeners.clear();
   fixture.update({ isPending: false, data: null });
   vi.clearAllMocks();
 });
-function setup() {
-  let current = { status: "signed-out", client: undefined as unknown };
-  const listeners = new Set<() => void>();
-  const loginOrRegisterJWT = vi.fn(async () => {
-    current = { status: "ready", client: { db: {} } };
-    for (const listener of listeners) listener();
+function setup(options: { startupFailure?: boolean } = {}) {
+  const events: string[] = [];
+  const account = {
+    id: "account-1",
+    identity: { issuer: "provider", subject: "user-1" },
+  } as AccountHandle;
+  const loginOrRegisterJWT = vi.fn(async () => account);
+  const logout = vi.fn(() => {
+    events.push("logout");
   });
-  const logout = vi.fn(async () => {
-    current = { status: "signed-out", client: undefined };
-    for (const listener of listeners) listener();
-  });
-  const jazz = {
-    getSnapshot: () => current,
-    subscribe(listener: () => void) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+  const accounts = new AccountManager({
+    createLocalFirst: () => account,
+    restoreLocalFirst: () => account,
+    registerJWT: loginOrRegisterJWT,
+    loginJWT: loginOrRegisterJWT,
     loginOrRegisterJWT,
+    linkJWT: async () => account,
     logout,
-  } as unknown as JazzSession;
+  });
+  let startupFailure = options.startupFailure;
+  const jazz = createJazzAppOwner({ auth: betterAuth(authClient) }, async () => {
+    if (startupFailure) {
+      startupFailure = false;
+      throw new Error("storage unavailable");
+    }
+    return createJazzSessionOwner({
+      accounts,
+      async openClient() {
+        return {
+          db: {} as Db,
+          async shutdown() {
+            events.push("flush");
+          },
+        };
+      },
+    });
+  });
+  vi.mocked(mountTodoWidget).mockImplementation(() => () => {
+    events.push("detach");
+  });
   const root = document.createElement("div");
   const app = mountApp(root, jazz);
-  const unsubscribe = jazz.subscribe(() => app.setDb(jazz.getSnapshot().client?.db ?? null));
   return {
     root,
+    jazz,
+    events,
     loginOrRegisterJWT,
     logout,
-    destroy() {
-      unsubscribe();
+    async destroy() {
       app.destroy();
+      await jazz.dispose();
     },
   };
 }
 it("renders the real sign-in form after initial signed-out hydration", async () => {
   const app = setup();
   await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
-  app.destroy();
+  await app.destroy();
 });
 it("mounts the initial todo subscription once and renders later profile updates", async () => {
   await fixture.signIn();
@@ -101,7 +128,7 @@ it("mounts the initial todo subscription once and renders later profile updates"
   });
   expect(app.root.textContent).toContain("Hello, Grace");
   expect(app.loginOrRegisterJWT).toHaveBeenCalledTimes(1);
-  app.destroy();
+  await app.destroy();
 });
 it.each([false, true])(
   "signup=%s only authenticates with provider; shared connection admits identity",
@@ -115,7 +142,7 @@ it.each([false, true])(
     if (signup) (form.elements.namedItem("name") as HTMLInputElement).value = "Member";
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(app.loginOrRegisterJWT).toHaveBeenCalledOnce());
-    app.destroy();
+    await app.destroy();
   },
 );
 it("provider logout detaches the old data view", async () => {
@@ -126,7 +153,7 @@ it("provider logout detaches the old data view", async () => {
   await vi.waitFor(() => expect(app.logout).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
   expect(app.root.textContent).not.toContain("Hello, Ada");
-  app.destroy();
+  await app.destroy();
 });
 it("provider signout failure remains visible and Retry repeats signout", async () => {
   await fixture.signIn();
@@ -138,5 +165,37 @@ it("provider signout failure remains visible and Retry repeats signout", async (
   app.root.querySelector<HTMLButtonElement>('[data-action="retry"]')!.click();
   await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
   expect(fixture.signOut).toHaveBeenCalledTimes(2);
-  app.destroy();
+  await app.destroy();
+});
+
+it("keeps private content hidden during provider hydration", async () => {
+  fixture.update({ isPending: true, data: null });
+  const app = setup();
+  await app.jazz.start();
+  expect(app.root.textContent).toContain("Loading");
+  expect(app.root.querySelector("form")).toBeNull();
+  expect(mountTodoWidget).not.toHaveBeenCalled();
+  fixture.update({ isPending: false, data: null });
+  await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
+  await app.destroy();
+});
+it("shows startup errors and retries initialization", async () => {
+  const app = setup({ startupFailure: true });
+  await vi.waitFor(() => expect(app.root.textContent).toContain("storage unavailable"));
+  expect(mountTodoWidget).not.toHaveBeenCalled();
+  app.root.querySelector<HTMLButtonElement>('[data-action="retry"]')!.click();
+  await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
+  await app.destroy();
+});
+it("detaches the rendered subscription before flushing and releases observers on destroy", async () => {
+  await fixture.signIn();
+  const app = setup();
+  await vi.waitFor(() => expect(app.root.textContent).toContain("Hello, Ada"));
+  app.root.querySelector<HTMLButtonElement>('[data-action="signout"]')!.click();
+  await vi.waitFor(() => expect(app.root.querySelector("form")).not.toBeNull());
+  expect(app.events.indexOf("detach")).toBeGreaterThanOrEqual(0);
+  expect(app.events.indexOf("flush")).toBeGreaterThan(app.events.indexOf("detach"));
+  await app.destroy();
+  expect(fixture.listeners.size).toBe(0);
+  expect(app.root.childElementCount).toBe(0);
 });

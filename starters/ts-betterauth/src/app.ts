@@ -1,37 +1,36 @@
 import type { Db } from "jazz-tools";
-import { connectBetterAuth, type createJazzSession } from "jazz-tools/client";
+import type { JazzApp } from "jazz-tools/client";
 import { authClient } from "./auth-client.js";
 import { mountTodoWidget } from "./todo-widget.js";
 import { mountSignInForm } from "./sign-in-form.js";
-type Session = Awaited<ReturnType<typeof createJazzSession>>;
+type App = JazzApp<{ db: Db }>;
 export interface AppHandle {
-  setDb(db: Db | null): void;
   destroy(): void;
 }
-export function mountApp(root: HTMLElement, jazz: Session): AppHandle {
-  const auth = connectBetterAuth(jazz, authClient);
-  let db: Db | null = jazz.getSnapshot().client?.db ?? null;
-  let session = authClient.useSession.get();
+export function mountApp(root: HTMLElement, jazz: App): AppHandle {
+  const consumer = jazz.attachConsumer();
   let unsubscribeTodos: (() => void) | null = null;
   function render() {
     unsubscribeTodos?.();
     unsubscribeTodos = null;
 
-    const error = auth.getSnapshot().error;
+    const snapshot = jazz.getSnapshot();
+    consumer.acknowledge(snapshot);
+    const error = snapshot.error;
     if (error) {
       root.innerHTML = `<main class="page-center"><div class="card"><p class="alert-error" role="alert">${escapeHtml(error.message)}</p><button type="button" class="btn-primary" data-action="retry">Retry</button></div></main>`;
       root
         .querySelector('[data-action="retry"]')
-        ?.addEventListener("click", () => void auth.retry().catch(() => {}));
+        ?.addEventListener("click", () => void jazz.retry().catch(() => {}));
       return;
     }
 
-    if (auth.getSnapshot().isPending) {
+    if (snapshot.status === "starting" || snapshot.status === "transitioning") {
       root.innerHTML = `<div>Loading…</div>`;
       return;
     }
 
-    if (!session.data?.session) {
+    if (snapshot.status === "signed-out") {
       root.innerHTML = `
         <main class="page-center">
           <img src="/jazz.svg" alt="Jazz" class="wordmark" width="80" height="24" />
@@ -42,19 +41,19 @@ export function mountApp(root: HTMLElement, jazz: Session): AppHandle {
       return;
     }
 
-    if (!db || !auth.getSnapshot().ready) {
+    if (snapshot.status !== "ready" || !snapshot.client) {
       root.innerHTML = `<div>Loading…</div>`;
       return;
     }
 
-    const todoDb = db;
-    const name = session.data.user?.name ?? "";
+    const todoDb = snapshot.client.db;
+    const name = authClient.useSession.get().data?.user?.name ?? "";
     root.innerHTML = `
       <main class="dashboard">
         <header>
           <img src="/jazz.svg" alt="Jazz" class="wordmark" width="80" height="24" />
           <div class="auth-nav">
-            <p>Hello, ${escapeHtml(name)}</p>
+            <p data-slot="profile">Hello, ${escapeHtml(name)}</p>
             <button type="button" data-action="signout">Sign out</button>
           </div>
         </header>
@@ -63,29 +62,28 @@ export function mountApp(root: HTMLElement, jazz: Session): AppHandle {
     `;
     root
       .querySelector('[data-action="signout"]')
-      ?.addEventListener("click", () => void auth.logout().catch(() => {}));
+      ?.addEventListener("click", () => void jazz.logout().catch(() => {}));
     unsubscribeTodos = mountTodoWidget(
       root.querySelector<HTMLElement>('[data-slot="todo"]')!,
       todoDb,
     );
   }
 
-  const unsubscribeAuth = auth.subscribe(render);
-  const unsubscribeSession = authClient.useSession.subscribe((next) => {
-    session = next;
-    render();
+  const unsubscribe = jazz.subscribe(render);
+  // Profile changes are presentation-only; Jazz owns identity admission and lifecycle.
+  const unsubscribeProfile = authClient.useSession.subscribe((session) => {
+    const profile = root.querySelector('[data-slot="profile"]');
+    if (profile) profile.textContent = `Hello, ${session.data?.user?.name ?? ""}`;
   });
   render();
   return {
-    setDb(next) {
-      db = next;
-      render();
-    },
     destroy() {
+      unsubscribe();
+      unsubscribeProfile();
       unsubscribeTodos?.();
-      unsubscribeAuth();
-      unsubscribeSession();
-      auth.dispose();
+      unsubscribeTodos = null;
+      root.replaceChildren();
+      consumer.release();
     },
   };
 }

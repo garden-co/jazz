@@ -35,7 +35,7 @@ or scaffold via `create-jazz`).
 
 ```
 src/
-  main.ts                        ← app entry; boots Jazz after BetterAuth session resolves
+  main.ts                        ← app entry; creates the observable Jazz app immediately
   app.ts                         ← shell renderer: sign-in form vs todo dashboard
   sign-in-form.ts                ← combined sign-in/sign-up form (mode toggle)
   todo-widget.ts                 ← Jazz-powered todo list (direct DOM)
@@ -58,14 +58,18 @@ Two processes run in development:
 1. **Hono** on port 3001, serving `/api/auth/*` (sign-up, sign-in, token, JWKS).
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
-The app owns one `JazzSession` and connects it to Better Auth with `connectBetterAuth`.
+The entry point creates one `createJazzApp({ appId, serverUrl, auth: betterAuth(authClient) })`.
+The DOM shell observes its snapshot for startup, signed-out, ready, and error views.
+It detaches old todo subscriptions before acknowledging each snapshot through its
+consumer lease, and releases that lease before disposing the app on page exit.
+A separate profile observer updates only the greeting; it does not drive Jazz identity.
 Sign-up and sign-in forms only call Better Auth. The connection watches initial
 hydration, login, signup, restoration, and logout; it atomically logs in or
 creates the Jazz account with `loginOrRegisterJWT`. Repeated notifications for
 the same provider identity do not replace the client. Jazz requests fresh JWTs
 from `/token` when credentials expire.
 
-Sign-out goes through the connection, which flushes Jazz before Better Auth
+Sign-out goes through the app, which flushes Jazz before Better Auth
 revokes credentials. Failures stay visible with a retry action. For a guest
 account whose existing data must survive signup, use the hybrid starter's
 explicit `linkJWT` flow without attaching the automatic connection.
