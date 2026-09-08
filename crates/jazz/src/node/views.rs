@@ -858,35 +858,40 @@ where
                     by_tx
                 },
             );
+        // Scalar publication can retract only its covered root source;
+        // the receiver derives result removal from that source delta.
+        let exit_candidates = row_result_removes
+            .iter()
+            .map(|(table, row, tx)| (table.to_string(), *row, *tx))
+            .chain(program_fact_removes.iter().filter_map(|fact| match fact {
+                ProgramFactEntry::CoveredInput(input)
+                    if input.source.path == [crate::protocol::ProgramSourceRole::Root] =>
+                {
+                    Some((
+                        input.source.table.to_string(),
+                        input.source_row,
+                        input.version.tx,
+                    ))
+                }
+                _ => None,
+            }))
+            .collect::<BTreeSet<_>>();
         // A live scalar predicate exit retracts coverage, but a still-readable
         // successor must also refresh the receiver's local-first cache. Probe
         // only removed physical rows through ordinary serving authorization;
         // do not reopen the query's input relation or infer permission from its
         // previous membership. Keep non-default views and complex scopes on
         // their existing witness path until their replacement contract exists.
-        if has_default_read_view
+        if !exit_candidates.is_empty()
+            && has_default_read_view
             && shape.schema_version() == self.catalogue.current_schema_version_id
             && simple_scalar_exit_query(shape.query())
         {
             let (read_shape, read_binding) =
                 self.whole_table_shape_binding(&shape.query().table)?;
-            // Scalar publication can retract only its covered root source;
-            // the receiver derives result removal from that source delta.
-            let exit_candidates = row_result_removes
+            let added_rows = row_result_adds
                 .iter()
-                .map(|(table, row, tx)| (table.to_string(), *row, *tx))
-                .chain(program_fact_removes.iter().filter_map(|fact| match fact {
-                    ProgramFactEntry::CoveredInput(input)
-                        if input.source.path == [crate::protocol::ProgramSourceRole::Root] =>
-                    {
-                        Some((
-                            input.source.table.to_string(),
-                            input.source_row,
-                            input.version.tx,
-                        ))
-                    }
-                    _ => None,
-                }))
+                .map(|(table, row_uuid, _)| (table.to_string(), *row_uuid))
                 .collect::<BTreeSet<_>>();
             for (table, row_uuid, old_tx) in &exit_candidates {
                 if table.as_str() != shape.query().table
@@ -894,9 +899,7 @@ where
                         .replacement_for(table, *row_uuid)
                         .0
                         .is_some()
-                    || row_result_adds.iter().any(|(added_table, added_row, _)| {
-                        added_table.as_str() == table && added_row == row_uuid
-                    })
+                    || added_rows.contains(&(table.clone(), *row_uuid))
                 {
                     continue;
                 }
