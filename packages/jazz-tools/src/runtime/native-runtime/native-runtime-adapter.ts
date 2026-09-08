@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../utf8.js";
 import { runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import type {
@@ -668,7 +669,7 @@ type NativeRowFieldPlan = {
   includeInValues: boolean;
 };
 
-const textDecoder = new TextDecoder("utf-8", { fatal: true });
+const textDecoder = new Utf8Decoder({ fatal: true });
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 const MAX_DEFERRED_PLACEHOLDER_CHUNKS = 16;
@@ -1188,7 +1189,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const result = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
     return isPendingNativeRead(result)
-      ? new TextDecoder().decode(await this.awaitNativeRead(result))
+      ? new Utf8Decoder().decode(await this.awaitNativeRead(result))
       : result;
   }
 
@@ -1204,7 +1205,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
     let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
     if (isPendingNativeRead(value)) {
-      value = new TextDecoder().decode(await this.awaitNativeRead(value));
+      value = new Utf8Decoder().decode(await this.awaitNativeRead(value));
     }
     return typeof value === "string" ? JSON.parse(value) : value;
   }
@@ -3361,7 +3362,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.admitLocalFirstSession(
       token,
       appId,
-      new TextDecoder().decode(authorBytesForSession(session)),
+      new Utf8Decoder().decode(authorBytesForSession(session)),
     );
   }
 

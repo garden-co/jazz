@@ -1,7 +1,8 @@
+import { Utf8Decoder } from "./utf8.js";
 import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
-const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
+const canonicalAuthorDecoder = new Utf8Decoder({ fatal: true });
 const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();

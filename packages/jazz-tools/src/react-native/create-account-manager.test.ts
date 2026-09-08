@@ -55,6 +55,31 @@ describe("React Native account preparation", () => {
     expect(native.openAttached).not.toHaveBeenCalled();
   });
 
+  it("retains and restores native account identity without browser decoder or Node Buffer globals", async () => {
+    const subject = "native-café-🧭";
+    const jwt = `e30.${Buffer.from(JSON.stringify({ iss: "urn:jazz:local-first", sub: subject })).toString("base64url")}.signature`;
+    vi.stubGlobal("TextDecoder", undefined);
+    vi.stubGlobal("Buffer", undefined);
+    mocks.install.mockReturnValue({
+      accountSecret: () => new Uint8Array(32).fill(7),
+      mintLocalFirstToken: () => jwt,
+    });
+    const config = {
+      appId: "native-missing-globals",
+      serverUrl: "https://core.example",
+      store: store(),
+    };
+    const manager = await createAccountManager(config);
+    const account = manager.createLocalFirst();
+    expect(account.identity.subject).toBe(subject);
+    await expect(
+      accountToken(account, accountRegistryUrl(config.serverUrl, config.appId)),
+    ).resolves.toBe(jwt);
+    const restored = await createAccountManager(config);
+    expect(restored.getLoggedIn()?.id).toBe(account.id);
+    expect(restored.getLoggedIn()?.identity.subject).toBe(subject);
+  });
+
   it("rejects a native build without account crypto during preparation", async () => {
     mocks.install.mockReturnValue({ abiVersion: 1, openAttached: vi.fn() });
     await expect(

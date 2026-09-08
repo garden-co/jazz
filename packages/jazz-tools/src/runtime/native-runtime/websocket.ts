@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
@@ -475,7 +476,7 @@ export function encodeWebSocketPrelude(
   requestedLink?: "scope_isolated_client_relay",
 ): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
-  const peerAuthor = new TextDecoder().decode(peerIdentity);
+  const peerAuthor = new Utf8Decoder().decode(peerIdentity);
   const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
   return JSON.stringify({
     peer_identity: peerAuthor,
@@ -521,7 +522,7 @@ export function peerIdentityForWebSocketAuth(
   let existing: ReturnType<typeof parseCanonicalAuthorSubject> = null;
   try {
     existing = parseCanonicalAuthorSubject(
-      new TextDecoder("utf-8", { fatal: true }).decode(fallbackIdentity),
+      new Utf8Decoder({ fatal: true }).decode(fallbackIdentity),
     );
   } catch {
     // Non-author transport identities have no account association to preserve.
