@@ -73,6 +73,18 @@ impl<S: OrderedKvStorage> NodeState<S> {
         policy_binding(&self.query_program_policy_context(identity))
     }
 
+    pub(crate) fn is_local_row_unavailable(
+        &self,
+        scope: &PolicyBindingKey,
+        table: crate::ids::GlobalPhysicalTableId,
+        row: RowUuid,
+    ) -> bool {
+        self.query
+            .local_unavailable_inputs
+            .get(&(scope.clone(), table))
+            .is_some_and(|input| input.rows.contains(&row))
+    }
+
     pub(crate) fn local_availability_table_id(
         &self,
         schema: SchemaVersionId,

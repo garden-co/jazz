@@ -224,6 +224,7 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
+    local_availability_dirty: Cell<bool>,
 }
 
 impl<S> Node<S>
@@ -355,6 +356,7 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
+            local_availability_dirty: Cell::new(false),
         }
     }
 
@@ -3073,7 +3075,8 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.chunk_resolver.has_pending_local_demand()
+        if self.local_availability_dirty.replace(false)
+            || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
         {
@@ -3180,7 +3183,14 @@ where
                     binding: binding.clone(),
                     opts: handle.coverage.opts.clone(),
                     identity: state.author,
-                    policy_binding: state.request_identity_claims.clone(),
+                    policy_binding: Some(state.request_identity_claims.clone().unwrap_or_else(
+                        || {
+                            (
+                                state.author,
+                                self.node.borrow().session_claims_for(state.author),
+                            )
+                        },
+                    )),
                 };
                 (
                     request,
@@ -3188,8 +3198,13 @@ where
                     std::mem::take(&mut state.scalar_reconciliation),
                 )
             };
-            Box::pin(self.advance_scalar_reconciliation(&request, revision, &mut reconciliation))
-                .await?;
+            Box::pin(self.advance_scalar_reconciliation(
+                &request,
+                revision,
+                &mut reconciliation,
+                Some(&owner),
+            ))
+            .await?;
             let mut state = owner.borrow_mut();
             if !state.closed.get() {
                 state.scalar_reconciliation = reconciliation;
@@ -3216,8 +3231,13 @@ where
             else {
                 continue;
             };
-            Box::pin(self.advance_scalar_reconciliation(&request, revision, &mut reconciliation))
-                .await?;
+            Box::pin(self.advance_scalar_reconciliation(
+                &request,
+                revision,
+                &mut reconciliation,
+                None,
+            ))
+            .await?;
             if let Some(owner) = self
                 .relay_upstream_subscription_owners
                 .borrow_mut()
@@ -3234,6 +3254,7 @@ where
         request: &PendingUpstreamSubscription,
         revision: u64,
         state: &mut ScalarReconciliation,
+        local_owner: Option<&Rc<RefCell<SubscriptionState>>>,
     ) -> Result<(), Error> {
         if !request.opts.propagate_upstream
             || !request.opts.read_view.is_default()
@@ -3261,44 +3282,143 @@ where
         {
             *state = ScalarReconciliation::default();
         }
-        if let Some(active) = &state.active {
-            if !self
-                .active_authority_view_receipts
-                .borrow()
-                .as_ref()
-                .is_some_and(|receipt| receipt.subscriptions.contains(&active.subscription))
-            {
-                return Ok(());
-            }
-            let node = self.node.borrow();
-            let Ok(key) = node.authority_result_key_for_subscription(active.subscription) else {
-                return Ok(());
+        if let Some(active) = &mut state.active {
+            let waker = self.query_runtime_waker();
+            let mut cx =
+                std::task::Context::from_waker(waker.as_ref().unwrap_or(std::task::Waker::noop()));
+            let result = match active.future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending if web_time::Instant::now() >= active.deadline => {
+                    row_availability::CurrentRowsResult::Unknown
+                }
+                std::task::Poll::Pending => return Ok(()),
             };
-            if !node.has_settled_authority_result(&key)
-                || node.opening_pending_for_authority_result(&key)
-                || node.publication_deferred_for_authority_result(&key)
-            {
+            let mut retry_rows = match &result {
+                row_availability::CurrentRowsResult::Unknown => active.rows.clone(),
+                row_availability::CurrentRowsResult::Applied(receipt) => receipt
+                    .rows
+                    .iter()
+                    .zip(&receipt.outcomes)
+                    .filter_map(|(row, outcome)| {
+                        (*outcome == crate::protocol::CurrentRowOutcome::Unknown).then_some(row.row)
+                    })
+                    .collect(),
+            };
+            state.active = None;
+            if let row_availability::CurrentRowsResult::Applied(receipt) = result {
+                // The router has correlated this receipt and ingested native
+                // carriers. This live original owner additionally gates marker
+                // application; raw wire claims are not the derived local key.
+                let (identity, claims) = request
+                    .policy_binding
+                    .clone()
+                    .unwrap_or_else(|| (request.identity, BTreeMap::new()));
+                if receipt.context
+                    != crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims)
+                {
+                    *state = ScalarReconciliation::default();
+                    return Ok(());
+                }
+                let mut owner = self.node.lock().await;
+                if local_owner.is_some_and(|local| {
+                    let local = local.borrow();
+                    local.closed.get()
+                        || !local
+                            .upstream_subscription_handles
+                            .iter()
+                            .any(|handle| handle.subscription == request.subscription)
+                }) || !self
+                    .active_authority_view_receipts
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|active| {
+                        active.connection_epoch == generation.0
+                            && active.subscriptions.contains(&request.subscription)
+                    })
+                {
+                    *state = ScalarReconciliation::default();
+                    return Ok(());
+                }
+                let mut node = owner.scoped_active_session_claims(
+                    receipt.context.identity,
+                    receipt.context.claims().clone(),
+                );
+                if let Some(scope) = node.local_read_policy_binding(receipt.context.identity) {
+                    let outcomes = receipt
+                        .rows
+                        .iter()
+                        .zip(&receipt.outcomes)
+                        .filter_map(|(row, outcome)| {
+                            let status = match outcome {
+                                crate::protocol::CurrentRowOutcome::Readable => {
+                                    crate::node::LocalRowAvailability::Readable
+                                }
+                                crate::protocol::CurrentRowOutcome::CurrentUnavailable => {
+                                    crate::node::LocalRowAvailability::CurrentUnavailable
+                                }
+                                crate::protocol::CurrentRowOutcome::Unknown => return None,
+                            };
+                            Some((row.physical_table, row.row, status))
+                        })
+                        .collect::<Vec<_>>();
+                    if !outcomes.is_empty() {
+                        node.activate_local_availability_authority(
+                            scope.clone(),
+                            receipt.core,
+                            receipt.core_epoch,
+                        )?;
+                        let changed = node
+                            .apply_verified_local_row_availability(
+                                &scope,
+                                crate::node::LocalAvailabilityWatermark {
+                                    core: receipt.core,
+                                    core_epoch: receipt.core_epoch,
+                                    claims_revision: receipt.claims_revision,
+                                    policy_epoch: receipt.policy_epoch,
+                                    settled_through: receipt.settled_through,
+                                    authorization_progress: receipt.authorization_progress,
+                                },
+                                &outcomes,
+                            )
+                            .await?;
+                        if changed {
+                            drop(node);
+                            drop(owner);
+                            self.subscriber_dirty_epoch
+                                .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
+                            self.local_availability_dirty.set(true);
+                            self.schedule_tick(TickUrgency::Immediate);
+                        }
+                    }
+                }
+            }
+            if retry_rows.is_empty() {
+                state.retry_delay_ms = 0;
+            } else {
+                state.pending.extend(retry_rows.drain(..));
+                state.retry_delay_ms = if state.retry_delay_ms == 0 {
+                    100
+                } else {
+                    (state.retry_delay_ms * 2).min(2_000)
+                };
+                state.retry_at = Some(
+                    web_time::Instant::now()
+                        + std::time::Duration::from_millis(state.retry_delay_ms),
+                );
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(state.retry_delay_ms);
+                }
+            }
+        }
+        if let Some(at) = state.retry_at {
+            if web_time::Instant::now() < at {
                 return Ok(());
             }
-            drop(node);
-            state.active = None;
+            state.retry_at = None;
         }
         if state.generation.as_ref() != Some(&generation) && state.pending.is_empty() {
             let mut owner = self.node.lock().await;
             let table = &request.shape.query().table;
-            if owner.current_write_schema()?.schema != request.shape.schema_version() {
-                return Ok(());
-            }
-            if owner
-                .table(table)?
-                .columns
-                .iter()
-                .any(|column| column.name == "id")
-            {
-                // The public `id` spelling names a declared user column first.
-                // Such tables need a future physical-ID wire access path.
-                return Ok(());
-            }
             let key = owner.authority_result_key_for_subscription(request.subscription)?;
             if !owner.has_settled_authority_result(&key)
                 || owner.opening_pending_for_authority_result(&key)
@@ -3313,21 +3433,47 @@ where
                 .as_ref()
                 .map(|(_, claims)| claims.clone());
             let mut node = owner.scoped_optional_session_claims(request.identity, claims);
-            // This reads only the original scalar query's local input scope.
-            // Cached policy decisions choose candidates, never authorize bytes.
-            let local = node
-                .query_rows_for_link(
+            // Public local-first output is the candidate inventory, even when
+            // cached policy proofs no longer admit those retained inputs.
+            let local = if let Some(local_owner) = local_owner {
+                let local = local_owner.borrow();
+                local
+                    .snapshot
+                    .rows
+                    .iter()
+                    .take(local.snapshot.root_count)
+                    .map(|row| row.row_uuid())
+                    .collect::<Vec<_>>()
+            } else {
+                node.query_rows_for_link(
                     &request.shape,
                     &request.binding,
                     DurabilityTier::Local,
                     request.identity,
                 )
-                .await?;
-            state.pending = local
+                .await?
                 .into_iter()
                 .map(|row| row.row_uuid())
+                .collect::<Vec<_>>()
+            };
+            let mut candidates = local
+                .into_iter()
                 .filter(|row| !authoritative.contains(row))
-                .collect();
+                .collect::<BTreeSet<_>>();
+            if let Some(scope) = node.local_read_policy_binding(request.identity) {
+                if let Ok(table_id) =
+                    node.local_availability_table_id(request.shape.schema_version(), table)
+                {
+                    // A fresh inclusion must revalidate a hidden row as well;
+                    // otherwise the local exclusion would prevent readmission.
+                    candidates.extend(
+                        authoritative
+                            .into_iter()
+                            .filter(|row| node.is_local_row_unavailable(&scope, table_id, *row)),
+                    );
+                }
+            }
+            state.pending = candidates.into_iter().collect();
             state.generation = Some(generation);
         }
         let count = state.pending.len().min(64);
@@ -3346,39 +3492,29 @@ where
                 matches!(record.fate, crate::tx::Fate::Accepted)
                     && record.durability >= DurabilityTier::Edge
             }) {
-                candidates.push(crate::query::lit(Value::Uuid(row.0)));
+                if let Ok(coordinate) = node.current_row_coordinate(table, row) {
+                    candidates.push(coordinate);
+                }
             }
         }
+        drop(node);
         if !candidates.is_empty() {
-            let query = Query::from(table.clone())
-                .filter(crate::query::in_list(crate::query::col("id"), candidates));
-            // A schema replacement ends this pilot attempt; it cannot turn an
-            // auxiliary query into a fatal error for the original subscriber.
-            let Ok(shape) = query.validate_with_schema_version(
-                node.try_current_schema()?,
-                request.shape.schema_version(),
-            ) else {
-                return Ok(());
+            let (identity, claims) = request
+                .policy_binding
+                .clone()
+                .unwrap_or_else(|| (request.identity, BTreeMap::new()));
+            let context = crate::protocol::PolicyBindingKey {
+                identity,
+                canonical_claims: crate::protocol::CanonicalPolicyClaims::new(claims),
             };
-            let binding = shape.bind(BTreeMap::new())?;
-            let subscription = self.next_subscription_key(&shape, request.opts.read_view_key());
-            self.upstream_subscriptions
-                .borrow_mut()
-                .push(PendingUpstreamCommand::Subscribe(
-                    PendingUpstreamSubscription {
-                        subscription,
-                        shape,
-                        binding,
-                        opts: request.opts.clone(),
-                        identity: request.identity,
-                        policy_binding: request.policy_binding.clone(),
-                    },
-                ));
             state.active = Some(ScalarProbe {
-                subscription,
-                upstream: Rc::clone(&self.upstream_subscriptions),
-                scheduler: Rc::clone(&self.scheduler),
+                deadline: web_time::Instant::now() + std::time::Duration::from_secs(5),
+                rows: candidates.iter().map(|row| row.row).collect(),
+                future: Box::pin(self.request_current_rows(candidates, context)),
             });
+            if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                scheduler.schedule_tick_after(5_000);
+            }
             self.schedule_tick(TickUrgency::Immediate);
         } else if !state.pending.is_empty() {
             self.schedule_tick(TickUrgency::AfterCurrentTurn);

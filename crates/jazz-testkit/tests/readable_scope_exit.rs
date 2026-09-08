@@ -574,7 +574,7 @@ async fn reconnect_scalar_reconciliation_continues_past_first_batch() {
     run_reconnect_scalar_query(65).await;
 }
 
-async fn run_reconnect_revoked_input(dependency: bool) {
+async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = revocation_schema(dependency);
@@ -644,13 +644,17 @@ async fn run_reconnect_revoked_input(dependency: bool) {
                 )
                 .await;
             }
-            let alice = TestingClient::builder()
+            let builder = TestingClient::builder()
                 .with_server(&relay)
                 .with_schema(schema.clone())
                 .with_user_id("alice")
-                .as_user()
-                .connect()
-                .await;
+                .as_user();
+            let builder = if persistent {
+                builder.with_persistent_storage()
+            } else {
+                builder
+            };
+            let (context, mut alice) = builder.connect_with_context().await;
             let mut initial = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::Remote)
                 .await
@@ -761,6 +765,74 @@ async fn run_reconnect_revoked_input(dependency: bool) {
             let cached = local_rows(&alice, Query::from("tasks")).await;
             assert!(cached.iter().any(|(id, values)| *id == tasks[1]
                 && values.contains(&Value::Text("readable control".into()))));
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "explicit unavailability removes revoked cached row",
+                |log| has_removed(log, tasks[0]),
+            )
+            .await;
+            assert!(
+                !local_rows(&alice, Query::from("tasks"))
+                    .await
+                    .iter()
+                    .any(|(id, _)| *id == tasks[0])
+            );
+
+            if persistent {
+                drop(local);
+                alice.shutdown().await.unwrap();
+                alice = jazz_testkit::connect(context.clone()).await.unwrap();
+                assert!(
+                    !local_rows(&alice, Query::from("tasks"))
+                        .await
+                        .iter()
+                        .any(|(id, _)| *id == tasks[0]),
+                    "reopen restores scoped unavailability without another probe"
+                );
+                local = alice
+                    .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                    .await
+                    .unwrap();
+            }
+            local_log.clear();
+            let tx = bob.begin_transaction().unwrap().transaction_id();
+            let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
+            if dependency {
+                staged
+                    .update(
+                        grants[0],
+                        vec![("owner".into(), Value::Text("alice".into()))],
+                    )
+                    .unwrap();
+            }
+            staged
+                .update(
+                    tasks[0],
+                    vec![
+                        ("owner".into(), Value::Text("alice".into())),
+                        ("done".into(), Value::Boolean(false)),
+                        ("title".into(), Value::Text("readmitted".into())),
+                    ],
+                )
+                .unwrap();
+            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "authoritative inclusion clears scoped exclusion",
+                |log| has_added_id(log, tasks[0]),
+            )
+            .await;
+            assert!(
+                local_rows(&alice, Query::from("tasks"))
+                    .await
+                    .iter()
+                    .any(|(id, values)| *id == tasks[0]
+                        && values.contains(&Value::Text("readmitted".into())))
+            );
             edge_system.shutdown().await.unwrap();
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
@@ -775,7 +847,7 @@ async fn run_reconnect_revoked_input(dependency: bool) {
 /// revoked successor. alice disconnects -> bob changes -> relay probes -> alice
 #[tokio::test]
 async fn reconnect_scalar_probe_withholds_same_row_revoked_successor() {
-    run_reconnect_revoked_input(false).await;
+    run_reconnect_revoked_input(false, false).await;
 }
 
 /// Bob revokes a related grant while alice is offline. The relay's cached grant
@@ -783,5 +855,12 @@ async fn reconnect_scalar_probe_withholds_same_row_revoked_successor() {
 /// alice offline -> bob revokes grant -> relay/Core point batch -> no disclosure
 #[tokio::test]
 async fn reconnect_scalar_probe_withholds_related_grant_revoked_successor() {
-    run_reconnect_revoked_input(true).await;
+    run_reconnect_revoked_input(true, false).await;
+}
+
+/// A durable client retains the denied source exclusion across reopen and
+/// clears it only after a new authoritative readable receipt.
+#[tokio::test]
+async fn unavailable_scalar_input_survives_reopen_and_readmits() {
+    run_reconnect_revoked_input(false, true).await;
 }

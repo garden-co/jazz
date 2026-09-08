@@ -167,7 +167,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
         &self,
         rows: Vec<crate::protocol::CurrentRowCoordinate>,
         context: PolicyBindingKey,
-    ) -> impl Future<Output = CurrentRowsResult> {
+    ) -> impl Future<Output = CurrentRowsResult> + use<S> {
         let id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
         let (sender, receiver) = oneshot::channel();
         let request = CurrentRowsRequest {

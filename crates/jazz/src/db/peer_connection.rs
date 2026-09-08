@@ -2860,19 +2860,6 @@ where
                                 {
                                     continue;
                                 }
-                                // A rejected point query is unresolved, but must release
-                                // its bounded batch slot and auxiliary transport handle.
-                                for owner in self.subscriptions.borrow().iter().filter_map(|owner| owner.upgrade()) {
-                                    let mut owner = owner.borrow_mut();
-                                    if owner.scalar_reconciliation.active.as_ref().is_some_and(|probe| probe.subscription == subscription) {
-                                        owner.scalar_reconciliation.active = None;
-                                    }
-                                }
-                                for owner in self.relay_upstream_subscription_owners.borrow_mut().values_mut() {
-                                    if owner.scalar_reconciliation.active.as_ref().is_some_and(|probe| probe.subscription == subscription) {
-                                        owner.scalar_reconciliation.active = None;
-                                    }
-                                }
                                 let delivered = queue_relay_subscription_rejection(
                                     &self.relay_upstream_subscription_owners,
                                     &self.pending_relay_subscription_rejections,

@@ -4243,22 +4243,9 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
 }
 
 struct ScalarProbe {
-    subscription: SubscriptionKey,
-    upstream: PendingUpstreamCommands,
-    scheduler: SharedTickScheduler,
-}
-
-impl Drop for ScalarProbe {
-    fn drop(&mut self) {
-        let mut pending = self.upstream.borrow_mut();
-        pending.retain(|command| {
-            !matches!(command, PendingUpstreamCommand::Subscribe(open)
-            if open.subscription == self.subscription)
-        });
-        pending.push(PendingUpstreamCommand::Unsubscribe(self.subscription));
-        drop(pending);
-        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-    }
+    deadline: web_time::Instant,
+    rows: Vec<RowUuid>,
+    future: Pin<Box<dyn Future<Output = row_availability::CurrentRowsResult>>>,
 }
 
 #[derive(Default)]
@@ -4266,6 +4253,8 @@ struct ScalarReconciliation {
     generation: Option<(u64, SubscriptionKey, u64)>,
     pending: VecDeque<RowUuid>,
     active: Option<ScalarProbe>,
+    retry_at: Option<web_time::Instant>,
+    retry_delay_ms: u64,
 }
 
 struct SubscriptionState {

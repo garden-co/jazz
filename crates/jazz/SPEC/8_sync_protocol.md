@@ -1171,8 +1171,9 @@ push must not be the only opportunity to repair this query after reconnect.
 The known-row exchange in chapter 7 uses explicit global physical table and row
 identities, not a public column named `id`. Batches contain at most 64 distinct
 coordinates. The batch cap bounds work in flight, not eventual coverage. Transient
-Unknown answers preserve candidates for bounded retries without tight polling;
-unsupported peers wait for a usable capability/connection. Query closure, claims
+Unknown answers preserve candidates for bounded retries without tight polling.
+The exchange is mandatory; missing optional support is not an Unknown outcome.
+Query closure, claims
 replacement and selected-authority replacement invalidate owned outstanding work.
 Pending local writes are not replaced simply because they are absent upstream.
 
@@ -1181,6 +1182,12 @@ ordered revalidation: scanning only currently visible local rows would otherwise
 make exclusion permanent. Readable native payloads are ingested before clearing
 an exclusion. Core evaluation sequence is comparable only in its connection
 epoch; durable per-row cut/catalogue floors survive epoch and Core changes.
+
+Native row repair MUST preserve a bundle's ViewScoped transaction cardinality.
+A withheld parent coordinate in an incomplete transaction remains inconclusive;
+a proven wrong parent in a complete transaction still fails validation. This
+allows later authorized readmission without fetching forbidden intermediate
+versions or weakening parent-coordinate checks.
 
 ### Readable negative evidence and the pilot boundary
 

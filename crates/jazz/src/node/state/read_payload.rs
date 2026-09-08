@@ -468,14 +468,23 @@ where
             // policy capability. Retain a local stored hint for restart; do
             // not import or republish a received one.
             bundle.tx = transaction_without_permission_subject(&bundle.tx);
-            self.ingest_known_transaction(
-                bundle.tx.clone(),
-                bundle.versions.clone(),
-                bundle.fate.clone(),
-                bundle.global_time,
-                bundle.durability,
-            )
-            .await?;
+            match bundle.scope {
+                crate::protocol::VersionBundleScope::ViewScoped => {
+                    // A row repair is still a partial transaction carrier.
+                    // Its visible cardinality cannot certify that a withheld
+                    // sibling/parent coordinate does not exist.
+                    self.ingest_view_scoped_transaction_with_current_indexes(
+                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
+                        bundle.global_time, bundle.durability,
+                    ).await?;
+                }
+                crate::protocol::VersionBundleScope::CompleteTransaction => {
+                    self.ingest_known_transaction(
+                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
+                        bundle.global_time, bundle.durability,
+                    ).await?;
+                }
+            }
             applied_bundles.push(bundle);
         }
         Ok(applied_bundles)
