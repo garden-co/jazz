@@ -412,3 +412,151 @@ fn current_rows_wire_v1_corpus_and_feature_gate() {
         );
     }
 }
+
+/// Alice cannot consume a Bob-scoped or partial receipt, and dropping Alice's
+/// future cancels its exact live nonce. Internal nonce-state assertion is needed
+/// because this pilot deliberately has no public unavailable-source side effect.
+#[test]
+fn current_rows_reject_wrong_context_partial_receipt_and_cancel() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let client = open_db(0xe6, alice, &schema);
+    let (up, _down) = link(alice, 0xe6, 0xc6, false);
+    let connection = block_on(client.connect_upstream(up));
+    let coordinate = client
+        .node
+        .node()
+        .borrow()
+        .current_row_coordinate("todos", row(0xd6))
+        .unwrap();
+    let context = PolicyBindingKey::from_canonical_parts(alice, test_provider_claims(alice));
+    let future = client.node.request_current_rows(vec![coordinate], context);
+    client.tick().unwrap();
+    let router = &client.node.current_rows;
+    let (id, request, context, expected) = {
+        let router = router.borrow();
+        let (id, route) = router.routes.iter().next().unwrap();
+        (
+            *id,
+            route.request.clone(),
+            route.context.clone(),
+            route.upstream.unwrap(),
+        )
+    };
+    let mut wrong = crate::db::row_availability::unknown_receipt(&request, context.clone());
+    wrong.context.identity = AuthorSubject::SYSTEM;
+    block_on(crate::db::row_availability::receive_current_rows(
+        &client.node.node(),
+        router,
+        Some(expected),
+        Some(expected),
+        true,
+        wrong,
+    ))
+    .unwrap();
+    assert!(router.borrow().routes.contains_key(&id));
+    let mut partial = crate::db::row_availability::unknown_receipt(&request, context);
+    partial.outcomes.clear();
+    block_on(crate::db::row_availability::receive_current_rows(
+        &client.node.node(),
+        router,
+        Some(expected),
+        Some(expected),
+        true,
+        partial,
+    ))
+    .unwrap();
+    assert!(router.borrow().routes.contains_key(&id));
+    drop(future);
+    assert!(!router.borrow().routes.contains_key(&id));
+    assert_eq!(router.borrow().cancels.len(), 1);
+    client.tick().unwrap();
+    assert!(router.borrow().cancels.is_empty());
+    drop(connection);
+}
+
+/// Alice's old peer Bob has not negotiated the new feature. The pending request
+/// resolves Unknown without emitting an availability message or a denial.
+#[test]
+fn current_rows_unsupported_peer_is_unknown() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let client = open_db(0xe7, alice, &schema);
+    let (up, _down) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xe7; 16]),
+        1,
+        NodeUuid::from_bytes([0xc7; 16]),
+        1,
+    );
+    let _connection = block_on(client.connect_upstream(up));
+    let coordinate = client
+        .node
+        .node()
+        .borrow()
+        .current_row_coordinate("todos", row(0xd7))
+        .unwrap();
+    let future = client.node.request_current_rows(
+        vec![coordinate],
+        PolicyBindingKey::from_canonical_parts(alice, test_provider_claims(alice)),
+    );
+    client.tick().unwrap();
+    assert!(matches!(block_on(future), CurrentRowsResult::Unknown));
+    assert!(client.node.current_rows.borrow().routes.is_empty());
+}
+
+/// Bob's trusted Edge revalidates more than 64 sequential immutable contexts at
+/// Core Carol. Completed nonce floors retire safely instead of permanently
+/// exhausting the router's bounded evidence cache.
+#[test]
+fn current_rows_more_than_64_sequential_contexts_remain_functional() {
+    let schema = owner_read_schema();
+    let core = open_core(0xc8, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let target = row(0xd8);
+    core.insert_with_id(
+        "todos",
+        target,
+        cells(
+            "public to system",
+            false,
+            AuthorSubject::for_test_bytes([0xa8; 16]),
+        ),
+    )
+    .unwrap();
+    let edge = open_db(0xe8, AuthorSubject::SYSTEM, &schema);
+    let (up, down) = link(AuthorSubject::SYSTEM, 0xe8, 0xc8, true);
+    let _up = block_on(edge.connect_upstream(up));
+    let _down = core.accept_subscriber_with_trust(
+        down,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    for _ in 0..4 {
+        edge.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let coordinate = core
+        .server
+        .node()
+        .borrow()
+        .current_row_coordinate("todos", target)
+        .unwrap();
+    for index in 0..130 {
+        let context = PolicyBindingKey::from_canonical_parts(
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("probe".to_owned(), Value::U64(index))]),
+        );
+        let future = edge
+            .node
+            .request_current_rows(vec![coordinate.clone()], context.clone());
+        for _ in 0..4 {
+            edge.tick().unwrap();
+            core.tick().unwrap();
+        }
+        let receipt = applied(block_on(future));
+        assert_eq!(receipt.context, context);
+        assert_eq!(receipt.outcomes, [CurrentRowOutcome::Readable]);
+        assert!(edge.node.current_rows.borrow().floors.len() <= 64);
+    }
+}

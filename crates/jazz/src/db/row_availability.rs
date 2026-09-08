@@ -31,13 +31,24 @@ pub(super) struct CurrentRowsRouter {
     pub cancels: VecDeque<(AuthorityContext, PermissionAdviceRequestId)>,
     pub progress: BTreeMap<u64, u64>,
     /// Floors are per exact context and Core epoch, never global policy state.
-    /// Saturation resolves new contexts Unknown rather than evicting live evidence.
-    pub floors: BTreeMap<(NodeUuid, u64, PolicyBindingKey), (GlobalTime, u64, u64)>,
+    /// Retain floors while an older admitted request could still return.
+    pub floors: BTreeMap<(NodeUuid, u64, PolicyBindingKey), CurrentRowsFloor>,
+}
+
+pub(super) struct CurrentRowsFloor {
+    cut: GlobalTime,
+    progress: u64,
+    policy: u64,
+    /// Requests already in flight when this evidence was accepted. A future
+    /// nonce cannot revive these replies; durable row watermarks live elsewhere.
+    protected_requests: BTreeSet<PermissionAdviceRequestId>,
 }
 
 impl CurrentRowsRouter {
     pub fn admit(&mut self, route: CurrentRowsRoute) -> bool {
-        if self.routes.len() + self.responses.values().map(VecDeque::len).sum::<usize>()
+        if self.routes.len()
+            + self.cancels.len()
+            + self.responses.values().map(VecDeque::len).sum::<usize>()
             >= MAX_PENDING
         {
             return false;
@@ -378,22 +389,29 @@ pub(super) async fn receive_current_rows<S: OrderedKvStorage + ReopenableStorage
         return Ok(());
     }
     let key = (receipt.core, receipt.core_epoch, receipt.context.clone());
-    if router
-        .borrow()
-        .floors
-        .get(&key)
-        .is_some_and(|(cut, progress, policy)| {
-            receipt.settled_through < *cut
-                || receipt.authorization_progress < *progress
-                || receipt.policy_epoch < *policy
-        })
-    {
+    if router.borrow().floors.get(&key).is_some_and(|floor| {
+        receipt.settled_through < floor.cut
+            || receipt.authorization_progress < floor.progress
+            || receipt.policy_epoch < floor.policy
+    }) {
         router.borrow_mut().finish(id, None);
         return Ok(());
     }
-    if router.borrow().floors.len() >= MAX_PENDING && !router.borrow().floors.contains_key(&key) {
-        router.borrow_mut().finish(id, None);
-        return Ok(());
+    {
+        let mut router = router.borrow_mut();
+        if router.floors.len() >= MAX_PENDING && !router.floors.contains_key(&key) {
+            let live = router.routes.keys().copied().collect::<BTreeSet<_>>();
+            router.floors.retain(|_, floor| {
+                floor
+                    .protected_requests
+                    .iter()
+                    .any(|request| live.contains(request))
+            });
+            if router.floors.len() >= MAX_PENDING {
+                router.finish(id, None);
+                return Ok(());
+            }
+        }
     }
     {
         let mut node = node.lock().await;
@@ -417,13 +435,26 @@ pub(super) async fn receive_current_rows<S: OrderedKvStorage + ReopenableStorage
     let mut router = router.borrow_mut();
     // At most one floor per outstanding route budget. Existing epoch/context
     // entries remain useful, but arbitrary completed requests cannot grow memory.
+    let protected_requests = router
+        .routes
+        .iter()
+        .filter_map(|(request_id, route)| {
+            (*request_id != id
+                && route.context == receipt.context
+                && route
+                    .upstream
+                    .is_some_and(|upstream| upstream.same_admitted_link(expected)))
+            .then_some(*request_id)
+        })
+        .collect();
     router.floors.insert(
         key,
-        (
-            receipt.settled_through,
-            receipt.authorization_progress,
-            receipt.policy_epoch,
-        ),
+        CurrentRowsFloor {
+            cut: receipt.settled_through,
+            progress: receipt.authorization_progress,
+            policy: receipt.policy_epoch,
+            protected_requests,
+        },
     );
     router.finish(id, Some(receipt));
     Ok(())
