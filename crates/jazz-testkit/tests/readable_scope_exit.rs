@@ -261,8 +261,8 @@ async fn partial_edge_revalidates_scalar_exit_with_authorized_point_query() {
         .await;
 }
 
-async fn run_revoked_exit(dependency: bool, relayed: bool) {
-    let schema = if dependency {
+fn revocation_schema(dependency: bool) -> Schema {
+    if dependency {
         SchemaBuilder::new()
             .table(
                 TableSchema::builder("grants")
@@ -291,7 +291,11 @@ async fn run_revoked_exit(dependency: bool, relayed: bool) {
             .build()
     } else {
         schema()
-    };
+    }
+}
+
+async fn run_revoked_exit(dependency: bool, relayed: bool) {
+    let schema = revocation_schema(dependency);
     let authority = JazzServer::start_with_schema(schema.clone()).await;
     let relay = if relayed {
         Some(
@@ -443,8 +447,7 @@ async fn relayed_scalar_exit_with_simultaneous_dependency_revocation_withholds_s
 /// No upstream predecessor survives the detached subscription. The ordinary
 /// query must revalidate the extra local input through a partial relay.
 /// alice caches -> disconnect/drop -> bob updates -> alice subscribes/reconnects
-#[tokio::test]
-async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
+async fn run_reconnect_scalar_query(count: usize) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
@@ -465,13 +468,19 @@ async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
                 .ready_on("tasks", TIMEOUT)
                 .connect()
                 .await;
-            let (task, _, tx) = bob
-                .insert(
-                    "tasks",
-                    row_input!("owner" => "alice", "done" => false, "title" => "before"),
-                )
-                .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+            let mut tasks = Vec::new();
+            let mut txs = Vec::new();
+            for _ in 0..count {
+                let (task, _, tx) = bob
+                    .insert(
+                        "tasks",
+                        row_input!("owner" => "alice", "done" => false, "title" => "before"),
+                    )
+                    .unwrap();
+                tasks.push(task);
+                txs.push(tx.unwrap());
+            }
+            jazz_testkit::wait_for_edge_txs(&bob, &txs).await;
             let alice = TestingClient::builder()
                 .with_server(&relay)
                 .with_schema(schema)
@@ -489,23 +498,26 @@ async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
                 &mut log,
                 TIMEOUT,
                 "alice caches original row",
-                |log| has_added_id(log, task),
+                |log| tasks.iter().all(|task| has_added_id(log, *task)),
             )
             .await;
             assert!(jazz::tools::test_support::disconnect_client(&alice));
             drop(initial);
-            let tx = bob
-                .update(
-                    task,
-                    vec![
-                        ("done".into(), Value::Boolean(true)),
-                        ("title".into(), Value::Text("after reconnect".into())),
-                    ],
-                )
-                .unwrap()
-                .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
-            assert_eq!(local_rows(&alice, filtered()).await.len(), 1);
+            let tx = bob.begin_transaction().unwrap().transaction_id();
+            let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
+            for task in &tasks {
+                staged
+                    .update(
+                        *task,
+                        vec![
+                            ("done".into(), Value::Boolean(true)),
+                            ("title".into(), Value::Text("after reconnect".into())),
+                        ],
+                    )
+                    .unwrap();
+            }
+            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            assert_eq!(local_rows(&alice, filtered()).await.len(), count);
             let mut local = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
                 .await
@@ -516,7 +528,7 @@ async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
                 &mut local_log,
                 TIMEOUT,
                 "offline local-first row",
-                |log| has_added_id(log, task),
+                |log| tasks.iter().all(|task| has_added_id(log, *task)),
             )
             .await;
             assert!(
@@ -529,16 +541,182 @@ async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
                 &mut local_log,
                 TIMEOUT,
                 "reconnected query repairs stale local input",
-                |log| has_removed(log, task),
+                |log| tasks.iter().all(|task| has_removed(log, *task)),
             )
             .await;
             let cached = local_rows(&alice, Query::from("tasks")).await;
-            assert!(cached.iter().any(|(id, values)| *id == task
-                && values.contains(&Value::Text("after reconnect".into()))));
+            assert!(
+                tasks
+                    .iter()
+                    .all(|task| cached.iter().any(|(id, values)| id == task
+                        && values.contains(&Value::Text("after reconnect".into()))))
+            );
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
             relay.shutdown().await;
             authority.shutdown().await;
         })
         .await;
+}
+
+/// Alice's retained scalar row converges through a partial relay after bob's
+/// offline update. alice caches -> disconnect/drop -> bob updates -> reconnect
+#[tokio::test]
+async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
+    run_reconnect_scalar_query(1).await;
+}
+
+/// Alice's 65 retained roots require more than one bounded 64-ID probe batch.
+/// bob changes every root while alice is offline; every cached input refreshes.
+/// alice caches 65 -> offline -> bob changes 65 -> reconnect -> two batches
+#[tokio::test]
+async fn reconnect_scalar_reconciliation_continues_past_first_batch() {
+    run_reconnect_scalar_query(65).await;
+}
+
+async fn run_reconnect_revoked_input(dependency: bool) {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = revocation_schema(dependency);
+            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let relay = JazzServer::builder()
+                .with_schema(schema.clone())
+                .with_app_id(authority.app_id())
+                .with_backend_secret(authority.backend_secret())
+                .with_upstream_url(authority.base_url())
+                .with_native_transport_connector(jazz_testkit::native_connector())
+                .start()
+                .await;
+            let bob = TestingClient::builder()
+                .with_server(&authority)
+                .with_schema(schema.clone())
+                .with_user_id("bob")
+                .as_admin()
+                .ready_on("tasks", TIMEOUT)
+                .connect()
+                .await;
+            let mut tasks = Vec::new();
+            let mut grants = Vec::new();
+            for _ in 0..2 {
+                let mut input =
+                    row_input!("owner" => "alice", "done" => false, "title" => "before");
+                if dependency {
+                    let (grant, _, tx) = bob
+                        .insert("grants", row_input!("owner" => "alice"))
+                        .unwrap();
+                    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+                    grants.push(grant);
+                    input.insert("grant".into(), grant.into());
+                }
+                let (task, _, tx) = bob.insert("tasks", input).unwrap();
+                jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+                tasks.push(task);
+            }
+            let alice = TestingClient::builder()
+                .with_server(&relay)
+                .with_schema(schema)
+                .with_user_id("alice")
+                .as_user()
+                .connect()
+                .await;
+            let mut initial = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::Remote)
+                .await
+                .unwrap();
+            let mut log = Vec::new();
+            wait_for_subscription_update(
+                &mut initial,
+                &mut log,
+                TIMEOUT,
+                "alice caches both inputs",
+                |log| tasks.iter().all(|task| has_added_id(log, *task)),
+            )
+            .await;
+            assert!(jazz::tools::test_support::disconnect_client(&alice));
+            drop(initial);
+            let tx = bob.begin_transaction().unwrap().transaction_id();
+            let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
+            let mut revoked = vec![
+                ("done".into(), Value::Boolean(true)),
+                ("title".into(), Value::Text("forbidden successor".into())),
+            ];
+            if dependency {
+                staged
+                    .update(grants[0], vec![("owner".into(), Value::Text("bob".into()))])
+                    .unwrap();
+            } else {
+                revoked.push(("owner".into(), Value::Text("bob".into())));
+            }
+            staged.update(tasks[0], revoked).unwrap();
+            staged
+                .update(
+                    tasks[1],
+                    vec![
+                        ("done".into(), Value::Boolean(true)),
+                        ("title".into(), Value::Text("readable control".into())),
+                    ],
+                )
+                .unwrap();
+            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            let mut local = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let mut local_log = Vec::new();
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "offline retained inputs",
+                |log| tasks.iter().all(|task| has_added_id(log, *task)),
+            )
+            .await;
+            assert!(
+                jazz::tools::test_support::reconnect_client(&alice)
+                    .await
+                    .unwrap()
+            );
+            // The readable control proves the automatic reconciliation query was
+            // answered; checking before its delivery could miss a delayed leak.
+            wait_for_subscription_update(
+                &mut local,
+                &mut local_log,
+                TIMEOUT,
+                "readable control repairs",
+                |log| has_removed(log, tasks[1]),
+            )
+            .await;
+            for reader in [
+                alice.clone(),
+                alice.for_session(Session::new(jazz_server::TEST_JWT_ISSUER, "bob")),
+            ] {
+                assert!(!local_rows(&reader, Query::from("tasks")).await.iter().any(
+                    |(_, values)| values.contains(&Value::Text("forbidden successor".into()))
+                ));
+            }
+            let cached = local_rows(&alice, Query::from("tasks")).await;
+            assert!(cached.iter().any(|(id, values)| *id == tasks[1]
+                && values.contains(&Value::Text("readable control".into()))));
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+            relay.shutdown().await;
+            authority.shutdown().await;
+        })
+        .await;
+}
+
+/// Bob revokes alice while she is offline and changes a readable control too.
+/// The control proves the relay's point batch completed without disclosing the
+/// revoked successor. alice disconnects -> bob changes -> relay probes -> alice
+#[tokio::test]
+async fn reconnect_scalar_probe_withholds_same_row_revoked_successor() {
+    run_reconnect_revoked_input(false).await;
+}
+
+/// Bob revokes a related grant while alice is offline. The relay's cached grant
+/// cannot authorize the new task bytes; the same batch repairs a readable task.
+/// alice offline -> bob revokes grant -> relay/Core point batch -> no disclosure
+#[tokio::test]
+async fn reconnect_scalar_probe_withholds_related_grant_revoked_successor() {
+    run_reconnect_revoked_input(true).await;
 }
