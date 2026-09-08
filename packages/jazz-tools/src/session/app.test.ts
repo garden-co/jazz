@@ -411,3 +411,59 @@ it("rejected manual action during logout preserves logout retry", async () => {
   expect(f.events).not.toContain("link");
   await app.dispose();
 });
+
+it.each(["jwt", "better-auth"] as const)(
+  "keeps %s callbacks out of structured-cloned host configuration",
+  async (kind) => {
+    const f = await setup();
+    const client: BetterAuthClient = {
+      $store: {
+        atoms: {
+          session: {
+            get: () => ({
+              data: { session: { id: "one" }, user: { id: "one" } },
+              isPending: false,
+            }),
+            subscribe: () => () => {},
+          },
+        },
+      },
+      $fetch: async () => ({ data: { token: "one" } }),
+      signOut: async () => ({}),
+    };
+    const auth =
+      kind === "jwt"
+        ? jwtAuth({ key: "one", getToken: async () => "one", logout: async () => {} })
+        : betterAuth(client);
+    const host = {
+      appId: "app",
+      serverUrl: "https://sync.example.test",
+      initial: "local-first" as const,
+      driver: { type: "memory" as const },
+    };
+    const config = { ...host, auth };
+    let calls = 0;
+    const app = createJazzAppOwner(
+      config,
+      async (received) => {
+        calls++;
+        // The runtime worker uses the platform structured-clone boundary. Permissive
+        // factories miss this failure until the first authenticated client opens.
+        expect(structuredClone(received)).toEqual(host);
+        expect(received).not.toHaveProperty("auth");
+        return f.session;
+      },
+      { start: false },
+    );
+    expect(calls).toBe(0);
+    await app.start();
+    await tick();
+    expect(app.getSnapshot().status).toBe("ready");
+    expect(f.events).toEqual(["admit:one", "open:one"]);
+    expect(config.auth).toBe(auth);
+    app.updateAuth(auth);
+    await tick();
+    expect(calls).toBe(1);
+    await app.dispose();
+  },
+);

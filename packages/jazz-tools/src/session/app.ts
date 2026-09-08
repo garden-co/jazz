@@ -49,7 +49,10 @@ export function createJazzAppOwner<Config, Client>(
   factory: (config: Config) => Promise<JazzSession<Client>>,
   options: { start?: boolean } = {},
 ): JazzApp<Client> {
-  let auth = config.auth;
+  // Auth descriptors contain callbacks and provider clients. They belong to
+  // this owner, never to the host configuration sent across runtime boundaries.
+  const { auth: initialAuth, ...hostConfig } = config;
+  let auth = initialAuth;
   let session: JazzSession<Client> | undefined;
   let connection:
     | (Omit<AuthProviderConnection, "update" | "logout"> & {
@@ -207,7 +210,7 @@ export function createJazzAppOwner<Config, Client>(
       failure = undefined;
       publish();
       const task = Promise.resolve()
-        .then(() => factory(config))
+        .then(() => factory(hostConfig as Config))
         .then(async (created) => {
           if (disposed) {
             await created.close();

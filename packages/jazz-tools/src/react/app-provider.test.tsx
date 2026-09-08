@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
+import { jwtAuth } from "../session/app.js";
 import { useJazzAuth } from "../react-core/app.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: host.create }));
@@ -71,4 +72,47 @@ it("provides logout in the data tree without an application auth context", async
     view.getByText("Sign out").click();
   });
   await waitFor(() => expect(view.getByText("signed-out")).toBeDefined());
+});
+
+it("opens an authenticated provider client with cloneable host options after enrollment", async () => {
+  const account = makeFakeAccount();
+  const cloned: unknown[] = [];
+  host.create.mockImplementation((config) =>
+    createJazzSessionOwner({
+      accounts: new AccountManager({
+        createLocalFirst: () => account,
+        restoreLocalFirst: () => account,
+        registerJWT: async () => account,
+        loginJWT: async () => account,
+        loginOrRegisterJWT: async () => account,
+        linkJWT: async () => account,
+        logout() {},
+      }),
+      openClient: async () => {
+        // Match the real host timing: options cross the worker boundary only
+        // after provider authentication has enrolled an account.
+        cloned.push(structuredClone(config));
+        return makeFakeClient({ authMode: "external", userId: "one", claims: {} });
+      },
+    }),
+  );
+  const tree = (key: string | null) => (
+    <JazzProvider
+      appId="app"
+      serverUrl="https://sync.example.test"
+      autoAttachDevTools={false}
+      auth={jwtAuth({ key, getToken: async () => "token", logout: async () => {} })}
+      signedOut={<p>signed out</p>}
+    >
+      <p>private data</p>
+    </JazzProvider>
+  );
+  const view = render(tree(null));
+  await waitFor(() => expect(view.getByText("signed out")).toBeDefined());
+  expect(cloned).toEqual([]);
+  view.rerender(tree("one"));
+  await waitFor(() => expect(view.getByText("private data")).toBeDefined());
+  expect(cloned).toEqual([
+    { appId: "app", serverUrl: "https://sync.example.test", initial: undefined },
+  ]);
 });
