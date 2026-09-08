@@ -161,6 +161,24 @@ impl<S: OrderedKvStorage> NodeState<S> {
         watermark: LocalAvailabilityWatermark,
         outcomes: &[(GlobalPhysicalTableId, RowUuid, LocalRowAvailability)],
     ) -> Result<bool, Error> {
+        self.apply_local_row_availability_after_persist(
+            scope,
+            watermark,
+            outcomes,
+            std::future::ready(()),
+        )
+        .await
+    }
+
+    // The injected await gives cancellation tests the exact durable/runtime
+    // boundary; production passes Ready and introduces no suspension here.
+    pub(super) async fn apply_local_row_availability_after_persist(
+        &mut self,
+        scope: &PolicyBindingKey,
+        watermark: LocalAvailabilityWatermark,
+        outcomes: &[(GlobalPhysicalTableId, RowUuid, LocalRowAvailability)],
+        after_persist: impl std::future::Future<Output = ()>,
+    ) -> Result<bool, Error> {
         if self.query.local_availability_authorities.get(scope)
             != Some(&(watermark.core, watermark.core_epoch))
         {
@@ -217,10 +235,15 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 value: record.values(),
             })
             .collect::<Vec<_>>();
+        // Arm before the write: cancellation of storage itself can have an
+        // ambiguous durable outcome. The mutable NodeState owner is retained
+        // until completion or drop, when Groove must reject further reads.
+        let application = self.database.guard_host_application()?;
         self.database
             .direct_record_store(LOCAL_ROW_AVAILABILITY_STORE)?
             .write_many(&writes)
             .await?;
+        after_persist.await;
         let changes = updates
             .iter()
             .map(|((_, table, row), record)| {
@@ -237,11 +260,13 @@ impl<S: OrderedKvStorage> NodeState<S> {
         // Thus Groove's non-poisoning descriptor/ownership prevalidation errors
         // indicate an internal invariant violation. Operational IVM/storage
         // failures poison Groove, blocking further query/subscription delivery
-        // until reopen replays the already durable receipt.
+        // until reopen replays the already durable receipt. The host guard
+        // extends that rule to prevalidation errors and future cancellation.
         let changed = self.update_local_unavailable_rows(scope, &changes).await?;
         for (key, record) in updates {
             self.query.local_availability_records.insert(key, record);
         }
+        application.complete();
         Ok(changed)
     }
 

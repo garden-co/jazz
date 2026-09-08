@@ -218,6 +218,15 @@ new operations against the durable state it finds. Reopen does not classify the
 abandoned submission retroactively and MUST NOT replay it as a retry; it only
 restores the state for which storage has a definite durable receipt.
 
+A host that couples a direct metadata write with a runtime input change must
+arm `Database::guard_host_application` before the write and retain exclusive
+database ownership through both steps. It completes the guard only after the
+runtime and host bookkeeping agree with durable state. Dropping that guard,
+including cancellation during either await, makes the instance unusable under
+the same rule. For example, a persisted Jazz availability exclusion cannot
+leave an older query source readable if its input update is interrupted;
+reopening reconstructs that source from the persisted scoped receipt.
+
 **Worked cancellation/reopen receipt.** Suppose durable state contains row A.
 The live database makes row B resident, begins B's atomic submission, and its
 host drops that persistence future. The live instance is poisoned: it may not

@@ -765,3 +765,79 @@ fn local_availability_context_capacity_includes_request_only_admissions() {
     node.retire_local_availability_scope_inputs(&first).unwrap();
     assert_eq!(parent_ids(&mut node, &schema, extra).len(), 2);
 }
+
+/// Internal suspension is necessary to drop precisely after the metadata write,
+/// before the IVM input change. Ordinary reads must fail closed until reopen.
+#[test]
+fn cancelled_local_availability_apply_blocks_reads_until_reopen() {
+    use futures::FutureExt;
+    let (dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            alice,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut subscription, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 2);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    let watermark = availability_watermark(1);
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    let persisted = std::cell::Cell::new(false);
+    let outcomes = [(table, row(1), LocalRowAvailability::CurrentUnavailable)];
+    let apply =
+        node.apply_local_row_availability_after_persist(&scope, watermark, &outcomes, async {
+            persisted.set(true);
+            std::future::pending::<()>().await;
+        });
+    assert!(apply.now_or_never().is_none()); // Drops the suspended apply.
+    assert!(
+        persisted.get(),
+        "the receipt write completed before cancellation"
+    );
+    node.query_rows_for_client(&shape, &binding, DurabilityTier::Local, alice)
+        .unwrap_err();
+    assert!(
+        futures::executor::block_on(
+            node.drain_local_maintained_view_subscription(&mut subscription, None)
+        )
+        .is_err(),
+        "maintained drain must reject a cancelled apply"
+    );
+    assert!(matches!(
+        node.database.ensure_usable(),
+        Err(groove::db::Error::DatabasePoisoned)
+    ));
+    drop(subscription);
+    drop(node);
+    let mut node = reopen_availability_node(&dir, &schema);
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    assert_eq!(parent_ids(&mut node, &schema, author(2)).len(), 2);
+    assert_eq!(
+        parent_ids(&mut node, &schema, AuthorSubject::SYSTEM).len(),
+        2
+    );
+}
