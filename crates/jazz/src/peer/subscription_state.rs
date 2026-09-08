@@ -263,10 +263,6 @@ impl CachedPeerQueryPlan {
         }
     }
 
-    pub(super) fn tier(&self) -> DurabilityTier {
-        self.tier
-    }
-
     pub(super) fn has_runtime_plan(&self) -> bool {
         self.plan.is_some()
     }

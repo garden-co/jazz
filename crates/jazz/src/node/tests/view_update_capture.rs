@@ -585,6 +585,8 @@ impl MaintainedSubscriptionViewSubscription {
             .collect::<BTreeSet<_>>();
         let mut update = core.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
+                shape: _shape,
+                has_default_read_view: true,
                 subscription: subscription_key,
                 settled_through: core.committed_global_time(),
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),

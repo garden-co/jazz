@@ -1252,11 +1252,11 @@ impl PeerState {
             .filter_map(ResultMemberEntry::as_row)
             .map(|(_, _, tx_id)| tx_id)
             .collect::<BTreeSet<_>>();
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing prepared state",
             ))?;
@@ -1280,6 +1280,8 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
                     subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -1899,6 +1901,8 @@ impl PeerState {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             scoped.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
                 subscription,
                 settled_through: watermark,
                 peer_complete_tx_payloads,
@@ -2408,11 +2412,11 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&maintained_subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing prepared state",
             ))?;
@@ -2462,6 +2466,8 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -2633,11 +2639,11 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&maintained_subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing prepared state",
             ))?;
@@ -2672,9 +2678,11 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
-        let (policy_identity, _) = self.served_subscription_policy_binding(target_subscription)?;
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let target_reset = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
                 .publication_states
                 .get(&maintained_subscription)
@@ -2683,8 +2691,10 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            node.view_update_for_maintained_result_members(
+            scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -2709,9 +2719,9 @@ impl PeerState {
                     maintained_facts: maintained,
                     allow_storage_witness_fallback,
                 },
-            )
+            ).await
         };
-        let mut target_reset = target_reset.await?;
+        let mut target_reset = target_reset?;
         if reset_result_set {
             view_update_reset_result_set(&mut target_reset);
         }

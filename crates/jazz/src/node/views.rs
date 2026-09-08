@@ -273,7 +273,46 @@ fn covered_input_version_rows_for_bundle(
         .collect()
 }
 
+fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
+    use crate::query::{Operand, Predicate};
+    fn scalar(operand: &Operand) -> bool {
+        !matches!(operand, Operand::Column(name) if name.contains('.') || name.starts_with('$'))
+    }
+    fn predicate(filter: &Predicate) -> bool {
+        match filter {
+            Predicate::All(parts) | Predicate::Any(parts) => parts.iter().all(predicate),
+            Predicate::Not(part) => predicate(part),
+            Predicate::Eq(a, b)
+            | Predicate::Ne(a, b)
+            | Predicate::Gt(a, b)
+            | Predicate::Gte(a, b)
+            | Predicate::Lt(a, b)
+            | Predicate::Lte(a, b)
+            | Predicate::Contains(a, b) => scalar(a) && scalar(b),
+            Predicate::In(a, values) => scalar(a) && values.iter().all(scalar),
+            Predicate::IsNull(a) => scalar(a),
+            Predicate::EnumMatch { .. } => false,
+        }
+    }
+    !query.filters.is_empty()
+        && query.filters.iter().all(predicate)
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.select.is_none()
+        && query.aggregate.is_none()
+        && query.relation.is_none()
+        && query.limit.is_none()
+        && query.offset == 0
+}
+
 pub(crate) struct MaintainedViewBundleInputs<'a> {
+    pub(crate) shape: &'a ValidatedQuery,
+    pub(crate) has_default_read_view: bool,
     pub(crate) subscription: SubscriptionKey,
     /// Cut of the exact source receipt used by the publication owner. A relay's
     /// own committed clock is not the authority cut of the inputs it forwards.
@@ -696,6 +735,8 @@ where
             .collect::<Vec<_>>();
         let update = self
             .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
+                shape,
+                has_default_read_view: true,
                 subscription,
                 settled_through: self.clock.committed_global_time,
                 result_member_adds,
@@ -721,6 +762,8 @@ where
         inputs: MaintainedViewBundleInputs<'_>,
     ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
+            shape,
+            has_default_read_view,
             subscription,
             settled_through,
             peer_complete_tx_payloads,
@@ -731,7 +774,7 @@ where
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-            identity: _identity,
+            identity,
             tier,
             maintained_facts,
             allow_storage_witness_fallback,
@@ -804,7 +847,7 @@ where
             })
             .collect::<BTreeSet<_>>();
         let covered_input_add_rows = covered_input_version_rows_for_bundle(&program_fact_adds);
-        let wanted_add_rows_by_tx = row_result_adds
+        let mut wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
             .chain(covered_input_add_rows)
@@ -815,6 +858,90 @@ where
                     by_tx
                 },
             );
+        // A live scalar predicate exit retracts coverage, but a still-readable
+        // successor must also refresh the receiver's local-first cache. Probe
+        // only removed physical rows through ordinary serving authorization;
+        // do not reopen the query's input relation or infer permission from its
+        // previous membership. Keep non-default views and complex scopes on
+        // their existing witness path until their replacement contract exists.
+        if has_default_read_view
+            && shape.schema_version() == self.catalogue.current_schema_version_id
+            && simple_scalar_exit_query(shape.query())
+        {
+            let (read_shape, read_binding) =
+                self.whole_table_shape_binding(&shape.query().table)?;
+            // Scalar publication can retract only its covered root source;
+            // the receiver derives result removal from that source delta.
+            let exit_candidates = row_result_removes
+                .iter()
+                .map(|(table, row, tx)| (table.to_string(), *row, *tx))
+                .chain(program_fact_removes.iter().filter_map(|fact| match fact {
+                    ProgramFactEntry::CoveredInput(input)
+                        if input.source.path == [crate::protocol::ProgramSourceRole::Root] =>
+                    {
+                        Some((
+                            input.source.table.to_string(),
+                            input.source_row,
+                            input.version.tx,
+                        ))
+                    }
+                    _ => None,
+                }))
+                .collect::<BTreeSet<_>>();
+            for (table, row_uuid, old_tx) in &exit_candidates {
+                if table.as_str() != shape.query().table
+                    || maintained_facts
+                        .replacement_for(table, *row_uuid)
+                        .0
+                        .is_some()
+                    || row_result_adds.iter().any(|(added_table, added_row, _)| {
+                        added_table.as_str() == table && added_row == row_uuid
+                    })
+                {
+                    continue;
+                }
+                let rows = self
+                    .query_rows_for_link_physical_row(
+                        &read_shape,
+                        &read_binding,
+                        tier,
+                        identity,
+                        *row_uuid,
+                    )
+                    .await?;
+                let Some(row) = rows.iter().find(|row| row.row_uuid() == *row_uuid) else {
+                    continue;
+                };
+                let Some(tx_id) = self.current_row_tx_id(row).await else {
+                    continue;
+                };
+                if tx_id == *old_tx {
+                    continue;
+                }
+                let stored_tx = self
+                    .query_transaction_memo(tx_id, &mut context)
+                    .await?
+                    .ok_or(Error::MissingTransaction(tx_id))?;
+                let wanted = BTreeSet::from([(table.to_string(), *row_uuid)]);
+                let versions = self
+                    .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted)
+                    .await?;
+                // Merge before bundling: an authorized sibling may already
+                // require this transaction, while other siblings remain private.
+                tx_versions_cache
+                    .entry(tx_id)
+                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
+                    .extend(
+                        versions
+                            .into_iter()
+                            .filter(|version| version.deletion().is_none()),
+                    );
+                wanted_add_rows_by_tx
+                    .entry(tx_id)
+                    .or_default()
+                    .extend(wanted);
+            }
+        }
         self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)
             .await?;
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
