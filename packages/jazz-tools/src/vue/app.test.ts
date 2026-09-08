@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { JazzProvider, useJazzAuth, type UseJazzAuth } from "./app.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import type { JazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => ({ factory: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: mocks.factory }));
@@ -28,7 +29,7 @@ const account = Object.freeze({
   id: "local",
   identity: { issuer: "test", subject: "local" },
 }) as AccountHandle;
-async function fixture(fail = false) {
+async function fixture(fail: false | "unknown" | "graceful" = false) {
   const events: string[] = [];
   const accounts = new AccountManager(
     {
@@ -46,8 +47,10 @@ async function fixture(fail = false) {
     shutdown: vi.fn(async () => {
       events.push("shutdown");
       if (fail) {
+        const error = new Error("flush failed");
+        const failure = fail === "graceful" ? new GracefulShutdownSyncError(error) : error;
         fail = false;
-        throw new Error("flush failed");
+        throw failure;
       }
     }),
   };
@@ -113,37 +116,42 @@ describe("Vue ergonomic app", () => {
     app.unmount();
     await flush();
   });
-  it("detaches consumers before logout flush and exposes failure plus retry", async () => {
-    const { session, events } = await fixture(true);
-    mocks.factory.mockReset().mockResolvedValue(session);
-    let auth!: UseJazzAuth;
-    const Child = defineComponent({
-      setup() {
-        auth = useJazzAuth();
-        expect(isReadonly(auth.snapshot)).toBe(true);
-        onUnmounted(() => events.push("child-cleanup"));
-        return () => h("p", "active");
-      },
-    });
-    const node = document.createElement("div");
-    const app = createApp({
-      render: () =>
-        h(
-          JazzProvider,
-          { appId: "test", autoAttachDevTools: false },
-          { default: () => h(Child), signedOut: () => h("p", "signed out") },
-        ),
-    });
-    app.mount(node);
-    await flush();
-    await expect(auth.logout()).rejects.toThrow("flush failed");
-    await flush();
-    expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));
-    expect(node.textContent).toContain("flush failed");
-    await auth.retry();
-    await flush();
-    expect(node.textContent).toBe("signed out");
-    app.unmount();
-    await flush();
-  });
+  it.each(["unknown", "graceful"] as const)(
+    "detaches consumers before %s logout failure and retries",
+    async (failure) => {
+      const { session, events } = await fixture(failure);
+      mocks.factory.mockReset().mockResolvedValue(session);
+      let auth!: UseJazzAuth;
+      const Child = defineComponent({
+        setup() {
+          auth = useJazzAuth();
+          expect(isReadonly(auth.snapshot)).toBe(true);
+          onUnmounted(() => events.push("child-cleanup"));
+          return () => h("p", "active");
+        },
+      });
+      const node = document.createElement("div");
+      const app = createApp({
+        render: () =>
+          h(
+            JazzProvider,
+            { appId: "test", autoAttachDevTools: false },
+            { default: () => h(Child), signedOut: () => h("p", "signed out") },
+          ),
+      });
+      app.mount(node);
+      await flush();
+      await expect(auth.logout()).resolves.toBeUndefined();
+      expect(auth.snapshot.value.status).toBe("error");
+      expect(auth.snapshot.value.error?.message).toContain("flush failed");
+      await flush();
+      expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));
+      expect(node.textContent).toContain("flush failed");
+      await auth.retry();
+      await flush();
+      expect(node.textContent).toBe("signed out");
+      app.unmount();
+      await flush();
+    },
+  );
 });

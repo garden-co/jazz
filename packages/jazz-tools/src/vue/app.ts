@@ -15,6 +15,7 @@ import {
 } from "vue";
 import { createJazzAppOwner, type JazzAppSnapshot, type JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
@@ -26,6 +27,7 @@ export type JazzProviderProps = Partial<JazzSessionConfig> & {
 };
 export type UseJazzAuth = {
   readonly snapshot: Readonly<ShallowRef<JazzAppSnapshot<JazzClient>>>;
+  readonly sessionActions: JazzSessionActions;
   logout(): Promise<void>;
   retry(): Promise<void>;
 };
@@ -72,8 +74,9 @@ export const JazzProvider = defineComponent({
     const lease = app.attachConsumer();
     const auth: UseJazzAuth = {
       snapshot: shallowReadonly(snapshot),
-      logout: () => app.logout(),
-      retry: () => app.retry(),
+      sessionActions: app.sessionActions,
+      logout: () => app.logout().catch(() => {}),
+      retry: () => app.retry().catch(() => {}),
     };
     provide(AuthKey, auth);
     const stop = app.subscribe(() => {
