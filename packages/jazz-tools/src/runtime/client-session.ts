@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
@@ -197,7 +198,7 @@ function decodeBase64ToUtf8(base64: string): string | null {
       for (let i = 0; i < binary.length; i += 1) {
         bytes[i] = binary.charCodeAt(i);
       }
-      return new TextDecoder().decode(bytes);
+      return new Utf8Decoder().decode(bytes);
     } catch {
       return null;
     }

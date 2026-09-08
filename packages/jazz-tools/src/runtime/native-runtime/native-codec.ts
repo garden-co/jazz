@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../utf8.js";
 import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
@@ -16,7 +17,7 @@ import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 
-const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export {
   createRecord,

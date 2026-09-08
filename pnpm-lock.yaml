@@ -1829,6 +1829,9 @@ importers:
       react-native:
         specifier: '>=0.76'
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
+      react-native-url-polyfill:
+        specifier: ^3.0.0
+        version: 3.0.0(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))
       web-streams-polyfill:
         specifier: ^4.2.0
         version: 4.2.0
@@ -11883,6 +11886,11 @@ packages:
 
   react-native-monorepo-config@0.3.5:
     resolution: {integrity: sha512-Xdu7k0s4V2FHn2OGnlr3D22Dgt5ij0ek9yzloPoLkHh3rL/jUQbPrawieKsAbkqoenv/7pfPJwMlPT27bvN1fg==}
+
+  react-native-url-polyfill@3.0.0:
+    resolution: {integrity: sha512-aA5CiuUCUb/lbrliVCJ6lZ17/RpNJzvTO/C7gC/YmDQhTUoRD5q5HlJfwLWcxz4VgAhHwXKzhxH+wUN24tAdqg==}
+    peerDependencies:
+      react-native: '*'
 
   react-native@0.81.5:
     resolution: {integrity: sha512-1w+/oSjEXZjMqsIvmkCRsOc8UBYv163bTWKTI8+1mxztvQPhCRYGTvZ/PL1w16xXHneIj/SLGfxWg2GWN2uexw==}
@@ -25000,6 +25008,11 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  react-native-url-polyfill@3.0.0(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)):
+    dependencies:
+      react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
+      whatwg-url-without-unicode: 8.0.0-3
 
   react-refresh@0.14.2: {}
 

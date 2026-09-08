@@ -1,3 +1,4 @@
+import { PlatformURL } from "../runtime/platform-url.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
@@ -25,7 +26,7 @@ export type AccountDbConfig = Omit<
 
 /** One canonical application endpoint for enrollment and context scope validation. */
 export function accountRegistryUrl(serverUrl: string, appId: string): string {
-  const url = new URL(serverUrl);
+  const url = new PlatformURL(serverUrl);
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol !== "http:" && url.protocol !== "https:")
@@ -51,7 +52,7 @@ function accountContextScope(config: AccountDbConfig): string {
   const registry = accountRegistry(account);
   // Offline creation still has a configured registry authority; no request is made.
   if (
-    !new URL(registry).pathname.endsWith(`/apps/${accountAppId(config.appId)}/accounts`) ||
+    !new PlatformURL(registry).pathname.endsWith(`/apps/${accountAppId(config.appId)}/accounts`) ||
     (config.serverUrl !== undefined &&
       accountRegistryUrl(config.serverUrl, config.appId) !== registry)
   ) {
