@@ -753,13 +753,21 @@ async fn handle_ws_connection(
     }
 
     let Some(core_server_shell) = state.runtime_for_client() else {
+        let message = if state.shutdown.is_shutting_down() {
+            "runtime is shutting down; retry later"
+        } else if state.topology.is_edge() {
+            "edge runtime is awaiting a complete authoritative catalogue; retry shortly"
+        } else {
+            match state.catalogue.known_schema_hashes(&state.catalogue_store) {
+                Ok(hashes) if hashes.is_empty() => {
+                    "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting"
+                }
+                _ => "runtime is not ready to accept client connections; retry shortly",
+            }
+        };
         send_ws_error(
             &mut socket,
-            WireError::new(
-                WireErrorCode::NotReady,
-                WireRetry::Later,
-                "runtime is bootstrapping its authoritative catalogue; retry shortly",
-            ),
+            WireError::new(WireErrorCode::NotReady, WireRetry::Later, message),
         )
         .await;
         let _ = socket.close().await;
@@ -2046,6 +2054,71 @@ mod tests {
                 .expect("serve websocket test app");
         });
         addr
+    }
+
+    /// Alice connects to a fresh Core with no published schemas and receives
+    /// actionable deployment guidance while retaining the retryable wire error.
+    #[tokio::test]
+    async fn ws_blank_core_reports_schema_deployment_required() {
+        assert_blank_runtime_diagnostic(
+            false,
+            "no schema has been published for this app; deploy a schema with `jazz-tools deploy <appId>` before connecting",
+        )
+        .await;
+    }
+
+    /// Alice connects to a blank Edge and is told it is awaiting its authority,
+    /// rather than being told to publish a schema directly to that Edge.
+    #[tokio::test]
+    async fn ws_blank_edge_reports_catalogue_wait() {
+        assert_blank_runtime_diagnostic(
+            true,
+            "edge runtime is awaiting a complete authoritative catalogue; retry shortly",
+        )
+        .await;
+    }
+
+    async fn assert_blank_runtime_diagnostic(edge: bool, expected: &str) {
+        let mut builder = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory);
+        if edge {
+            builder = builder.with_upstream_url("ws://127.0.0.1:9");
+        }
+        let server = builder.build().await.expect("build blank server");
+        let state = server.state;
+        let addr = start_ws_test_server(state.clone()).await;
+        let (mut alice, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect Alice");
+        alice
+            .send(WsMessage::Binary(ws_prelude(AuthorSubject::SYSTEM).into()))
+            .await
+            .expect("send Alice prelude");
+        alice
+            .send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(
+                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                )
+                .into(),
+            ))
+            .await
+            .expect("send Alice hello");
+        let response = tokio::time::timeout(Duration::from_secs(5), alice.next())
+            .await
+            .expect("wait for readiness error")
+            .expect("readiness frame")
+            .expect("readiness response");
+        let frames = decode_ws_message(&response);
+        let [WireFrame::Error(error)] = frames.as_slice() else {
+            panic!("expected readiness error, got {frames:?}");
+        };
+        assert_eq!(error.code, WireErrorCode::NotReady);
+        assert_eq!(error.retry, WireRetry::Later);
+        assert_eq!(error.message, expected);
     }
 
     fn ws_url(addr: std::net::SocketAddr, app_id: AppId) -> String {
