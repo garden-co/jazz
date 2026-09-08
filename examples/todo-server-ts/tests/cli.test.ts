@@ -5,7 +5,15 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJwtIssuer,
+  type LocalJazzServerHandle,
+  type TestJwtIssuerHandle,
+} from "jazz-tools/testing";
+import permissions from "../permissions.js";
+import { app } from "../schema.js";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
 const APP_ID = "todo-cli-durable-restart";
@@ -18,12 +26,30 @@ type RunningChild = {
 };
 
 let jwtIssuer: TestJwtIssuerHandle;
-
+let upstream: LocalJazzServerHandle;
+async function startUpstream(): Promise<void> {
+  jwtIssuer = await startTestJwtIssuer();
+  upstream = await startLocalJazzServer({
+    appId: APP_ID,
+    jwksUrl: jwtIssuer.jwksUrl,
+    jwtIssuer: EXTERNAL_ISSUER,
+    jwtAudience: jwtIssuer.audience,
+  });
+  await deploy({
+    serverUrl: upstream.url,
+    appId: upstream.appId,
+    adminSecret: upstream.adminSecret,
+    schema: app,
+    permissions,
+  });
+}
 async function startChild(cwd: string): Promise<RunningChild> {
   const childEnv = {
     ...process.env,
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
+    JAZZ_SERVER_URL: upstream.url,
+    JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
   };
   delete childEnv.DB_PATH;
@@ -73,6 +99,8 @@ async function runCli(
     ...process.env,
     PORT: "0",
     JAZZ_APP_ID: APP_ID,
+    JAZZ_SERVER_URL: upstream.url,
+    JAZZ_BACKEND_SECRET: upstream.backendSecret,
     JAZZ_JWKS_URL: jwtIssuer.jwksUrl,
   };
   if (dbPath === undefined) delete childEnv.DB_PATH;
@@ -108,10 +136,11 @@ const invalidCliCases = [
 
 describe("Todo server CLI", () => {
   beforeAll(async () => {
-    jwtIssuer = await startTestJwtIssuer();
+    await startUpstream();
   });
 
   afterAll(async () => {
+    await upstream?.stop();
     await jwtIssuer?.stop();
   });
 
