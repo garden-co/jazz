@@ -19,6 +19,8 @@ async function setup() {
   const events: string[] = [];
   let shutdownFailure = false;
   let admissionFailure = false;
+  let linkFailure = false;
+  let openFailure = false;
   const handles = new Map<string, AccountHandle>();
   const account = (id: string) => {
     let result = handles.get(id);
@@ -46,6 +48,7 @@ async function setup() {
     loginOrRegisterJWT: enroll,
     async linkJWT(_account: AccountHandle, auth: JWTAuth) {
       events.push("link");
+      if (linkFailure) throw new Error("link unavailable");
       await token(auth);
       return account("local");
     },
@@ -54,6 +57,7 @@ async function setup() {
     accounts,
     async openClient(selected) {
       events.push(`open:${selected.id}`);
+      if (openFailure) throw new Error("open unavailable");
       return {
         async shutdown() {
           events.push(`flush:${selected.id}`);
@@ -67,6 +71,12 @@ async function setup() {
     events,
     failShutdown(value: boolean) {
       shutdownFailure = value;
+    },
+    failLink(value: boolean) {
+      linkFailure = value;
+    },
+    failOpen(value: boolean) {
+      openFailure = value;
     },
     failAdmission(value: boolean) {
       admissionFailure = value;
@@ -102,17 +112,26 @@ describe("shared Jazz application lifecycle", () => {
     const f = await setup();
     await f.session.createLocalFirst();
     const app = createJazzAppOwner(
-      { auth: jwtAuth({ key: null, isPending: true, getToken: async () => "one" }) },
+      {
+        auth: jwtAuth({
+          logout: async () => {},
+          key: null,
+          isPending: true,
+          getToken: async () => "one",
+        }),
+      },
       async () => f.session,
     );
     await tick();
     expect(app.getSnapshot().client).toBeUndefined();
-    app.updateAuth(jwtAuth({ key: "one", getToken: async () => "one" }));
+    app.updateAuth(jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "one" }));
     await tick();
     expect(app.getSnapshot().status).toBe("ready");
     const client = app.getSnapshot().client;
     expect(client).toBeDefined();
-    app.updateAuth(jwtAuth({ key: "one", getToken: async () => "refreshed" }));
+    app.updateAuth(
+      jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "refreshed" }),
+    );
     await tick();
     expect(app.getSnapshot().client).toBe(client);
     expect(f.events.filter((e) => e.startsWith("admit"))).toEqual(["admit:one"]);
@@ -121,13 +140,13 @@ describe("shared Jazz application lifecycle", () => {
   it("waits for committed detachment before flushing on account switch", async () => {
     const f = await setup();
     const app = createJazzAppOwner(
-      { auth: jwtAuth({ key: "one", getToken: async () => "one" }) },
+      { auth: jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "one" }) },
       async () => f.session,
     );
     await tick();
     const consumer = app.attachConsumer();
     const ready = app.getSnapshot();
-    app.updateAuth(jwtAuth({ key: "two", getToken: async () => "two" }));
+    app.updateAuth(jwtAuth({ logout: async () => {}, key: "two", getToken: async () => "two" }));
     await tick();
     expect(app.getSnapshot().client).toBeUndefined();
     expect(f.events).not.toContain("flush:one");
@@ -183,7 +202,7 @@ describe("shared Jazz application lifecycle", () => {
     f.failShutdown(false);
     await app.retry();
     expect(f.events.slice(-3)).toEqual(["flush:one", "logout", "revoke"]);
-    app.updateAuth(jwtAuth({ key: null, getToken: async () => "none" }));
+    app.updateAuth(jwtAuth({ logout: async () => {}, key: null, getToken: async () => "none" }));
     await tick();
     expect(app.getSnapshot().status).toBe("signed-out");
     await app.dispose();
@@ -192,19 +211,23 @@ describe("shared Jazz application lifecycle", () => {
     const f = await setup();
     const token = deferred<string>();
     const app = createJazzAppOwner(
-      { auth: jwtAuth({ key: "one", getToken: () => token.promise }) },
+      { auth: jwtAuth({ logout: async () => {}, key: "one", getToken: () => token.promise }) },
       async () => f.session,
     );
     await tick();
-    app.updateAuth(jwtAuth({ key: "two", getToken: async () => "two" }));
-    app.updateAuth(jwtAuth({ key: "one", getToken: async () => "fresh-one" }));
+    app.updateAuth(jwtAuth({ logout: async () => {}, key: "two", getToken: async () => "two" }));
+    app.updateAuth(
+      jwtAuth({ logout: async () => {}, key: "one", getToken: async () => "fresh-one" }),
+    );
     token.resolve("stale-one");
     await tick();
     expect(f.events).not.toContain("admit:stale-one");
     expect(f.events).toContain("open:fresh-one");
     expect(app.getSnapshot().status).toBe("ready");
     f.failAdmission(true);
-    app.updateAuth(jwtAuth({ key: "three", getToken: async () => "three" }));
+    app.updateAuth(
+      jwtAuth({ logout: async () => {}, key: "three", getToken: async () => "three" }),
+    );
     await tick();
     expect(app.getSnapshot().status).toBe("error");
     expect(app.getSnapshot().client).toBeUndefined();
@@ -256,6 +279,43 @@ describe("shared Jazz application lifecycle", () => {
     expect(f.events).toContain("link");
     expect(app.getSnapshot().status).toBe("ready");
     consumer.release();
+    await app.dispose();
+  });
+  it("repeats failed manual linking but only reopens after successful linking", async () => {
+    const f = await setup();
+    const app = createJazzAppOwner({}, async () => f.session);
+    await tick();
+    await app.sessionActions.createLocalFirst();
+    f.failLink(true);
+    await expect(app.sessionActions.linkJWT({ getToken: async () => "linked" })).rejects.toThrow(
+      "link unavailable",
+    );
+    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    f.failLink(false);
+    await app.retry();
+    expect(f.events.filter((event) => event === "link")).toHaveLength(2);
+    f.failOpen(true);
+    await expect(
+      app.sessionActions.linkJWT({ getToken: async () => "linked-again" }),
+    ).rejects.toThrow("open unavailable");
+    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
+    f.failOpen(false);
+    await app.retry();
+    expect(f.events.filter((event) => event === "link")).toHaveLength(3);
+    expect(app.getSnapshot().status).toBe("ready");
+    await app.dispose();
+  });
+  it("retries failed unmanaged logout instead of reopening the old account", async () => {
+    const f = await setup();
+    const app = createJazzAppOwner({}, async () => f.session);
+    await tick();
+    await app.sessionActions.createLocalFirst();
+    f.failShutdown(true);
+    await expect(app.logout()).rejects.toThrow();
+    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    f.failShutdown(false);
+    await app.retry();
+    expect(app.getSnapshot().status).toBe("signed-out");
     await app.dispose();
   });
   it("attaches real Better Auth connector and coalesces descriptor rerenders", async () => {

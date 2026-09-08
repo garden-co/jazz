@@ -14,7 +14,7 @@ import {
 
 export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
-  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout?(): unknown } & AuthProviderState);
+  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout(): unknown } & AuthProviderState);
 export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
 export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind">): JazzAuth => ({
   kind: "jwt",
@@ -25,6 +25,8 @@ export interface JazzAppSnapshot<Client> {
   readonly client?: Client;
   readonly account?: JazzSessionSnapshot<Client>["account"];
   readonly error?: Error;
+  /** Action retries repeat a failed enrollment; session retries only recover the selected client. */
+  readonly recovery?: "action" | "session";
 }
 export interface JazzApp<Client> {
   getSnapshot(): JazzAppSnapshot<Client>;
@@ -61,6 +63,7 @@ export function createJazzAppOwner<Config, Client>(
   let disposal: Promise<void> | undefined;
   let disposed = false;
   let failure: Error | undefined;
+  let manualRetry: (() => Promise<void>) | undefined;
   let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = new Set<() => void>();
@@ -80,8 +83,14 @@ export function createJazzAppOwner<Config, Client>(
           : current.status === "signed-out" && (!auth || provider?.ready)
             ? "signed-out"
             : "transitioning";
+    const recovery: JazzAppSnapshot<Client>["recovery"] = error
+      ? current && (current.status === "ready" || current.status === "signed-out")
+        ? "action"
+        : "session"
+      : undefined;
     const next = {
       status,
+      recovery,
       client: status === "ready" ? current?.client : undefined,
       account: current?.account,
       error,
@@ -92,6 +101,7 @@ export function createJazzAppOwner<Config, Client>(
       snapshot.client === next.client &&
       snapshot.account === next.account &&
       snapshot.error === next.error &&
+      snapshot.recovery === next.recovery &&
       (!current || versions.get(snapshot) === current)
     )
       return;
@@ -142,7 +152,22 @@ export function createJazzAppOwner<Config, Client>(
   ] as const) {
     (sessionActions as any)[name] = async (...args: unknown[]) => {
       if (auth) throw new Error("Manual session actions require an app without managed auth");
-      return (requireSession()[name] as (...args: unknown[]) => Promise<void>)(...args);
+      const current = requireSession();
+      const invoke = async () => {
+        manualRetry = undefined;
+        try {
+          await (current[name] as (...args: unknown[]) => Promise<void>)(...args);
+          manualRetry = undefined;
+        } catch (cause) {
+          const failed = current.getSnapshot();
+          if (failed.error && (failed.status === "ready" || failed.status === "signed-out"))
+            manualRetry = invoke;
+          throw cause;
+        } finally {
+          publish();
+        }
+      };
+      return invoke();
     };
   }
   const app: JazzApp<Client> = {
@@ -206,7 +231,11 @@ export function createJazzAppOwner<Config, Client>(
       failure = undefined;
       try {
         if (connection) await connection.retry();
-        else await session.retry();
+        else if (manualRetry && snapshot.recovery === "action") await manualRetry();
+        else {
+          await session.retry();
+          manualRetry = undefined;
+        }
       } catch (cause) {
         failure = asError(cause);
         throw cause;
@@ -216,16 +245,19 @@ export function createJazzAppOwner<Config, Client>(
     },
     async logout() {
       const current = requireSession();
+      manualRetry = undefined;
       failure = undefined;
       try {
         if (jwtConnection) {
           const leaving = auth;
           await jwtConnection.logout(() =>
-            leaving?.kind === "jwt" ? leaving.logout?.() : undefined,
+            leaving?.kind === "jwt" ? leaving.logout() : undefined,
           );
         } else if (connection) await connection.logout();
         else await current.logout();
+        manualRetry = undefined;
       } catch (cause) {
+        if (!connection) manualRetry = app.logout;
         failure = asError(cause);
         throw cause;
       } finally {
@@ -235,6 +267,7 @@ export function createJazzAppOwner<Config, Client>(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      manualRetry = undefined;
       disconnect();
       publish(true);
       disposal = (async () => {
