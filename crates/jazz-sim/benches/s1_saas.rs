@@ -1642,17 +1642,14 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        input_adds: program_fact_adds,
-        ..
+        supporting_rows, ..
     }) = update
     {
         // The receiver evaluates its result from covered inputs; authorities
         // no longer send a redundant result-member list. Count the disclosed
         // input closure, including relation support, when checking its cache.
-        for entry in program_fact_adds {
-            if let jazz::protocol::SupportingInput::Row(input) = entry {
-                rows.insert((input.version_table.to_string(), input.source_row));
-            }
+        for input in supporting_rows {
+            rows.insert((input.version_table.to_string(), input.row));
         }
     }
 }
@@ -1660,18 +1657,11 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            input_adds: program_fact_adds,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|entry| match entry {
-                jazz::protocol::SupportingInput::Row(input)
-                    if input.version_table.as_str() == table =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect::<BTreeSet<_>>()
             .len(),
         _ => 0,

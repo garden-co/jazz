@@ -1210,7 +1210,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
             jazz::db::block_on(client.edge_peer.rehydrate_query(core, &shape, &binding)).unwrap()
         };
         client.hydration_bytes += view_update_bytes(&update);
-        client.hydration_rows += result_row_count(&update);
+        client.hydration_rows += result_row_count(&update, table);
         apply_sync_message_settled(&mut client.edge, update).unwrap();
     }
     client.hydrated = true;
@@ -2228,23 +2228,14 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
     }
 }
 
-fn result_row_count(update: &SyncMessage) -> usize {
+fn result_row_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            input_adds: program_fact_adds,
-            input_removes: program_fact_removes,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .chain(program_fact_removes)
-            .filter_map(|fact| match fact {
-                jazz::protocol::SupportingInput::Row(input)
-                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
-                {
-                    Some((&input.version_table, input.source_row, input.version.tx))
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| (&input.version_table, input.row, input.version.tx))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         _ => 0,

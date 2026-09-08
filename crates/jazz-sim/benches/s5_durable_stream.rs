@@ -1247,18 +1247,11 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn result_row_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            input_adds: program_fact_adds,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|fact| match fact {
-                jazz::protocol::SupportingInput::Row(input)
-                    if input.version_table.as_str() == table =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect::<BTreeSet<_>>()
             .len(),
         _ => 0,

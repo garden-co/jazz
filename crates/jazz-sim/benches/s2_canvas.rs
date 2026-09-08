@@ -1691,18 +1691,11 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
     }
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            input_adds: program_fact_adds,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|entry| match entry {
-                jazz::protocol::SupportingInput::Row(input)
-                    if input.version_table.as_str() == SHAPES =>
-                {
-                    Some(input.version.tx)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == SHAPES)
+            .map(|input| input.version.tx)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
@@ -2718,18 +2711,11 @@ fn is_ancestor(
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            input_adds: program_fact_adds,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|entry| match entry {
-                jazz::protocol::SupportingInput::Row(input)
-                    if input.version_table.as_str() == table =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect::<BTreeSet<_>>()
             .len(),
         _ => 0,

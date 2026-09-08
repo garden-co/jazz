@@ -185,7 +185,6 @@ mod tests {
                 read_view: ReadViewKey::default(),
             },
             settled_through: GlobalTime::default(),
-            reset_input_set: false,
             version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx: Transaction {
                     tx_id,
@@ -207,8 +206,7 @@ mod tests {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         });
         let nested_bytes = view_update_bytes(&nested);
         let nested_floor = bytes_floor(&nested);
