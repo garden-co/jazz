@@ -91,10 +91,10 @@ impl AccountRegistryOwner {
                         }
                         Request::LoginOrRegister(principal, response) => {
                             let result = jazz::db::block_on(registry.login_or_register(&principal));
-                            if result.is_ok() {
+                            if result.as_ref().is_ok_and(|result| result.created) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
-                            let _ = response.send(result);
+                            let _ = response.send(result.map(|result| result.assignment));
                         }
                         Request::Login(principal, response) => {
                             let _ = response.send(jazz::db::block_on(registry.login(&principal)));
@@ -182,6 +182,23 @@ mod tests {
     use super::*;
     use jazz::account_registry::{AccountError, AccountId};
     use uuid::Uuid;
+
+    // Observer invalidation is an internal owner contract, not an HTTP result.
+    #[tokio::test]
+    async fn login_or_register_notifies_only_new_assignments() {
+        let owner = AccountRegistryOwner::open(None).unwrap();
+        let mut changes = owner.subscribe();
+        let principal = Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "user".into(),
+        };
+        let created = owner.login_or_register(principal.clone()).await.unwrap();
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        assert_eq!(owner.login_or_register(principal).await.unwrap(), created);
+        assert!(!changes.has_changed().unwrap());
+        owner.close().unwrap();
+    }
 
     // The registry owner must reject even an empty old-preview root at the
     // manifest boundary, before attempting command replay.

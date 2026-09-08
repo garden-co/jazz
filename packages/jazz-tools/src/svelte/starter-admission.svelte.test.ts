@@ -63,6 +63,9 @@ it("B's startup retry cannot admit A after failed B login and failed A reopen", 
     linkJWT: async () => {
       throw new Error("unexpected");
     },
+    loginOrRegisterJWT: async () => {
+      throw new Error("unused login-or-register");
+    },
     loginJWT: async () => {
       if (failLogin) throw new Error("B login rejected");
       return handles[controls.current.user.id as keyof typeof handles] as never;
@@ -127,6 +130,9 @@ async function setupNotifications(read?: typeof controls.read) {
     },
     logout: () => {
       events.push("logout");
+    },
+    loginOrRegisterJWT: async () => {
+      throw new Error("unused login-or-register");
     },
     loginJWT: async () => {
       const subject = controls.current.user.id;

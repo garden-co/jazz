@@ -459,6 +459,75 @@ mod tests {
     use super::*;
     use crate::server::testing::{JazzServer, TestJwtIssuer};
 
+    /// Concurrent first-device requests and a lost-response retry must resolve
+    /// one immutable assignment, including when routed through an edge.
+    #[tokio::test]
+    async fn login_or_register_is_atomic_and_revocation_is_permanent() {
+        let core = JazzServer::start().await;
+        let edge = JazzServer::builder()
+            .with_app_id(core.app_id())
+            .with_upstream_url(core.base_url())
+            .start()
+            .await;
+        let client = reqwest::Client::new();
+        let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
+        let token = TestJwtIssuer::jwt_for_user("new-account");
+        let url = format!("{base}/login-or-register");
+        let mut requests = Vec::new();
+        for _ in 0..16 {
+            let client = client.clone();
+            let token = token.clone();
+            let url = url.clone();
+            requests.push(tokio::spawn(async move {
+                let response = client.post(url).bearer_auth(token).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                response.json::<AccountResponse>().await.unwrap().account
+            }));
+        }
+        let mut account = None;
+        for request in requests {
+            let resolved = request.await.unwrap();
+            assert_eq!(*account.get_or_insert(resolved), resolved);
+        }
+        // The client may have lost any preceding response: no client-generated
+        // request ID is necessary to recover the immutable identity assignment.
+        let retry = client.post(&url).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(
+            retry.json::<AccountResponse>().await.unwrap().account,
+            account.unwrap()
+        );
+        let strict = client
+            .post(format!("{base}/register"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(strict.status(), StatusCode::CONFLICT);
+        let invalid = client
+            .post(&url)
+            .bearer_auth("invalid-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        let revoked = client.post(format!("{base}/revoke")).bearer_auth(&token)
+            .json(&serde_json::json!({"identity": {"issuer": "urn:jazz:test", "subject": "new-account"}}))
+            .send().await.unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        for operation in ["login-or-register", "login"] {
+            let denied = client
+                .post(format!("{base}/{operation}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        }
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
+
     /// Exercise public HTTP enrollment through an actual edge/core topology.
     /// Service lookup is deliberately read-only and rejects user credentials.
     #[tokio::test]
