@@ -23,6 +23,7 @@ vi.mock("jazz-tools/svelte", async () => ({
   JazzProvider: (await import("./JazzProvider.svelte")).default,
   betterAuth: (await import("../session/app.js")).betterAuth,
 }));
+vi.mock("$app/navigation", () => ({ goto: vi.fn() }));
 vi.mock("$lib/auth-client", () => ({
   authClient: {
     $store: {
@@ -132,13 +133,17 @@ async function setupNotifications(read?: typeof controls.read) {
   });
   controls.owner = owner;
   const target = document.createElement("div");
+  let childRenders = 0;
   const component = mount(AppProvider, {
     target,
     props: {
       // A signed-out route renders a login form; private content needs a client.
       // A stale reopened A client would still expose this marker if admitted for B.
       children: createRawSnippet(() => ({
-        render: () => (owner.getSnapshot().client ? "<p>PRIVATE DATA</p>" : "<p>SIGN IN</p>"),
+        render: () => {
+          childRenders++;
+          return owner.getSnapshot().client ? "<p>PRIVATE DATA</p>" : "<p>SIGN IN</p>";
+        },
       })),
     },
   });
@@ -154,6 +159,7 @@ async function setupNotifications(read?: typeof controls.read) {
   await settle();
   return {
     owner,
+    childRenders: () => childRenders,
     target,
     events,
     stop,
@@ -308,4 +314,14 @@ it("retains the prepared session and retries an initial provider read failure", 
   expect(events).toEqual(["login:principal-a"]);
   expect(owner.getSnapshot().status).toBe("ready");
   expect(target.textContent).toContain("PRIVATE DATA");
+});
+
+it("never mounts protected route children in the signed-out fallback", async () => {
+  const { target, publish, childRenders } = await setupNotifications();
+  const admittedRenders = childRenders();
+  publish(null);
+  await settle();
+  expect(childRenders()).toBe(admittedRenders);
+  expect(target.textContent).toContain("Sign in");
+  expect(target.textContent).not.toContain("PRIVATE DATA");
 });
