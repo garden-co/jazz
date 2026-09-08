@@ -4,6 +4,10 @@ use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz::query::Query;
+use jazz::tools::native_transport_connector::{
+    NativeCatalogueBootstrapFuture, NativeTransportConnector, NativeTransportError,
+    NativeTransportFuture, NativeTransportRequest,
+};
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
@@ -13,6 +17,49 @@ use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+// Retry at the adapter boundary, before JazzClient renders transport errors as
+// diagnostic strings. The native adapter owns code/retry classification.
+struct RetryLaterConnector {
+    deadline: tokio::time::Instant,
+}
+
+impl NativeTransportConnector for RetryLaterConnector {
+    fn validate_catalogue_bootstrap_url(
+        &self,
+        server_url: &str,
+        app_id: jazz::tools::AppId,
+    ) -> Result<(), NativeTransportError> {
+        jazz_native_transport::NativeWebSocketConnector
+            .validate_catalogue_bootstrap_url(server_url, app_id)
+    }
+
+    fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
+        let deadline = self.deadline;
+        Box::pin(async move {
+            loop {
+                match jazz_native_transport::NativeWebSocketConnector
+                    .connect(request.clone())
+                    .await
+                {
+                    Err(error)
+                        if error.is_retryable() && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    result => return result,
+                }
+            }
+        })
+    }
+
+    fn bootstrap_catalogue(
+        &self,
+        request: NativeTransportRequest,
+    ) -> NativeCatalogueBootstrapFuture {
+        jazz_native_transport::NativeWebSocketConnector.bootstrap_catalogue(request)
+    }
+}
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[allow(dead_code)]
@@ -168,19 +215,12 @@ impl<'a> TestingClient<'a> {
             .expect("enroll public test client");
         let deadline = tokio::time::Instant::now() + timeout;
 
-        let client = loop {
-            match crate::connect(context.clone()).await {
-                Ok(client) => break client,
-                Err(error)
-                    if error.to_string().contains("bootstrapping")
-                        && error.to_string().contains("retry shortly")
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("connect test client after retry-later: {error}"),
-            }
-        };
+        let client = JazzClient::connect_with_native_transport(
+            context,
+            std::sync::Arc::new(RetryLaterConnector { deadline }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("connect test client after retry-later: {error}"));
 
         if let Some(ready_table) = ready_table {
             wait_for_edge_query_ready(
