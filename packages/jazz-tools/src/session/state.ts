@@ -25,6 +25,8 @@ export interface JazzSessionSnapshot<Client> {
   readonly client?: Client;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
+  /** Whether recovery repeats an uncommitted action or only reopens the selected account. */
+  readonly recovery?: "action" | "session";
 }
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
@@ -137,6 +139,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           account: selected,
           client: usable ? client : undefined,
           error: asError(cause),
+          recovery: "action",
         });
       }
       throw cause;
@@ -151,7 +154,12 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
         client = previous ? await openClient(previous) : undefined;
       } catch (startup) {
         if (token === generation)
-          publish({ status: "error", account: selected, error: asError(startup) });
+          publish({
+            status: "error",
+            account: selected,
+            error: asError(startup),
+            recovery: "action",
+          });
         throw cause;
       }
       if (token === generation)
@@ -160,6 +168,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           account: selected,
           client,
           error: asError(cause),
+          recovery: "action",
         });
       throw cause;
     }
@@ -172,7 +181,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       client = selected ? await openClient(selected) : undefined;
     } catch (cause) {
       if (token === generation)
-        publish({ status: "error", account: selected, error: asError(cause) });
+        publish({ status: "error", account: selected, error: asError(cause), recovery: "session" });
       throw cause;
     }
     if (token !== generation) throw superseded();

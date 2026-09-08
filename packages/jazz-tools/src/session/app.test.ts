@@ -18,6 +18,7 @@ function deferred<T>() {
 async function setup() {
   const events: string[] = [];
   let shutdownFailure = false;
+  let unknownShutdownFailure = false;
   let admissionFailure = false;
   let linkFailure = false;
   let openFailure = false;
@@ -61,6 +62,7 @@ async function setup() {
       return {
         async shutdown() {
           events.push(`flush:${selected.id}`);
+          if (unknownShutdownFailure) throw new Error("unknown shutdown failure");
           if (shutdownFailure) throw new GracefulShutdownSyncError(new Error("offline"));
         },
       };
@@ -69,6 +71,9 @@ async function setup() {
   return {
     session,
     events,
+    failUnknownShutdown(value: boolean) {
+      unknownShutdownFailure = value;
+    },
     failShutdown(value: boolean) {
       shutdownFailure = value;
     },
@@ -292,7 +297,7 @@ describe("shared Jazz application lifecycle", () => {
     );
     expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
     f.failLink(false);
-    await app.retry();
+    await Promise.all([app.retry(), app.retry()]);
     expect(f.events.filter((event) => event === "link")).toHaveLength(2);
     f.failOpen(true);
     await expect(
@@ -316,6 +321,21 @@ describe("shared Jazz application lifecycle", () => {
     f.failShutdown(false);
     await app.retry();
     expect(app.getSnapshot().status).toBe("signed-out");
+    await app.dispose();
+  });
+  it("repeats logout after an unknown shutdown failure without reopening the account", async () => {
+    const f = await setup();
+    const app = createJazzAppOwner({}, async () => f.session);
+    await tick();
+    await app.sessionActions.createLocalFirst();
+    f.failUnknownShutdown(true);
+    await expect(app.logout()).rejects.toThrow("unknown shutdown failure");
+    expect(f.session.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    f.failUnknownShutdown(false);
+    await app.retry();
+    expect(app.getSnapshot().status).toBe("signed-out");
+    expect(f.events.filter((event) => event === "open:local")).toHaveLength(1);
     await app.dispose();
   });
   it("attaches real Better Auth connector and coalesces descriptor rerenders", async () => {

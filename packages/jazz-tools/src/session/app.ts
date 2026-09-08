@@ -16,6 +16,7 @@ export type JazzAuth =
   | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
   | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout(): unknown } & AuthProviderState);
 export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
+/** The logout callback must clear provider state and eventually publish key: null. */
 export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind">): JazzAuth => ({
   kind: "jwt",
   ...options,
@@ -64,6 +65,8 @@ export function createJazzAppOwner<Config, Client>(
   let disposed = false;
   let failure: Error | undefined;
   let manualRetry: (() => Promise<void>) | undefined;
+  let actionGeneration = 0;
+  let retrying: Promise<void> | undefined;
   let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
   const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
   const listeners = new Set<() => void>();
@@ -84,9 +87,10 @@ export function createJazzAppOwner<Config, Client>(
             ? "signed-out"
             : "transitioning";
     const recovery: JazzAppSnapshot<Client>["recovery"] = error
-      ? current && (current.status === "ready" || current.status === "signed-out")
-        ? "action"
-        : "session"
+      ? (current?.recovery ??
+        (current && (current.status === "ready" || current.status === "signed-out")
+          ? "action"
+          : "session"))
       : undefined;
     const next = {
       status,
@@ -153,14 +157,24 @@ export function createJazzAppOwner<Config, Client>(
     (sessionActions as any)[name] = async (...args: unknown[]) => {
       if (auth) throw new Error("Manual session actions require an app without managed auth");
       const current = requireSession();
+      const generation = ++actionGeneration;
       const invoke = async () => {
+        if (disposed || generation !== actionGeneration)
+          throw new Error("Jazz app action was superseded");
         manualRetry = undefined;
+        failure = undefined;
         try {
           await (current[name] as (...args: unknown[]) => Promise<void>)(...args);
-          manualRetry = undefined;
+          if (generation === actionGeneration) manualRetry = undefined;
         } catch (cause) {
           const failed = current.getSnapshot();
-          if (failed.error && (failed.status === "ready" || failed.status === "signed-out"))
+          if (
+            generation === actionGeneration &&
+            failed.error &&
+            (failed.recovery === "action" ||
+              failed.status === "ready" ||
+              failed.status === "signed-out")
+          )
             manualRetry = invoke;
           throw cause;
         } finally {
@@ -225,26 +239,39 @@ export function createJazzAppOwner<Config, Client>(
       }
       publish();
     },
-    async retry() {
+    retry() {
+      if (disposed) return Promise.reject(new Error("Jazz app is disposed"));
       if (!session) return app.start();
-      requireSession();
+      if (retrying) return retrying;
+      const current = requireSession();
+      const generation = actionGeneration;
       failure = undefined;
-      try {
-        if (connection) await connection.retry();
-        else if (manualRetry && snapshot.recovery === "action") await manualRetry();
-        else {
-          await session.retry();
-          manualRetry = undefined;
-        }
-      } catch (cause) {
-        failure = asError(cause);
-        throw cause;
-      } finally {
-        publish();
-      }
+      const task = Promise.resolve()
+        .then(async () => {
+          if (disposed || generation !== actionGeneration) return;
+          try {
+            if (connection) await connection.retry();
+            else if (manualRetry && snapshot.recovery === "action") await manualRetry();
+            else {
+              await current.retry();
+              manualRetry = undefined;
+            }
+          } catch (cause) {
+            if (generation === actionGeneration) failure = asError(cause);
+            throw cause;
+          } finally {
+            publish();
+          }
+        })
+        .finally(() => {
+          if (retrying === task) retrying = undefined;
+        });
+      retrying = task;
+      return task;
     },
     async logout() {
       const current = requireSession();
+      const generation = ++actionGeneration;
       manualRetry = undefined;
       failure = undefined;
       try {
@@ -255,10 +282,10 @@ export function createJazzAppOwner<Config, Client>(
           );
         } else if (connection) await connection.logout();
         else await current.logout();
-        manualRetry = undefined;
+        if (generation === actionGeneration) manualRetry = undefined;
       } catch (cause) {
-        if (!connection) manualRetry = app.logout;
-        failure = asError(cause);
+        if (!connection && generation === actionGeneration) manualRetry = app.logout;
+        if (generation === actionGeneration) failure = asError(cause);
         throw cause;
       } finally {
         publish();
@@ -267,6 +294,7 @@ export function createJazzAppOwner<Config, Client>(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      ++actionGeneration;
       manualRetry = undefined;
       disconnect();
       publish(true);
