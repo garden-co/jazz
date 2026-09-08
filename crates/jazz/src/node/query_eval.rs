@@ -3552,6 +3552,16 @@ where
                 None => local.initial_received = false,
             }
         }
+        if local.initial_received {
+            let witnesses = self
+                .selected_deletion_witnesses(&authority_result_key, shape.schema_version())
+                .await?;
+            let (adds, removes) = local
+                .maintained
+                .replace_selected_deletion_witnesses(witnesses);
+            transitions.program_fact_adds.extend(adds);
+            transitions.program_fact_removes.extend(removes);
+        }
         Ok((
             local.subscription,
             local.maintained,

@@ -879,7 +879,33 @@ where
                 .contains_key(authority_result_key)
     }
 
-    /// Root identities are sufficient only for the unprojected scalar pilot.
+    /// Only exact deletion witnesses already admitted on this selected usage.
+    pub(crate) async fn selected_deletion_witnesses(
+        &mut self,
+        key: &AuthorityResultKey,
+        schema: SchemaVersionId,
+    ) -> Result<BTreeMap<ProgramFactEntry, VersionRow>, Error> {
+        let inputs = self
+            .query
+            .authority_results
+            .get(key)
+            .into_iter()
+            .flat_map(|state| state.covered_input_versions.values())
+            .filter(|input| input.version.layer == crate::protocol::ResultRowLayer::Deletion)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut witnesses = BTreeMap::new();
+        for input in inputs {
+            let version = self
+                .covered_input_version(&input, schema)
+                .await?
+                .ok_or(Error::MissingTransaction(input.version.tx))?;
+            witnesses.insert(ProgramFactEntry::CoveredInput(input), version);
+        }
+        Ok(witnesses)
+    }
+
+    /// Root identities suffice only for the unprojected scalar pilot.
     /// Policy proof sources must never become reconciliation candidates.
     pub(crate) fn scalar_authority_input_rows(
         &self,

@@ -2593,6 +2593,7 @@ where
                 session_claims,
                 session_claim_revision,
                 local_receiver,
+                partial_edge_query_host: edge_authority,
                 outbox: Rc::clone(&self.outbox),
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
@@ -3147,7 +3148,7 @@ where
                 }
             }
         }
-        self.reconcile_scalar_query_inputs().await?;
+        Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
             for connection in &connections {
@@ -3196,7 +3197,7 @@ where
                     std::mem::take(&mut state.scalar_reconciliation),
                 )
             };
-            self.advance_scalar_reconciliation(&request, revision, &mut reconciliation)
+            Box::pin(self.advance_scalar_reconciliation(&request, revision, &mut reconciliation))
                 .await?;
             let mut state = owner.borrow_mut();
             if !state.closed.get() {
@@ -3224,7 +3225,7 @@ where
             else {
                 continue;
             };
-            self.advance_scalar_reconciliation(&request, revision, &mut reconciliation)
+            Box::pin(self.advance_scalar_reconciliation(&request, revision, &mut reconciliation))
                 .await?;
             if let Some(owner) = self
                 .relay_upstream_subscription_owners
@@ -3291,7 +3292,7 @@ where
             drop(node);
             state.active = None;
         }
-        if state.generation.as_ref() != Some(&generation) {
+        if state.generation.as_ref() != Some(&generation) && state.pending.is_empty() {
             let mut owner = self.node.lock().await;
             let table = &request.shape.query().table;
             if owner.current_write_schema()?.schema != request.shape.schema_version() {

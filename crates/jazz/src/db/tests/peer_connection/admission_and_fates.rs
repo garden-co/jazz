@@ -4,6 +4,7 @@ use super::*;
 use crate::db::peer_connection::{
     ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
     coverage_group_subscription_key, dispatch_admitted_subscriber_message,
+    selects_authority_query_source,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -5730,6 +5731,58 @@ fn delegated_request_binding_requires_backend_client_link() {
         assert!(
             state.served.is_empty(),
             "{trust:?} must not admit delegated queries"
+        );
+    }
+}
+
+// Internal: this matrix pins host admission independently of wire declarations;
+// the reconnect test exercises its observable confidentiality consequence.
+#[test]
+fn partial_edge_query_source_uses_effective_scope_not_transport_trust() {
+    let alice = AuthorSubject::for_test_bytes([0x71; 16]);
+    for trust in [
+        CommitUnitTrust::Session,
+        CommitUnitTrust::TrustedBackend,
+        CommitUnitTrust::TrustedAuthority,
+    ] {
+        assert!(selects_authority_query_source(false, true, trust, alice));
+        assert!(!selects_authority_query_source(false, false, trust, alice));
+        assert_eq!(
+            selects_authority_query_source(false, true, trust, AuthorSubject::SYSTEM),
+            trust == CommitUnitTrust::Session
+        );
+    }
+}
+
+// Internal: the capability is a host-only admission event, never a wire field.
+#[test]
+fn authority_query_delegation_requires_explicit_host_admission() {
+    for trust in [
+        CommitUnitTrust::TrustedAuthority,
+        CommitUnitTrust::TrustedAdmin,
+    ] {
+        let schema = owner_read_schema();
+        let server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+        let (_, transport) = duplex();
+        let subscriber =
+            server.accept_subscriber_with_trust(transport, AuthorSubject::SYSTEM, trust);
+        subscriber.borrow_mut().admit_authority_query_delegate();
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        let binding = admitted_request_policy_binding(
+            state.ingest_context,
+            &state.peer,
+            None,
+            Some(crate::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::for_test_bytes([0x73; 16]),
+                claims: BTreeMap::new(),
+            }),
+        );
+        assert_eq!(
+            binding.is_some(),
+            trust == CommitUnitTrust::TrustedAuthority
         );
     }
 }

@@ -69,6 +69,8 @@ pub enum ServerLinkAdmission {
     /// A normal session or backend link.
     #[default]
     OrdinarySession,
+    /// Host-verified SYSTEM authority credential permitting scoped query delegation.
+    AuthorityQueryDelegate,
     /// A durable relay for exactly the one session authenticated by this
     /// connection. The epoch is freshly minted at admission and invalidated
     /// on reconnect.
@@ -735,6 +737,22 @@ impl ShellDb {
 }
 
 impl ShellPeerConnection {
+    fn admit_authority_query_delegate(&self) {
+        match self {
+            Self::Memory(connection) | Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).admit_authority_query_delegate()
+            }
+        }
+    }
+
+    fn set_partial_edge_query_host(&self) {
+        match self {
+            Self::Memory(connection) | Self::Durable(connection) => {
+                crate::db::block_on(connection.lock()).set_partial_edge_query_host()
+            }
+        }
+    }
+
     fn io_pump(&self) -> crate::db::PeerIoPump {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).io_pump(),
@@ -1305,6 +1323,12 @@ impl InMemoryServerShell {
                 trust,
             )
         };
+        if link_admission == ServerLinkAdmission::AuthorityQueryDelegate {
+            connection.admit_authority_query_delegate();
+        }
+        if self.role == NodeRole::Edge {
+            connection.set_partial_edge_query_host();
+        }
         let session_id = self.sessions.len();
         let auxiliary_pump = connection.io_pump();
         self.sessions.push(Some(ServerSessionState {
@@ -1330,20 +1354,39 @@ impl InMemoryServerShell {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn connect_upstream_wire_io(
         &mut self,
         protocol_version: u16,
         features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
     ) -> ServerUpstreamIo {
-        let transport = SharedWireTransport::default();
-        let adapter = Box::new(WireTransportAdapter::new_with_session_context(
-            transport.clone(),
+        self.connect_upstream_wire_io_with_delegated_sessions(
             protocol_version,
             features,
-            None,
             session_context,
-        ));
+            false,
+        )
+    }
+
+    pub(super) fn connect_upstream_wire_io_with_delegated_sessions(
+        &mut self,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
+    ) -> ServerUpstreamIo {
+        let transport = SharedWireTransport::default();
+        let adapter = Box::new(
+            WireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                transport.clone(),
+                protocol_version,
+                features,
+                None,
+                session_context,
+                permits_delegated_sessions,
+            ),
+        );
         let connection = self.db.connect_upstream(adapter);
         let pump = connection.io_pump();
         let connection_id = self.next_wire_upstream_connection_id;

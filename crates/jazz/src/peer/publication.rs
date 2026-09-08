@@ -1360,6 +1360,7 @@ impl PeerState {
         // exact selected authority closure. Do not let the generic
         // trusted-serving drain observe an authority output or a stale source
         // frontier.
+        let mut deletion_changes = (Vec::new(), Vec::new());
         let receiver_install = self
             .publication_states
             .get_mut(&subscription)
@@ -1388,6 +1389,13 @@ impl PeerState {
                 // Pending is not an empty strict result. Leave the receiver
                 // attached and wait for the exact claimed source closure.
                 return Ok(ResultTransitions::default());
+            }
+            if due {
+                let witnesses = node.selected_deletion_witnesses(&source, schema_version).await?;
+                if let Some(view) = self.publication_states.get_mut(&subscription)
+                    .and_then(|state| state.maintained_subscription_view.as_mut()) {
+                    deletion_changes = view.maintained.replace_selected_deletion_witnesses(witnesses);
+                }
             }
         }
         node.drive_ready_query_runtime_with_waker(progress_waker)
@@ -1423,8 +1431,7 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
-        let mut program_fact_adds = Vec::new();
-        let mut program_fact_removes = Vec::new();
+        let (mut program_fact_adds, mut program_fact_removes) = deletion_changes;
         let allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;

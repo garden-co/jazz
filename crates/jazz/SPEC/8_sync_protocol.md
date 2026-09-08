@@ -1168,6 +1168,30 @@ with a declared user `id` column are excluded because that spelling does not
 identify the physical row. There is no new wire or durable encoding. This pilot
 does not implement related-input or unknown negative-dependency completeness.
 
+### Host-admitted authority query delegation
+
+A verified Admin credential on a SYSTEM, non-bootstrap authority connection may
+receive the host-only `AuthorityQueryDelegate` capability. This permits immutable
+per-request query policy bindings on trusted Edge-to-Core links. Bare
+`TrustedAuthority`, bootstrap `TrustedAdmin`, raw peer roles, and wire claims do
+not grant this capability. Existing admission APIs default to no capability;
+write authorization and publication trust are unchanged.
+
+At a partial Edge, every admitted non-SYSTEM query scope (including delegated
+users over trusted links), and every untrusted session, consumes its exact
+Core-authorized source versions. Those sources compile in ClientLocal mode:
+missing policy-proof rows must not cause cached-policy re-evaluation or authorize
+fresh shared-cache bytes. The Edge's own SYSTEM scope retains local evaluation
+and ordinary query-driven reconciliation. Host topology selects this boundary,
+not a wire role or a cache history-completeness claim.
+
+Strict receivers retain the selected usage's deletion-layer CoveredInput facts
+and exact version bodies beside the content graph, since a tombstone contributes
+no app tuple. They forward those witnesses under the original source occurrence;
+replacement or teardown releases them. They never select a deletion from an
+unrelated shared-cache version. This retained state is proportional to the
+selected scope's deletion witnesses and changes only with its source receipt.
+
 ## Open Questions
 
 - 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.

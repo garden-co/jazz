@@ -610,12 +610,13 @@ fn spawn_edge_upstream_connector(
             let connection = tokio::select! {
                 biased;
                 _ = shutdown.wait_requested() => return,
-                result = shell.connect_upstream_wire(
+                result = shell.connect_upstream_wire_with_delegated_sessions(
                     connected.transport,
                     connected.terminal,
                     connected.protocol_version,
                     connected.features,
                     connected.session_context,
+                    connected.permits_delegated_sessions,
                 ) => match result {
                     Ok(connection) => connection,
                     Err(error) => {

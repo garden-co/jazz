@@ -3132,6 +3132,14 @@ fn admitted_request_policy_binding(
         {
             Some((delegated.identity, delegated.claims))
         }
+        Some(delegated)
+            if peer.authority_query_delegate
+                && ingest.trust == CommitUnitTrust::TrustedAuthority
+                && ingest.identity == AuthorSubject::SYSTEM
+                && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+        {
+            Some((delegated.identity, delegated.claims))
+        }
         Some(_) => None,
     }
 }

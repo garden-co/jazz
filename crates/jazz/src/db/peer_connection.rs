@@ -927,6 +927,7 @@ pub(super) struct SubscriberConnectionState {
     pub(super) session_claims: BTreeMap<String, Value>,
     pub(super) session_claim_revision: u64,
     pub(super) local_receiver: bool,
+    pub(super) partial_edge_query_host: bool,
     pub(super) outbox: Outbox,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) served: BTreeMap<SubscriptionKey, CoverageKey>,
@@ -942,6 +943,19 @@ pub(super) struct SubscriberConnectionState {
         BTreeMap<crate::protocol::AuthorizationSupportScopeKey, ServedAuthorizationScopeHydration>,
     pub(super) authority_scope_hydration_count: u64,
     pub(super) serve_dirty: bool,
+}
+
+/// Host topology and the admitted logical scope select query authority.
+/// Trusted transport does not turn a delegated user's scope into SYSTEM.
+pub(super) fn selects_authority_query_source(
+    client_scope_relay: bool,
+    partial_edge_query_host: bool,
+    trust: CommitUnitTrust,
+    subject: AuthorSubject,
+) -> bool {
+    client_scope_relay
+        || (partial_edge_query_host
+            && (trust == CommitUnitTrust::Session || subject != AuthorSubject::SYSTEM))
 }
 
 /// A valid request awaiting activation of its schema, not a rejected query.
@@ -1179,7 +1193,7 @@ where
             // opaque upstream usage below, because that usage *does* name an
             // authority result admitted under the old immutable claims.
             if group.upstream_opts.propagate_upstream
-                && group.upstream_opts.binding_source != BindingSource::RelayAuthoritySession
+                && group.authority_result_subscription != group.upstream_subscription
             {
                 let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
                 if let Some(owner) = owners.get_mut(&(
@@ -1233,7 +1247,7 @@ where
                 // may even be SYSTEM), so identity equality is not provenance.
                 if group.policy_binding_origin == CoveragePolicyBindingOrigin::DirectAdmitted {
                     group.policy_binding = refreshed_direct_binding.clone();
-                    if group.upstream_opts.binding_source == BindingSource::RelayAuthoritySession
+                    if group.authority_result_subscription == group.upstream_subscription
                         && group.upstream_opts.propagate_upstream
                         && let Some(downstream_subscription) = group.subscribers.first().copied()
                     {
@@ -1611,6 +1625,23 @@ where
         self.last_resume_bytes
     }
 
+    /// Host-only capability; does not alter write or publication trust.
+    pub(crate) fn admit_authority_query_delegate(&mut self) {
+        if let ConnectionLink::Subscriber(state) = &mut self.link {
+            state.peer.authority_query_delegate = state.ingest_context.trust
+                == CommitUnitTrust::TrustedAuthority
+                && state.ingest_context.identity == AuthorSubject::SYSTEM
+                && matches!(state.peer.role(), PeerRole::ClientLink { .. });
+        }
+    }
+
+    /// Set only by the serving shell's host-owned Edge role at admission.
+    pub(crate) fn set_partial_edge_query_host(&mut self) {
+        if let ConnectionLink::Subscriber(state) = &mut self.link {
+            state.partial_edge_query_host = true;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
@@ -1683,6 +1714,7 @@ where
             peer,
             coverage_groups,
             ingest_context,
+            partial_edge_query_host,
             scope_purposes,
             scope_aggregates,
             serve_dirty,
@@ -1717,8 +1749,13 @@ where
         ) in groups
         {
             let group_subscription = coverage_group_subscription_key(&coverage);
+            let scope_relay = selects_authority_query_source(
+                self.node.borrow().client_relay_scope().is_some(),
+                *partial_edge_query_host,
+                ingest_context.trust,
+                policy_binding.0,
+            );
             peer.set_subscription_policy_binding(group_subscription, policy_binding);
-            let scope_relay = self.node.borrow().client_relay_scope().is_some();
             if awaiting_upstream_settlement {
                 let authority_result_source = self
                     .node
@@ -2822,6 +2859,19 @@ where
                                 {
                                     continue;
                                 }
+                                // A rejected point query is unresolved, but must release
+                                // its bounded batch slot and auxiliary transport handle.
+                                for owner in self.subscriptions.borrow().iter().filter_map(|owner| owner.upgrade()) {
+                                    let mut owner = owner.borrow_mut();
+                                    if owner.scalar_reconciliation.active.as_ref().is_some_and(|probe| probe.subscription == subscription) {
+                                        owner.scalar_reconciliation.active = None;
+                                    }
+                                }
+                                for owner in self.relay_upstream_subscription_owners.borrow_mut().values_mut() {
+                                    if owner.scalar_reconciliation.active.as_ref().is_some_and(|probe| probe.subscription == subscription) {
+                                        owner.scalar_reconciliation.active = None;
+                                    }
+                                }
                                 let delivered = queue_relay_subscription_rejection(
                                     &self.relay_upstream_subscription_owners,
                                     &self.pending_relay_subscription_rejections,
@@ -3553,6 +3603,7 @@ where
                 session_claims: _,
                 session_claim_revision: _,
                 local_receiver,
+                partial_edge_query_host,
                 outbox,
                 upstream_subscriptions,
                 served,
@@ -4371,7 +4422,9 @@ where
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
-                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+                            let scope_relay = selects_authority_query_source(
+                                self.node.borrow().client_relay_scope().is_some(), *partial_edge_query_host,
+                                ingest_context.trust, subscription_policy_binding.0);
                             let upstream_opts = if local_subscriber || scope_relay {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
@@ -7076,7 +7129,6 @@ fn stamp_subscriber_opening_state<S>(
     // A selected upstream source does not itself make this a strict read.
     // Local-first still publishes cached inputs while that source is pending.
     if let SyncMessage::ViewUpdate(payload) = message
-        && node.borrow().client_relay_scope().is_some()
         && peer.subscription_awaits_selected_authority_source(payload.subscription)
     {
         let source = peer

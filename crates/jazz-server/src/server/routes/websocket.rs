@@ -219,6 +219,13 @@ fn ws_link_admission(
     admission_epoch: u64,
 ) -> Result<ServerLinkAdmission, WireError> {
     match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession
+            if admission.credential == WebSocketCredential::Admin
+                && admission.identity == AuthorSubject::SYSTEM
+                && admission.trust == CommitUnitTrust::TrustedAuthority =>
+        {
+            Ok(ServerLinkAdmission::AuthorityQueryDelegate)
+        }
         RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
         RequestedWebSocketLink::ScopeIsolatedClientRelay
             if admission.trust == CommitUnitTrust::Session
@@ -1665,6 +1672,10 @@ mod tests {
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
         assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&relay, 0, 1).unwrap(),
+            ServerLinkAdmission::AuthorityQueryDelegate
+        );
 
         let admin_scope_request = ws_admission(
             WebSocketPrelude {
@@ -1703,6 +1714,10 @@ mod tests {
         .await
         .expect("admit authenticated catalogue bootstrap");
         assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
+        assert_eq!(
+            ws_link_admission(&bootstrap, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let non_system = ws_admission(
             WebSocketPrelude {
@@ -1722,6 +1737,10 @@ mod tests {
         .await
         .expect("admit authentication before protocol bootstrap rejection");
         assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&non_system, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let backend = ws_admission(
             WebSocketPrelude {

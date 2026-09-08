@@ -595,16 +595,23 @@ async fn run_reconnect_revoked_input(dependency: bool) {
                 .ready_on("tasks", TIMEOUT)
                 .connect()
                 .await;
+            let edge_system = TestingClient::builder()
+                .with_server(&relay)
+                .with_schema(schema.clone())
+                .with_user_id("edge-system")
+                .as_admin()
+                .connect()
+                .await;
             let mut tasks = Vec::new();
             let mut grants = Vec::new();
             for _ in 0..2 {
                 let mut input =
                     row_input!("owner" => "alice", "done" => false, "title" => "before");
                 if dependency {
-                    let (grant, _, tx) = bob
+                    let (grant, _, tx) = edge_system
                         .insert("grants", row_input!("owner" => "alice"))
                         .unwrap();
-                    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+                    jazz_testkit::wait_for_edge_txs(&edge_system, &[tx.unwrap()]).await;
                     grants.push(grant);
                     input.insert("grant".into(), grant.into());
                 }
@@ -612,9 +619,34 @@ async fn run_reconnect_revoked_input(dependency: bool) {
                 jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
                 tasks.push(task);
             }
+            // Close the separate Edge seed writer before changing its grants
+            // through Core; keep only the independent task reader below.
+            edge_system.shutdown().await.unwrap();
+            let edge_system = TestingClient::builder()
+                .with_server(&relay)
+                .with_schema(schema.clone())
+                .with_user_id("edge-system-reader")
+                .as_admin()
+                .connect()
+                .await;
+            if dependency {
+                let mut observed = bob
+                    .subscribe_with_read_tier(Query::from("grants"), ReadTier::Remote)
+                    .await
+                    .unwrap();
+                let mut observed_log = Vec::new();
+                wait_for_subscription_update(
+                    &mut observed,
+                    &mut observed_log,
+                    TIMEOUT,
+                    "Core writer observes grants",
+                    |log| grants.iter().all(|grant| has_added_id(log, *grant)),
+                )
+                .await;
+            }
             let alice = TestingClient::builder()
                 .with_server(&relay)
-                .with_schema(schema)
+                .with_schema(schema.clone())
                 .with_user_id("alice")
                 .as_user()
                 .connect()
@@ -629,6 +661,22 @@ async fn run_reconnect_revoked_input(dependency: bool) {
                 &mut log,
                 TIMEOUT,
                 "alice caches both inputs",
+                |log| tasks.iter().all(|task| has_added_id(log, *task)),
+            )
+            .await;
+            // An independent trusted scope deliberately fills the Edge's shared
+            // task cache. Its SYSTEM-authorized successors must not become Alice's
+            // authority merely because the Edge still holds an old grant.
+            let mut system_scope = edge_system
+                .subscribe_with_read_tier(Query::from("tasks"), ReadTier::Remote)
+                .await
+                .unwrap();
+            let mut system_log = Vec::new();
+            wait_for_subscription_update(
+                &mut system_scope,
+                &mut system_log,
+                TIMEOUT,
+                "trusted scope caches tasks",
                 |log| tasks.iter().all(|task| has_added_id(log, *task)),
             )
             .await;
@@ -658,6 +706,22 @@ async fn run_reconnect_revoked_input(dependency: bool) {
                 )
                 .unwrap();
             jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            system_log.clear();
+            wait_for_subscription_update(
+                &mut system_scope,
+                &mut system_log,
+                TIMEOUT,
+                "SYSTEM receives successor in Edge shared cache",
+                |log| jazz_testkit::has_updated(log, tasks[0]),
+            )
+            .await;
+            assert!(
+                local_rows(&edge_system, Query::from("tasks"))
+                    .await
+                    .iter()
+                    .any(|(id, values)| *id == tasks[0]
+                        && values.contains(&Value::Text("forbidden successor".into())))
+            );
             let mut local = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
                 .await
@@ -697,6 +761,7 @@ async fn run_reconnect_revoked_input(dependency: bool) {
             let cached = local_rows(&alice, Query::from("tasks")).await;
             assert!(cached.iter().any(|(id, values)| *id == tasks[1]
                 && values.contains(&Value::Text("readable control".into()))));
+            edge_system.shutdown().await.unwrap();
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
             relay.shutdown().await;
