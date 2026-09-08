@@ -589,3 +589,43 @@ must not widen those facts.
 - **Per-column encryption and authorization.** If encrypted columns are added,
   policy evaluation must define what can be evaluated server-side, what requires
   client-side keys, and how key loss/revocation interacts with read policy.
+
+### Bounded current-row availability pilot
+
+The optional `FEATURE_CURRENT_ROW_AVAILABILITY` exchange requires the existing
+admitted authorization-scope link feature. Its three appended semantic variants
+(`CurrentRowsRequest`, `CurrentRowsReceipt`, `CurrentRowsCancel`) use the existing
+named postcard semantic codec and native `VersionCarrier` record encoding. The
+wire-v1 corpus pins their bytes. No durable receipt encoding is introduced.
+
+A request contains at most 64 distinct known `(current schema, logical table,
+global physical table UUID, row UUID)` coordinates. Only the default root view
+of an unbranched table is supported. Unknown schema, unsupported scope, missing
+capability, and unavailable upstream resolve Unknown, never denial. Physical
+row addressing bypasses the public `id` field. The host-only complete-policy-input
+capability enables Core minting; history completeness and advertised wire roles
+do not enable it.
+
+Core evaluates the exact admitted immutable policy binding and captures its
+history cut, policy epoch, claims revision and connection-local evaluation
+sequence under one node owner lock. Cut and evaluation sequence have independent
+monotonic floors, scoped by Core identity, epoch and exact policy binding. The
+sequence is not a subscription's authorization generation. Generic
+CurrentUnavailable reveals neither existence, deletion, denial cause, nor a
+successor version. Readable includes an authorized deleted-row preimage and its
+ordinary deletion-register witness so includeDeleted retains its semantics.
+Only requested readable physical rows enter native carriers; transaction siblings
+and policy-support rows do not. Receivers validate the complete cardinality,
+coordinates and immutable context before normal ingestion, and expose typed
+outcomes only after that ingestion succeeds.
+
+An Edge trusted by its client may proxy the exchange. It retains a bounded
+mapping from downstream nonce/connection to fresh upstream nonce, selected
+admitted upstream link and immutable client policy binding. A delegated client
+binding remains client-scoped over a trusted backend link; SYSTEM is not a
+fallback. Receipts are admitted only against the still-selected live upstream
+mapping. Disconnect, cancellation and authority handoff invalidate requests;
+backpressure preserves unsent ownership. This is a trusted Edge forwarding
+contract, not an end-to-end signature protocol. An Edge's cached policy query
+never mints a definitive outcome. The pilot exposes an internal typed result and
+does not yet modify unavailable-row source filters or durable state.

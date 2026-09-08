@@ -632,6 +632,7 @@ where
         identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
+        physical_row: Option<RowUuid>,
     ) -> Result<QueryProgram, Error> {
         let query_schema = self
             .catalogue
@@ -679,7 +680,14 @@ where
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
         // reads, which discard the physical cap before their anti-join.
-        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        let access_paths = if let Some(row) = physical_row {
+            BTreeMap::from([(
+                root_source_id(&shape.query().table),
+                CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+            )])
+        } else {
+            self.one_shot_access_paths(shape, binding, tier)?
+        };
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
@@ -2110,6 +2118,7 @@ where
                 identity,
                 authorization_mode,
                 read_view,
+                None,
             )
             .await?;
         let deltas = self
@@ -2708,6 +2717,59 @@ where
         let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
         self.finish_engine_query_rows_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
+    }
+
+    pub(crate) async fn query_readable_current_row_including_deleted(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let program = self
+            .compile_include_deleted_query_program_in_authorization_mode(
+                shape,
+                binding,
+                tier,
+                identity,
+                QueryAuthorizationMode::TrustedServing,
+                &ReadViewSpec::default(),
+                Some(row_uuid),
+            )
+            .await?;
+        // A policy can introduce claim parameters even though this physical
+        // row lookup has no public query parameters. Those programs must go
+        // through Groove's prepare/bind boundary just like ordinary serving
+        // reads; executing the lowered graph directly leaves its binding
+        // source unprepared and fails instead of representing a denied read.
+        let plan = self
+            .prepared_query_plan_from_program(&program, shape, binding)
+            .await?;
+        let policy = self.query_program_policy_context(identity);
+        let deltas = match plan {
+            PreparedQueryPlan::Prepared { shape, params, .. } => {
+                let values = binding_values_for_plan(
+                    binding,
+                    &params,
+                    &policy,
+                    PreparedClaimBindingMode::Strict,
+                )?;
+                self.bind_disposable_shape_snapshot(shape, &values).await?
+            }
+            PreparedQueryPlan::Graph { graph, .. } => self
+                .database
+                .query_graph(graph)
+                .await
+                .map_err(Error::Groove)?,
+            PreparedQueryPlan::PeerMaintainedMarker => {
+                unreachable!("point reads never use peer-maintained plans")
+            }
+        };
+        self.materialize_include_deleted_query_rows(table, deltas)
     }
 
     #[cfg(test)]

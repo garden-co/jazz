@@ -618,6 +618,7 @@ where
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
+    pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
@@ -746,7 +747,7 @@ fn queue_direct_control(
     pending.push_back(PendingSubscriberControlResponse::direct(message));
 }
 
-fn queue_sync_context_control(
+pub(super) fn queue_sync_context_control(
     pending: &mut VecDeque<PendingSubscriberControlResponse>,
     message: SyncMessage,
 ) {
@@ -1889,6 +1890,7 @@ where
         self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
+        self.pump_current_rows()?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -2658,6 +2660,33 @@ where
                                     .apply_trusted_catalogue_snapshot(*snapshot)
                                     .await?;
                                 publications.extend(outcome.publications);
+                            }
+                            SyncMessage::CurrentRowsReceipt(receipt) => {
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &self.subscriptions,
+                                        &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
+                                        &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                let expected = *expected_scope_authority;
+                                let selected = *self.admitted_upstream_authority.borrow();
+                                row_availability::receive_current_rows(&self.node, &self.current_rows, selected, expected, authority_receipt_eligible, receipt).await?;
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                applied = true;
+                                continue;
                             }
                             SyncMessage::RowVersionPayloads { version_bundles } => {
                                 if !pending_view_updates.is_empty() {
@@ -3750,6 +3779,48 @@ where
                         }
                         SyncMessage::ChunkResponseBatch(_) => {
                             drop_peer_request(&self.node);
+                            continue;
+                        }
+                        SyncMessage::CurrentRowsCancel { request_id } => {
+                            self.current_rows.borrow_mut().cancel_downstream(connection_epoch, request_id);
+                            continue;
+                        }
+                        SyncMessage::CurrentRowsRequest(request) => {
+                            let supported = self.transport.connection_session_context().is_some_and(|session| session.negotiated_features & crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY != 0);
+                            if !supported || !row_availability::valid_request(&request) {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let Some((identity, claims)) = admitted_request_policy_binding(*ingest_context, peer, session_claim_binding.clone(), request.delegated_session.clone()) else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let context = crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims.clone());
+                            if self.node.borrow().can_mint_current_row_receipts() {
+                                let progress = {
+                                    let mut router = self.current_rows.borrow_mut();
+                                    let progress = router.progress.entry(connection_epoch).or_default();
+                                    *progress = progress.checked_add(1).expect("current row progress exhausted");
+                                    *progress
+                                };
+                                let epoch = self.transport.connection_session_context().unwrap().local.epoch;
+                                let receipt = {
+                                    let mut node = self.node.lock().await;
+                                    node.scoped_active_session_claims(identity, claims).evaluate_current_rows(&request, context, epoch, progress).await?
+                                };
+                                queue_sync_context_control(&mut self.pending_control_responses, SyncMessage::CurrentRowsReceipt(receipt));
+                            } else {
+                                let upstream_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                let mut forwarded = request.clone();
+                                forwarded.request_id = upstream_id;
+                                forwarded.delegated_session = None;
+                                let route = row_availability::CurrentRowsRoute { request: forwarded, context: context.clone(), upstream: None, downstream: Some((connection_epoch, request.request_id)), sender: None };
+                                if self.admitted_upstream_authority.borrow().is_none() || !self.current_rows.borrow_mut().admit(route) {
+                                    queue_direct_control(&mut self.pending_control_responses, SyncMessage::CurrentRowsReceipt(row_availability::unknown_receipt(&request, context)));
+                                }
+                            }
+                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                            flush_subscriber_controls_or_stop!(self, peer);
                             continue;
                         }
                         SyncMessage::AuthorizationScopeIntent {
@@ -6062,7 +6133,7 @@ where
     Ok(())
 }
 
-fn transport_error(error: TransportError) -> Error {
+pub(super) fn transport_error(error: TransportError) -> Error {
     match error {
         TransportError::Backpressure => {
             Error::new(ErrorCode::Backpressure, "transport backpressure")
@@ -6800,7 +6871,7 @@ where
     node.borrow_mut().record_dropped_peer_request();
 }
 
-fn handle_transport_backpressure<S>(
+pub(super) fn handle_transport_backpressure<S>(
     node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &TransportError,

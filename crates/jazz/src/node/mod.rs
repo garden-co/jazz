@@ -325,6 +325,7 @@ mod policy;
 pub(crate) mod query_engine;
 mod query_eval;
 mod recovery;
+mod row_availability;
 mod source_resolution;
 mod views;
 pub(crate) use open_tx::TransactionBranchRowState;

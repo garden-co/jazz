@@ -367,7 +367,10 @@ where
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
                 ),
-                SyncMessage::PermissionAdviceRequest { .. }
+                SyncMessage::CurrentRowsRequest(_)
+                | SyncMessage::CurrentRowsReceipt(_)
+                | SyncMessage::CurrentRowsCancel { .. }
+                | SyncMessage::PermissionAdviceRequest { .. }
                 | SyncMessage::PermissionAdviceResponse { .. }
                 | SyncMessage::AuthorizationScopeSubscribe { .. }
                 | SyncMessage::AuthorizationScopeReceipt { .. }

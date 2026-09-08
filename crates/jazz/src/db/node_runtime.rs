@@ -203,6 +203,7 @@ where
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
+    pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
@@ -342,6 +343,7 @@ where
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            current_rows: Rc::new(RefCell::new(row_availability::CurrentRowsRouter::default())),
             edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             local_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
@@ -2155,6 +2157,7 @@ where
                 ),
                 write_state_waiters: Rc::clone(&self.write_state_waiters),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+                current_rows: Rc::clone(&self.current_rows),
                 edge_fate_routes: Rc::clone(&self.edge_fate_routes),
                 local_fate_routes: Rc::clone(&self.local_fate_routes),
                 admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
@@ -2567,6 +2570,7 @@ where
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            current_rows: Rc::clone(&self.current_rows),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
             local_fate_routes: Rc::clone(&self.local_fate_routes),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
@@ -2741,6 +2745,7 @@ where
             return false;
         }
         let connection_epoch = connection_ref.connection_epoch;
+        self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
         let mut terminal_permission_advice = Vec::new();

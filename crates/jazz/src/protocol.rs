@@ -254,6 +254,81 @@ pub enum SyncMessage {
     /// Complete edge-admitted frontier, accepted only on an authenticated
     /// authority link. Core reconciles after all members have been admitted.
     AuthorityPublication(AuthorityPublication),
+    /// Bounded known-row revalidation in the current default view.
+    CurrentRowsRequest(CurrentRowsRequest),
+    /// Core-backed current-row evidence, scoped to one admitted request.
+    CurrentRowsReceipt(CurrentRowsReceipt),
+    /// Retire a request on this connection; never cancels another connection.
+    CurrentRowsCancel {
+        /// Nonce allocated on this connection.
+        request_id: PermissionAdviceRequestId,
+    },
+}
+
+/// Maximum known rows in one current-availability request.
+pub const MAX_CURRENT_ROWS: usize = 64;
+
+/// Exact current-default-view coordinate. Local physical aliases never cross this wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowCoordinate {
+    /// Exact current schema identity.
+    pub schema: SchemaVersionId,
+    /// Logical table in that schema.
+    pub table: String,
+    /// Permanent physical lineage, never a node-local alias.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Known physical row UUID.
+    pub row: RowUuid,
+}
+
+/// Caller supplies known coordinates, never an enumeration query or policy predicate.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsRequest {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// Immutable host-admitted delegated binding, absent on ordinary clients.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// No unavailable outcome distinguishes missing, deleted, and denied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum CurrentRowOutcome {
+    /// Authorized current content, including an authorized deletion preimage.
+    Readable,
+    /// No authorized current representation; no cause is disclosed.
+    CurrentUnavailable,
+    /// No definitive current evidence is available.
+    Unknown,
+}
+
+/// Core evaluation evidence. The authenticated serving Edge may proxy this after
+/// validating its selected upstream nonce/epoch; this is not a signature chain.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsReceipt {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// One outcome for every coordinate, with identical ordering.
+    pub outcomes: Vec<CurrentRowOutcome>,
+    /// Exact admitted policy snapshot.
+    pub context: PolicyBindingKey,
+    /// Core mint identity validated by the forwarding owner.
+    pub core: NodeUuid,
+    /// Core connection epoch; old epochs cannot discharge new requests.
+    pub core_epoch: u64,
+    /// Core claims revision captured during evaluation.
+    pub claims_revision: u64,
+    /// Core catalogue/policy epoch captured during evaluation.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by evaluation.
+    pub settled_through: GlobalTime,
+    /// Monotonic evaluation sequence in this Core connection epoch; independent of cut.
+    pub authorization_progress: u64,
+    /// Authorized requested rows only. No unavailable outcome has a version witness.
+    pub version_carriers: Vec<VersionCarrier>,
 }
 
 /// Shared payload for ordinary and authorization-scope view updates.
@@ -617,6 +692,12 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
+            Self::CurrentRowsRequest(_)
+            | Self::CurrentRowsReceipt(_)
+            | Self::CurrentRowsCancel { .. } => {
+                crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY
+                    | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            }
             Self::ChunkRequestBatch(_)
             | Self::ChunkResponseBatch(_)
             | Self::ChunkUploadStart(_)
@@ -638,6 +719,15 @@ impl SyncMessage {
             }
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
+            }
+            Self::CurrentRowsReceipt(receipt) => {
+                validate_version_carrier_runs(&receipt.version_carriers)?;
+                for carrier in &receipt.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
             }
             _ => self.carried_view_update().map_or(Ok(()), |view| {
                 validate_version_carrier_runs(&view.version_carriers)?;
