@@ -25,7 +25,7 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
       return;
     }
     try {
-      await lifecycle.loginJWT({ getToken });
+      await lifecycle.loginOrRegisterJWT({ getToken });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed");
     } finally {

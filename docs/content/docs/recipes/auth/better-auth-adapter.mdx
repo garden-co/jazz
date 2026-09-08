@@ -159,35 +159,37 @@ export const auth = betterAuth({
 
 ### Connect Better Auth sessions to Jazz accounts
 
-The adapter stores Better Auth users, password credentials, and application sessions. A successful Better Auth sign-in does not itself register a Jazz account. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
+The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, attach `connectBetterAuth(jazz, authClient)` (or React's `useBetterAuth`) to the app's Jazz session. Better Auth signup and login then automatically create or resolve the Jazz account; there is no second enrollment action. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
 
 Mount `auth.handler` using your framework's [Better Auth integration](https://www.better-auth.com/docs/installation). The [JWT plugin](https://www.better-auth.com/docs/plugins/jwt) exposes `/api/auth/token` for a signed-in user and `/api/auth/jwks` for verification. Configure the Jazz core with that reachable JWKS URL and the same issuer and audience as the backend's `jazzConfig`. For a self-hosted core, use `--jwks-url`, `--jwt-issuer`, and `--jwt-audience`; see [Server Setup](/docs/getting-started/server-setup). Set `BETTER_AUTH_URL` without a trailing slash in this example.
 
-An explicit enrollment route can resolve the application cookie and register a fresh identity:
+For a server-only app, resolve the Better Auth cookie and opt into account creation
+on the immutable request scope. The shared backend client keeps its own identity;
+no extra Jazz session or client is created for the user:
 
-```ts title="enroll.ts"
-import { createJazzSession } from "jazz-tools/backend";
-import { auth, jazzConfig } from "./auth";
+```ts title="messages.ts"
+import { auth, client } from "./auth";
+import { app } from "./schema";
 
-export async function enroll(request: Request) {
+export async function messages(request: Request) {
   const signedIn = await auth.api.getSession({ headers: request.headers });
   if (!signedIn) return new Response("Sign in first", { status: 401 });
   const { token } = await auth.api.getToken({ headers: request.headers });
-
-  // A separate owner keeps the shared backend's selected account unchanged.
-  const userSession = await createJazzSession(jazzConfig);
-  try {
-    await userSession.registerJWT(token);
-    return Response.json({ account: userSession.getSnapshot().account!.id });
-  } finally {
-    await userSession.close();
-  }
+  const headers = new Headers(request.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  const bearerRequest = new Request(request, { headers });
+  const db = await client.forRequest(bearerRequest, { account: "login-or-register" });
+  return Response.json(await db.all(app.messages, { tier: "global" }));
 }
 ```
 
-Use `registerJWT` only for explicit first-time enrollment. Returning identities use `loginJWT`; do not turn every login failure into registration. To attach a fresh identity to an existing account, first select that account through an admitted identity, then call `linkJWT` with the fresh identity's token. See [Authentication](/docs/auth/authentication) for registration, linking, and failure behavior.
+The core atomically resolves an active assignment or creates one for a fresh
+identity. Invalid and revoked credentials are rejected. Use the default strict
+request mode for a hybrid app where signup must link the fresh provider identity
+to an existing guest account first. See [Authentication](/docs/auth/authentication).
 
-After enrollment, clients obtain a JWT from `/api/auth/token` and send it to application data routes as a bearer. Each route creates its own immutable scope:
+Browser clients with an automatic connection can instead send a JWT from
+`/api/auth/token` as a bearer. Data routes then use the default strict scope:
 
 ```ts title="messages.ts"
 import { auth, client } from "./auth";

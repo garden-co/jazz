@@ -1,9 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { getAuthActions } from "$lib/auth-actions";
 
-  const auth = getAuthActions();
   let isSignUp = $state(false);
   let error = $state<string | null>(null);
 
@@ -16,11 +14,12 @@
     const name = data.get("name") as string | null;
 
     try {
-      await auth.authenticate(isSignUp, () =>
+      const result = await (
         isSignUp
           ? authClient.signUp.email({ name: name!, email, password })
-          : authClient.signIn.email({ email, password }),
+          : authClient.signIn.email({ email, password })
       );
+      if (result.error) throw new Error(result.error.message ?? "Authentication failed");
       await goto("/dashboard");
     } catch (cause) {
       error = cause instanceof Error ? cause.message : "Account setup failed";

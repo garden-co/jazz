@@ -97,18 +97,17 @@ export function App() {
 
 ### Account admission — `src/App.tsx`
 
-`JazzApp` gets an ordinary WorkOS JWT through `getAccessToken()` and calls
-`accounts.loginJWT({ getToken })`. Login resolves an existing Jazz account; it
-never registers an identity implicitly. The UI offers an explicit registration
-action for a new provider identity. Without a WorkOS session, the app restores
-or creates a local-first account.
+This example requires WorkOS sign-in before opening the chat. `JazzApp` owns a
+`JazzSession`; `useAuthProvider` watches WorkOS hydration and user identity.
+The first provider sign-in creates its Jazz account atomically, and returning
+identities resolve the same account. No second registration action is needed.
 
-The app creates a client from that opaque handle and provides the existing
-client with `JazzClientProvider`. Client creation and cleanup run after React
-commits, including Strict Mode cancellation. Before provider redirects it uses
-ordinary `shutdown({ waitForSync: true })`; a failed synchronization barrier
-preserves the existing client. Same-identity expiry refresh calls WorkOS through
-the account credential's `getToken` callback.
+`JazzSessionProvider` owns the data view across transitions. Sign-out uses the
+shared connection to flush Jazz before WorkOS revokes its token or redirects.
+Failed synchronization remains visible with a retry. Token refresh calls
+`getAccessToken({ forceRefresh: true })` without replacing the client.
+For a guest-first example that preserves local data during signup, see the
+Better Auth or custom JWT chat examples' manual linking flow.
 
 Ownership policies compare `$createdBy.account` with `session.user.account`.
 The provider's issuer and subject remain available under `session.user.identity`.

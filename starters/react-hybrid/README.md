@@ -12,7 +12,7 @@ Run `pnpm install` then `pnpm dev`. Set `BETTER_AUTH_SECRET` in `.env` before st
 
 The app configures one Jazz session with `initial: "local-first"`. It restores a usable saved account or creates a local-first account, which works offline and syncs when the server is available.
 
-After Better Auth signup, the app calls `session.linkJWT({ getToken })`; sign-in calls `session.loginJWT({ getToken })`. The session detaches consumers, waits for sync, and replaces the client. A failed sync preserves the usable prior client and prevents enrollment. The credential callback supplies fresh tokens without changing a live client identity.
+After Better Auth signup, the app calls `session.linkJWT({ getToken })`; sign-in calls `session.loginOrRegisterJWT({ getToken })`. The session detaches consumers, waits for sync, and replaces the client. A failed sync preserves the usable prior client and prevents enrollment. The credential callback supplies fresh tokens without changing a live client identity.
 
 Recovery phrases and passkeys export or restore the selected local-first handle. Restore also shuts down its context before calling `restoreLocalFirst`.
 
@@ -45,3 +45,7 @@ The included Better Auth adapter is in-memory.
 ## Where to go next
 
 Read the Jazz and Better Auth documentation before extending authentication.
+
+This starter uses manual hybrid authentication. Do not attach `connectBetterAuth`
+or `useBetterAuth`: signup must link the incoming identity before any automatic
+account creation. Auth-required apps can use the corresponding Better Auth starter.

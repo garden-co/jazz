@@ -90,7 +90,7 @@ export function mountApp(
         ? `<p role="alert">${escapeHtml(sessionError.message)}</p><button data-action="retry-session">Retry Jazz startup</button><button data-action="retry-login">Retry sign in</button><button data-action="continue-local">Continue locally</button>`
         : `<div>Loading…</div>`;
       root.querySelector('[data-action="retry-login"]')?.addEventListener("click", () => {
-        void recover(() => jazz.loginJWT({ getToken })).catch(() => {});
+        void recover(() => jazz.loginOrRegisterJWT({ getToken })).catch(() => {});
       });
       root.querySelector('[data-action="continue-local"]')?.addEventListener("click", () => {
         void recover(jazz.createLocalFirst).catch(() => {});

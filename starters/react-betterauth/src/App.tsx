@@ -21,7 +21,7 @@ export function App() {
     try {
       await actions.signOut();
     } catch (cause) {
-      actions.reportFailure(cause);
+      // Shared auth state exposes logout failures and retry.
     }
   }
 

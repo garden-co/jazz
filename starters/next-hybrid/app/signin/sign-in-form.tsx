@@ -25,7 +25,7 @@ export function SignInForm() {
     const result = await signInAction(previous, formData);
     if (result) return result;
     try {
-      await lifecycle.loginJWT({ getToken });
+      await lifecycle.loginOrRegisterJWT({ getToken });
     } catch (cause) {
       return cause instanceof Error ? cause.message : "Sign-in failed";
     }

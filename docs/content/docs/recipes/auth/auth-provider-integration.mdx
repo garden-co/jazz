@@ -28,9 +28,9 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 />
 
 1. The user signs in with your auth provider and gets a JWT.
-2. Your client calls `loginJWT({ getToken })` for an existing identity, or explicitly calls `registerJWT` to create its account.
+2. The shared provider connection calls `loginOrRegisterJWT({ getToken })`.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. Core resolves the exact `(iss, sub)` assignment and returns an opaque account handle. Pass that handle to the Jazz context. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Authenticating an unregistered identity alone never creates an account.
+4. Core atomically resolves the exact `(iss, sub)` assignment or creates its account when fresh. The Jazz session opens the account's client. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Revoked assignments remain rejected; login-or-register never reassigns an identity.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -63,7 +63,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
 
     ### Connecting to Jazz
 
-    Use a token callback to log in or explicitly register, then pass the returned account handle in the `config` prop.
+    Own a Jazz session and call `useBetterAuth`. Forms only call Better Auth signup or sign-in; Jazz follows the provider session automatically. Use `auth.logout()` to flush Jazz before revoking the provider session.
 
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/auth-betterauth-chat/src/docs/recipe-connect-snippet.tsx#betterauth-jazz-react

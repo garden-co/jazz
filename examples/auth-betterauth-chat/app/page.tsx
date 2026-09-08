@@ -79,7 +79,7 @@ export default function Page() {
     if (!session) return;
     void (async () => {
       const token = await getJwtFromBetterAuth();
-      if (token) await session.loginJWT({ getToken });
+      if (token) await session.loginOrRegisterJWT({ getToken });
     })().catch((cause) =>
       setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
     );
@@ -108,111 +108,60 @@ function SessionScreen({
   reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
 }) {
   const session = useJazzSession();
-  const {
-    account,
-    status,
-    error: sessionError,
-    loginJWT,
-    linkJWT,
-    registerJWT,
-    logout,
-    createLocalFirst,
-    retry,
-  } = session;
-  const error = sessionError ?? providerError;
-  const clearProviderError = () =>
-    reportError((current) => (current === providerError ? undefined : current));
-
-  async function signIn(email: string, password: string) {
-    const result = await authClient.signIn.email({ email, password });
-    if (result.error) throw new Error(result.error.message);
-    await loginJWT({ getToken });
-    clearProviderError();
-  }
-  async function signUp(email: string, password: string) {
-    const result = await authClient.signUp.email({ email, name: email, password });
-    if (result.error) throw new Error(result.error.message);
-    await linkJWT({ getToken });
-    clearProviderError();
-  }
-  async function signOut() {
-    reportError(undefined);
+  // This is the manual hybrid escape hatch: no automatic enrollment connector
+  // runs while signup links the provider identity to this local-first account.
+  const recovery = React.useRef<() => Promise<void>>(() =>
+    session.loginOrRegisterJWT({ getToken: getToken }),
+  );
+  async function perform(action: () => Promise<void>) {
+    recovery.current = action;
     try {
-      await logout();
-      const result = await authClient.signOut();
-      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
-      await createLocalFirst();
+      await action();
+      reportError(undefined);
     } catch (cause) {
       reportError(cause instanceof Error ? cause : new Error(String(cause)));
       throw cause;
     }
   }
-  async function registerProvider() {
-    if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
-    else await registerJWT({ getToken });
+  async function signIn(email: string, password: string) {
+    const result = await authClient.signIn.email({ email, password });
+    if (result.error) throw new Error(result.error.message);
+    await perform(() => session.loginOrRegisterJWT({ getToken: getToken }));
   }
-
+  async function signUp(email: string, password: string) {
+    const result = await authClient.signUp.email({ email, name: email, password });
+    if (result.error) throw new Error(result.error.message);
+    await perform(() => session.linkJWT({ getToken: getToken }));
+  }
+  async function signOut() {
+    await perform(async () => {
+      await session.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await session.createLocalFirst();
+    });
+  }
+  const error = providerError ?? session.error;
   return (
     <>
       {error && (
-        <div role="alert">
+        <section role="alert">
           <p>{error.message}</p>
           <button
             onClick={() =>
-              void registerProvider()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            {account?.identity.issuer === "urn:jazz:local-first"
-              ? "Link provider identity to this account"
-              : "Create a new Jazz account for this provider identity"}
-          </button>
-          <button
-            onClick={() =>
-              void retry()
-                .then(clearProviderError)
-                .catch(() => {})
+              void perform(session.status === "error" ? session.retry : recovery.current).catch(
+                () => {},
+              )
             }
           >
             Retry
           </button>
-        </div>
+        </section>
       )}
-      {status === "ready" ? (
+      {session.status === "ready" ? (
         <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
-      ) : status === "signed-out" ? (
-        <div>
-          <button
-            onClick={() =>
-              void loginJWT({ getToken: getToken })
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Retry sign in
-          </button>
-          <button
-            onClick={() =>
-              void createLocalFirst()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Continue locally
-          </button>
-          <button
-            onClick={() =>
-              void signOut()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Retry sign out
-          </button>
-        </div>
       ) : (
-        <p>Preparing account…</p>
+        <p>Preparing account...</p>
       )}
     </>
   );

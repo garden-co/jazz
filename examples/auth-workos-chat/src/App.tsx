@@ -1,11 +1,16 @@
 import * as React from "react";
 import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { JazzClientProvider, useAuthState } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSessionOwner,
+  useAuthProvider,
+  useAuthState,
+  type JazzSession,
+  type JazzClient,
+} from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, WORKOS_CLIENT_ID } from "../constants.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
-import { createAccountManager, type AccountHandle } from "jazz-tools";
-import { createJazzClient } from "jazz-tools/client";
 
 type ChatShellProps = {
   user: User | null;
@@ -55,117 +60,50 @@ const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
 function JazzApp() {
-  const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
-  const [account, setAccount] = React.useState<AccountHandle>();
-  const [error, setError] = React.useState<string>();
-  const [accounts, setAccounts] =
-    React.useState<Awaited<ReturnType<typeof createAccountManager>>>();
-  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>>>();
-  const [generation, setGeneration] = React.useState(0);
-  const release = React.useRef<Promise<unknown>>(Promise.resolve());
-  React.useEffect(() => {
-    let cancelled = false;
-    setClient(undefined);
-    const previousRelease = release.current;
-    const creation = previousRelease.then(async () => {
-      if (cancelled || !account) return;
-      const next = await createJazzClient({ appId, serverUrl, account });
-      if (cancelled) {
-        await next.shutdown();
-        return;
-      }
-      setClient(next);
-      return next;
-    });
-    void creation.catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-    });
-    return () => {
-      cancelled = true;
-      // A failed open owns no client and must not poison a later retry.
-      // A failed prior shutdown remains a barrier against overlapping owners.
-      release.current = previousRelease.then(() =>
-        creation.then(
-          (owned) => owned?.shutdown(),
-          () => undefined,
-        ),
-      );
-      void release.current.catch(console.error);
-    };
-  }, [account, generation]);
-  async function leave(action: () => void | Promise<void>) {
-    let closed = false;
-    try {
-      await client?.shutdown({ waitForSync: true });
-      closed = true;
-      await action();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      if (closed) setGeneration((value) => value + 1);
-    }
-  }
-  const userId = user?.id;
-  const getToken = React.useRef(getAccessToken);
-  getToken.current = getAccessToken;
-  React.useEffect(() => {
-    if (isLoading) return;
-    let cancelled = false;
-    setAccount(undefined);
-    setError(undefined);
-    void (async () => {
-      const manager = await createAccountManager({ appId, serverUrl });
-      if (cancelled) return;
-      setAccounts(manager);
-      const selected = userId
-        ? await manager.loginJWT({ getToken: () => getToken.current({ forceRefresh: true }) })
-        : (manager.getLoggedIn() ?? manager.createLocalFirst());
-      if (!cancelled) setAccount(selected);
-    })().catch((cause: unknown) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [isLoading, userId]);
-
-  async function register() {
-    if (!accounts) return;
-    try {
-      const selected = await accounts.registerJWT({
-        getToken: () => getToken.current({ forceRefresh: true }),
-      });
-      setAccount(selected);
-      setError(undefined);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-  if (error && !client)
+  const { session, error, retry } = useJazzSessionOwner({ appId, serverUrl });
+  if (error)
     return (
-      <main>
-        <p role="alert">{error}</p>
-        <p>New provider identities must explicitly register with Jazz.</p>
-        <button
-          onClick={() => {
-            void register();
-          }}
-        >
-          Create a Jazz account
-        </button>
-      </main>
+      <section>
+        <p role="alert">{error.message}</p>
+        <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </section>
     );
-  if (!client) return <p className="loading-state">Resolving account…</p>;
+  if (!session) return <p>Preparing Jazz...</p>;
+  return <WorkOSSession session={session} />;
+}
+function WorkOSSession({ session }: { session: JazzSession<JazzClient> }) {
+  const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
+  const auth = useAuthProvider(
+    session,
+    { key: user?.id ?? null, isPending: isLoading },
+    {
+      getToken: () => getAccessToken({ forceRefresh: true }),
+    },
+  );
+  const fallback = auth.error ? (
+    <section>
+      <p role="alert">{auth.error.message}</p>
+      <button onClick={() => void auth.retry().catch(() => {})}>Retry</button>
+    </section>
+  ) : auth.isPending ? (
+    <p>Resolving account...</p>
+  ) : (
+    <button onClick={() => void signIn()}>Sign in with WorkOS</button>
+  );
   return (
-    <>
-      {error && <p role="alert">{error}</p>}
-      <JazzClientProvider client={client}>
+    <JazzSessionProvider session={session} fallback={fallback}>
+      {auth.ready && user ? (
         <ChatShell
           user={user}
-          onSignIn={() => leave(signIn)}
-          onSignOut={() => leave(() => signOut({ returnTo: window.location.href }))}
+          onSignIn={signIn}
+          onSignOut={() =>
+            auth.logout(() => signOut({ returnTo: window.location.href })).catch(() => {})
+          }
         />
-      </JazzClientProvider>
-    </>
+      ) : (
+        fallback
+      )}
+    </JazzSessionProvider>
   );
 }
 

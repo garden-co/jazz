@@ -66,15 +66,15 @@ aren't exercised by `pnpm test`.
 
 ### Account lifecycle
 
-Provider sign-in uses `loginJWT` to resolve a registered account. Sign-up creates
+This example demonstrates manual hybrid auth, without an automatic provider
+connection. Provider sign-in uses `loginOrRegisterJWT` to atomically resolve or
+create the provider identity's Jazz account. Sign-up creates
 an ordinary provider identity, gracefully shuts down the local Jazz client,
 then links the new JWT to its account using `linkJWT`. The provider does not
 rewrite user IDs or mint special proof claims. New contexts receive only the
 returned account handle.
 
-If linking fails, the existing account is reopened. On reload a failed provider
-login also preserves the retained local account, and the UI offers a link retry.
-A new account is explicitly registered only when there is no retained local
-account to link. These operations never merge existing accounts. Signing out
+If linking fails, the existing account is reopened. The retry action preserves
+the original intent: signup retries linking, while login retries login-or-register. These operations never merge existing accounts. Signing out
 closes the client before clearing provider credentials and choosing a new local
 account.

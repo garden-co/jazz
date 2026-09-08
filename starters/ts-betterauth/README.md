@@ -58,18 +58,17 @@ Two processes run in development:
 1. **Hono** on port 3001, serving `/api/auth/*` (sign-up, sign-in, token, JWKS).
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
-`src/accounts.ts` prepares an `AccountManager`, including its encrypted local
-storage. `src/jazz-lifecycle.ts` owns exactly one `Db`, opened with the
-manager's opaque account handle. It obtains a fresh Better Auth JWT through
-`authClient.$fetch("/token")` whenever Jazz needs one; the JWT is never stored
-as the account identity.
+The app owns one `JazzSession` and connects it to Better Auth with `connectBetterAuth`.
+Sign-up and sign-in forms only call Better Auth. The connection watches initial
+hydration, login, signup, restoration, and logout; it atomically logs in or
+creates the Jazz account with `loginOrRegisterJWT`. Repeated notifications for
+the same provider identity do not replace the client. Jazz requests fresh JWTs
+from `/token` when credentials expire.
 
-The initial session and ordinary sign-ins call `loginJWT`; only the explicit
-sign-up/recovery action calls `registerJWT`. Session changes are serialized
-with form actions. Before a sign-out or account change, the old context shuts
-down with `waitForSync: true`; a failed close leaves it usable, and a failed
-account operation reopens the manager's selected handle so the recovery button
-can be retried safely.
+Sign-out goes through the connection, which flushes Jazz before Better Auth
+revokes credentials. Failures stay visible with a retry action. For a guest
+account whose existing data must survive signup, use the hybrid starter's
+explicit `linkJWT` flow without attaching the automatic connection.
 
 ## Extending the schema
 

@@ -12,7 +12,7 @@
       await auth.signOut();
       await goto("/");
     } catch (cause) {
-      auth.reportFailure(cause);
+      // Shared auth state exposes logout failures and retry.
     }
   }
 </script>

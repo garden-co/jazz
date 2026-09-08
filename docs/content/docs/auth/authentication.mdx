@@ -28,18 +28,19 @@ Configure the Jazz core with your provider's signing keys, issuer, and audience.
 
 Choose the operation that matches the user's intent:
 
-| Operation                    | Result                                                                                        |
-| ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `jazz.registerJWT(auth)`     | Create an account for a fresh external identity.                                              |
-| `jazz.loginJWT(auth)`        | Select an existing, active account assignment.                                                |
-| `jazz.linkJWT(auth)`         | Attach a fresh external identity to the currently selected account and select its new handle. |
-| `jazz.getSnapshot().account` | Read the locally selected handle, or `undefined`.                                             |
-| `jazz.logout()`              | Clear selection and invalidate this manager's issued credentials.                             |
+| Operation                       | Result                                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------- |
+| `jazz.loginOrRegisterJWT(auth)` | Atomically select an active assignment or create the account for a fresh identity.            |
+| `jazz.registerJWT(auth)`        | Create an account for a fresh external identity.                                              |
+| `jazz.loginJWT(auth)`           | Select an existing, active account assignment.                                                |
+| `jazz.linkJWT(auth)`            | Attach a fresh external identity to the currently selected account and select its new handle. |
+| `jazz.getSnapshot().account`    | Read the locally selected handle, or `undefined`.                                             |
+| `jazz.logout()`                 | Clear selection and invalidate this manager's issued credentials.                             |
 
-Registration, login, and linking require a connection to the core. Authenticating with your provider does not implicitly register a Jazz account. An enrollment rejection preserves the previous selection. If enrollment succeeds but local persistence or client startup fails, the new selection remains; use `jazz.retry()` to retry that local work.
+Registration, login, and linking require a connection to the core. For ordinary provider signup, sign-in, and restoration, use `loginOrRegisterJWT`. The core performs one ordered decision: return the existing active assignment or create it when unassigned. Revoked identities remain rejected and assignments are never moved. Strict `loginJWT` and `registerJWT` remain available when the application needs those specific operations. An enrollment rejection preserves the previous selection. If enrollment succeeds but local persistence or client startup fails, the new selection remains; use `jazz.retry()` to retry that local work.
 
 ```ts
-await jazz.loginJWT({
+await jazz.loginOrRegisterJWT({
   getToken: async () => {
     const token = await getTokenFromYourProvider();
     return token;
@@ -50,9 +51,17 @@ const { client } = jazz.getSnapshot();
 
 `auth` can also be a JWT string. Use a `getToken` callback for renewable credentials. The shared account context refreshes them across all framework bindings; there is no provider-level `onJWTExpired` callback. Every refreshed token must have the same exact issuer and subject. A callback that does not settle within 30 seconds fails that attempt; its eventual result cannot replace a later credential.
 
+## Automatic provider connections
+
+For auth-required Better Auth apps, mount `connectBetterAuth(jazz, authClient)` from `jazz-tools/client`, or use `useBetterAuth(jazz, authClient)` from `jazz-tools/react`. Forms only call Better Auth's `signUp` and `signIn`. The connection watches initial hydration and provider session changes, uses atomic login-or-register, and exposes `ready`, `isPending`, `error`, and `retry`. Same-session notifications and token refresh do not recreate the Jazz client.
+
+Use the connection's `logout()` to flush Jazz before Better Auth revokes credentials. Dispose the connection when its owner unmounts; the application still owns and closes the Jazz session. Generic providers can use `connectAuthProvider(jazz, { getToken })` and `update({ key, isPending, error })`, or React's `useAuthProvider`. The key identifies the provider session or exact issuer/subject; it must not be the rotating JWT string. Generic logout accepts the provider signout callback.
+
 ## Linking identities
 
 An exact identity can belong to only one account, permanently. Revocation prevents its use but does not free it for reassignment. Linking therefore accepts only a fresh identity. If the identity already belongs to a different account, the app must decide how to migrate data; Jazz does not merge accounts.
+
+For a hybrid app, omit the automatic connection. Signup calls the provider and then `jazz.linkJWT(auth)` on the retained guest account; ordinary login calls `loginOrRegisterJWT`. This ensures the fresh identity is linked before any automatic account creation.
 
 `jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
 
@@ -77,6 +86,6 @@ Provider claims remain under `session.claims`. They cannot override `session.use
 
 Create a Node owner with `await createJazzSession({ appId, app, driver, serverUrl, initial: { backendSecret } })` from `jazz-tools/backend`. Backend admission requires a live core check; the secret is private, ephemeral handle material. The ready snapshot's `client.db` performs backend work.
 
-`await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. External identities must already be registered; local-first proofs can establish their deterministic founding account.
+`await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. By default, external identities must already be registered; local-first proofs can establish their deterministic founding account. Auth-required server routes can opt into `client.forRequest(request, { account: "login-or-register" })` to atomically create a fresh external assignment after verifying the bearer. The option applies only to that immutable request scope; it never changes the backend account or accepts revoked identities. Keep the default strict mode on hybrid routes where a fresh identity must be linked first.
 
 `await client.forAccount(account)` accepts an opaque admitted user handle and re-verifies its credential. Neither method switches the shared owner. Raw session objects cannot select an arbitrary principal or account. `await client.withAttribution(account)` retains backend permissions while recording verified user authorship.

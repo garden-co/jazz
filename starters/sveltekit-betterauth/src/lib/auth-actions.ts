@@ -1,12 +1,7 @@
 import { getContext, setContext } from "svelte";
 const key = Symbol("provider-auth-actions");
 export interface AuthActions {
-  authenticate(
-    enroll: boolean,
-    request: () => Promise<{ error?: { message?: string | null } | null }>,
-  ): Promise<void>;
   signOut(): Promise<void>;
-  reportFailure(cause: unknown): void;
 }
 export function setAuthActions(actions: AuthActions) {
   setContext(key, actions);

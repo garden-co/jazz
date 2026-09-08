@@ -19,7 +19,7 @@ function SessionContent({
   const {
     status,
     error: sessionError,
-    loginJWT,
+    loginOrRegisterJWT,
     linkJWT,
     createLocalFirst,
     retry,
@@ -62,7 +62,7 @@ function SessionContent({
         <div>
           <button
             onClick={() =>
-              void loginJWT({ getToken })
+              void loginOrRegisterJWT({ getToken })
                 .then(clearProviderError)
                 .catch(() => {})
             }
@@ -98,7 +98,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
     if (!session) return;
     void authClient
       .getSession()
-      .then((auth) => (auth.data?.session ? session.loginJWT({ getToken }) : undefined))
+      .then((auth) => (auth.data?.session ? session.loginOrRegisterJWT({ getToken }) : undefined))
       .catch((cause) =>
         setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
       );

@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => {
   const session = {
     getSnapshot: vi.fn(() => ({ status: "ready", account, client: { db } })),
     subscribe: vi.fn(() => () => {}),
-    loginJWT: vi.fn(async () => {}),
+    loginOrRegisterJWT: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
   };
   return {
@@ -30,7 +30,7 @@ vi.mock("./auth-client.js", () => ({ authClient: { getSession: mocks.getSession 
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
-  mocks.session.loginJWT.mockResolvedValue(undefined);
+  mocks.session.loginOrRegisterJWT.mockResolvedValue(undefined);
   mocks.getSession.mockResolvedValue({ data: null });
   vi.stubEnv("VITE_JAZZ_APP_ID", "test-app");
   vi.stubEnv("VITE_JAZZ_SERVER_URL", "https://sync.test");
@@ -51,7 +51,7 @@ describe("hybrid account bootstrap", () => {
       serverUrl: "https://sync.test",
       initial: "local-first",
     });
-    expect(mocks.session.loginJWT).not.toHaveBeenCalled();
+    expect(mocks.session.loginOrRegisterJWT).not.toHaveBeenCalled();
     expect(mocks.mountApp).toHaveBeenCalledWith(
       expect.anything(),
       mocks.db,
@@ -61,10 +61,12 @@ describe("hybrid account bootstrap", () => {
   });
   it("restores provider login and retains local data with an explicit link error when login fails", async () => {
     mocks.getSession.mockResolvedValue({ data: { session: { id: "provider-session" } } });
-    mocks.session.loginJWT.mockRejectedValue(new Error("account is not linked"));
+    mocks.session.loginOrRegisterJWT.mockRejectedValue(new Error("account is not linked"));
     await import("./main.js");
     await vi.waitFor(() => expect(mocks.mountApp).toHaveBeenCalledOnce());
-    expect(mocks.session.loginJWT).toHaveBeenCalledWith({ getToken: expect.any(Function) });
+    expect(mocks.session.loginOrRegisterJWT).toHaveBeenCalledWith({
+      getToken: expect.any(Function),
+    });
     expect(mocks.mountApp).toHaveBeenCalledWith(
       expect.anything(),
       mocks.db,

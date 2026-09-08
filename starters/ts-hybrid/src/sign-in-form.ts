@@ -53,7 +53,7 @@ export function mountSignInForm(parent: HTMLElement, session: Session, onToggle:
       return;
     }
     try {
-      await session.loginJWT({ getToken });
+      await session.loginOrRegisterJWT({ getToken });
     } catch (cause) {
       errorEl.textContent = cause instanceof Error ? cause.message : "Sign-in failed";
       errorEl.hidden = false;

@@ -16,7 +16,7 @@ What it demonstrates:
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
-The seeded provider identity must be explicitly registered with Jazz on its first login;
+The seeded provider identity gets its Jazz account on first login through `loginOrRegisterJWT`;
 the login error offers that action. Subsequent login resolves the existing account.
 New sign-ups receive `role = "member"` by default (configured via the `admin` plugin).
 
@@ -147,10 +147,11 @@ base URL is required; Better Auth defaults to `/api/auth` in the browser.
 ### Client — `app/page.tsx`
 
 `Page` configures `JazzSessionProvider` once and uses `useJazzSession` commands.
-Startup restores the retained local account and uses `loginJWT` for an existing
-provider session. Login never implicitly registers or links an identity.
+Startup restores the retained local account and uses `loginOrRegisterJWT` for an existing
+provider session. This atomically resolves or creates its Jazz account.
 
-After Better Auth signup, `linkJWT({ getToken })` preserves the account that owns
+This is the manual hybrid scenario: no automatic Better Auth connection is
+attached. After Better Auth signup, `linkJWT({ getToken })` preserves the account that owns
 local data. The session detaches the old data view, waits for sync, performs the
 link, and opens the selected account. If sync fails, enrollment never starts and
 the prior client remains usable. If linking fails, the session reopens the
