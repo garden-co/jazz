@@ -83,12 +83,6 @@ struct DecodedRowBatch {
 }
 
 #[derive(Deserialize)]
-struct DecodedRelationSnapshot {
-    root_count: u64,
-    rows: Vec<DecodedRowBatch>,
-}
-
-#[derive(Deserialize)]
 struct DecodedSubscriptionDelta {
     added: Vec<DecodedRowBatch>,
     updated: Vec<DecodedRowBatch>,
@@ -290,16 +284,19 @@ fn values_from_batches(batches: &[DecodedRowBatch]) -> BTreeMap<String, Value> {
 }
 
 #[wasm_bindgen_test(async)]
-async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encoding() {
+async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding() {
     // This is deliberately through the wasm-bindgen exported surface: public
     // schema JSON + postcard open config, streaming mutation promises, prepared
-    // query, relation snapshot promise, and ReadableStream pulls.
+    // query, unified read promise, and ReadableStream pulls.
     let db = fixture_db();
     let query = db
-        .prepare_query(postcard::to_allocvec(&Query::from("values")).expect("encode query"))
+        .prepare_query(
+            postcard::to_allocvec(&Query::from("values")).expect("encode query"),
+            "query".to_owned(),
+        )
         .expect("prepare public query");
     let reader = stream_reader(
-        db.subscribe(&query, JsValue::NULL)
+        db.subscribe(&query, JsValue::NULL, None)
             .expect("create public subscription"),
     );
 
@@ -317,12 +314,13 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     let cells = empty_cells();
 
     let text_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row.clone(),
             cells.clone(),
             "text".to_owned(),
             Some("insert".to_owned()),
+            None,
             None,
             None,
             None,
@@ -333,12 +331,13 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     await_promise(text_upload.finish()).await;
 
     let bytes_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row.clone(),
             cells.clone(),
             "bytes".to_owned(),
             Some("update".to_owned()),
+            None,
             None,
             None,
             None,
@@ -349,12 +348,13 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     await_promise(bytes_upload.finish()).await;
 
     let json_upload = db
-        .begin_streaming_mutation_encoded(
+        .begin_streaming_mutation(
             "values".to_owned(),
             row,
             cells,
             "json".to_owned(),
             Some("update".to_owned()),
+            None,
             None,
             None,
             None,
@@ -392,8 +392,10 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
         Some(&Value::String(json.clone()))
     );
 
+    let sync_opts = serde_wasm_bindgen::to_value(&serde_json::json!({ "sync": true }))
+        .expect("encode synchronous read options");
     let synchronous_error = db
-        .all(&query, JsValue::NULL, None, None)
+        .all(&query, sync_opts, None, None)
         .expect_err("synchronous public read must reject an indirect scalar");
     assert!(
         synchronous_error
@@ -402,20 +404,19 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
         "the legacy synchronous path must fail helpfully instead of leaking tag 14 to the logical decoder"
     );
 
-    let relation = await_promise(
-        db.all_relation_snapshot(&query, JsValue::NULL, None, None)
-            .expect("start public relation snapshot"),
-    )
-    .await;
-    let relation_bytes = relation
+    let read = db
+        .all(&query, JsValue::NULL, None, None)
+        .expect("start public read")
+        .dyn_into::<js_sys::Promise>()
+        .expect("asynchronous all returns a promise");
+    let read = await_promise(read).await;
+    let read_bytes = read
         .dyn_into::<js_sys::Uint8Array>()
-        .expect("relation snapshot resolves Uint8Array")
+        .expect("read resolves Uint8Array")
         .to_vec();
-    let relation: DecodedRelationSnapshot =
-        postcard::from_bytes(&relation_bytes).expect("decode public relation snapshot");
-    assert_eq!(relation.root_count, 1);
-    let relation_values = values_from_batches(&relation.rows);
-    assert_eq!(relation_values.get("text"), Some(&Value::String(text)));
-    assert_eq!(relation_values.get("bytes"), Some(&Value::Bytes(bytes)));
-    assert_eq!(relation_values.get("json"), Some(&Value::String(json)));
+    let read_values =
+        values_from_batches(&postcard::from_bytes(&read_bytes).expect("decode public read rows"));
+    assert_eq!(read_values.get("text"), Some(&Value::String(text)));
+    assert_eq!(read_values.get("bytes"), Some(&Value::Bytes(bytes)));
+    assert_eq!(read_values.get("json"), Some(&Value::String(json)));
 }

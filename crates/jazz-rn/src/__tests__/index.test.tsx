@@ -11,8 +11,8 @@ type NativeForegroundCommand =
   | 'probe'
   | 'tick'
   | 'close'
-  | { type: 'prepareQuery'; query: Uint8Array }
-  | { type: 'all'; query: number }
+  | { type: 'prepareQuery'; query: Uint8Array; kind: 'query' | 'relation' }
+  | { type: 'all'; query: number; optionsJson: string; transaction?: number }
   | { type: 'poll'; operation: number }
   | { type: 'cancel'; operation: number }
   | { type: 'beginTransaction'; kind: 'mergeable' | 'exclusive' }
@@ -244,7 +244,10 @@ it('keeps malformed capability input out of the JSI foreground factory', () => {
 });
 
 it('uses a compact versioned byte vocabulary for the initial foreground NativeDb slice', () => {
-  const relay = loadRelay({ getAbiVersion: () => NATIVE_RELAY_ABI_V1, execute: jest.fn() });
+  const relay = loadRelay({
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    execute: jest.fn(),
+  });
 
   expect(relay.encodeNativeForegroundCommand('probe')).toEqual(
     Uint8Array.of(0)
@@ -257,11 +260,16 @@ it('uses a compact versioned byte vocabulary for the initial foreground NativeDb
     relay.encodeNativeForegroundCommand({
       type: 'prepareQuery',
       query: Uint8Array.of(1, 2),
+      kind: 'query',
     })
-  ).toEqual(Uint8Array.of(2, 2, 1, 2));
+  ).toEqual(Uint8Array.of(2, 2, 1, 2, 0));
   expect(
-    relay.encodeNativeForegroundCommand({ type: 'all', query: 129 })
-  ).toEqual(Uint8Array.of(3, 129, 1));
+    relay.encodeNativeForegroundCommand({
+      type: 'all',
+      query: 129,
+      optionsJson: '{}',
+    })
+  ).toEqual(Uint8Array.of(3, 129, 1, 2, 123, 125, 0));
   expect(
     relay.encodeNativeForegroundCommand({ type: 'poll', operation: 129 })
   ).toEqual(Uint8Array.of(8, 129, 1));
@@ -375,7 +383,9 @@ it('uses a compact versioned byte vocabulary for the initial foreground NativeDb
   ).toThrow(
     'Jazz native foreground transaction kind must be mergeable or exclusive'
   );
-  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V1))).toEqual({
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V1))
+  ).toEqual({
     type: 'probe',
     abiVersion: NATIVE_RELAY_ABI_V1,
   });
@@ -448,10 +458,30 @@ it('decodes canonical foreground handles through the JavaScript safe integer lim
     [Number.MAX_SAFE_INTEGER, [255, 255, 255, 255, 255, 255, 255, 15]],
   ] as const;
   for (const [value, bytes] of corpus) {
-    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([2, ...bytes]))).toEqual({ type: 'preparedQuery', query: value });
-    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([4, ...bytes]))).toEqual({ type: 'subscribed', subscription: value });
-    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([8, ...bytes]))).toEqual({ type: 'pending', operation: value });
-    expect(relay.decodeNativeForegroundResponse(Uint8Array.from([11, ...bytes]))).toEqual({ type: 'transactionOpened', transaction: value });
+    expect(
+      relay.decodeNativeForegroundResponse(Uint8Array.from([2, ...bytes]))
+    ).toEqual({
+      type: 'preparedQuery',
+      query: value,
+    });
+    expect(
+      relay.decodeNativeForegroundResponse(Uint8Array.from([4, ...bytes]))
+    ).toEqual({
+      type: 'subscribed',
+      subscription: value,
+    });
+    expect(
+      relay.decodeNativeForegroundResponse(Uint8Array.from([8, ...bytes]))
+    ).toEqual({
+      type: 'pending',
+      operation: value,
+    });
+    expect(
+      relay.decodeNativeForegroundResponse(Uint8Array.from([11, ...bytes]))
+    ).toEqual({
+      type: 'transactionOpened',
+      transaction: value,
+    });
   }
 });
 
@@ -472,7 +502,9 @@ it('rejects trailing, nonminimal, truncated, and out-of-range foreground handles
   ];
   for (const bytes of corpus) {
     for (const tag of [2, 4, 8, 11]) {
-      expect(() => relay.decodeNativeForegroundResponse(Uint8Array.from([tag, ...bytes]))).toThrow(/malformed/);
+      expect(() =>
+        relay.decodeNativeForegroundResponse(Uint8Array.from([tag, ...bytes]))
+      ).toThrow(/malformed/);
     }
   }
 });

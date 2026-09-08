@@ -371,15 +371,15 @@ future NAPI-compatible host). It is not an RN object API. Its operation mapping
 is intentionally the maintained `NativeDb` contract, grouped to keep the wire
 surface orderly:
 
-| Command family           | Existing `NativeDb` operations mapped by the binding                                                     | Response / handle rule                                                                                                                 |
-| ------------------------ | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| lifecycle and scheduling | `Probe`, `tick`, `close`, `setTickScheduler`, `onMutationError`                                          | probe and bounded tick are synchronous; close is idempotent; native-to-JS wakes are coalesced callbacks, never a borrowed Rust closure |
-| schema and identity      | `registerSchema`, `setIdentityClaims`, `setNonDurableClient`, `setRelayAuthoritySessionOwner`            | schema/view handles are opaque native IDs scoped to their foreground                                                                   |
-| query and attachment     | `prepareQuery`, `all*`, relation reads, attach/covered/detach                                            | query and attachment handles are opaque; rows are existing encoded row-batch bytes                                                     |
-| subscriptions            | `subscribe*`, `readAll`/`drain`, cancel                                                                  | subscription handles are opaque; batches are existing encoded subscription payloads                                                    |
-| writes and transactions  | `begin/commit/rollback`, attach tx, insert/update/upsert/delete/restore, `writeState`, `wait`            | transaction and write handles are opaque; write receipts retain the existing encoded receipt contract                                  |
-| large values and advice  | staging policy/eviction, range/text/JSON reads, append/splice/diffs, streaming upload, permission advice | existing value and advice payload codecs; streaming/advice handles are opaque and explicitly finished/cancelled                        |
-| peer transport           | `connectUpstream*`, accept subscriber, receive/send frames, close                                        | normal canonical peer-frame bytes; this remains the only route between foreground and relay/upstream                                   |
+| Command family           | Existing `NativeDb` operations mapped by the binding                                          | Response / handle rule                                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| lifecycle and scheduling | `Probe`, `tick`, `close`, `setTickScheduler`, `onMutationError`                               | probe and bounded tick are synchronous; close is idempotent; native-to-JS wakes are coalesced callbacks, never a borrowed Rust closure |
+| schema and identity      | `registerSchema`, `setIdentityClaims`, `setNonDurableClient`, `setRelayAuthoritySessionOwner` | schema/view handles are opaque native IDs scoped to their foreground                                                                   |
+| queries                  | `prepareQuery`, `all`                                                                         | query handles are opaque; rows are existing encoded row-batch bytes                                                                    |
+| subscriptions            | `subscribe`, drain, cancel                                                                    | subscription handles are opaque; batches are existing encoded subscription payloads                                                    |
+| writes and transactions  | `begin/commit/rollback`, insert/update/upsert/delete/restore, `writeState`, `wait`            | transaction and write handles are opaque; write receipts retain the existing encoded receipt contract                                  |
+| large values and advice  | streaming upload, large-value update, permission advice                                       | existing value and advice payload codecs; streaming handles are opaque and explicitly finished/cancelled                               |
+| peer transport           | `connectUpstream*`, accept subscriber, receive/send frames, close                             | normal canonical peer-frame bytes; this remains the only route between foreground and relay/upstream                                   |
 
 Commands are append-only within a native ABI version: adding a new discriminant
 is allowed only when older bindings cannot select or decode it; changing a
@@ -390,50 +390,56 @@ before opening a foreground. Unknown or malformed command/response bytes fail
 closed, with no partially returned buffer. Command outputs are copied into
 JS-owned memory before Rust frees its response allocation.
 
-**V1 foreground extension registry.** Existing request ordinals 0–17 and
-response ordinals 0–16 remain byte-for-byte unchanged. The additional request
-ordinals, in declaration/field order, are:
+**V1 foreground request registry.** Request ordinals and ordered fields are:
 
-| Ordinal | Request                        | Ordered fields                                                                                                   |
-| ------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| 18      | AllWithOptions                 | query u64, options_json string, transaction option u64                                                           |
-| 19      | AllRelationSnapshotWithOptions | query u64, options_json string, transaction option u64                                                           |
-| 20      | SubscribeWithOptions           | query u64, options_json string                                                                                   |
-| 21      | WaitForTransaction             | tx_id 16 raw bytes, tier string                                                                                  |
-| 22      | StageMutation                  | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
-| 23      | DisconnectNativeUpstream       | none                                                                                                             |
-| 24      | ReconnectNativeUpstream        | none                                                                                                             |
-| 25      | NativeConnectionStatus         | none                                                                                                             |
+| Ordinal | Request                  | Ordered fields                                                                                                   |
+| ------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| 0       | Probe                    | none                                                                                                             |
+| 1       | Tick                     | none                                                                                                             |
+| 2       | PrepareQuery             | query byte vector, kind enum                                                                                     |
+| 3       | All                      | query u64, options_json string, transaction option u64                                                           |
+| 4       | Subscribe                | query u64, options_json string                                                                                   |
+| 5       | DrainSubscription        | subscription u64                                                                                                 |
+| 6       | Unsubscribe              | subscription u64                                                                                                 |
+| 7       | Close                    | none                                                                                                             |
+| 8       | Poll                     | operation u64                                                                                                    |
+| 9       | Cancel                   | operation u64                                                                                                    |
+| 10      | BeginTransaction         | kind enum                                                                                                        |
+| 11      | Insert                   | transaction u64, table string, cells byte vector, row_id option 16 raw bytes                                     |
+| 12      | Update                   | transaction u64, table string, row_id 16 raw bytes, patch byte vector                                            |
+| 13      | Upsert                   | transaction u64, table string, row_id 16 raw bytes, cells byte vector                                            |
+| 14      | Delete                   | transaction u64, table string, row_id 16 raw bytes                                                               |
+| 15      | CommitTransaction        | transaction u64                                                                                                  |
+| 16      | RollbackTransaction      | transaction u64                                                                                                  |
+| 17      | WaitForCoreTransaction   | tx_id 16 raw bytes                                                                                               |
+| 18      | WaitForTransaction       | tx_id 16 raw bytes, tier string                                                                                  |
+| 19      | StageMutation            | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
+| 20      | DisconnectNativeUpstream | none                                                                                                             |
+| 21      | ReconnectNativeUpstream  | none                                                                                                             |
+| 22      | NativeConnectionStatus   | none                                                                                                             |
+| 23      | NativeSessionMetadata    | none                                                                                                             |
+| 24      | WriteState               | tx_id 16 raw bytes                                                                                               |
+| 25      | DrainMutationErrors      | none                                                                                                             |
+| 26      | BeginStreamingMutation   | mutation enum, table string, row_id 16 raw bytes, cells byte vector, column string, options_json string          |
+| 27      | PushStreamingMutation    | upload u64, chunk byte vector                                                                                    |
+| 28      | FinishStreamingMutation  | upload u64                                                                                                       |
+| 29      | AbortStreamingMutation   | upload u64                                                                                                       |
+| 30      | LocalCurrentRow          | table string, row_id 16 raw bytes                                                                                |
+| 31      | UpdateLargeValues        | table string, row_id 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option u64          |
+| 32      | DirectMutation           | mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string                  |
+| 33      | PermissionAdvice         | action enum                                                                                                      |
+| 34      | WaitForPendingWrites     | tier string                                                                                                      |
 
-The following ordinals are reserved for the coordinated V1 continuation.
-Reservation alone does not imply that a native artifact implements a handler;
-unsupported operations must fail closed until their acceptance gates pass.
+The command bytes are pinned by
+`foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec`,
+`foreground_extension_v1_byte_contract`,
+`foreground_continuation_v1_byte_contract`, and
+`relation_preparation_uses_the_v1_query_kind_byte_contract`. PrepareQuery kind
+ordinals are Query=0 and Relation=1. A relation query uses the same
+retained-query lifecycle as an ordinary query and requires the default read
+view when subscribed.
 
-| Request ordinal | Reserved request                                               | Response ordinal / payload                                                                       |
-| --------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 26              | NativeSessionMetadata (no fields)                              | 18 NativeSessionMetadata: account_id Option<[u8;16]> (UUID bytes), issuer string, user_id string |
-| 27              | WriteState: tx_id 16 raw bytes                                 | 19 WriteState: state_json string                                                                 |
-| 28              | DrainMutationErrors (no fields)                                | 20 MutationErrors: events_json string                                                            |
-| 29              | BeginStreamingMutation                                         | 21 StreamingMutationOpened: upload u64                                                           |
-| 30              | PushStreamingMutation: upload u64, chunk byte vector           | 22 StreamingMutationPushed (no fields)                                                           |
-| 31              | FinishStreamingMutation: upload u64                            | existing 14 TransactionCommitted                                                                 |
-| 32              | AbortStreamingMutation: upload u64                             | 23 StreamingMutationAborted: aborted bool                                                        |
-| 33              | AllRelationQuery: query_bytes byte vector, options_json string | existing 3 Rows                                                                                  |
-
-BeginStreamingMutation has ordered fields mutation enum, table string,
-row_id 16 raw bytes, cells byte vector, column string, options_json string.
-Request 34 is LocalCurrentRow: table string, row_id 16 raw bytes; its response
-is existing 3 Rows. Request 35 is UpdateLargeValues: table string, row_id
-16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option
-u64; its response is existing 14 TransactionCommitted. The continuation bytes
-are pinned by `foreground_continuation_v1_byte_contract`.
-Request 37 is SubscribeRelationQuery: query_bytes byte vector, options_json string;
-its response is existing 4 Subscribed. It uses the same asynchronous canonical
-relation preparation as request 33, then the ordinary deferred subscription
-opener and event codec. It requires the default read view.
-
-Request 36 is DirectMutation: mutation enum, table string, optional row_id 16 raw
-bytes, cells byte vector, options_json string. Response 24 is MutationCommitted:
+Response 24 is MutationCommitted:
 tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's
 queued admission and return its reserved write identity before suspended owner
 work completes. Synchronous LocalCurrentRow and WriteState report an explicit
@@ -461,8 +467,8 @@ The byte-level Rust contract is pinned by
 `foreground_extension_v1_byte_contract`; additive handler availability must be
 verified by the corresponding real C ABI acceptance tests.
 
-`AllWithOptions` and `AllRelationSnapshotWithOptions` attach ordinary core
-coverage with the supplied read options before evaluating. An optional
+`All` attaches ordinary core coverage with the supplied read options before
+evaluating. An optional
 foreground-owned transaction handle selects the opening snapshot and staged
 write overlay through the existing transaction read APIs; it cannot select a
 sibling foreground's transaction or replace its opening identity/claims.
@@ -471,14 +477,15 @@ owner thread. Completion or cancellation queues a bounded coverage cleanup;
 ordinary owner turns acquire the node asynchronously before releasing its pins.
 The read admission budget includes retained reads and queued cleanups, and
 foreground retirement cancels those local obligations after cancelling retained
-ticks and reads. Relation
-snapshots use `binding_codec::encode_relation_snapshot`. Subscription event 3,
+ticks and reads. Relation snapshots use
+`binding_codec::encode_relation_snapshot`. Subscription event 3,
 `StructuredDelta`, appends the existing terminal-operation JSON codec to the
 ordinary reset/settled/tier/row-delta fields. Event 0 remains unchanged. The new
 event byte contract is pinned by `foreground_structured_delta_v1_byte_contract`.
 
-`AllRelationQuery` accepts the bounded typed Postcard relation-query payload and
-uses the core relation resolver plus asynchronous canonical query preparation.
+`PrepareQuery` accepts either the bounded typed Postcard query payload or the
+bounded typed Postcard relation-query payload selected by its explicit kind and
+uses asynchronous canonical query preparation for both.
 
 ### Relation-query Postcard carrier
 
@@ -488,8 +495,8 @@ Relation-query payloads use the same typed Postcard grammar as their enclosing
 column/key/project references, recursion bound, and a typed JSON literal tree.
 The literal tree explicitly distinguishes null, boolean, i64, u64, f64 bits,
 string, array, and object entries; it does not serialize `serde_json::Value`
-directly and does not embed JSON or a second custom byte codec. Direct native
-relation reads receive that same standalone Postcard relation payload.
+directly and does not embed JSON or a second custom byte codec. Native relation
+preparation receives that same standalone Postcard relation payload.
 
 Relation payloads are capped at 1 MiB, nesting at 128, structural collections
 at 4,096, strings at 65,536 UTF-8 bytes, and semantic dimensions at `u32::MAX`.
@@ -497,7 +504,7 @@ Union labels remain unique, UTF-8, NUL-free, and 1 through 4,096 bytes. Rows,
 cells, snapshots, and subscription deltas retain their existing native binding
 encodings; only the relation-query AST carrier changes.
 
-The standalone direct-read payload is `WireRelationQuery { rel }`. Within a
+The standalone relation preparation payload is `WireRelationQuery { rel }`. Within a
 `Query.relation` option and a `ShapeBody::Relation` variant, that same struct is
 nested directly in the enclosing Postcard value; it is never length-wrapped as a
 byte vector. Postcard enum ordinals follow the declared Rust order: relation
@@ -515,7 +522,7 @@ payload with no trailing bytes or overlong alternative spelling.
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
 `DrainSubscription`, `Unsubscribe`. Query inputs are exactly the canonical
-postcard `Query` bytes used by the existing native `prepareQuery`; read output
+postcard `Query` or `WireRelationQuery` bytes selected by `PrepareQuery.kind`; read output
 is the existing `binding_codec::encode_rows` payload and subscription deltas
 are the existing `binding_codec::encode_subscription_delta` payload. Query and
 subscription identifiers are owner-thread-local opaque u64 handles allocated

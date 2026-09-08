@@ -312,9 +312,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             all: () => encodeRows([]),
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -396,9 +393,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -456,9 +453,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -545,9 +542,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: (...args: unknown[]) => {
+            all: (...args: unknown[]) => {
               calls.push(args);
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -598,9 +595,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
-              return encodeRows([]);
+              return encodeRelationSnapshot([]);
             },
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -650,7 +647,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
               return encodeRows([]);
             },
@@ -694,7 +691,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
+            all: () => {
               relationQueries += 1;
               return encodeRows([]);
             },
@@ -873,9 +870,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             all: () => encodeRows([]),
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1114,11 +1108,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => Uint8Array.from([0]),
             prepareQuery: () => ({}),
-            updateEncoded: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
+            update: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
               calls.push(["update", table, rowId, patch]);
               return write;
             },
-            deleteEncoded: (table: string, rowId: Uint8Array) => {
+            delete: (table: string, rowId: Uint8Array) => {
               calls.push(["delete", table, rowId]);
               return write;
             },
@@ -1161,7 +1155,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => Uint8Array.from([0]),
             prepareQuery: () => ({}),
-            updateLargeValuesEncoded: (...args: unknown[]) => {
+            updateLargeValues: (...args: unknown[]) => {
               calls.push(args);
               return fakeWrite();
             },
@@ -1288,11 +1282,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]),
             prepareQuery: () => ({}),
-            insertEncoded: (
-              _table: string,
-              _cells: Uint8Array,
-              options?: { rowId?: Uint8Array },
-            ) => {
+            insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
               insertedRowIds.push(options?.rowId ?? new Uint8Array(16));
               return write;
             },
@@ -1341,15 +1331,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertEncoded: (...args: unknown[]) => {
+            insert: (...args: unknown[]) => {
               calls.push(["insert", ...args]);
               return fakeWrite();
             },
-            updateEncoded: (...args: unknown[]) => {
+            update: (...args: unknown[]) => {
               calls.push(["update", ...args]);
               return fakeWrite();
             },
-            upsertEncoded: (...args: unknown[]) => {
+            upsert: (...args: unknown[]) => {
               calls.push(["upsert", ...args]);
               return fakeWrite();
             },
@@ -1413,9 +1403,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 ])
               : encodeRows([]),
           prepareQuery: () => ({}),
-          attachQuery: () => ({}),
-          queryAttachmentIsCovered: () => true,
-          detachQuery: () => undefined,
           subscribe: () => ({
             readAll: () => {
               if (!ticked || subscriptionDrained) return [];
@@ -1434,7 +1421,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               ];
             },
           }),
-          insertEncoded: () => {
+          insert: () => {
             schedulerCallback?.("deferred");
             return fakeWrite();
           },
@@ -1559,10 +1546,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               authoritativeChecks += 1;
               return "allowed" as const;
             },
-            authorizeInsertEncodedForIdentity: () => {
-              authoritativeChecks += 1;
-              return "denied" as const;
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1661,9 +1644,9 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("delegates each scoped backend advice request with its immutable session binding", async () => {
     const authoritative = vi.fn(() => "allowed" as const);
     const backend = fakeDb({
-      requestInsertPermissionAdviceEncoded: authoritative,
+      requestInsertPermissionAdvice: authoritative,
       requestReadPermissionAdvice: authoritative,
-      requestUpdatePermissionAdviceEncoded: authoritative,
+      requestUpdatePermissionAdvice: authoritative,
       requestDeletePermissionAdvice: authoritative,
       tick: () => undefined,
     });
@@ -1722,7 +1705,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            requestInsertPermissionAdviceEncoded: () => "permit" as never,
+            requestInsertPermissionAdvice: () => "permit" as never,
             requestReadPermissionAdvice: () => ({
               poll: () => "permit",
               cancel: () => {},
@@ -1797,7 +1780,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             authorizeReadForIdentity: () => "allowed" as const,
-            authorizeInsertEncodedForIdentity: () => "denied" as const,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1846,10 +1828,15 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            setIdentityClaims: (author: Uint8Array, claims: Record<string, unknown>) => {
+            prepareQuery: (
+              _query: Uint8Array,
+              _kind: "query" | "relation",
+              author: Uint8Array,
+              claims: Record<string, unknown>,
+            ) => {
               claimUpdates.push({ author: new TextDecoder().decode(author), claims });
+              return {};
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1916,7 +1903,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               ]);
             },
             prepareQuery: () => ({}),
-            subscribeForIdentity: () => {
+            subscribe: () => {
               throw new Error("reserved public session must be rejected before subscribing");
             },
             tick: () => undefined,
@@ -2536,7 +2523,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => {
               calls.push("all");
-              return encodeRows([
+              return encodeRelationSnapshot([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -2563,8 +2550,14 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     await expect(
       runtime.query(JSON.stringify({ table: "todos", relation_ir: unsupportedJoinRelationIr() })),
-    ).rejects.toThrow("Native runtime does not support relation queries");
-    expect(calls).toEqual([]);
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "should not be read" }],
+      },
+    ]);
+    expect(calls).toEqual(["prepareQuery", "all"]);
   });
 
   it("preserves raw subscription literal number spellings in native relation bytes", () => {
@@ -2573,10 +2566,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            subscribeRelationQuery: (bytes: Uint8Array) => {
-              relationBytes = bytes;
-              return new ReadableStream();
+            prepareQuery: (bytes: Uint8Array, kind: "query" | "relation") => {
+              if (kind === "relation") relationBytes = bytes;
+              return {};
             },
+            subscribe: () => new ReadableStream(),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3033,19 +3027,9 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push("prepareQuery");
               return {};
             },
-            allRelationSnapshot: () => {
-              calls.push("allRelationSnapshot");
-              return encodeTerminalRelationSnapshot(relationSchema);
-            },
             all: () => {
               calls.push("all");
-              return encodeRows([
-                {
-                  table: "todos",
-                  rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                  title: "should not be read",
-                },
-              ]);
+              return encodeTerminalRelationSnapshot(relationSchema);
             },
             tick: () => undefined,
           }),
@@ -3079,7 +3063,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       valuesByColumn?: Map<string, unknown>;
     }>;
 
-    expect(calls).toEqual(["prepareQuery", "allRelationSnapshot"]);
+    expect(calls).toEqual(["prepareQuery", "all"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.table).toBe("users");
     expect(rows[0]?.valuesByColumn?.get("todosViaOwner")).toEqual({
@@ -3183,7 +3167,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
-  it("rejects Gather subscriptions while preparing the original query", () => {
+  it("routes Gather subscriptions through the prepared-query subscription", () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3210,7 +3194,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    expect(() =>
+    expect(
       runtime.createSubscription(
         JSON.stringify({
           table: "todos",
@@ -3237,15 +3221,12 @@ describe("NativeRuntimeAdapter server transport", () => {
           },
         }),
       ),
-    ).toThrow("Native runtime does not support relation query subscriptions");
-    expect(calls).toEqual([]);
+    ).toBe(1);
+    expect(calls).toEqual(["prepareQuery", "subscribe"]);
   });
 
   it("passes supported read tiers and propagation through native read options", async () => {
     const readOptions: unknown[] = [];
-    const attachments: unknown[] = [];
-    const detached: unknown[] = [];
-    const attachment = {};
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -3254,12 +3235,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            attachQuery: (_query: unknown, opts: unknown) => {
-              attachments.push(opts);
-              return attachment;
-            },
-            queryAttachmentIsCovered: () => true,
-            detachQuery: (handle: unknown) => detached.push(handle),
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -3284,40 +3259,37 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).resolves.toEqual([]);
 
     expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
-    expect(attachments).toEqual([]);
-    expect(detached).toEqual([]);
   });
 
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
     const calls: string[] = [];
+    let prepared = 0;
     const nativeDb = fakeDb({
-      prepareQuery: () => ({}),
-      all: (_query: unknown, _opts: unknown, openTransactionId: string, author: Uint8Array) => {
-        if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(openTransactionId ? "transaction" : "plain");
-        return encodeRows([]);
-      },
-      allRelationQuery: (_query: unknown, _opts: unknown, author: Uint8Array) => {
-        if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push("relation");
-        return encodeRows([]);
-      },
-      allRelationSnapshot: (
-        _query: unknown,
+      prepareQuery: (_bytes: Uint8Array, kind: "query" | "relation") => ({
+        kind,
+        sequence: prepared++,
+      }),
+      all: (
+        query: { kind: "query" | "relation"; sequence: number },
         _opts: unknown,
         openTransactionId: string,
         author: Uint8Array,
       ) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
-        return encodeRelationSnapshot([]);
+        if (query.kind === "relation") {
+          calls.push("relation");
+          return encodeRelationSnapshot([]);
+        }
+        if (query.sequence === 2) {
+          calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
+          return encodeRelationSnapshot([]);
+        }
+        calls.push(openTransactionId ? "transaction" : "plain");
+        return encodeRows([]);
       },
-      subscribeForBackend: () => {
-        calls.push("subscription");
-        return new ReadableStream();
-      },
-      subscribeRelationQueryForBackend: () => {
-        calls.push("relation-subscription");
+      subscribe: (query: { kind: "query" | "relation" }, _opts: unknown, author: Uint8Array) => {
+        if (author) throw new Error("backend authority must be implicit in its native open");
+        calls.push(query.kind === "relation" ? "relation-subscription" : "subscription");
         return new ReadableStream();
       },
       tick: () => undefined,
@@ -3429,10 +3401,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(all).toHaveBeenCalledOnce();
   });
 
-  it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
-    const attachments: unknown[] = [];
+  it("hydrates broad Edge members with one native read", async () => {
     const readOptions: unknown[] = [];
-    const detached: unknown[] = [];
     const row = {
       table: "todos",
       rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -3446,13 +3416,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return encodeRows([row]);
             },
-            attachQuery: (_query: unknown, opts: unknown) => {
-              attachments.push(opts);
-              return { tier: (opts as { tier: string }).tier };
-            },
             connectUpstream: () => new FakeTransport([]),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: (attachment: unknown) => detached.push(attachment),
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -3476,13 +3440,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
 
-    expect(attachments).toEqual([{ tier: "edge" }]);
-    expect(readOptions).toEqual([{ tier: "edge" }, { tier: "edge" }, { tier: "edge" }]);
-    expect(detached).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }]);
   });
 
-  it("forwards a standalone exact Edge read as a fresh Edge authority request", async () => {
-    const attachments: unknown[] = [];
+  it("forwards a standalone exact Edge read through all", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3492,13 +3453,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return encodeRows([]);
             },
-            attachQuery: (_query: unknown, opts: unknown) => {
-              attachments.push(opts);
-              return {};
-            },
             connectUpstream: () => new FakeTransport([]),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -3525,7 +3480,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).resolves.toEqual([]);
 
-    expect(attachments).toEqual([{ tier: "edge" }]);
     expect(readOptions).toEqual([{ tier: "edge" }]);
   });
 
@@ -3539,9 +3493,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -3568,7 +3519,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "edge" }]);
   });
 
-  it("keeps concurrent client coverage attachments on the raw client path", async () => {
+  it("keeps concurrent client reads on the raw client path", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const attachedSubjects: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -3577,24 +3528,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
               if (author) throw new Error("client coverage must not use an authority identity");
+              attachedSubjects.push("client");
               return encodeRows([]);
             },
             connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: (
-              _query: unknown,
-              _opts: unknown,
-              _openTransactionId: string | undefined,
-              author: Uint8Array | undefined,
-            ) => {
-              if (author) {
-                throw new Error("client coverage must not select an authority identity");
-              }
-              attachedSubjects.push("client");
-              return {};
-            },
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3677,9 +3615,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => true,
-            detachQuery: () => undefined,
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -3701,675 +3636,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readOptions).toEqual([{ tier: "edge", include_deleted: true }]);
   });
 
-  it("does not let edge reads run before server query coverage is observed", async () => {
-    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    vi.useFakeTimers();
-    try {
-      const transport = new FakeTransport([]);
-      let covered = false;
-      let coverageProbeCalls = 0;
-      let rowReadCalls = 0;
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => {
-                if (!covered) {
-                  coverageProbeCalls += 1;
-                  throw new Error("NotCovered");
-                }
-                rowReadCalls += 1;
-                return new Uint8Array([0]);
-              },
-              connectUpstream: () => transport,
-              prepareQuery: () => ({}),
-              attachQuery: () => ({}),
-              queryAttachmentIsCovered: () => covered,
-              detachQuery: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-      await runtime.waitForUpstreamServerConnection();
-
-      const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
-      await vi.advanceTimersByTimeAsync(40);
-
-      expect(transport.tickCount).toBeGreaterThan(0);
-      expect(coverageProbeCalls).toBeGreaterThan(0);
-      expect(rowReadCalls).toBe(0);
-
-      covered = true;
-      await vi.advanceTimersByTimeAsync(10);
-
-      await expect(query).resolves.toEqual([]);
-      expect(rowReadCalls).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("requires fresh worker coverage when a full one-shot query is reattached", async () => {
-    vi.useFakeTimers();
-    try {
-      let rows = encodeRows([]);
-      let publishCommittedRow = false;
-      let attachmentCount = 0;
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => rows,
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: () => ({ generation: ++attachmentCount }),
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => {
-                if (!publishCommittedRow) return;
-                rows = encodeRows([
-                  {
-                    table: "todos",
-                    rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
-                    title: "committed while detached",
-                  },
-                ]);
-              },
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-      const queryJson = JSON.stringify({ table: "todos" });
-      const fullPropagation = JSON.stringify({ propagation: "full" });
-
-      const first = runtime.query(queryJson, null, "global", fullPropagation);
-      await vi.advanceTimersByTimeAsync(10);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await expect(first).resolves.toEqual([]);
-      expect(attachmentCount).toBe(1);
-
-      let secondSettled = false;
-      const second = runtime.query(queryJson, null, "global", fullPropagation).then((result) => {
-        secondSettled = true;
-        return result;
-      });
-      await vi.advanceTimersByTimeAsync(1);
-      expect(secondSettled).toBe(false);
-
-      publishCommittedRow = true;
-      runtime.notifyPeerTransportActivity();
-      // Receiving a frame cannot make the stale covered bit authoritative
-      // before the worker has processed and materialized that generation.
-      await vi.advanceTimersByTimeAsync(10);
-      expect(secondSettled).toBe(false);
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await expect(second).resolves.toEqual([
-        {
-          table: "todos",
-          id: "00000000-0000-0000-0000-000000000001",
-          values: [{ type: "Text", value: "committed while detached" }],
-        },
-      ]);
-      // The new full attachment itself supplied both membership and the
-      // concrete row. Re-reading that settled outer scope must not manufacture
-      // a second exact-id authority attachment: it would be a distinct receipt
-      // with no extra authorization information and can self-await.
-      expect(attachmentCount).toBe(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("requires post-attachment activity for a repeated full query", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: () => ({}),
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-
-      let firstSettled = false;
-      const first = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (firstSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(firstSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await first;
-
-      // A pending frame received before the new attachment cannot confirm it.
-      runtime.notifyPeerTransportActivity();
-      let secondSettled = false;
-      const second = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (secondSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(secondSettled).toBe(false);
-
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      expect(secondSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await second;
-      expect(secondSettled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("waits for the persistent owner's local answer without requiring a server", async () => {
-    vi.useFakeTimers();
-    try {
-      let ownerAnswered = false;
-      const attachedOptions: unknown[] = [];
-      const probeCoverage = vi.fn(() => ownerAnswered);
-      const tick = vi.fn();
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: (_query: unknown, opts: unknown) => {
-                attachedOptions.push(opts);
-                return {};
-              },
-              queryAttachmentIsCovered: probeCoverage,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-      let settled = false;
-      const pending = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "local")
-        .then((rows) => {
-          settled = true;
-          return rows;
-        });
-      await vi.advanceTimersByTimeAsync(20);
-      expect(settled).toBe(false);
-      const probeCalls = probeCoverage.mock.calls.length;
-      const tickCalls = tick.mock.calls.length;
-      expect(runtime.describeQueryCoverageWaits()).toMatchObject({
-        nonDurableClient: true,
-        waits: [{ tier: "local", lastCovered: false }],
-      });
-      expect(probeCoverage).toHaveBeenCalledTimes(probeCalls);
-      expect(tick).toHaveBeenCalledTimes(tickCalls);
-      // An unrelated owner frame cannot acknowledge this exact query.
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(20);
-      expect(settled).toBe(false);
-      ownerAnswered = true;
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(20);
-      await expect(pending).resolves.toEqual([]);
-      expect(attachedOptions).toEqual([{ tier: "local" }]);
-      expect(settled).toBe(true);
-      expect(runtime.describeQueryCoverageWaits().waits).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not treat processed activity as coverage for a new full attachment", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: () => ({}),
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-
-      const first = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
-      await vi.advanceTimersByTimeAsync(10);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await first;
-
-      // Activity processed before this attachment cannot confirm the new
-      // upstream subscription, even when its local native state is covered.
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-
-      let settled = false;
-      const second = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (settled = true));
-      await vi.advanceTimersByTimeAsync(1);
-      expect(settled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await second;
-      expect(settled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not reuse worker-confirmed coverage across trusted-serving identities", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: (
-                _query: unknown,
-                _opts: unknown,
-                _openTransactionId: string | undefined,
-                author: Uint8Array | undefined,
-              ) => {
-                if (!author) {
-                  throw new Error("trusted-serving coverage must use an authority identity");
-                }
-                return {};
-              },
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-        { readAuthorizationHost: "trusted-serving" },
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-      const alice = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "alice",
-        claims: {},
-        authMode: "external",
-      });
-      const bob = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "bob",
-        claims: {},
-        authMode: "external",
-      });
-
-      let aliceSettled = false;
-      const firstAlice = runtime
-        .query(JSON.stringify({ table: "todos" }), alice, "edge")
-        .then(() => (aliceSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(aliceSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstAlice;
-
-      let bobSettled = false;
-      const firstBob = runtime
-        .query(JSON.stringify({ table: "todos" }), bob, "edge")
-        .then(() => (bobSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(bobSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstBob;
-
-      let secondBobSettled = false;
-      const secondBob = runtime
-        .query(JSON.stringify({ table: "todos" }), bob, "edge")
-        .then(() => (secondBobSettled = true));
-      await vi.advanceTimersByTimeAsync(1);
-      expect(secondBobSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await secondBob;
-      expect(secondBobSettled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not treat processed activity as confirmation for a new trusted-serving identity", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: (
-                _query: unknown,
-                _opts: unknown,
-                _openTransactionId: string | undefined,
-                author: Uint8Array | undefined,
-              ) => {
-                if (!author) {
-                  throw new Error("trusted-serving coverage must use an authority identity");
-                }
-                return {};
-              },
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-        { readAuthorizationHost: "trusted-serving" },
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-      const alice = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "alice",
-        claims: {},
-        authMode: "external",
-      });
-      const bob = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "bob",
-        claims: {},
-        authMode: "external",
-      });
-
-      const firstAlice = runtime.query(JSON.stringify({ table: "todos" }), alice, "edge");
-      await vi.advanceTimersByTimeAsync(10);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstAlice;
-
-      // This activity can refresh Alice's confirmed context, but processing it
-      // before Bob attaches cannot confirm Bob's distinct serving context.
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      let bobSettled = false;
-      const firstBob = runtime
-        .query(JSON.stringify({ table: "todos" }), bob, "edge")
-        .then(() => (bobSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(bobSettled).toBe(false);
-
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstBob;
-      expect(bobSettled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not reuse worker-confirmed coverage after trusted-serving claims change", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: (
-                _query: unknown,
-                _opts: unknown,
-                _openTransactionId: string | undefined,
-                author: Uint8Array | undefined,
-              ) => {
-                if (!author) {
-                  throw new Error("trusted-serving coverage must use an authority identity");
-                }
-                return {};
-              },
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setIdentityClaims: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-        { readAuthorizationHost: "trusted-serving" },
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-      const reader = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "alice",
-        claims: { role: "reader" },
-        authMode: "external",
-      });
-      const revoked = JSON.stringify({
-        issuer: "https://issuer.example",
-        user_id: "alice",
-        claims: { role: "revoked" },
-        authMode: "external",
-      });
-
-      let readerSettled = false;
-      const firstReader = runtime
-        .query(JSON.stringify({ table: "todos" }), reader, "edge")
-        .then(() => (readerSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(readerSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstReader;
-
-      let revokedSettled = false;
-      const firstRevoked = runtime
-        .query(JSON.stringify({ table: "todos" }), revoked, "edge")
-        .then(() => (revokedSettled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(revokedSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await firstRevoked;
-
-      let secondRevokedSettled = false;
-      const secondRevoked = runtime
-        .query(JSON.stringify({ table: "todos" }), revoked, "edge")
-        .then(() => (secondRevokedSettled = true));
-      await vi.advanceTimersByTimeAsync(1);
-      expect(secondRevokedSettled).toBe(false);
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await secondRevoked;
-      expect(secondRevokedSettled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("accepts query coverage after consuming worker activity that arrived before attachment", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new NativeRuntimeAdapter(
-        {
-          openMemory: () =>
-            fakeDb({
-              all: () => new Uint8Array([0]),
-              connectUpstream: () => new FakeTransport([]),
-              prepareQuery: () => ({}),
-              attachQuery: () => ({}),
-              queryAttachmentIsCovered: () => true,
-              detachQuery: () => undefined,
-              setNonDurableClient: () => undefined,
-              tick: () => undefined,
-            }),
-          openBrowser: async () => {
-            throw new Error("not used");
-          },
-        } as never,
-        testSchema,
-        new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
-        1,
-        true,
-      );
-      runtime.setNonDurableClient();
-      runtime.connectUpstreamPeer();
-
-      runtime.notifyPeerTransportActivity();
-      let settled = false;
-      const query = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (settled = true));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(settled).toBe(false);
-
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
-      await query;
-      expect(settled).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("waits for suspended evaluation before probing one-shot query coverage", async () => {
-    let releaseTick!: () => void;
-    let reportTickStarted!: () => void;
-    const tickStarted = new Promise<void>((resolve) => {
-      reportTickStarted = resolve;
-    });
-    const tickGate = new Promise<void>((resolve) => {
-      releaseTick = resolve;
-    });
-    let nodeBorrowed = false;
-    let coverageProbeCalls = 0;
-    const transport = new FakeTransport([]);
+  it("polls a pending binding-owned read until it completes", async () => {
+    let polls = 0;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            connectUpstream: () => transport,
+            all: () => ({
+              poll: () => (++polls < 2 ? null : encodeRows([])),
+            }),
+            connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => {
-              expect(nodeBorrowed).toBe(false);
-              coverageProbeCalls += 1;
-              return true;
-            },
-            detachQuery: () => undefined,
-            tick: async () => {
-              nodeBorrowed = true;
-              reportTickStarted();
-              await tickGate;
-              nodeBorrowed = false;
-            },
+            tick: () => undefined,
           }),
         openBrowser: async () => {
           throw new Error("not used");
@@ -4383,19 +3661,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     runtime.connectUpstreamPeer();
 
-    const progress = runtime.progressPeerTransport();
-    await tickStarted;
-    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
-    await Promise.resolve();
-    expect(coverageProbeCalls).toBe(0);
-
-    releaseTick();
-    await progress;
-    await expect(query).resolves.toEqual([]);
-    expect(coverageProbeCalls).toBe(1);
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
+      [],
+    );
+    expect(polls).toBe(2);
   });
 
-  it("rejects pending edge reads when the websocket transport errors during coverage wait", async () => {
+  it("processes already-admitted worker activity before starting a fresh native read", async () => {
+    let processed = false;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              expect(processed).toBe(true);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            setNonDurableClient: () => undefined,
+            tick: () => {
+              processed = true;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.setNonDurableClient();
+    runtime.connectUpstreamPeer();
+    runtime.notifyPeerTransportActivity();
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("rejects a pending binding-owned read when its server transport errors", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
@@ -4403,19 +3711,13 @@ describe("NativeRuntimeAdapter server transport", () => {
         sockets.push(this);
       }
     } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([]);
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
-            all: () => {
-              throw new Error("NotCovered");
-            },
-            connectUpstream: () => transport,
+            all: () => ({ poll: () => null }),
+            connectUpstream: () => new FakeTransport([]),
             prepareQuery: () => ({}),
-            attachQuery: () => ({}),
-            queryAttachmentIsCovered: () => false,
-            detachQuery: () => undefined,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -4596,8 +3898,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
-              calls.push("allRelationQuery");
+            all: () => {
+              calls.push("all");
               return new Uint8Array();
             },
             tick: () => undefined,
@@ -4633,8 +3935,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationSnapshot: () => {
-              calls.push("allRelationSnapshot");
+            all: () => {
+              calls.push("all");
               return new Uint8Array([0]);
             },
             prepareQuery: () => {
@@ -4718,8 +4020,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            allRelationQuery: () => {
-              calls.push("allRelationQuery");
+            all: () => {
+              calls.push("all");
               return new Uint8Array([0]);
             },
             tick: () => undefined,
@@ -6438,7 +5740,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6470,7 +5772,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     } satisfies WasmSchema;
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6495,23 +5797,23 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[3]).toBe("title");
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("insert");
+    expect(beginStreamingMutation).toHaveBeenCalledOnce();
+    expect(beginStreamingMutation.mock.calls[0]?.[3]).toBe("title");
+    expect(beginStreamingMutation.mock.calls[0]?.[4]).toBe("insert");
     expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
     expect(finished).toBe(true);
     expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
   });
 
   it("forwards update identity, branch view, and custom timestamp to native finish", async () => {
-    const beginStreamingMutationEncoded = vi.fn(() => ({
+    const beginStreamingMutation = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
       abort: vi.fn(),
     }));
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6546,12 +5848,13 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
+    const call = beginStreamingMutation.mock.calls[0] as unknown[];
     expect(call[4]).toBe("update");
     expect(call[5]).toBeInstanceOf(Uint8Array);
-    expect(call[6]).toBe(1234);
-    expect(call[7]).toEqual(head);
-    expect(call[8]).toEqual(base);
+    expect(call[6]).toBeUndefined();
+    expect(call[7]).toBe(1234);
+    expect(call[8]).toEqual(head);
+    expect(call[9]).toEqual(base);
   });
 
   it.each([
@@ -6572,7 +5875,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     },
   ])("strictly parses write-context canonical author attribution: $name", async (testCase) => {
     const ownerAuthor = JSON.stringify(["urn:jazz:test", "owner"]);
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6591,7 +5894,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6616,21 +5919,22 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
+    const author = beginStreamingMutation.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       testCase.expectedAuthor ?? ownerAuthor,
     );
   });
 
-  it("uses the explicit backend binding ABI for provenance without passing it as admission", async () => {
-    const insertWithIdEncodedAttributed = vi.fn(
-      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
+  it("passes provenance separately from admission through the unified binding ABI", async () => {
+    const insert = vi.fn(
+      (
+        _table: string,
+        _cells: Uint8Array,
+        _options: { author?: Uint8Array; attribution?: Uint8Array },
+      ) => fakeWrite(),
     );
     const beginTransaction = vi.fn();
-    const beginTransactionAttributed = vi.fn(
-      (_openTransactionId: string, _author: Uint8Array) => undefined,
-    );
-    const beginStreamingMutationAttributedEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -6646,10 +5950,9 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       }),
     );
     const nativeDb = fakeDb({
-      insertWithIdEncodedAttributed,
+      insert,
       beginTransaction,
-      beginTransactionAttributed,
-      beginStreamingMutationAttributedEncoded,
+      beginStreamingMutation,
     });
     const runtime = new NativeRuntimeAdapter(
       {
@@ -6677,15 +5980,22 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000123",
     );
-    const insertCall = insertWithIdEncodedAttributed.mock.calls[0];
+    const insertCall = insert.mock.calls[0];
     expect(insertCall?.[0]).toBe("todos");
-    expect(new TextDecoder().decode(insertCall?.[3])).toBe(attribution);
+    expect(insertCall?.[2].author).toBeUndefined();
+    expect(new TextDecoder().decode(insertCall?.[2].attribution!)).toBe(attribution);
 
     runtime.beginTransaction("mergeable", "attributed-batch" as never, context);
-    expect(beginTransaction).not.toHaveBeenCalled();
-    const transactionCall = beginTransactionAttributed.mock.calls[0];
+    const transactionCall = beginTransaction.mock.calls[0];
     expect(transactionCall?.[0]).toBe("attributed-batch");
-    expect(new TextDecoder().decode(transactionCall?.[1])).toBe(attribution);
+    expect(transactionCall?.[1]).toBe("mergeable");
+    expect(transactionCall?.[2]).toBeUndefined();
+    expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
+
+    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
+    const exclusiveCall = beginTransaction.mock.calls[1];
+    expect(exclusiveCall?.[1]).toBe("exclusive");
+    expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
       "insert",
@@ -6698,7 +6008,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       context,
       "00000000-0000-0000-0000-000000000125",
     );
-    const streamingCall = beginStreamingMutationAttributedEncoded.mock.calls[0];
+    const streamingCall = beginStreamingMutation.mock.calls[0];
     expect(streamingCall?.[0]).toBe("todos");
     expect(new TextDecoder().decode(streamingCall?.[6])).toBe(attribution);
 
@@ -6711,97 +6021,17 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000124",
       ),
     ).toThrow("do not support branch views");
-    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
-  });
-
-  it("fails closed when a backend-attributed NAPI ABI method is absent", async () => {
-    const insertEncoded = vi.fn(() => fakeWrite());
-    const updateEncoded = vi.fn(() => fakeWrite());
-    const upsertEncoded = vi.fn(() => fakeWrite());
-    const deleteEncoded = vi.fn(() => fakeWrite());
-    const restoreEncoded = vi.fn(() => fakeWrite());
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: () => undefined,
-    }));
-    const beginTransaction = vi.fn();
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () => {
-          throw new Error("not used");
-        },
-        openMemoryAsBackend: () =>
-          fakeDb({
-            insertEncoded,
-            updateEncoded,
-            upsertEncoded,
-            deleteEncoded,
-            restoreEncoded,
-            beginStreamingMutationEncoded,
-            beginTransaction,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-      { backendMode: true, readAuthorizationHost: "trusted-serving" },
-    );
-    const context = JSON.stringify({
-      attribution: JSON.stringify(["https://issuer.example", "alice"]),
-    });
-    const id = "00000000-0000-0000-0000-000000000123";
-    const values = { title: { type: "Text", value: "must not become SYSTEM" } } as const;
-
-    expect(() => runtime.insert("todos", values, context, id)).toThrow("backend-attributed insert");
-    expect(() =>
-      runtime.insert("todos", { title: { type: "Boolean", value: false } } as never, context, id),
-    ).toThrow("backend-attributed insert");
-    expect(() => runtime.update("todos", id, values, context)).toThrow("backend-attributed update");
-    expect(() => runtime.upsert("todos", id, values, context)).toThrow("backend-attributed upsert");
-    expect(() => runtime.delete("todos", id, context)).toThrow("backend-attributed delete");
-    expect(() => runtime.restore("todos", id, values, context)).toThrow(
-      "backend-attributed restore",
-    );
-    await expect(
-      runtime.streamingMutation(
-        "insert",
-        "todos",
-        {},
-        "title",
-        (async function* () {
-          yield "must not begin";
-        })(),
-        context,
-        id,
-      ),
-    ).rejects.toThrow("backend-attributed streaming mutations");
-    expect(() => runtime.beginTransaction("mergeable", "missing-abi" as never, context)).toThrow(
-      "backend-attributed mergeable transactions",
-    );
-
-    expect(insertEncoded).not.toHaveBeenCalled();
-    expect(updateEncoded).not.toHaveBeenCalled();
-    expect(upsertEncoded).not.toHaveBeenCalled();
-    expect(deleteEncoded).not.toHaveBeenCalled();
-    expect(restoreEncoded).not.toHaveBeenCalled();
-    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
-    expect(beginTransaction).not.toHaveBeenCalled();
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 
   it("rejects malformed backend attribution instead of falling back to SYSTEM", () => {
-    const insertEncoded = vi.fn(() => fakeWrite());
+    const insert = vi.fn(() => fakeWrite());
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => {
           throw new Error("not used");
         },
-        openMemoryAsBackend: () => fakeDb({ insertEncoded }),
+        openMemoryAsBackend: () => fakeDb({ insert }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6821,18 +6051,18 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000123",
       ),
     ).toThrow("backend attribution must be a canonical author subject string");
-    expect(insertEncoded).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("does not mix per-write provenance into a transaction opened without it", () => {
     const beginTransaction = vi.fn();
-    const attachMergeableTx = vi.fn(() => fakeTx());
+    const insert = vi.fn();
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => {
           throw new Error("not used");
         },
-        openMemoryAsBackend: () => fakeDb({ beginTransaction, attachMergeableTx }),
+        openMemoryAsBackend: () => fakeDb({ beginTransaction, insert }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6858,16 +6088,23 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000123",
       ),
     ).toThrow("opened without backend attribution");
-    expect(attachMergeableTx).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("binds reserved backend attribution to the exact verified session capability", () => {
-    const insertWithIdEncodedAttributed = vi.fn(
-      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
+    const insert = vi.fn(
+      (
+        _table: string,
+        _cells: Uint8Array,
+        options?: { rowId?: Uint8Array; attribution?: Uint8Array },
+      ) => ({
+        ...fakeWrite(),
+        rowId: options?.rowId ?? new Uint8Array(16),
+      }),
     );
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemoryAsBackend: () => fakeDb({ insertWithIdEncodedAttributed }),
+        openMemoryAsBackend: () => fakeDb({ insert }),
       } as never,
       testSchema,
       new Uint8Array(16),
@@ -6896,10 +6133,8 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "00000000-0000-0000-0000-000000000123",
       );
     write({ attribution, session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } });
-    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
-    expect(new TextDecoder().decode(insertWithIdEncodedAttributed.mock.calls[0]![3])).toBe(
-      attribution,
-    );
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(insert.mock.calls[0]![2]?.attribution!)).toBe(attribution);
     for (const context of [
       { attribution },
       { attribution, session },
@@ -6925,18 +6160,18 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       },
     ])
       expect(() => write(context)).toThrow("reserved issuer");
-    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(1);
   });
 
   it("rejects reserved public write-context sessions and attributions", async () => {
-    const beginStreamingMutationEncoded = vi.fn(() => ({
+    const beginStreamingMutation = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
       abort: vi.fn(),
     }));
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -6997,11 +6232,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       ),
     ).rejects.toThrow("reserved issuer");
 
-    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
+    expect(beginStreamingMutation).not.toHaveBeenCalled();
   });
 
   it("admits verified reserved write-context sessions carrying the runtime capability", async () => {
-    const beginStreamingMutationEncoded = vi.fn(
+    const beginStreamingMutation = vi.fn(
       (
         _table: string,
         _rowId: Uint8Array,
@@ -7024,7 +6259,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     )!;
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutation }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -7054,7 +6289,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
+    const author = beginStreamingMutation.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       '["urn:jazz:local-first","verified-writer"]',
     );
@@ -7066,7 +6301,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       {
         openMemory: () =>
           fakeDb({
-            beginStreamingMutationEncoded: () => ({
+            beginStreamingMutation: () => ({
               push: () => undefined,
               finish: () => fakeWrite(),
               abort,
@@ -7180,12 +6415,8 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
       openMemory: () =>
         fakeDb({
           all: () => new Uint8Array([0]),
-          attachQuery: () => ({}),
-          queryAttachmentIsCovered: () => true,
-          detachQuery: () => undefined,
           prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
-          subscribeForIdentity: () => new ReadableStream(),
           tick: () => undefined,
         }),
       openBrowser: async () => {
@@ -7260,7 +6491,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
     {
       openMemory: () =>
         fakeDb({
-          subscribeRelationQuery: () => ({
+          subscribe: () => ({
             readAll: () => chunks.splice(0),
             close: () => true,
           }),
@@ -8355,27 +7586,15 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
-    tx?: TxForTest;
   };
   const implementation = db as T & {
     connectUpstream?(): Transport;
     tick?(): void | Promise<void>;
-    mergeableTx?(openTransactionId: string): TxForTest;
-    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+  const requireOpenBatch = (openTransactionId: string): void => {
     const batch = openBatches.get(openTransactionId);
-    if (!batch || batch.kind !== kind)
-      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
-    batch.tx ??=
-      kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
-        : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
-          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
-    return batch.tx;
+    if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
@@ -8383,6 +7602,7 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.
     wireFeatures: () => CLIENT_WIRE_FEATURES,
+    prepareQuery: () => ({}),
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (
@@ -8392,18 +7612,33 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
     ) => {
       openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
-    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => ({
+      ...fakeWrite(),
+      rowId: options?.rowId ?? new Uint8Array(16),
+    }),
+    insertInTransaction: (
+      openTransactionId: string,
+      _table: string,
+      _cells: Uint8Array,
+      options?: { rowId?: Uint8Array },
+    ) => (requireOpenBatch(openTransactionId), options?.rowId ?? new Uint8Array(16)),
+    restore: () => fakeWrite(),
+    restoreInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    update: () => fakeWrite(),
+    updateInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    upsert: () => fakeWrite(),
+    upsertInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    delete: () => fakeWrite(),
+    deleteInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
     commitTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       openBatches.delete(openTransactionId);
-      return batch.tx?.commit() ?? fakeWrite();
+      return fakeWrite();
     },
     rollbackTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
-      batch.tx?.rollback();
       openBatches.delete(openTransactionId);
     },
     ...db,
@@ -8423,19 +7658,6 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   return result as T & NativeDbForTest;
 }
 
-function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
-  return {
-    commit: () => fakeWrite(),
-    rollback: () => undefined,
-    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
-    restoreEncoded: () => undefined,
-    updateEncoded: () => undefined,
-    upsertEncoded: () => undefined,
-    deleteEncoded: () => undefined,
-    ...overrides,
-  };
-}
-
 function fakeWrite() {
   return {
     txId: "00000000000070008000000000000001",
@@ -8444,39 +7666,6 @@ function fakeWrite() {
     writeState: () => ({}),
   };
 }
-
-type TxForTest = {
-  commit(): ReturnType<typeof fakeWrite>;
-  rollback(): void;
-  insertEncoded(
-    table: string,
-    cells: Uint8Array,
-    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
-  ): Uint8Array;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
-  ): void;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
-  ): void;
-  deleteEncoded(
-    table: string,
-    rowId: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-};
 
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
@@ -8526,7 +7715,7 @@ it("retains deferred admission failure until execute installs its callback", asy
     {
       openMemory: () =>
         fakeDb({
-          prepareQueryAsync: () => ({
+          prepareQuery: () => ({
             poll: () => {
               throw failure;
             },
@@ -8566,7 +7755,7 @@ it.each([null, undefined])(
       {
         openMemory: () =>
           fakeDb({
-            prepareQueryAsync: () => ({
+            prepareQuery: () => ({
               poll: () => {
                 polls++;
                 if (polls === 1) {
@@ -8608,63 +7797,6 @@ it.each([null, undefined])(
   },
 );
 
-it("finishes wake-driven attachment admission before starting its dependent read", async () => {
-  let polls = 0;
-  let wake = () => {};
-  let releaseOwner!: () => void;
-  const ownerReleased = new Promise<void>((resolve) => {
-    releaseOwner = resolve;
-  });
-  const pending = {
-    setWake: (callback: () => void) => {
-      wake = callback;
-    },
-    poll: () => {
-      polls += 1;
-      if (polls === 1) {
-        queueMicrotask(() => wake());
-        return null;
-      }
-      releaseOwner();
-      return true;
-    },
-    cancel: () => {},
-  };
-  const runtime = new NativeRuntimeAdapter(
-    {
-      openMemory: () =>
-        fakeDb({
-          attachQuery: () => pending,
-          queryAttachmentIsCovered: () => polls > 1,
-          all: async () => {
-            await ownerReleased;
-            return new Uint8Array();
-          },
-          tick: () => undefined,
-        } as never),
-      openBrowser: async () => {
-        throw new Error("unused");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-  );
-  const inner = runtime as unknown as Record<string, any>;
-  inner.nonDurableClient = true;
-  const attachment = inner.attachQueryIfNeeded("local", undefined, {}, null);
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(polls).toBe(2);
-  } finally {
-    releaseOwner();
-    inner.closed = true;
-    await attachment;
-  }
-});
-
 it("cancels wake-driven admission before shutdown waits for its blocked tick", async () => {
   let cancellations = 0;
   let releaseOwner!: () => void;
@@ -8675,7 +7807,7 @@ it("cancels wake-driven admission before shutdown waits for its blocked tick", a
     {
       openMemory: () =>
         fakeDb({
-          prepareQueryAsync: () => ({
+          prepareQuery: () => ({
             poll: () => null,
             setWake: () => {},
             cancel: () => {
@@ -8713,7 +7845,7 @@ it("isolates throwing callbacks when replaying a deferred admission failure", as
     {
       openMemory: () =>
         fakeDb({
-          prepareQueryAsync: () => ({
+          prepareQuery: () => ({
             poll: () => {
               throw failure;
             },
@@ -8762,7 +7894,12 @@ it("keeps same-query admissions with different claims out of the shared prepared
     {
       openMemory: () =>
         fakeDb({
-          prepareQueryAsync: (_query: Uint8Array, identity: Uint8Array, claims: unknown) => {
+          prepareQuery: (
+            _query: Uint8Array,
+            _kind: "query" | "relation",
+            identity: Uint8Array,
+            claims: unknown,
+          ) => {
             const prepared = {
               identity: new Uint8Array(identity),
               claims: structuredClone(claims),
@@ -8801,42 +7938,4 @@ it("keeps same-query admissions with different claims out of the shared prepared
   expect(b.claims).toEqual({ team: "team-b" });
   expect(setClaims).not.toHaveBeenCalled();
   await runtime.close();
-});
-
-it("rejects scoped relation operations on an older native without mutating ambient claims", async () => {
-  const setIdentityClaims = vi.fn();
-  const allRelationQuery = vi.fn();
-  const subscribeRelationQueryForIdentity = vi.fn();
-  const runtime = new NativeRuntimeAdapter(
-    {
-      openMemoryAsBackend: () =>
-        fakeDb({ setIdentityClaims, allRelationQuery, subscribeRelationQueryForIdentity } as never),
-      openBrowser: async () => {
-        throw new Error("unused");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-    { backendMode: true, readAuthorizationHost: "trusted-serving" },
-  );
-  const query = JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") });
-  const session = JSON.stringify({
-    issuer: "https://issuer.example",
-    user_id: "alice",
-    claims: { team: "a" },
-  });
-  try {
-    await expect(runtime.query(query, session)).rejects.toThrow("immutable scoped preparation");
-    expect(() => runtime.createSubscription(query, session)).toThrow(
-      "immutable scoped preparation",
-    );
-    expect(setIdentityClaims).not.toHaveBeenCalled();
-    expect(allRelationQuery).not.toHaveBeenCalled();
-    expect(subscribeRelationQueryForIdentity).not.toHaveBeenCalled();
-  } finally {
-    await runtime.close();
-  }
 });

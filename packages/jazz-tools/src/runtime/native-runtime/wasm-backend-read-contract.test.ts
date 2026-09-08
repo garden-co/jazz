@@ -26,37 +26,26 @@ describe("WASM backend read capability parity", () => {
           true,
         ),
       );
-      const query = db.prepareQuery(queryFromTable("notes"));
+      const query = db.prepareQuery(queryFromTable("notes"), "query");
       const relation = encodeRelationQueryPostcard({
         Project: {
           input: { TableScan: { table: "notes" } },
           columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
         },
       } satisfies RelExpr);
+      const relationQuery = db.prepareQuery(relation, "relation");
       const opts = { tier: "local" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [
-        () => db.allAsync(query, opts),
-        () => db.allAsync(query, opts, txId),
-        () => db.allRelationSnapshot(query, opts),
-        () => db.allRelationSnapshot(query, opts, txId),
-        () => db.allRelationQuery(relation, opts),
+        () => db.all(query, opts),
+        () => db.all(query, opts, txId),
+        () => db.all(relationQuery, opts),
       ];
       try {
-        const attachment = db.attachQuery(query, opts);
-        db.detachQuery(attachment);
-        for (const read of reads) expect(await read()).toBeInstanceOf(Uint8Array);
-        if (backend) {
-          await db.subscribeForBackend(query, opts).cancel();
-          await db.subscribeRelationQueryForBackend(relation, opts).cancel();
-        } else {
-          for (const read of [
-            () => db.subscribeForBackend(query, opts),
-            () => db.subscribeRelationQueryForBackend(relation, opts),
-          ])
-            expect(read).toThrow(/explicit backend runtime/);
-        }
+        for (const read of reads) expect(await resolveRead(read())).toBeInstanceOf(Uint8Array);
+        await db.subscribe(query, opts).cancel();
+        await db.subscribe(relationQuery, opts).cancel();
       } finally {
         db.rollbackTransaction(txId);
         db.close();
@@ -64,3 +53,12 @@ describe("WASM backend read capability parity", () => {
     });
   }
 });
+
+async function resolveRead(read: Uint8Array | { poll(): Uint8Array | null }): Promise<Uint8Array> {
+  if (read instanceof Uint8Array) return read;
+  for (;;) {
+    const result = read.poll();
+    if (result !== null) return result;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}

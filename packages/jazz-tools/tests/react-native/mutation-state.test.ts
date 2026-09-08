@@ -23,7 +23,7 @@ it("reads live native fate/durability and retires closed write state", async () 
       commands,
     );
     try {
-      const write = native.insertEncoded(
+      const write = native.insert(
         "documents",
         encodeCellsForRow(app.wasmSchema.documents!, {
           title: { type: "Text", value: "local state" },
@@ -121,7 +121,7 @@ it("closes an unfinished large upload without publication or late mutation callb
     );
     const errors = vi.fn();
     native.onMutationError(errors);
-    const upload = native.beginStreamingMutationEncoded(
+    const upload = native.beginStreamingMutation(
       "documents",
       crypto.getRandomValues(new Uint8Array(16)),
       encodeCellsForPatch(app.wasmSchema.documents!, {}),
@@ -157,7 +157,7 @@ it.each(["finish", "abort"] as const)(
         );
       const operations: number[] = [];
       try {
-        const seed = native.insertEncoded(
+        const seed = native.insert(
           "documents",
           encodeCellsForRow(app.wasmSchema.documents!, {
             title: { type: "Text", value: "capacity waiter" },
@@ -168,7 +168,7 @@ it.each(["finish", "abort"] as const)(
           seed.txId.match(/../g)!.map((byte) => Number.parseInt(byte, 16)),
         );
         const rowId = crypto.getRandomValues(new Uint8Array(16));
-        const upload = native.beginStreamingMutationEncoded(
+        const upload = native.beginStreamingMutation(
           "documents",
           rowId,
           encodeCellsForPatch(app.wasmSchema.documents!, {}),
