@@ -1013,6 +1013,17 @@ fn scalar_unavailability_receipt_preserves_inflight_local_edit() {
         !client.node.current_rows.borrow().floors.is_empty(),
         "held receipt passed exact context and local-cut validation"
     );
+    {
+        let node = client.node.node.borrow();
+        let scope = node.local_read_policy_binding(alice).unwrap();
+        let table = node
+            .local_availability_table_id(schema.version_id(), "todos")
+            .unwrap();
+        assert!(
+            node.is_local_row_unavailable(&scope, table, target),
+            "settled denial applies immediately even while the edit is pending"
+        );
+    }
     let rows = prepared_all(
         &client,
         &Query::from("todos"),

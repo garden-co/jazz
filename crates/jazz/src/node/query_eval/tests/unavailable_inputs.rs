@@ -39,6 +39,21 @@ fn fixture() -> (tempfile::TempDir, NodeState<RocksDbStorage>, JazzSchema) {
             )])),
     )
     .unwrap();
+    // These fixtures represent retained settled cache, not optimistic drafts.
+    for (index, tx) in node
+        .pending_transaction_ids_for(NodeUuid::from_bytes([91; 16]), AuthorSubject::SYSTEM)
+        .unwrap()
+        .into_iter()
+        .enumerate()
+    {
+        node.apply_fate_update(
+            tx,
+            Fate::Accepted,
+            Some(GlobalTime(index as u64 + 1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    }
     (dir, node, schema)
 }
 
@@ -839,6 +854,251 @@ fn cancelled_local_availability_apply_blocks_reads_until_reopen() {
     assert_eq!(
         parent_ids(&mut node, &schema, AuthorSubject::SYSTEM).len(),
         2
+    );
+}
+
+/// Internal receipt setup isolates an edit made after confirmed withdrawal;
+/// the edit itself uses the public pending commit API and ordinary local reads.
+#[test]
+fn local_edit_after_confirmed_unavailable_retains_optimistic_visibility() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let watermark = availability_watermark(1);
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    node.apply_verified_local_row_availability(
+        &scope,
+        watermark,
+        &[(table, row(1), LocalRowAvailability::CurrentUnavailable)],
+    )
+    .unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            alice,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut maintained, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 1);
+    let mut edits = Vec::new();
+    for id in [row(1), row(2)] {
+        let parent = node
+            .local_content_winner_tx_id("parents", id)
+            .unwrap()
+            .unwrap();
+        let published = node
+            .commit_mergeable(
+                MergeableCommit::new("parents", id, 100)
+                    .made_by(alice)
+                    .parents(vec![parent])
+                    .cells(BTreeMap::from([(
+                        "label".to_owned(),
+                        Value::String("local draft".to_owned()),
+                    )])),
+            )
+            .unwrap();
+        edits.push(node.persist_and_settle_transaction(published).unwrap());
+    }
+    let owned = read(
+        &mut node,
+        &schema,
+        Query::from("parents"),
+        AuthorSubject::SYSTEM,
+    );
+    assert_eq!(owned.len(), 2, "both pending edits are in local storage");
+    assert!(
+        owned.iter().all(|row| row.application_field("label")
+            == Some(Value::Nullable(Some(Box::new(Value::String(
+                "local draft".to_owned()
+            )))))),
+        "pending labels: {:?}",
+        owned
+            .iter()
+            .map(|row| row.application_field("label"))
+            .collect::<Vec<_>>()
+    );
+    let visible = read(&mut node, &schema, Query::from("parents"), alice);
+    assert!(
+        visible
+            .iter()
+            .any(|candidate| candidate.row_uuid() == row(2)
+                && candidate.application_field("label")
+                    == Some(Value::Nullable(Some(Box::new(Value::String(
+                        "local draft".to_owned()
+                    )))))),
+        "ordinary pending edit control must be visible"
+    );
+    assert!(
+        visible
+            .iter()
+            .any(|candidate| candidate.row_uuid() == row(1)),
+        "a prior unavailable receipt must not suppress a later optimistic local edit"
+    );
+    let update = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("pending draft publishes a delta");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("ordinary row terminal");
+    };
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { .. })),
+        "pending draft inserts the denied cached row into maintained output"
+    );
+    assert_eq!(
+        node.query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            alice,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(2)]),
+        "settled-only reads do not consume optimistic drafts"
+    );
+    assert_eq!(
+        node.query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            None,
+            alice,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap()
+        .len(),
+        2,
+        "includeDeleted retains the same optimistic draft"
+    );
+    node.apply_fate_update(
+        edits[0],
+        Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    let update = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("rejection retracts the draft");
+    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        terminal_operations,
+    } = update
+    else {
+        panic!("ordinary row terminal");
+    };
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
+    );
+    assert_eq!(parent_ids(&mut node, &schema, author(2)).len(), 2);
+}
+
+/// Edge-accepted versions can remain in Ahead storage. They are settled cache,
+/// while a distinct pending successor must still participate normally.
+#[test]
+fn local_unavailable_edge_accepted_ahead_keeps_pending_successor() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let parent = node
+        .local_content_winner_tx_id("parents", row(1))
+        .unwrap()
+        .unwrap();
+    let accepted = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("parents", row(1), 100)
+                .made_by(alice)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("edge accepted".to_owned()),
+                )])),
+        )
+        .unwrap();
+    node.apply_fate_update(accepted, Fate::Accepted, None, Some(DurabilityTier::Edge))
+        .unwrap();
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    let watermark = availability_watermark(1);
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    node.apply_verified_local_row_availability(
+        &scope,
+        watermark,
+        &[(table, row(1), LocalRowAvailability::CurrentUnavailable)],
+    )
+    .unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)]),
+        "Edge-accepted Ahead content is still subject to the settled exclusion"
+    );
+    let pending = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("parents", row(1), 200)
+                .made_by(alice)
+                .parents(vec![accepted])
+                .cells(BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("pending successor".to_owned()),
+                )])),
+        )
+        .unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(1), row(2)])
+    );
+    node.apply_fate_update(
+        pending,
+        Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)]),
+        "rejection cannot resurrect the Edge-accepted predecessor"
     );
 }
 

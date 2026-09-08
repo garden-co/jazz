@@ -273,21 +273,39 @@ impl<S: OrderedKvStorage> NodeState<S> {
         Ok(())
     }
 
-    pub(super) async fn exclude_local_unavailable_rows(
+    pub(super) async fn exclude_local_unavailable_graph(
         &mut self,
         scope: &PolicyBindingKey,
         schema: SchemaVersionId,
         source: &SourceRequest,
-        resolved: &mut ResolvedSource,
-    ) -> Result<(), Error> {
+        graph: GraphBuilder,
+        pending_ahead: bool,
+    ) -> Result<GraphBuilder, Error> {
         let table = self.local_availability_table_id(schema, &source.source.table)?;
         let id = self.local_unavailable_input(scope, table).await?;
-        resolved.graph = GraphBuilder::anti_join(
-            resolved.graph.clone(),
-            GraphBuilder::input_source(id, descriptor()),
-            [resolved.row_shape.row_uuid_field.clone()],
-            ["row_uuid".to_owned()],
-        );
-        Ok(())
+        let unavailable = GraphBuilder::input_source(id, descriptor());
+        if pending_ahead {
+            // Ahead also holds Edge-accepted versions. Keep exact version keys:
+            // a settled predecessor cannot suppress a pending sibling/successor.
+            let fields = ["row_uuid", "tx_time", "tx_node_id"];
+            let settled = GraphBuilder::join(
+                graph.clone(),
+                read_sources::edge_accepted_transaction_source_graph(),
+                ["tx_time", "tx_node_id"],
+                ["time", "node_id"],
+            )
+            .project_fields(fields.map(|field| ProjectField::renamed(left_field(field), field)));
+            let blocked = GraphBuilder::join(settled, unavailable, ["row_uuid"], ["row_uuid"])
+                .project_fields(
+                    fields.map(|field| ProjectField::renamed(left_field(field), field)),
+                );
+            return Ok(GraphBuilder::anti_join(graph, blocked, fields, fields));
+        }
+        Ok(GraphBuilder::anti_join(
+            graph,
+            unavailable,
+            ["row_uuid"],
+            ["row_uuid"],
+        ))
     }
 }

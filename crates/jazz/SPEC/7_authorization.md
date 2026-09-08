@@ -499,6 +499,14 @@ A readable deletion instead carries ordinary native content and deletion evidenc
 it is not converted into an access-loss marker.
 Only `ClientLocal` current/default application sources apply this exclusion,
 before joins, aggregates, windows, and logical limits, including `includeDeleted`.
+The exclusion applies to settled cached inputs before they are combined with
+ordinary optimistic pending versions. A draft created before or after the
+receipt remains visible through that same pending source; applying denial does
+not wait for the draft or start edit-specific retries. The durable denial stays
+in place, so rejecting or removing the draft cannot resurrect the settled row.
+Settled-only reads still exclude the row. Ahead storage can also contain
+Edge-accepted versions; those settled versions are excluded by exact version
+identity while distinct pending versions continue to participate.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
 snapshots, and non-default branch views do not consume the marker. Stored row
 content remains intact. A fresh verified `Readable` evaluation readmits the row;

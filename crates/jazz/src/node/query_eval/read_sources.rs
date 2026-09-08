@@ -71,6 +71,59 @@ impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn local_exclusion_scope(
+        &self,
+        request: &SourceRequest,
+    ) -> Option<crate::protocol::PolicyBindingKey> {
+        (!matches!(
+            request.authorization,
+            SourceAuthorizationRequest::PolicyProof { .. }
+        ) && self
+            .read_view
+            .sources
+            .get(&request.source)
+            .is_some_and(unavailable_inputs::is_current_app_source))
+        .then(|| self.local_unavailable_scope.clone())
+        .flatten()
+    }
+
+    fn excludes_below_pending(&self, request: &SourceRequest) -> bool {
+        self.local_exclusion_scope(request).is_some()
+            && !self.inline_sources.contains_key(&request.source)
+            && match self.read_view.sources.get(&request.source) {
+                Some(SourceExpr::VisibleCurrent {
+                    tier: DurabilityTier::Local,
+                    ..
+                }) => true,
+                Some(SourceExpr::WithOverlays { overlays, .. }) => {
+                    overlays.entries == [OverlayRef::PendingLocal]
+                }
+                _ => false,
+            }
+    }
+
+    async fn exclude_settled_arm(
+        &mut self,
+        request: &SourceRequest,
+        graph: GraphBuilder,
+        pending_ahead: bool,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        if !self.excludes_below_pending(request) {
+            return Ok(graph);
+        }
+        let scope = self.local_exclusion_scope(request).expect("checked scope");
+        self.node
+            .exclude_local_unavailable_graph(
+                &scope,
+                self.read_view.read_schema,
+                request,
+                graph,
+                pending_ahead,
+            )
+            .await
+            .map_err(|_| source_resolution_error(request, SourceGap::LocalAvailabilityInput))
+    }
+
     fn stored_column_ids_for_read_table(
         &self,
         request: &SourceRequest,
@@ -1244,7 +1297,8 @@ where
             };
             (graph, descriptor, metadata, BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
-            && self.needs_projected_current_source(&request.source.table)
+            && (self.needs_projected_current_source(&request.source.table)
+                || self.excludes_below_pending(request))
             && !receiver_local_overlay
         {
             if !request.requirements.metadata.is_empty() {
@@ -1269,7 +1323,9 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
                 let tier = graph_tier.expect("visible current source has a tier");
-                let selected_policy_base = if self.access_paths.contains_key(&request.source) {
+                let selected_policy_base = if self.access_paths.contains_key(&request.source)
+                    || self.excludes_below_pending(request)
+                {
                     None
                 } else if let Some(access_path) =
                     self.cached_policy_authorization_access_path(request)?
@@ -1367,7 +1423,8 @@ where
                 BTreeSet::new(),
             )
         } else if request.visibility == RowVisibility::IncludeDeleted
-            && self.needs_projected_current_source(&request.source.table)
+            && (self.needs_projected_current_source(&request.source.table)
+                || self.excludes_below_pending(request))
         {
             let tier = graph_tier.expect("visible current source has a tier");
             let base = self
@@ -1608,6 +1665,7 @@ where
             } else {
                 graph
             };
+            let covered = self.exclude_settled_arm(request, covered, false).await?;
             let inputs = vec![covered, graph];
 
             let winner = GraphBuilder::arg_max_by(
@@ -1803,7 +1861,9 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
-                let selected_policy_base = if self.access_paths.contains_key(&request.source) {
+                let selected_policy_base = if self.access_paths.contains_key(&request.source)
+                    || self.excludes_below_pending(request)
+                {
                     None
                 } else if let Some(access_path) =
                     self.cached_policy_authorization_access_path(request)?
@@ -1995,16 +2055,7 @@ where
         request: &'a SourceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
-            let exclusion_scope = (!matches!(
-                request.authorization,
-                SourceAuthorizationRequest::PolicyProof { .. }
-            ) && self
-                .read_view
-                .sources
-                .get(&request.source)
-                .is_some_and(unavailable_inputs::is_current_app_source))
-            .then(|| self.local_unavailable_scope.clone())
-            .flatten();
+            let exclusion_scope = self.local_exclusion_scope(request);
             // A physical limit is valid only when no later source filter can
             // remove candidates. Unavailability is a mutable anti-join, so
             // retain the logical query limit after it instead.
@@ -2017,13 +2068,17 @@ where
             let mut resolved = self
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
-            if let Some(scope) = exclusion_scope {
-                self.node
-                    .exclude_local_unavailable_rows(
+            if let Some(scope) = exclusion_scope
+                && !self.excludes_below_pending(request)
+            {
+                resolved.graph = self
+                    .node
+                    .exclude_local_unavailable_graph(
                         &scope,
                         self.read_view.read_schema,
                         request,
-                        &mut resolved,
+                        resolved.graph,
+                        false,
                     )
                     .await
                     .map_err(|_| {
@@ -2268,13 +2323,15 @@ where
         request: &SourceRequest,
         table: &TableSchema,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        self.visible_current_physical_source_graph(
-            request,
-            table,
-            PhysicalCurrentClass::Ahead,
-            DurabilityTier::Local,
-        )
-        .await
+        let graph = self
+            .visible_current_physical_source_graph(
+                request,
+                table,
+                PhysicalCurrentClass::Ahead,
+                DurabilityTier::Local,
+            )
+            .await?;
+        self.exclude_settled_arm(request, graph, true).await
     }
 
     /// Read a physical current arm with the ordinary deletion fence. The
@@ -2823,6 +2880,7 @@ where
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             }
         };
+        let global = self.exclude_settled_arm(request, global, false).await?;
         let content = if tier == DurabilityTier::Global {
             global
         } else {
@@ -2863,6 +2921,7 @@ where
                     ),
             }
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let ahead = self.exclude_settled_arm(request, ahead, true).await?;
             let ahead = if tier == DurabilityTier::Edge {
                 edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
             } else {
@@ -3027,25 +3086,29 @@ fn deletion_register_current_source_graph(
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
+pub(super) fn edge_accepted_transaction_source_graph() -> GraphBuilder {
+    GraphBuilder::table("jazz_transactions")
+        .filter(
+            PredicateExpr::And(vec![
+                PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+                PredicateExpr::Or(vec![
+                    PredicateExpr::eq("durability", Value::EnumTag(2)),
+                    PredicateExpr::eq("durability", Value::EnumTag(3)),
+                ])
+                .canonicalize(),
+            ])
+            .canonicalize(),
+        )
+        .project(["time", "node_id"])
+}
+
 pub(super) fn edge_visible_ahead_current_source_graph(
     source: GraphBuilder,
     fields: Vec<String>,
 ) -> GraphBuilder {
     GraphBuilder::join(
         source.project(fields.clone()),
-        GraphBuilder::table("jazz_transactions")
-            .filter(
-                PredicateExpr::And(vec![
-                    PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
-                    PredicateExpr::Or(vec![
-                        PredicateExpr::eq("durability", Value::EnumTag(2)),
-                        PredicateExpr::eq("durability", Value::EnumTag(3)),
-                    ])
-                    .canonicalize(),
-                ])
-                .canonicalize(),
-            )
-            .project(["time", "node_id"]),
+        edge_accepted_transaction_source_graph(),
         ["tx_time", "tx_node_id"],
         ["time", "node_id"],
     )

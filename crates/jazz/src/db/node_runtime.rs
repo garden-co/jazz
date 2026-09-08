@@ -3364,27 +3364,9 @@ where
                                 crate::node::LocalRowAvailability::Readable
                             }
                             crate::protocol::CurrentRowOutcome::CurrentUnavailable => {
-                                // A local edit may have started after this batch
-                                // was sent. Do not hide that pending overlay with
-                                // a decision about the authority's settled row.
-                                let settled = if let Some(tx) = node
-                                    .local_content_winner_tx_id(
-                                        &request.shape.query().table,
-                                        row.row,
-                                    )
-                                    .await?
-                                {
-                                    node.transaction_record(tx).await.is_some_and(|record| {
-                                        matches!(record.fate, crate::tx::Fate::Accepted)
-                                            && record.durability >= DurabilityTier::Edge
-                                    })
-                                } else {
-                                    true
-                                };
-                                if !settled {
-                                    retry_rows.push(row.row);
-                                    continue;
-                                }
+                                // Availability constrains settled input. The normal
+                                // pending source remains visible without postponing
+                                // this receipt or scheduling edit-specific retries.
                                 crate::node::LocalRowAvailability::CurrentUnavailable
                             }
                             crate::protocol::CurrentRowOutcome::Unknown => continue,
@@ -3527,10 +3509,6 @@ where
                 if let Ok(coordinate) = node.current_row_coordinate(table, row) {
                     candidates.push(coordinate);
                 }
-            } else if state.retry_delay_ms != 0 {
-                // A receipt deferred for an in-flight local edit must remain
-                // eligible once that edit settles, even without another scope delta.
-                state.pending.push_back(row);
             }
         }
         drop(node);
@@ -3553,18 +3531,7 @@ where
             }
             self.schedule_tick(TickUrgency::Immediate);
         } else if !state.pending.is_empty() {
-            if state.retry_delay_ms != 0 {
-                state.retry_delay_ms = (state.retry_delay_ms * 2).min(2_000);
-                state.retry_at = Some(
-                    web_time::Instant::now()
-                        + std::time::Duration::from_millis(state.retry_delay_ms),
-                );
-                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                    scheduler.schedule_tick_after(state.retry_delay_ms);
-                }
-            } else {
-                self.schedule_tick(TickUrgency::AfterCurrentTurn);
-            }
+            self.schedule_tick(TickUrgency::AfterCurrentTurn);
         }
         Ok(())
     }
