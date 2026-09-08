@@ -2,8 +2,6 @@
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import { writable } from "svelte/store";
   import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
-  import type { JazzApp, JazzAppSnapshot, JazzAuth } from "../session/app.js";
-  import type { JazzClient } from "./create-jazz-client.js";
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
   import { setJazzAuth } from "./auth-state.js";
 
@@ -16,14 +14,11 @@
   };
   let { children, signedOut, loading, error, autoAttachDevTools = true, auth, ...config }: Props = $props();
   // Configuration belongs to one mounted provider. Key the provider to replace it.
-  const initialConfig = untrack(() => config);
-  const snapshotStore = writable<JazzAppSnapshot<JazzClient>>({ status: "starting" });
-  let owner: JazzApp<JazzClient> | undefined;
-  const retry = () => owner?.retry() ?? Promise.resolve();
-  setJazzAuth({ subscribe: snapshotStore.subscribe, retry, logout: () => owner?.logout() ?? Promise.resolve() });
+  const app = untrack(() => createJazzApp({ ...config, auth }, { start: false }));
+  const snapshotStore = writable(app.getSnapshot());
+  const retry = () => app.retry().catch(() => {});
+  setJazzAuth({ subscribe: snapshotStore.subscribe, retry, logout: () => app.logout().catch(() => {}), sessionActions: app.sessionActions });
   onMount(() => {
-    const app = createJazzApp({ ...initialConfig, initial: initialConfig.initial ?? (auth ? undefined : "local-first"), auth });
-    owner = app;
     const lease = app.attachConsumer();
     const update = () => {
       const observed = app.getSnapshot();
@@ -32,14 +27,14 @@
     };
     const unsubscribe = app.subscribe(update);
     update();
+    void app.start().catch(() => {});
     return () => {
-      owner = undefined;
       unsubscribe();
       lease.release();
       void app.dispose().catch(console.error);
     };
   });
-  $effect(() => { const next = auth as JazzAuth | undefined; owner?.updateAuth(next); });
+  $effect(() => { app.updateAuth(auth); });
 </script>
 
 {#snippet pending()}

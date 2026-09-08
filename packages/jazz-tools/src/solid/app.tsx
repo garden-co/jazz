@@ -11,13 +11,15 @@ import {
   type JSX,
 } from "solid-js";
 import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
-import type { JazzApp, JazzAppSnapshot } from "../session/app.js";
+import type { JazzAppSnapshot } from "../session/app.js";
+import type { JazzSessionActions } from "../session/state.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { ActiveClient } from "./session.js";
 import { LegacyJazzProvider, type LegacyJazzProviderProps } from "./provider.js";
 
 export interface UseJazzAuth {
   snapshot: Accessor<JazzAppSnapshot<JazzClient>>;
+  readonly sessionActions: JazzSessionActions;
   logout(): Promise<void>;
   retry(): Promise<void>;
 }
@@ -48,21 +50,17 @@ function AppProvider(props: JazzAppProviderProps) {
     "error",
     "autoAttachDevTools",
   ]);
-  const [snapshot, setSnapshot] = createSignal<JazzAppSnapshot<JazzClient>>({ status: "starting" });
-  let owner: JazzApp<JazzClient> | undefined;
+  const app = createJazzApp({ ...config }, { start: false });
+  const [snapshot, setSnapshot] = createSignal(app.getSnapshot());
   let acknowledge: (() => void) | undefined;
-  const retry = () => owner?.retry() ?? Promise.resolve();
+  const retry = () => app.retry().catch(() => {});
   const value: UseJazzAuth = {
     snapshot,
     retry,
-    logout: () => owner?.logout() ?? Promise.resolve(),
+    logout: () => app.logout().catch(() => {}),
+    sessionActions: app.sessionActions,
   };
   onMount(() => {
-    const app = createJazzApp({
-      ...config,
-      initial: config.initial ?? (config.auth ? undefined : "local-first"),
-    });
-    owner = app;
     const lease = app.attachConsumer();
     const update = () => setSnapshot(app.getSnapshot());
     const stop = app.subscribe(update);
@@ -71,16 +69,15 @@ function AppProvider(props: JazzAppProviderProps) {
       queueMicrotask(() => lease.acknowledge(observed));
     };
     update();
+    void app.start().catch(() => {});
     onCleanup(() => {
-      owner = undefined;
       stop();
       lease.release();
       void app.dispose().catch(console.error);
     });
   });
   createEffect(() => {
-    const next = props.auth;
-    owner?.updateAuth(next);
+    app.updateAuth(props.auth);
   });
   createEffect(() => {
     snapshot();

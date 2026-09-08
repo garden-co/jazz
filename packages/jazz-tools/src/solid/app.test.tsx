@@ -26,9 +26,12 @@ async function setup() {
   const events: string[] = [];
   const handle = (id: string) =>
     ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
+  let failLogout = false;
   const accounts = new AccountManager({
     createLocalFirst: () => handle("local"),
-    logout: () => {},
+    logout: () => {
+      if (failLogout) throw new Error("logout failed");
+    },
     registerJWT: async () => handle("unused"),
     loginJWT: async () => handle("unused"),
     loginOrRegisterJWT: async (auth: any) => handle(await auth.getToken()),
@@ -49,10 +52,16 @@ async function setup() {
       ) as any,
   });
   factory.mockResolvedValue(owner);
-  return { owner, events };
+  return {
+    owner,
+    events,
+    failLogout: () => {
+      failLogout = true;
+    },
+  };
 }
 it("retries startup through the default UI and exposes unified auth to children", async () => {
-  const { owner, events } = await setup();
+  const { owner, events, failLogout } = await setup();
   await owner.createLocalFirst();
   factory.mockRejectedValueOnce(new Error("startup unavailable"));
   let auth: ReturnType<typeof useJazzAuth>;
@@ -84,6 +93,15 @@ it("retries startup through the default UI and exposes unified auth to children"
   await auth!.logout();
   expect(events).toEqual(["detached", "shutdown:local"]);
   expect(node.textContent).not.toContain("PRIVATE");
+  const actions = auth!.sessionActions;
+  await actions.createLocalFirst();
+  await flush();
+  expect(node.textContent).toContain("PRIVATE");
+  expect(auth!.sessionActions).toBe(actions);
+  failLogout();
+  await expect(auth!.logout()).resolves.toBeUndefined();
+  await flush();
+  expect(node.textContent).toContain("logout failed");
 });
 it("reacts to JWT getters, conceals children during provider pending, and releases before shutdown", async () => {
   const { owner, events } = await setup();

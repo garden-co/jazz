@@ -4,6 +4,10 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import JazzProvider from "./JazzProvider.svelte";
+import type { JazzAuthState } from "./auth-state.js";
+import { writable } from "svelte/store";
+import { jwtAuth } from "../session/app.js";
+import JwtApp from "../../tests/svelte/JwtApp.svelte";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
@@ -24,8 +28,14 @@ afterEach(async () => {
 it("owns startup retry and keeps the hook context across fallback and ready children", async () => {
   const events: string[] = [];
   const handle = { id: "local", identity: { issuer: "test", subject: "local" } } as AccountHandle;
+  let failLogout = false;
   const accounts = new AccountManager(
-    { createLocalFirst: () => handle, logout: () => {} } as any,
+    {
+      createLocalFirst: () => handle,
+      logout: () => {
+        if (failLogout) throw new Error("logout failed");
+      },
+    } as any,
     handle,
   );
   const owner = await createJazzSessionOwner({
@@ -44,10 +54,19 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   });
   factory.mockRejectedValueOnce(new Error("startup failed")).mockResolvedValue(owner);
   const target = document.createElement("div");
+  let observedAuth!: JazzAuthState;
   const status = createRawSnippet(() => ({
     render: () => "<div></div>",
     setup: (element) => {
-      const nested = mount(AuthStatus, { target: element, context: getAllContexts() });
+      const nested = mount(AuthStatus, {
+        target: element,
+        context: getAllContexts(),
+        props: {
+          onAuth: (auth: JazzAuthState) => {
+            observedAuth = auth;
+          },
+        },
+      });
       return () => {
         events.push("detached");
         void unmount(nested);
@@ -75,6 +94,15 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   await settle();
   expect(target.textContent).toBe("SIGN IN");
   expect(events).toEqual(["detached", "shutdown"]);
+  const actions = observedAuth.sessionActions;
+  await actions.createLocalFirst();
+  await settle();
+  expect(target.textContent).toContain("ready");
+  expect(observedAuth.sessionActions).toBe(actions);
+  failLogout = true;
+  await expect(observedAuth.logout()).resolves.toBeUndefined();
+  await settle();
+  expect(target.textContent).toContain("logout failed");
   await unmount(component);
   component = undefined;
   await settle();
@@ -113,4 +141,63 @@ it("renders custom startup loading and error snippets with the provider retry", 
   expect(target.textContent).toBe("CUSTOM LOADING");
   reject(new Error("again"));
   await settle();
+});
+
+it("updates JWT descriptors reactively and never mounts private children while pending", async () => {
+  const events: string[] = [];
+  const handle = (id: string) =>
+    ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
+  const accounts = new AccountManager({
+    logout: () => {},
+    loginOrRegisterJWT: async (auth: any) => handle(await auth.getToken()),
+  } as any);
+  const owner = await createJazzSessionOwner({
+    accounts,
+    openClient: async () =>
+      attachSubscriptionStore(
+        {
+          db: { onAuthChanged: () => () => {} },
+          session: null,
+          shutdown: async () => {
+            events.push("shutdown");
+          },
+        },
+        {} as never,
+      ) as any,
+  });
+  factory.mockResolvedValue(owner);
+  const descriptor = (key: string | null, isPending = false) =>
+    jwtAuth({ key, isPending, getToken: async () => key!, logout: async () => {} });
+  const auth = writable(descriptor(null));
+  let mounts = 0;
+  const target = document.createElement("div");
+  component = mount(JwtApp, {
+    target,
+    props: {
+      auth,
+      children: createRawSnippet(() => ({
+        render: () => {
+          mounts++;
+          return "<p>PRIVATE</p>";
+        },
+        setup: () => () => {
+          events.push("detached");
+        },
+      })),
+    },
+  });
+  await settle();
+  expect(target.textContent).toBe("SIGN IN");
+  expect(mounts).toBe(0);
+  auth.set(descriptor("a"));
+  await settle();
+  expect(target.textContent).toBe("PRIVATE");
+  auth.set(descriptor("a", true));
+  await settle();
+  expect(target.textContent).toBe("WAIT");
+  auth.set(descriptor("b"));
+  await settle();
+  expect(target.textContent).toBe("PRIVATE");
+  expect(owner.getSnapshot().account?.identity.subject).toBe("b");
+  expect(events.slice(0, 2)).toEqual(["detached", "shutdown"]);
 });

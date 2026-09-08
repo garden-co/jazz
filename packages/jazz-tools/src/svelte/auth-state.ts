@@ -1,9 +1,11 @@
 import { getContext, setContext } from "svelte";
 import type { Readable } from "svelte/store";
 import type { JazzAppSnapshot } from "../session/app.js";
+import type { JazzSessionActions } from "../session/state.js";
 import type { JazzClient } from "./create-jazz-client.js";
 
 export type JazzAuthState = Readable<JazzAppSnapshot<JazzClient>> & {
+  readonly sessionActions: JazzSessionActions;
   logout(): Promise<void>;
   retry(): Promise<void>;
 };
