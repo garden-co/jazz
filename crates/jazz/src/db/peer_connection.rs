@@ -5158,7 +5158,8 @@ where
                     let now_ms = self.upload_retry_clock.borrow().now_ms();
                     let outcome = {
                         let mut node = self.node.lock().await;
-                        peer.drain_deferred_edge_fates(&mut node, now_ms)
+                        // Deferred admission owns its policy and persistence futures.
+                        Box::pin(peer.drain_deferred_edge_fates(&mut node, now_ms))
                         .await
                         .map_err(Error::from)?
                     };
@@ -5210,6 +5211,8 @@ where
                         }
                     }
                 }
+                // View serving is a separate phase from deferred policy admission.
+                return Box::pin(async {
                 queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
                 if !flush_downstream_fates(
                     &self.node,
@@ -5801,6 +5804,8 @@ where
                     }
                 }
                     Ok::<bool, Error>(false)
+                })
+                .await;
                 })
                 .await;
                 })
