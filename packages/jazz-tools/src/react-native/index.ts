@@ -34,3 +34,38 @@ export {
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
 } from "./runtime-source.js";
 export { REACT_NATIVE_UNSUPPORTED_ERROR } from "./native-foreground-db.js";
+
+export { useAccountState } from "../react-core/use-account-state.js";
+
+export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
+export type {
+  AccountHandle,
+  AccountIdentity,
+  AccountSnapshot,
+  AccountManager,
+} from "../accounts/state.js";
+export type { AccountStore } from "../accounts/persistence.js";
+export {
+  AccountAuthError,
+  exportLocalFirstSecret,
+  type BackendAuth,
+  type JWTAuth,
+} from "../accounts/enrollment.js";
+
+export {
+  createJazzSession,
+  JazzSessionProvider,
+  useJazzSession,
+  type JazzSessionConfig,
+  type JazzSessionProviderProps,
+  type UseJazzSessionResult,
+  type JazzSession,
+  type JazzSessionSnapshot,
+  type JazzSessionActions,
+} from "./session.js";
+
+export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
+
+export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
+export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
+export type { JazzAppProviderProps } from "./provider.js";

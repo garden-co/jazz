@@ -381,7 +381,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
-                    made_by: AuthorSubject::SYSTEM,
+                    made_by: AuthorSubject::system_at(tx_id.node),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -416,7 +416,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorSubject::SYSTEM,
+                made_by: AuthorSubject::system_at(tx_id.node),
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -456,7 +456,7 @@ fn partial_node_snapshot_advances_from_authoritative_settled_through() {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
-                    made_by: AuthorSubject::SYSTEM,
+                    made_by: AuthorSubject::system_at(tx_id.node),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -1477,6 +1477,8 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     }));
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 
+    let tx_id = bundle.tx.tx_id;
+
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -1505,6 +1507,19 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
             .unwrap(),
         vec![(row(1), title_cells("one"))]
     );
+
+    // The maintained-view producer must preserve the receiver's partial
+    // cardinality when it relays this selected row downstream.
+    let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+    let versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let downstream_bundle = reader
+        .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
+        .unwrap();
+    assert_eq!(
+        downstream_bundle.scope,
+        crate::protocol::VersionBundleScope::ViewScoped
+    );
+    assert_eq!(downstream_bundle.tx.n_total_writes, 1);
 }
 
 #[test]

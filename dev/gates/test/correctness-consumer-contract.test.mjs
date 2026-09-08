@@ -11,6 +11,7 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
     "packages/jazz-tools/package.json",
     "packages/inspector/package.json",
     "examples/band-chat/apps/nextjs-betterauth/package.json",
+    "examples/auth-workos-chat/package.json",
   ];
   for (const path of packages) {
     const pkg = JSON.parse(read(path));
@@ -122,6 +123,7 @@ test("sealed consumers select content-addressed artifact paths rather than workt
     "packages/jazz-tools/vitest.config.svelte.ts",
     "examples/band-chat/apps/nextjs-betterauth/vitest.config.browser.ts",
     "examples/record-player/apps/next-betterauth/vitest.config.browser.ts",
+    "examples/auth-workos-chat/vitest.config.browser.ts",
   ]) {
     const source = read(config);
     assert.match(source, /JAZZ_CORRECTNESS_WASM_PACKAGE/);

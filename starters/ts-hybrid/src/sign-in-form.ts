@@ -1,6 +1,9 @@
 import { authClient } from "./auth-client.js";
+import { getToken } from "./accounts.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
-export function mountSignInForm(parent: HTMLElement, onToggle: () => void): void {
+export function mountSignInForm(parent: HTMLElement, session: Session, onToggle: () => void): void {
   parent.innerHTML = `
     <div class="card">
       <h1>Sign in</h1>
@@ -43,11 +46,19 @@ export function mountSignInForm(parent: HTMLElement, onToggle: () => void): void
 
     const result = await authClient.signIn.email({ email, password });
 
-    submit.disabled = false;
-
     if (result.error) {
       errorEl.textContent = result.error.message ?? "Sign-in failed";
       errorEl.hidden = false;
+      submit.disabled = false;
+      return;
+    }
+    try {
+      await session.loginOrRegisterJWT({ getToken });
+    } catch (cause) {
+      errorEl.textContent = cause instanceof Error ? cause.message : "Sign-in failed";
+      errorEl.hidden = false;
+    } finally {
+      submit.disabled = false;
     }
   });
 }

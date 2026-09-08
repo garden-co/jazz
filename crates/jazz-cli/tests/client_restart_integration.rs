@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
+use jazz::account_registry::AccountId;
 use jazz::tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     SchemaBuilder, TableSchema, Value,
@@ -281,6 +282,7 @@ fn make_context(
         storage_factory: Some(std::sync::Arc::new(
             jazz_storage_rocksdb::RocksDbStorageFactory,
         )),
+        account_id: None,
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
@@ -373,14 +375,16 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
-    let client = connect_native(make_context(
+    let mut context = make_context(
         app_id,
         server.base_url(),
         client_dir.path().to_path_buf(),
         make_jwt(user_id),
-    ))
-    .await
-    .expect("connect client");
+    );
+    jazz_testkit::enroll_test_context(&mut context)
+        .await
+        .expect("enroll the restart fixture before public admission");
+    let client = connect_native(context).await.expect("connect client");
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     let (_, _, transaction_id) = client
@@ -484,7 +488,8 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
         storage_factory: None,
-        jwt_token: None,
+        account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
+        jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
         admin_secret: None,
     };

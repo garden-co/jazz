@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../utf8.js";
 import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
@@ -12,10 +13,11 @@ import {
   writeDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
+import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 
-const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export {
   createRecord,
@@ -176,27 +178,15 @@ export function openConfig(
   return writer.finish();
 }
 
-/**
- * Core open configuration carries a portable canonical `[issuer, subject]`
- * JSON author. There is deliberately no UUID fallback.
- */
+/** Core open configuration uses the shared portable author representation. */
 function canonicalOpenAuthor(author: Uint8Array): string {
   try {
-    const canonical = new TextDecoder("utf-8", { fatal: true }).decode(author);
-    const parsed = JSON.parse(canonical);
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 2 &&
-      typeof parsed[0] === "string" &&
-      typeof parsed[1] === "string" &&
-      JSON.stringify(parsed) === canonical
-    ) {
-      return canonical;
-    }
+    const canonical = fatalUtf8Decoder.decode(author);
+    if (parseCanonicalAuthorSubject(canonical)) return canonical;
   } catch {
     // Fall through to the consistent public-boundary diagnostic.
   }
-  throw new Error("native open config author must be canonical UTF-8 JSON [issuer, subject]");
+  throw new Error("native open config author must be a canonical UTF-8 author identity");
 }
 
 export function queryFromTable(table: string): Uint8Array {

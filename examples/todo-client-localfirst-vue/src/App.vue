@@ -1,62 +1,30 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { JazzProvider } from "jazz-tools/vue";
-import { generateAuthSecret, type DbConfig } from "jazz-tools";
+import type { DbConfig } from "jazz-tools";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
 
-interface Props {
-  config?: Partial<DbConfig>;
-}
-
-const props = withDefaults(defineProps<Props>(), {
-  config: () => ({}),
-});
-
-function readEnv(name: string): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.[name];
-}
-
-function secretStorageKey(appId: string): string {
-  return `jazz-auth-secret:${encodeURIComponent(appId)}`;
-}
-
-function getOrCreateSecretSync(appId: string): string {
-  const stored = localStorage.getItem(secretStorageKey(appId));
-  if (stored) return stored;
-  const secret = generateAuthSecret();
-  localStorage.setItem(secretStorageKey(appId), secret);
-  return secret;
-}
-
+const props = defineProps<{ config?: Partial<DbConfig> }>();
 // #region context-setup-vue
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnv("VITE_JAZZ_APP_ID");
-  const serverUrl = overrides.serverUrl ?? readEnv("VITE_JAZZ_SERVER_URL");
-  if (!appId)
-    throw new Error("Missing appId: add jazzPlugin() to vite.config.ts or set VITE_JAZZ_APP_ID");
-  const secret = overrides.secret ?? getOrCreateSecretSync(appId);
-
-  return {
-    appId,
-    env: "dev",
-    secret,
-    ...(serverUrl ? { serverUrl } : {}),
-    ...overrides,
-  };
-}
+const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+const config = computed(() => ({
+  appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID,
+  serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
+  env: "dev" as const,
+  ...props.config,
+}));
+// Explicit account overrides retain the caller-owned account path used by tests.
+const providerProps = computed(() =>
+  config.value.account ? { config: config.value as DbConfig } : config.value,
+);
 // #endregion context-setup-vue
-
-const config = computed(() => defaultConfig(props.config));
 </script>
 
 <template>
-  <JazzProvider :config="config">
+  <JazzProvider v-bind="providerProps" :key="JSON.stringify([config.appId, config.serverUrl])">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />
-    <template #fallback>
-      <p>Loading...</p>
-    </template>
   </JazzProvider>
 </template>

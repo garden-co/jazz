@@ -428,6 +428,7 @@ JS-owned memory before Rust frees its response allocation.
 | 31      | UpdateLargeValues        | table string, row_id 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option u64          |
 | 32      | DirectMutation           | mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string                  |
 | 33      | PermissionAdvice         | action enum                                                                                                      |
+| 34      | WaitForPendingWrites     | tier string                                                                                                      |
 
 The command bytes are pinned by
 `foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec`,

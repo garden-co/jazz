@@ -234,6 +234,20 @@ describe("websocket frame carrier", () => {
     expect(issuerA).not.toBe(issuerB);
   });
 
+  it("retains the account on matching JWT refresh and rejects another acting identity", () => {
+    const author = '["00000000-0000-0000-0000-000000000001","https://issuer.example","alice"]';
+    const identity = new TextEncoder().encode(author);
+    const auth = (sub: string) =>
+      JSON.stringify({
+        jwt_token: `header.${btoa(JSON.stringify({ iss: "https://issuer.example", sub }))}.signature`,
+      });
+    expect(peerIdentityForWebSocketAuth(auth("alice"), identity)).toEqual(identity);
+    expect(JSON.parse(encodeWebSocketPrelude(auth("alice"), identity)).peer_identity).toBe(author);
+    expect(() => peerIdentityForWebSocketAuth(auth("bob"), identity)).toThrow(
+      "context account identity",
+    );
+  });
+
   it("preserves verified external JWT issuer and subject bytes exactly", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const jwt = (iss: string) =>

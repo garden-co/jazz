@@ -12,6 +12,87 @@ use super::*;
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
+/// Test-only rendezvous after refresh has detached a public stream's local
+/// maintained subscription. It makes the cancellation/finalization handoff
+/// deterministic without changing production scheduling.
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct SubscriptionRefreshDetachPause {
+    token: Rc<()>,
+    entered: Rc<Cell<bool>>,
+    released: Rc<Cell<bool>>,
+    waker: Rc<RefCell<Option<Waker>>>,
+}
+
+#[cfg(test)]
+impl Drop for SubscriptionRefreshDetachPause {
+    fn drop(&mut self) {
+        let removed = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| {
+            if slot
+                .borrow()
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(&current.token, &self.token))
+            {
+                slot.borrow_mut().take()
+            } else {
+                None
+            }
+        });
+        drop(removed);
+    }
+}
+
+#[cfg(test)]
+impl SubscriptionRefreshDetachPause {
+    pub(super) fn entered(&self) -> bool {
+        self.entered.get()
+    }
+
+    pub(super) fn release(&self) {
+        self.released.set(true);
+        if let Some(waker) = self.waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SUBSCRIPTION_REFRESH_DETACH_PAUSE: RefCell<Option<SubscriptionRefreshDetachPause>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn pause_subscription_refresh_after_detach_for_test() -> SubscriptionRefreshDetachPause {
+    let pause = SubscriptionRefreshDetachPause {
+        token: Rc::new(()),
+        entered: Rc::new(Cell::new(false)),
+        released: Rc::new(Cell::new(false)),
+        waker: Rc::new(RefCell::new(None)),
+    };
+    SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause.clone()));
+    pause
+}
+
+#[cfg(test)]
+async fn wait_for_subscription_refresh_detach_for_test() {
+    let pause = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow().clone());
+    let Some(pause) = pause else {
+        return;
+    };
+    pause.entered.set(true);
+    std::future::poll_fn(|context| {
+        if pause.released.get() {
+            Poll::Ready(())
+        } else {
+            *pause.waker.borrow_mut() = Some(context.waker().clone());
+            Poll::Pending
+        }
+    })
+    .await;
+    let removed = SUBSCRIPTION_REFRESH_DETACH_PAUSE.with(|slot| slot.borrow_mut().take());
+    drop(removed);
+}
+
 /// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
 /// close future drops the lease, rather than the accepted operation.
 struct QueuedMutationLease<'a> {
@@ -773,6 +854,22 @@ where
             if restored.insert(tx_id) {
                 self.queue_pending_upload(tx_id, None);
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn restore_backend_pending_uploads(
+        &self,
+        node_id: NodeUuid,
+    ) -> Result<(), Error> {
+        let pending = self
+            .node
+            .lock()
+            .await
+            .synchronizing_transaction_ids_for_node(node_id)
+            .await?;
+        for tx_id in pending {
+            self.queue_pending_upload(tx_id, None);
         }
         Ok(())
     }
@@ -1649,6 +1746,33 @@ where
                 request_id,
                 action,
                 session_claim_binding: None,
+                delegated_session: None,
+            },
+        );
+        self.schedule_tick(TickUrgency::Immediate);
+        PermissionAdviceFuture {
+            waiters: Rc::clone(&self.permission_advice_waiters),
+            request_id,
+            receiver,
+        }
+    }
+
+    pub(super) fn request_permission_advice_with_delegated_session(
+        &self,
+        action: PermissionAdviceAction,
+        session: crate::protocol::DelegatedSessionBinding,
+    ) -> PermissionAdviceFuture {
+        let request_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+        let (sender, receiver) = oneshot::channel();
+        self.permission_advice_waiters
+            .borrow_mut()
+            .insert(request_id, sender);
+        self.upstream_subscriptions.borrow_mut().push(
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                request_id,
+                action,
+                session_claim_binding: Some((session.identity, session.claims.clone())),
+                delegated_session: Some(session),
             },
         );
         self.schedule_tick(TickUrgency::Immediate);
@@ -1899,7 +2023,12 @@ where
                         state.read_view.clone(),
                         state.remote_propagate_upstream,
                     );
-                    let coverage = coverage_key(shape, binding, opts.clone());
+                    let coverage = request_coverage_key(
+                        shape,
+                        binding,
+                        opts.clone(),
+                        &state.request_identity_claims,
+                    );
                     let subscription = self
                         .upstream_subscription_owners
                         .borrow()
@@ -1926,7 +2055,7 @@ where
                                 binding: binding.clone(),
                                 opts,
                                 identity: state.author,
-                                policy_binding: None,
+                                policy_binding: state.request_identity_claims.clone(),
                             },
                         ));
                     }
@@ -2640,11 +2769,13 @@ where
                                     })
                                     .cloned()
                                     .unwrap_or_default();
-                                if current_claims == *claims {
+                                if request.delegated_session.is_some() || current_claims == *claims
+                                {
                                     reconnect_permission_advice.push((
                                         *request_id,
                                         request.action.clone(),
                                         Some(request.session_claim_binding.clone()),
+                                        request.delegated_session.clone(),
                                     ));
                                 } else {
                                     // A successor can only prove its currently
@@ -2660,28 +2791,32 @@ where
                             request_id,
                             action,
                             session_claim_binding,
+                            delegated_session,
                         } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            if session_claim_binding
-                                .as_ref()
-                                .is_none_or(|(identity, claims)| {
-                                    current_session_claims
-                                        .iter()
-                                        .find_map(|(current_identity, current_claims, _)| {
-                                            (current_identity == identity).then_some(current_claims)
-                                        })
-                                        .cloned()
-                                        .unwrap_or_default()
-                                        == *claims
-                                })
+                            if delegated_session.is_some()
+                                || session_claim_binding.as_ref().is_none_or(
+                                    |(identity, claims)| {
+                                        current_session_claims
+                                            .iter()
+                                            .find_map(|(current_identity, current_claims, _)| {
+                                                (current_identity == identity)
+                                                    .then_some(current_claims)
+                                            })
+                                            .cloned()
+                                            .unwrap_or_default()
+                                            == *claims
+                                    },
+                                )
                             {
                                 reconnect_permission_advice.push((
                                     *request_id,
                                     action.clone(),
                                     session_claim_binding.clone(),
+                                    delegated_session.clone(),
                                 ));
                             } else {
                                 terminal_permission_advice.push(*request_id);
@@ -2771,11 +2906,12 @@ where
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 reconnect_permission_advice.into_iter().map(
-                    |(request_id, action, session_claim_binding)| {
+                    |(request_id, action, session_claim_binding, delegated_session)| {
                         PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
                             session_claim_binding,
+                            delegated_session,
                         }
                     },
                 ),
@@ -3258,6 +3394,7 @@ where
                     )
                     .await?
             };
+            let replacement_is_cold = !maintained.initial_snapshot_received();
             if state.borrow().closed.get() {
                 node.lock()
                     .await
@@ -3288,6 +3425,20 @@ where
                 state_ref
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
+                state_ref.cold_runtime_replacement = replacement_is_cold;
+                if replacement_is_cold {
+                    // Own the replacement before yielding its cold initial batch;
+                    // otherwise the next owner turn would retire and reopen it.
+                    state_ref.groove_runtime_token = groove_runtime_token;
+                }
+            }
+            if replacement_is_cold {
+                // Opening a new maintained graph is intentionally nonblocking:
+                // an empty cold materialization is pending local IVM work, not
+                // a replacement result. The first terminal batch below emits
+                // one reset from the previously published facade.
+                retained.push(Rc::downgrade(&state));
+                continue;
             }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
@@ -3338,9 +3489,21 @@ where
                         .take()
                         .expect("replacement maintained subscription installed")
                 };
-                let drained = node
-                    .lock()
-                    .await
+                let mut node_ref = node.lock().await;
+                // A stream may be cancelled while this refresh waits for the
+                // node owner. Its queued finalizer can retire the exact local
+                // subscription before this drain acquires that owner.
+                if state.borrow().closed.get() {
+                    drop(node_ref);
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    *maintained_subscription = Some(maintained);
+                    continue;
+                }
+                let drained = node_ref
                     .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                         &mut maintained,
                         Some(authority_result_key.clone()),
@@ -3479,8 +3642,11 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
+        let cold_runtime_replacement_pending = state.borrow().cold_runtime_replacement;
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
+            #[cfg(test)]
+            wait_for_subscription_refresh_detach_for_test().await;
             let (shape, binding) = {
                 let state_ref = state.borrow();
                 let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
@@ -3649,6 +3815,12 @@ where
                     refresh.maintained.as_mut()
                 {
                     let mut node_ref = node.lock().await;
+                    // Finalization may have run while this refresh waited for
+                    // the owner. Do not drain the detached receiver after its
+                    // stream synchronously marked itself closed.
+                    if state.borrow().closed.get() {
+                        continue;
+                    }
                     // Only a scope-bound source consumes authority inputs.
                     // Local-first remains an ordinary storage-backed graph.
                     let authoritative_result_key = (authorization_mode
@@ -3720,6 +3892,90 @@ where
                 }
                 if let Some(key) = authoritative_reset_result.as_ref() {
                     consumed_authoritative_resets.insert(key.clone());
+                }
+                if cold_runtime_replacement_pending {
+                    let replacement_ready = refresh
+                        .maintained
+                        .as_ref()
+                        .is_some_and(LocalMaintainedViewSubscription::initial_snapshot_received);
+                    if !replacement_ready {
+                        retained.push(Rc::downgrade(&state));
+                        continue;
+                    }
+                    let previous = materialized_subscription_snapshot(
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
+                    let previous_snapshot_index = refresh.snapshot_index.clone();
+                    let maintained = refresh
+                        .maintained
+                        .take()
+                        .expect("cold runtime replacement kept its maintained subscription");
+                    let materialized = node
+                        .lock()
+                        .await
+                        .materialize_local_maintained_relation_snapshot_with_occurrences(
+                            &maintained,
+                        )
+                        .await;
+                    refresh.maintained = Some(maintained);
+                    let materialized = materialized?;
+                    let replacement = materialized.snapshot;
+                    refresh.snapshot = relation_snapshot_with_delta_slack(&replacement);
+                    refresh.snapshot_index = relation_snapshot_index_with_root_occurrences(
+                        &refresh.snapshot,
+                        &materialized.root_occurrence_ids,
+                    )?;
+                    refresh.snapshot_index.terminal_records = refresh
+                        .maintained
+                        .as_ref()
+                        .expect("cold runtime replacement restored maintained subscription")
+                        .decoded_terminal_records()?;
+                    let settled = subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
+                    refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                    refresh.settled = settled;
+                    state.borrow_mut().cold_runtime_replacement = false;
+                    let mut event = subscription_delta_event_with_reset(
+                        snapshot_tier,
+                        settled,
+                        &previous,
+                        &replacement,
+                        true,
+                        terminal_rows,
+                    );
+                    if let SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    } = &mut event
+                    {
+                        *added = subscription_outputs_with_occurrence_sidecar(
+                            &replacement,
+                            &materialized.root_occurrence_ids,
+                        )?;
+                        updated.clear();
+                        *removed = reset_removed_roots(
+                            &previous,
+                            &previous_snapshot_index,
+                            &materialized.root_occurrence_ids,
+                        );
+                    }
+                    retained.push(Rc::downgrade(&state));
+                    if refresh.sender.unbounded_send(event).is_ok() {
+                        changed += 1;
+                    }
+                    continue;
                 }
                 if let Some(update) = maintained_update {
                     match update {

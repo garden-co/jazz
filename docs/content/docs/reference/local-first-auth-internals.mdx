@@ -1,113 +1,34 @@
 ---
 title: Local-first auth internals
-description: "How local-first auth derives a stable account from a secret, how the self-signed JWT is structured, and how the server verifies it without an external key store."
-reviewedAt: "b29b48d1a"
+description: "How a local signing identity founds an offline account and links ordinary provider identities through the core registry."
 ---
 
-This page explains how [local-first auth](/docs/auth/local-first-auth) works under the hood. You do
-not need any of this to use it. Read this if you are debugging, building a custom client, or
-reasoning about what the design actually guarantees.
+[Local-first auth](/docs/auth/local-first-auth) separates a signing identity from the account that owns application data. A local-first account can be created offline; adding an external identity requires the core registry.
 
-## The core idea
+## Identity and account derivation
 
-An account, in local-first auth, is a secret: a single 32-byte seed.
+The client retains a 32-byte secret, represented as `jazz-auth-v1:<43 unpadded base64url characters>`. Native crypto derives an Ed25519 signing key using the `jazz-auth-sign-v1` domain separator. Its public key determines the local identity's UUID subject in the `jazz-auth-key-v1` namespace.
 
-The portable representation is exactly `jazz-auth-v1:<43 unpadded base64url characters>`. It is a
-versioned encoding of those 32 bytes—not an additional key derivation. Future formats will use a new
-prefix and an explicit verified key-store migration. Rotating this root creates a new author; it
-cannot preserve the existing local-first identity. App/profile scope strings are encoded exactly in
-the storage-key preimage; only BIP-39 recovery phrases receive Unicode and whitespace normalization.
+The identity is `(urn:jazz:local-first, subject)`. Its founder account is a separate, application-scoped UUIDv5: the namespace is the normalized app UUID, and the name is `jazz-account-founder-v1` followed by a zero byte and the subject. Therefore the same recovery secret restores the same identity and the same account within an application. A new secret creates a different identity and founder account.
 
-There is no registry mapping "user X → public key Y" sitting on a server somewhere. The seed
-deterministically produces a keypair, and the user ID is a deterministic function of the resulting
-public key, so holding the secret is the same thing as being the account: it lets you regenerate
-the keypair on demand and self-certify as that identity. Signing in is reconstructing the keypair
-from the stored secret; signing up is generating a new one.
+`createAccountManager` prepares native crypto and retained selection. After preparation, `createLocalFirst()` synchronously returns an opaque `AccountHandle`. A context waits for the handle's recovery material to be durably retained before using its credentials. Browser, React Native, and Expo adapters provide host storage; the account-selection logic is shared.
 
-This is why the design doesn't need a server-side user registry: the public key embedded in a token, paired with its signature, is everything the server needs to confirm the claimed account. Verification reuses the JWT-checking path the server already runs for external-auth tokens — only the source of the signing key differs (embedded in the token for local-first, fetched from a JWKS endpoint for external auth).
+## Self-signed authentication
 
-## Identity derivation
+Local-first JWTs use Ed25519, `iss: "urn:jazz:local-first"`, the derived identity subject, an application audience, and the embedded `jazz_pub_key`. The server verifies the signature, checks the audience and token lifetime, and confirms that the public key derives the claimed subject.
 
-The account is built from a single 32-byte secret the client stores locally.
+This proves control of the identity without an external JWKS provider. The deterministic founder rule lets core admit that identity's account without a competing registration choice. It does not let the caller choose an arbitrary account ID.
 
-1. The 32-byte **seed** is hashed with SHA-512 after the domain separator
-   `jazz-auth-sign-v1`. The first 32 bytes of the digest form the Ed25519 **signing key**.
-2. The corresponding **public key** (32 bytes) is extracted from the signing key.
-3. A deterministic **user ID** is derived from the public key using UUIDv5 with the namespace
-   `jazz-auth-key-v1`.
+The core registry records the exact identity-to-account assignment. External identities require explicit registration or linking; merely verifying an external JWT does not create an account.
 
-Every step is deterministic, so the same seed always produces the same user ID, on any device, at
-any time. Backing up the seed is backing up the identity.
+## Linking a provider identity
 
-## The self-signed JWT
+The provider keeps its normal issuer and subject. It does not rewrite its user ID, accept a Jazz-specific signup proof, or mint custom linking claims.
 
-When the client talks to a server, it mints a JWT and signs it with the Ed25519 key derived above.
-The key claims are:
+The app first gracefully closes its current context with `shutdown({ waitForSync: true })`. If synchronization fails, it keeps that context and retries later. Once closed, it calls `accounts.linkJWT({ getToken })` outside any context, then opens a new context using the returned handle.
 
-| Claim          | Value                    | Purpose                                              |
-| -------------- | ------------------------ | ---------------------------------------------------- |
-| `alg`          | `"EdDSA"`                | Ed25519 signature algorithm                          |
-| `iss`          | `"urn:jazz:local-first"` | Marks the token as local-first (not provider-issued) |
-| `sub`          | User ID (UUIDv5)         | The claimed account ID                               |
-| `jazz_pub_key` | Public key (base64url)   | Embedded so the server can verify without a lookup   |
-| `aud`          | App ID                   | Scopes the token to a specific app                   |
+The core linking protocol uses a nonce and two authenticated proofs: a currently permitted identity authorizes linking a particular target identity, and that target proves control through its ordinary JWT. The ordered registry accepts the link only if the target identity is unassigned. An identity already assigned to another account cannot be moved or merged, including after revocation.
 
-The public key travels inside the JWT and the whole JWT is signed with the matching private key, so the server doesn't need a separate key-distribution step or a shared secret with the client.
+Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `.account` keep ownership stable; comparisons of the entire author also distinguish the acting identity.
 
-## Server verification
-
-When the server receives a local-first JWT (as identified by the `iss` field), it:
-
-1. Reads `jazz_pub_key` from the token
-2. Uses it to verify the signature
-3. Recomputes the UUIDv5 from that public key (same namespace, same algorithm)
-4. Confirms the recomputed ID matches `sub`
-
-A token where `sub` and `jazz_pub_key` disagree is rejected outright, because either would require
-forging the other. A token where the signature does not verify is rejected because the holder did
-not prove possession of the private key.
-
-## Upgrading to a provider account
-
-When a local-first account upgrades to a real account via an external provider (BetterAuth,
-WorkOS, etc.), the user should keep the same Jazz account ID so their existing data carries over
-unchanged. This works because the account ID is a deterministic function of the keypair: if the
-client can prove (to the provider) that it holds the key behind account ID X, the provider can
-safely record X as the Jazz ID of the new user. Any JWT the provider issues afterwards uses X as
-its subject, and the user's existing data is already owned by X.
-
-The proof takes the form of a **proof token** — a short-lived JWT signed by the same key the
-client uses for self-signed auth. Structurally it is the same as a local-first JWT, but scoped to
-a specific sign-up flow:
-
-- `aud` is an application-defined string like `"my-app-signup"` (the client and server must agree).
-- `exp` is short — 60 seconds is usually enough for a sign-up round-trip.
-- `sub` and `jazz_pub_key` still pin the token to a specific account.
-
-The provider's endpoint verifies the proof token the same way any Jazz server verifies a
-local-first JWT, then records the proven Jazz user ID against the newly created provider account.
-
-<Sequence
-  eyebrow="Local-first sign-up"
-  description="Converting a local-first identity into a provider account."
-  participants={[
-    { id: "client", label: "Client" },
-    { id: "provider", label: "Provider server" },
-  ]}
-  steps={[
-    { kind: "note", over: "client", text: "User starts with local-first auth" },
-    { kind: "message", from: "client", to: "client", text: "db.getLocalFirstIdentityProof()" },
-    { kind: "message", from: "client", to: "provider", text: "Sign up (email + proofToken)" },
-    {
-      kind: "message",
-      from: "provider",
-      to: "provider",
-      text: "Verify proof, create user with same Jazz ID",
-    },
-    { kind: "message", from: "provider", to: "client", text: "Session + JWT", line: "dashed" },
-    { kind: "note", over: "client", text: "Same Jazz ID, now with a provider account" },
-  ]}
-/>
-
-See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the
-practical, BetterAuth-specific flow.
+If linking fails after the old context was closed, the app may reopen the account still selected by the manager. The manager performs no database shutdown or upload scheduling itself. See [Local-first auth](/docs/auth/local-first-auth) for the application flow.

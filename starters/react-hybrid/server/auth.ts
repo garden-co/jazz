@@ -1,8 +1,6 @@
 import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { bearer, jwt } from "better-auth/plugins";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { jwtPayload } from "./jwt-payload.js";
 
 const APP_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3001";
 
@@ -38,41 +36,6 @@ export const auth = betterAuth({
     minPasswordLength: 8,
     requireEmailVerification: false,
   },
-  hooks: {
-    before: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== "/sign-up/email") return;
-
-      const { verifyLocalFirstIdentityProof } = await import("jazz-napi");
-      const {
-        ok,
-        error,
-        id: provedUserId,
-      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "react-localfirst-signup");
-      if (!ok) {
-        throw new APIError("BAD_REQUEST", { message: error });
-      }
-
-      return {
-        context: {
-          ...ctx,
-          body: { ...ctx.body, provedUserId },
-        },
-      };
-    }),
-  },
-  databaseHooks: {
-    user: {
-      create: {
-        before: async (user, context) => {
-          const provedUserId = (context?.body as { provedUserId?: string } | undefined)
-            ?.provedUserId;
-          if (provedUserId) {
-            return { data: { ...user, id: provedUserId } };
-          }
-        },
-      },
-    },
-  },
   plugins: [
     bearer(),
     jwt({
@@ -83,7 +46,6 @@ export const auth = betterAuth({
         expirationTime: "1h",
         issuer: APP_ORIGIN,
         getSubject: ({ user }: { user: { id: string } }) => user.id,
-        definePayload: jwtPayload,
       },
     }),
   ],

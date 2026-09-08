@@ -31,9 +31,10 @@ struct ForegroundRuntimeInstallation {
   ForegroundRuntimeInstallation(
       jazz_native_relay_host *host,
       jlong runtime_token,
-      const std::shared_ptr<facebook::react::CallInvoker> &callInvoker)
+      const std::shared_ptr<facebook::react::CallInvoker> &callInvoker,
+      const std::string &storageRoot)
       : lease(std::make_shared<jazz::rn::ForegroundRuntimeLease>(
-            host, static_cast<uint64_t>(runtime_token), callInvoker)) {}
+            host, static_cast<uint64_t>(runtime_token), callInvoker, storageRoot)) {}
 
   std::mutex mutex;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
@@ -51,7 +52,8 @@ std::map<ForegroundRuntimeKey, std::shared_ptr<ForegroundRuntimeInstallation>>
 std::shared_ptr<ForegroundRuntimeInstallation> foregroundInstallation(
     jazz_native_relay_host *host,
     jlong runtime_token,
-    const std::shared_ptr<facebook::react::CallInvoker> &callInvoker = nullptr) {
+    const std::shared_ptr<facebook::react::CallInvoker> &callInvoker = nullptr,
+    const std::string &storageRoot = {}) {
   std::lock_guard<std::mutex> lock(foreground_installations_mutex);
   const ForegroundRuntimeKey key{host, runtime_token};
   const auto found = foreground_installations.find(key);
@@ -60,7 +62,7 @@ std::shared_ptr<ForegroundRuntimeInstallation> foregroundInstallation(
   }
   if (!callInvoker) return nullptr;
   auto installation = std::make_shared<ForegroundRuntimeInstallation>(
-      host, runtime_token, callInvoker);
+      host, runtime_token, callInvoker, storageRoot);
   foreground_installations.emplace(key, installation);
   return installation;
 }
@@ -155,15 +157,20 @@ Java_com_jazzrn_JazzRelayBridge_nativeRevokeTrustedScope(
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_jazzrn_JazzRelayBridge_nativeForegroundBindingsInstaller(
-    JNIEnv *, jclass, jlong host, jlong runtime_token) {
+    JNIEnv *env, jclass, jlong host, jlong runtime_token, jbyteArray storage_root) {
   auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
   if (relay_host == nullptr) {
     return nullptr;
   }
+  if (storage_root == nullptr) return nullptr;
+  const auto length = env->GetArrayLength(storage_root);
+  std::string storageRoot(static_cast<size_t>(length), '\0');
+  env->GetByteArrayRegion(storage_root, 0, length, reinterpret_cast<jbyte *>(storageRoot.data()));
+  if (env->ExceptionCheck()) return nullptr;
   auto holder = facebook::react::BindingsInstallerHolder::newObjectCxxArgs(
-      [relay_host, runtime_token](facebook::jsi::Runtime &runtime,
+      [relay_host, runtime_token, storageRoot](facebook::jsi::Runtime &runtime,
                      const std::shared_ptr<facebook::react::CallInvoker> &callInvoker) {
-        auto installation = foregroundInstallation(relay_host, runtime_token, callInvoker);
+        auto installation = foregroundInstallation(relay_host, runtime_token, callInvoker, storageRoot);
         if (!installation) return;
         std::lock_guard<std::mutex> lock(installation->mutex);
         jazz::rn::installForegroundRuntime(runtime, installation->lease);

@@ -1,7 +1,14 @@
-import type { Db } from "jazz-tools";
 import { authClient } from "./auth-client.js";
+import { getToken } from "./accounts.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
-export function mountSignUpForm(parent: HTMLElement, db: Db, onToggle: () => void): void {
+export function mountSignUpForm(
+  parent: HTMLElement,
+  session: Session,
+  onToggle: () => void,
+  reportLinkFailure: (cause: unknown) => void,
+): void {
   parent.innerHTML = `
     <div class="card">
       <h1>Create account</h1>
@@ -48,32 +55,28 @@ export function mountSignUpForm(parent: HTMLElement, db: Db, onToggle: () => voi
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "react-localfirst-signup",
-    });
+    const { error } = await authClient.signUp.email({
+      email,
+      name,
+      password,
+    } as Parameters<typeof authClient.signUp.email>[0]);
 
-    if (!proofToken) {
-      errorEl.textContent = "Sign up requires an active Jazz session";
+    if (error) {
+      errorEl.textContent = error.message ?? "Sign-up failed";
       errorEl.hidden = false;
       submit.disabled = false;
       submit.textContent = "Create account";
       return;
     }
-
-    const { error } = await authClient.signUp.email({
-      email,
-      name,
-      password,
-      proofToken,
-    } as Parameters<typeof authClient.signUp.email>[0]);
-
-    submit.disabled = false;
-    submit.textContent = "Create account";
-
-    if (error) {
-      errorEl.textContent = error.message ?? "Sign-up failed";
+    try {
+      await session.linkJWT({ getToken });
+    } catch (cause) {
+      reportLinkFailure(cause);
+      errorEl.textContent = cause instanceof Error ? cause.message : "Sign-up failed";
       errorEl.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Create account";
     }
   });
 }

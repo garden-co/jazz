@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { app } from "../../schema";
-import { authJazzContext } from "./auth-jazz-context";
+import { authJazzClient } from "./auth-jazz-client";
 import { authorForSession } from "./identity";
 
 /**
@@ -9,7 +9,7 @@ import { authorForSession } from "./identity";
  */
 export async function ensureProfile(issuer: string, userId: string, displayName: string) {
   const author = authorForSession(issuer, userId);
-  const db = authJazzContext().asBackend(app);
+  const db = (await authJazzClient()).db;
   const existing = await db.one(app.profiles.where({ author }));
   if (existing) return existing;
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { BrowserAuthSecretStore } from "./auth-secret-store.js";
 import { formatAuthSecret } from "./auth-secret-codec.js";
 import { RecoveryPhrase } from "./recovery-phrase.js";
-import { createDb } from "./default-create-db.js";
+import { createDb } from "./testing/create-internal-db.js";
 
 function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const map = new Map<string, string>();
@@ -96,7 +96,7 @@ describe("RecoveryPhrase integration — identity continuity", () => {
       const idA = dbA.getAuthState().session?.user ?? null;
       const idB = dbB.getAuthState().session?.user ?? null;
       expect(idA).not.toBeNull();
-      expect(idB).toBe(idA);
+      expect(idB).toStrictEqual(idA);
     } finally {
       await dbA.shutdown();
       await dbB.shutdown();

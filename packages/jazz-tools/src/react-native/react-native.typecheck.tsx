@@ -1,4 +1,5 @@
 // Typecheck-only port of the deleted origin/main React Native tests to the v2 API.
+import type { AccountHandle } from "../accounts/state.js";
 import type { ReactNode } from "react";
 import {
   Db,
@@ -31,9 +32,11 @@ const app = schema.defineApp({
 const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();
 
 declare const authSecretStore: AuthSecretStore;
+declare const account: AccountHandle;
 
 const config: DbConfig = {
   appId: "rn-typecheck",
+  account,
   serverUrl: "https://sync.example.test",
   sqliteStorage,
 };
@@ -44,12 +47,8 @@ const config: DbConfig = {
 const admittedConfig: JazzClientConfig = {
   appId: "rn-native-relay-typecheck",
   nativeRelay: { capability: new Uint8Array(32) },
-  cookieSession: {
-    issuer: "https://sync.example.test",
-    user_id: "admitted-user",
-    claims: {},
-    authMode: "external",
-  },
+  account,
+  serverUrl: "https://sync.example.test",
 };
 
 async function clientFactory(): Promise<JazzClient> {
@@ -79,7 +78,10 @@ function Hooks({ children }: { children: ReactNode }) {
   db satisfies Db;
   client satisfies { db: Db; shutdown(): Promise<void> };
   session satisfies ReturnType<typeof useSession>;
-  if (session) session.user satisfies string;
+  if (session) {
+    session.user.account satisfies string | null;
+    session.user.identity.subject satisfies string;
+  }
   auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
   suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;

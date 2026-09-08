@@ -443,7 +443,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         tx_id: TxId::new(TxTime::from(10), node(1)),
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorSubject::SYSTEM,
+        made_by: AuthorSubject::system_at(node(1)),
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,

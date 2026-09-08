@@ -8,6 +8,35 @@
 use super::*;
 use crate::query::{col, eq, lit};
 
+/// Test-only rendezvous at the cancellation-sensitive proof-stack boundary.
+#[cfg(test)]
+struct PolicyProofCompilationPause;
+
+#[cfg(test)]
+thread_local! {
+    static POLICY_PROOF_COMPILATION_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl Drop for PolicyProofCompilationPause {
+    fn drop(&mut self) {
+        POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(false));
+    }
+}
+
+#[cfg(test)]
+fn pause_policy_proof_compilation_for_test() -> PolicyProofCompilationPause {
+    POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(true));
+    PolicyProofCompilationPause
+}
+
+#[cfg(test)]
+async fn wait_for_policy_proof_compilation_for_test() {
+    if POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.get()) {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
 /// The support key deliberately excludes the row/candidate operation key: two
@@ -256,8 +285,8 @@ where
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
         let cache_key = policy_authorization_graph_cache_key(&request);
-        if let Some(graph) = self.query.policy_authorization_graph_cache.get(&cache_key) {
-            return Ok(graph.clone());
+        if let Some(graph) = self.policy_authorization_graph_cache_get(&cache_key) {
+            return Ok(graph);
         }
         self.policy_authorization_row_id_graph_inner(request, None, true)
             .await
@@ -280,26 +309,37 @@ where
         cache: bool,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         let cache_key = policy_authorization_graph_cache_key(&request);
+        self.restore_expired_policy_compilation_state();
         let proof_table = match &request.policy {
             PolicyContext::AuthorizationSubplan {
                 protected_source, ..
             } => Some(protected_source.table.clone()),
             PolicyContext::System | PolicyContext::Identity { .. } => None,
         };
+        let proof_lease = proof_table.as_ref().map(|_| std::rc::Rc::new(()));
         if let Some(table) = &proof_table {
             let depth = self.query.policy_proof_stack.len();
             if self
                 .query
                 .policy_proof_stack
                 .iter()
-                .any(|active| active == table)
+                .any(|active| active.table == *table)
             {
                 return Err(Error::PolicyProofCycle {
                     table: table.clone(),
                     depth,
                 });
             }
-            self.query.policy_proof_stack.push(table.clone());
+            self.query.policy_proof_stack.push(PolicyProofStackEntry {
+                table: table.clone(),
+                lease: std::rc::Rc::downgrade(
+                    proof_lease
+                        .as_ref()
+                        .expect("proof table owns a cancellation lease"),
+                ),
+            });
+            #[cfg(test)]
+            wait_for_policy_proof_compilation_for_test().await;
         }
 
         let result = async {
@@ -352,11 +392,16 @@ where
         }
         .await;
 
-        if proof_table.is_some() {
-            self.query
+        if let Some(lease) = proof_lease {
+            let entry = self
+                .query
                 .policy_proof_stack
                 .pop()
                 .expect("policy proof stack entry is balanced");
+            debug_assert!(std::rc::Weak::ptr_eq(
+                &entry.lease,
+                &std::rc::Rc::downgrade(&lease)
+            ));
         }
         result
     }
@@ -375,10 +420,7 @@ where
             } else if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
-            claims.insert(
-                "user".to_owned(),
-                Value::String(identity.canonical().to_owned()),
-            );
+            claims.extend(crate::tools::policy_claims::author_policy_claims(identity));
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -849,10 +891,7 @@ where
             });
         let cache_key = policy_authorization_graph_cache_key(&policy_request);
         let authorized = self
-            .query
-            .policy_authorization_graph_cache
-            .get(&cache_key)
-            .cloned()
+            .policy_authorization_graph_cache_get(&cache_key)
             .ok_or(Error::InvalidStoredValue(
                 "policy dependency was not prepared before source composition",
             ))?;
@@ -1476,7 +1515,7 @@ pub(super) fn permission_scope_claim_values(
     // claims such as `sub` and `user_id` retain their admitted values, while
     // other Jazz defaults remain fallbacks.
     for (name, value) in default_permission_scope_claim_values(writer) {
-        if name == "user" {
+        if name == "user" || name.starts_with("user.") {
             claim_values.insert(name, value);
         } else {
             claim_values.entry(name).or_insert(value);
@@ -1798,8 +1837,9 @@ mod authorization_scope_compiler_tests {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([0x51; 16]), schema, storage).unwrap();
-        let identity =
-            AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+        let identity = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_u128(1)));
         let user_id = uuid::Uuid::from_bytes([0x52; 16]);
         node.set_test_provider_claims(
             identity,
@@ -1839,7 +1879,11 @@ mod authorization_scope_compiler_tests {
         );
         assert_eq!(
             permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("user"),
-            Some(&Value::String(identity.canonical().to_owned()))
+            Some(
+                &crate::ids::RowAuthor::from_persisted_subject(identity)
+                    .unwrap()
+                    .to_value()
+            )
         );
     }
 
@@ -2035,12 +2079,12 @@ mod authorization_scope_compiler_tests {
         })
         .unwrap();
 
-        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1).cells(
-            BTreeMap::from([(
+        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1)
+            .made_by(AuthorSubject::system_at(NodeUuid::from_bytes([0x42; 16])))
+            .cells(BTreeMap::from([(
                 "owner".to_owned(),
                 Value::Uuid(uuid::Uuid::from_bytes([0x43; 16])),
-            )]),
-        );
+            )]));
         let version =
             VersionRecord::from_commit(&commit, &base.tables[0], base.version_id()).unwrap();
         let actions = node.authorization_actions_for_versions(&[version]).unwrap();
@@ -2055,6 +2099,228 @@ mod authorization_scope_compiler_tests {
             scope.subscriptions.len(),
             1,
             "v2 projected insert policy needs support"
+        );
+    }
+
+    /// Alice cancels a paused policy-proof compiler before it can lower a
+    /// protected table; a later identical request must compile normally.
+    /// This stays at NodeState level because production callers cannot
+    /// deterministically cancel at the shared proof-stack mutation boundary.
+    ///
+    /// alice compiler ──push proof lease──► pause
+    /// alice cancel ──drop lease──────────► bob compiler ──prepare──► graph
+    #[test]
+    fn cancelling_policy_proof_compilation_does_not_poison_the_next_request() {
+        let schema = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
+                    )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([0x9a; 16]), schema, storage).unwrap();
+        let author = AuthorSubject::for_test_bytes([0x9b; 16]);
+        node.set_test_provider_claims(
+            author,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("user_id"),
+                Value::Uuid(uuid::Uuid::from_bytes([0x9b; 16])),
+            )]),
+        );
+        let request = node
+            .table_read_policy_authorization_request(
+                node.catalogue.current_schema_version_id,
+                "resources",
+                author,
+                ParamBindingMode::InlineAllReachableSeeds,
+                DurabilityTier::Local,
+                None,
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let pause = pause_policy_proof_compilation_for_test();
+        let mut cancelled = Box::pin(node.policy_authorization_row_id_graph(request.clone()));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+        drop(pause);
+
+        futures::executor::block_on(node.policy_authorization_row_id_graph(request.clone()))
+            .expect("the next policy compiler clears Alice's cancelled proof lease");
+
+        let live_lease = std::rc::Rc::new(());
+        node.query.policy_proof_stack.push(PolicyProofStackEntry {
+            table: "resources".to_owned(),
+            lease: std::rc::Rc::downgrade(&live_lease),
+        });
+        assert!(matches!(
+            futures::executor::block_on(node.point_policy_authorization_row_id_graph(
+                request,
+                BTreeMap::new(),
+            )),
+            Err(Error::PolicyProofCycle { table, depth }) if table == "resources" && depth == 1
+        ));
+        node.query.policy_proof_stack.pop();
+    }
+
+    /// Alice cancels a point-read compiler after it has replaced the reusable
+    /// policy graph with a row-scoped graph. Her later point read must not
+    /// inherit that cancelled scope, and Bob remains denied.
+    ///
+    /// alice point compiler ──replace generic graph──► pause ──cancel──►
+    /// alice next point read ──restore generic graph──► allow
+    /// bob same row ──fresh policy graph──► deny
+    #[test]
+    fn cancelling_scoped_policy_graph_replacement_restores_the_generic_graph() {
+        let schema = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
+                    )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([0x9a; 16]), schema, storage).unwrap();
+        let alice = AuthorSubject::for_test_bytes([0x9b; 16]);
+        let bob = AuthorSubject::for_test_bytes([0x9c; 16]);
+        for (author, claim) in [(alice, [0x9b; 16]), (bob, [0x9c; 16])] {
+            node.set_test_provider_claims(
+                author,
+                BTreeMap::from([(
+                    crate::query::provider_claim_key("user_id"),
+                    Value::Uuid(uuid::Uuid::from_bytes(claim)),
+                )]),
+            );
+        }
+        let first = RowUuid(uuid::Uuid::from_bytes([0x9d; 16]));
+        let second = RowUuid(uuid::Uuid::from_bytes([0x9e; 16]));
+        let transaction = node
+            .commit_mergeable_many_settled(vec![
+                MergeableCommit::new("resources", first, 1).cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(uuid::Uuid::from_bytes([0x9b; 16])),
+                )])),
+                MergeableCommit::new("resources", second, 2).cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(uuid::Uuid::from_bytes([0x9b; 16])),
+                )])),
+            ])
+            .unwrap();
+        node.accept_global_for_test(transaction).unwrap();
+
+        let generic = crate::query::Query::from("resources")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = generic.bind(BTreeMap::new()).unwrap();
+        assert_eq!(
+            futures::executor::block_on(node.query_rows_for_link(
+                &generic,
+                &binding,
+                DurabilityTier::Local,
+                alice,
+            ))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first, second]),
+            "the cached generic graph starts unbounded by a point read"
+        );
+        let generic_cache_key = node
+            .query
+            .policy_authorization_graph_cache
+            .keys()
+            .next()
+            .cloned()
+            .expect("the generic query prepares one policy graph");
+        assert!(
+            node.query.policy_authorization_graph_cache[&generic_cache_key]
+                .access_paths
+                .is_empty(),
+            "the reusable graph begins without a point path"
+        );
+
+        let pause = super::pause_scoped_policy_graph_replacement_for_test();
+        let mut cancelled = Box::pin(node.dry_run_read_current_allows("resources", first, alice));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+        drop(pause);
+
+        assert!(
+            !node
+                .query
+                .policy_authorization_graph_replacements
+                .is_empty(),
+            "cancellation leaves a leased replacement for the next reader to restore"
+        );
+        let restored = node
+            .policy_authorization_graph_cache_get(&generic_cache_key)
+            .expect("the next graph-cache reader restores the generic graph");
+        assert!(
+            restored.access_paths.is_empty(),
+            "the cache reader must not return Alice's cancelled point path"
+        );
+        assert!(
+            node.query
+                .policy_authorization_graph_replacements
+                .is_empty(),
+            "restoration removes the cancelled replacement receipt"
+        );
+
+        assert!(
+            futures::executor::block_on(node.dry_run_read_current_allows(
+                "resources",
+                second,
+                alice
+            ))
+            .expect("Alice's next point read restores the generic graph")
+        );
+        assert_eq!(
+            futures::executor::block_on(node.query_rows_for_link(
+                &generic,
+                &binding,
+                DurabilityTier::Local,
+                alice,
+            ))
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+            BTreeSet::from([first, second]),
+            "Alice's generic query must not inherit the cancelled first-row scope"
+        );
+        assert!(
+            !futures::executor::block_on(node.dry_run_read_current_allows("resources", first, bob))
+                .expect("Bob must not inherit Alice's cancelled point scope")
         );
     }
 }

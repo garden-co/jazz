@@ -1,3 +1,4 @@
+import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { DurabilityTier } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
@@ -33,6 +34,9 @@ export class BrowserConnectionManager extends ConnectionManager {
   private browserConnectionInput: ConnectionManagerClientInput | null = null;
   /** A failed follower owns no recoverable port; reconnect must mint a new one. */
   private recoverableConnectionFailure = false;
+  private observedConfigurationAdmissionFailure: BrowserWorkerConnection | null = null;
+  private configurationAdmissionRetry: Promise<BrowserWorkerConnection | null> | null = null;
+  private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
 
   constructor(host: DbForConnection) {
     super(host);
@@ -60,6 +64,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     // the old receipt before the new generation can begin serving reads.
     this.host.clearAuthenticatedInspectorLocalReads();
     const workerConfig = { ...this.host.config };
+    copyAccountConfigAdmission(this.host.config, workerConfig);
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
       config: workerConfig,
@@ -77,12 +82,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
     this.connection = connection;
+    this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
-    this.unregisterInspectorControl = registerBrowserInspectorControl(() =>
-      connection.openInspectorControlPort(),
+    this.unregisterInspectorControl = registerBrowserInspectorControl(
+      () => connection.openInspectorControlPort(),
+      () => this.host.config,
     );
     this.initialExplicitOfflineStateKnown = false;
-    this.connectionReady = connection.ready().then(
+    const readiness = connection.ready();
+    this.readinessByConnection.set(connection, readiness);
+    this.connectionReady = readiness.then(
       () => {
         if (this.connection !== connection) return;
         const inspectorPhysicalDbName =
@@ -118,9 +127,25 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
-    if (this.host.isShuttingDown) return;
-    await this.storageReset;
-    if (this.connectionError) throw this.connectionError;
+    if (this.host.isShuttingDown || signal?.aborted) return;
+    const reset = this.storageReset;
+    // Capture before yielding: callers already waiting on a rejected attempt
+    // must see that rejection, even if a later API call starts a replacement.
+    let connection = reset ? null : this.connection;
+    const retry = connection !== null && this.observedConfigurationAdmissionFailure === connection;
+    await reset;
+    if (this.host.isShuttingDown || signal?.aborted) return;
+    connection ??= this.connection;
+    if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
+    if (this.host.isShuttingDown || signal?.aborted) return;
+    try {
+      await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
+    } catch (error) {
+      if (connection === this.connection && connection?.canRetryInitialConfigurationAdmission?.()) {
+        this.observedConfigurationAdmissionFailure = connection;
+      }
+      throw error;
+    }
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
@@ -137,6 +162,29 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.host.config.serverUrl && tier !== "local") {
       await this.connection?.waitForServerConnection();
     }
+  }
+
+  private retryConfigurationAdmission(
+    failed: BrowserWorkerConnection,
+  ): Promise<BrowserWorkerConnection | null> {
+    if (this.configurationAdmissionRetry) return this.configurationAdmissionRetry;
+    if (failed !== this.connection) return Promise.resolve(this.connection);
+    const retry = (async () => {
+      await failed.shutdown();
+      if (this.host.isShuttingDown || failed !== this.connection) return null;
+      this.connection = null;
+      this.connectionReady = null;
+      this.connectionError = null;
+      this.observedConfigurationAdmissionFailure = null;
+      return this.openBrowserWorkerConnection();
+    })();
+    this.configurationAdmissionRetry = retry;
+    void retry
+      .finally(() => {
+        if (this.configurationAdmissionRetry === retry) this.configurationAdmissionRetry = null;
+      })
+      .catch(() => undefined);
+    return retry;
   }
 
   shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
@@ -271,6 +319,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.connection !== connection) return;
     this.connectionError = new Error("IndexedDB storage was externally invalidated");
     reloadAfterStorageInvalidation();
+  }
+
+  override async waitForPendingWrites(): Promise<void> {
+    await this.connection?.waitForPendingWrites();
   }
 
   override async shutdown(): Promise<void> {

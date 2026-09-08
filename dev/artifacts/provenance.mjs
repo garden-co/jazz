@@ -5,7 +5,15 @@
  * platform-specific stat/hash utilities.
  */
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -95,6 +103,26 @@ const isNapiGeneratedOutput = (repoPath) =>
   repoPath.startsWith("crates/jazz-napi/.napi-stage-") ||
   repoPath.startsWith("crates/jazz-napi/.native-artifacts/");
 
+// Provenance roots are whole checkout roots.  A hermetic fixture may live
+// below another checkout's ignored target directory; Git would otherwise walk
+// upward, report that enclosing checkout, and return an empty tracked inventory
+// for the fixture.  Treat that case as the non-Git filesystem fallback.
+function isRepositoryRoot(root) {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.error)
+    throw new Error(`artifact provenance: could not inspect Git root: ${result.error.message}`);
+  if (result.status !== 0) {
+    if (result.stderr.includes("not a git repository")) return false;
+    throw new Error(
+      `artifact provenance: could not inspect Git root: ${result.stderr.trim() || "unknown error"}`,
+    );
+  }
+  return resolve(result.stdout.trim()) === realpathSync(root);
+}
+
 function files(root, paths) {
   const found = [];
   const visit = (path) => {
@@ -136,11 +164,15 @@ function files(root, paths) {
 // fingerprint.  The recursive fallback deliberately exists only for the
 // hermetic non-git fixtures used by this module's unit tests.
 function trackedFiles(root, paths) {
+  if (!isRepositoryRoot(root)) return files(root, paths);
   const result = spawnSync("git", ["ls-files", "-z", "--", ...paths], {
     cwd: root,
     encoding: "buffer",
   });
-  if (result.status !== 0) return files(root, paths);
+  if (result.status !== 0)
+    throw new Error(
+      `artifact provenance: could not list tracked inputs: ${result.stderr.toString("utf8").trim() || "unknown error"}`,
+    );
 
   const found = [];
   for (const rawPath of result.stdout.toString("utf8").split("\0")) {
@@ -171,11 +203,7 @@ function trackedFiles(root, paths) {
 // to have a different ABI. Dirty files remain working-tree inputs so local
 // edits still invalidate the provenance they produced.
 function trackedInputContents(root, paths) {
-  const repository = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
-    cwd: root,
-    encoding: "utf8",
-  });
-  if (repository.status !== 0 || repository.stdout.trim() !== "true")
+  if (!isRepositoryRoot(root))
     return new Map(paths.map((path) => [path, readFileSync(join(root, path))]));
   const autocrlf = spawnSync("git", ["config", "--bool", "core.autocrlf"], {
     cwd: root,
@@ -291,10 +319,11 @@ function workspaceDependencyInputs(root, kind) {
       `artifact provenance: cargo metadata was invalid for ${kind}: ${error.message}`,
     );
   }
+  const canonicalRoot = realpathSync(root);
   const packages = new Map(
     metadata.packages.map((pkg) => [resolve(dirname(pkg.manifest_path)), pkg]),
   );
-  const rootDirectory = resolve(root, dirname(artifactRoots[kind]));
+  const rootDirectory = resolve(canonicalRoot, dirname(artifactRoots[kind]));
   if (!packages.has(rootDirectory)) {
     throw new Error(`artifact provenance: cargo metadata omitted ${artifactRoots[kind]}`);
   }
@@ -317,7 +346,7 @@ function workspaceDependencyInputs(root, kind) {
       pending.push(dependencyDirectory);
     }
   }
-  return [...visited].map((directory) => relative(root, directory)).sort();
+  return [...visited].map((directory) => relative(canonicalRoot, directory)).sort();
 }
 
 const inputsFor = {

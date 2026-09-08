@@ -17,6 +17,25 @@ async function addTodo(page: Page, title: string) {
   await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });
 }
 
+async function openBackup(page: Page) {
+  const restoreInput = page.getByLabel("Restore from recovery phrase");
+  if (!(await restoreInput.isVisible())) {
+    await page.getByText("Back up or restore your local-only account").click();
+  }
+  await expect(restoreInput).toBeVisible({ timeout: TIMEOUT });
+}
+
+async function restorePhrase(page: Page, phrase: string) {
+  // The replacement client can render before the intentional document reload.
+  // Observe navigation before submitting so the next step uses the final page.
+  await page.getByLabel("Restore from recovery phrase").fill(phrase);
+  await Promise.all([
+    page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()),
+    page.getByRole("button", { name: "Restore", exact: true }).click(),
+  ]);
+  await waitForApp(page);
+}
+
 test("recovery phrase round-trips the local-first identity", async ({ page }) => {
   const runId = Date.now();
   const todo = `Backup todo ${runId}`;
@@ -26,12 +45,24 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await addTodo(page, todo);
 
   // Reveal the phrase.
-  await page.getByText("Back up or restore your local-only account").click();
+  await openBackup(page);
   await page.getByRole("button", { name: "Show recovery phrase" }).click();
   const phraseTextarea = page.getByLabel("Recovery phrase", { exact: true });
   await expect(phraseTextarea).not.toHaveValue("", { timeout: TIMEOUT });
   const phrase = await phraseTextarea.inputValue();
   expect(phrase.trim().split(/\s+/).length).toBe(24);
+
+  // Reopening the same account must still replace the client cleanly.
+  await restorePhrase(page, phrase);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  // A rejected recovery still leaves a fresh client for the selected account.
+  await openBackup(page);
+  await page.getByLabel("Restore from recovery phrase").fill("not a recovery phrase");
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: TIMEOUT });
+  await waitForApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 
   // Clear local storage → a fresh anonymous identity is generated, todo vanishes.
   await page.evaluate(() => localStorage.clear());
@@ -40,11 +71,9 @@ test("recovery phrase round-trips the local-first identity", async ({ page }) =>
   await expect(page.getByText(todo)).toHaveCount(0, { timeout: TIMEOUT });
 
   // Restore the phrase.
-  await page.getByText("Back up or restore your local-only account").click();
-  await page.getByLabel("Restore from recovery phrase").fill(phrase);
-  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await openBackup(page);
+  await restorePhrase(page, phrase);
 
-  // Page reloads; the original todo should reappear.
-  await waitForApp(page);
+  // After the restore reload, the original todo should reappear.
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });

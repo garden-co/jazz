@@ -14,6 +14,677 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+/// Alice's foreground receives Bob's persistent owner's truthful Local answer
+/// after cold storage resumes, without an authority or unsolicited polling.
+/// This covers host callback progress, not dependence on one specific wake:
+/// deferred scheduler callbacks may also resume cold query work.
+/// Alice --Local attachment--> Bob --cold storage wake--> owner tick --> Alice.
+/// This is internal because the public client harness cannot suspend storage or
+/// constrain owner turns to the host's actual scheduler/transport callbacks.
+#[test]
+fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct HostWake {
+        owner: usize,
+        queue: Arc<Mutex<VecDeque<usize>>>,
+    }
+    impl HostWake {
+        fn enqueue(&self) {
+            self.queue.lock().unwrap().push_back(self.owner);
+        }
+    }
+    impl std::task::Wake for HostWake {
+        fn wake(self: Arc<Self>) {
+            self.enqueue();
+        }
+    }
+    impl TickScheduler for HostWake {
+        fn schedule_tick(&self, _: TickUrgency) {
+            self.enqueue();
+        }
+        fn schedule_tick_after(&self, _: u64) {
+            panic!("offline Local delivery must not require a protocol retry timer");
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(Waker::from(Arc::new(self.clone())))
+        }
+    }
+    struct DeliveringTransport {
+        inner: Box<dyn Transport>,
+        receiver: HostWake,
+    }
+    impl Transport for DeliveringTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.inner.send(message)?;
+            self.receiver.enqueue();
+            Ok(())
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+
+    for seed_cache in [false, true] {
+        let schema = schema_with_explicit_public_read();
+        let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&refs);
+        let eviction = storage.clone();
+        let relay = block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x74; 16]),
+                author,
+            },
+        )))
+        .unwrap();
+        relay.set_relay_authority_session_owner_for_test();
+        let cached = row(0x75);
+        if seed_cache {
+            relay
+                .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+                .unwrap();
+        }
+        let foreground = open_db(0x76, author, &schema);
+        foreground.set_non_durable_client();
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let wakes = [
+            HostWake {
+                owner: 0,
+                queue: queue.clone(),
+            },
+            HostWake {
+                owner: 1,
+                queue: queue.clone(),
+            },
+        ];
+        relay.set_tick_scheduler(Some(Rc::new(wakes[0].clone())));
+        foreground.set_tick_scheduler(Some(Rc::new(wakes[1].clone())));
+        let (up, down) = duplex();
+        let _upstream = block_on(foreground.connect_upstream(Box::new(DeliveringTransport {
+            inner: up,
+            receiver: wakes[0].clone(),
+        })));
+        let _subscriber = relay.accept_subscriber_with_claims(
+            Box::new(DeliveringTransport {
+                inner: down,
+                receiver: wakes[1].clone(),
+            }),
+            author,
+            BTreeMap::new(),
+        );
+        let query = prepared(&foreground, &Query::from("todos"));
+        let opts = ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        };
+        eviction.evict_all();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::Get);
+        control.pause_on(TestStorageOperation::ScanOpen);
+        let attachment = foreground
+            .attach_query_with_opts(&query, opts.clone())
+            .unwrap();
+        assert!(!foreground.query_attachment_is_covered(&attachment));
+
+        // Retain suspended owner turns, just as an async host retains tickAsync.
+        // Transport sends and scheduler callbacks are the only queue producers.
+        let mut turns: [Option<std::pin::Pin<Box<dyn Future<Output = ()> + '_>>>; 2] = [None, None];
+        let mut resumed = false;
+        for _ in 0..256 {
+            let owner = queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("Local delivery stalled without a scheduled host wake");
+            if turns[owner].is_none() {
+                turns[owner] = Some(if owner == 0 {
+                    Box::pin(async {
+                        relay.tick().await.unwrap();
+                    })
+                } else {
+                    Box::pin(async {
+                        foreground.tick().await.unwrap();
+                    })
+                });
+            }
+            let waker = Waker::from(Arc::new(wakes[owner].clone()));
+            if turns[owner]
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+            {
+                turns[owner] = None;
+            }
+            if !resumed
+                && control.observed().iter().any(|op| {
+                    matches!(
+                        op,
+                        TestStorageOperation::Get | TestStorageOperation::ScanOpen
+                    )
+                })
+            {
+                assert!(
+                    !foreground.query_attachment_is_covered(&attachment),
+                    "cold owner must not certify an unassembled answer"
+                );
+                control.resume();
+                resumed = true;
+            }
+            if foreground.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(resumed, "fixture must suspend an actual cold owner read");
+        assert!(
+            foreground.query_attachment_is_covered(&attachment),
+            "Local delivery did not complete within 256 scheduled callbacks (seed_cache={seed_cache})"
+        );
+        drop(turns);
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+            if seed_cache { vec![cached] } else { vec![] }
+        );
+        foreground.detach_query(attachment);
+    }
+}
+
+/// Alice's initial Local opening survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn initial_local_opening_retries_after_transport_backpressure() {
+    assert_initial_opening_backpressure(false, false, false);
+}
+
+/// Alice receives Bob's exact retained opening before a later committed row.
+#[test]
+fn retained_local_opening_precedes_writes_arriving_during_backpressure() {
+    assert_initial_opening_backpressure(true, false, false);
+}
+
+/// Alice cancels while Bob's initial opening is unaccepted; it must not leak later.
+#[test]
+fn cancelled_local_opening_is_not_sent_after_backpressure() {
+    assert_initial_opening_backpressure(false, true, false);
+}
+
+/// Bob's shared evaluator retries only Alice's unaccepted sibling opening.
+/// The internal sibling key models the shared-group path, as claim-refresh tests do.
+#[test]
+fn initial_group_openings_do_not_replay_accepted_siblings_after_backpressure() {
+    assert_initial_opening_backpressure(false, false, true);
+}
+
+/// Alice cancels her stalled opening while Bob keeps a sibling usage alive.
+#[test]
+fn cancelled_group_opening_does_not_block_or_replace_its_live_sibling() {
+    assert_initial_opening_backpressure(false, true, true);
+}
+
+fn assert_initial_opening_backpressure(
+    write_while_pending: bool,
+    cancel_while_pending: bool,
+    with_sibling: bool,
+) {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+        rejected_message: Option<SyncMessage>,
+        reject_at: usize,
+        cancelled_opening: bool,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                if self.accepted.get() + 1 == self.reject_at && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
+                    return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    if self.cancelled_opening {
+                        let (SyncMessage::ViewUpdate(actual), SyncMessage::ViewUpdate(cancelled)) =
+                            (&message, &expected)
+                        else {
+                            unreachable!()
+                        };
+                        assert_ne!(
+                            actual.subscription, cancelled.subscription,
+                            "a cancelled opening must not be sent for the surviving sibling"
+                        );
+                    } else {
+                        assert_eq!(
+                            message, expected,
+                            "retry retains the exact opening generation and row occurrences"
+                        );
+                    }
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            rejected_message: None,
+            reject_at: if with_sibling && !cancel_while_pending {
+                2
+            } else {
+                1
+            },
+            cancelled_opening: cancel_while_pending,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    if with_sibling {
+        foreground.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        let mut second = attachment.subscription();
+        second.read_view.id = uuid::Uuid::from_bytes([0xd7; 16]);
+        let mut connection = subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(state) = &mut connection.link else {
+            unreachable!()
+        };
+        let coverage = state.served[&attachment.subscription()].clone();
+        state.served.insert(second, coverage.clone());
+        let group = state.coverage_groups.get_mut(&coverage).unwrap();
+        group.subscribers.insert(second);
+        group.pending_initial_subscribers.insert(second);
+        state
+            .peer
+            .set_subscription_policy_binding(second, group.policy_binding.clone());
+    }
+    let later = row(0x7a);
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        let previously_rejected = rejected.get();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+        if !previously_rejected && rejected.get() {
+            if write_while_pending {
+                relay
+                    .insert_with_id_attributed(
+                        author,
+                        "todos",
+                        later,
+                        cells("later", false, author),
+                    )
+                    .unwrap();
+            }
+            if cancel_while_pending {
+                foreground.detach_query(attachment.clone());
+            }
+        }
+    }
+    assert!(rejected.get(), "fixture must reject the initial ViewUpdate");
+    if cancel_while_pending {
+        assert_eq!(
+            accepted.get(),
+            usize::from(with_sibling),
+            "only the surviving sibling may receive an opening after cancellation"
+        );
+        return;
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the unsent initial Local opening must retry after capacity returns"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        if write_while_pending {
+            vec![cached, later]
+        } else {
+            vec![cached]
+        }
+    );
+    assert_eq!(
+        accepted.get(),
+        if write_while_pending || with_sibling {
+            2
+        } else {
+            1
+        },
+        "retry accepts one initial opening and only the subsequent delta"
+    );
+    foreground.detach_query(attachment);
+}
+
+/// Alice's incremental Local update survives Bob's one rejected transport send.
+/// Alice --subscribe--> Bob --ViewUpdate/backpressure--> retry --> Alice.
+/// This internal transport seam is necessary to reject exactly an unaccepted
+/// semantic opening; the public client cannot select that capacity boundary.
+#[test]
+fn incremental_local_update_retries_after_transport_backpressure() {
+    struct RejectFirstView {
+        inner: Box<dyn Transport>,
+        rejected: Rc<Cell<bool>>,
+        accepted: Rc<Cell<usize>>,
+        seen: usize,
+        rejected_message: Option<SyncMessage>,
+    }
+    impl Transport for RejectFirstView {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::ViewUpdate(_)) {
+                self.seen += 1;
+                if self.seen == 2 && !self.rejected.replace(true) {
+                    self.rejected_message = Some(message.clone());
+                    return Err(TransportError::Backpressure);
+                }
+                if let Some(expected) = self.rejected_message.take() {
+                    assert_eq!(
+                        message, expected,
+                        "retry preserves the exact incremental publication"
+                    );
+                }
+                self.accepted.set(self.accepted.get() + 1);
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let relay = open_db(0x77, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let cached = row(0x78);
+    relay
+        .insert_with_id_attributed(author, "todos", cached, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x79, author, &schema);
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(Cell::new(false));
+    let accepted = Rc::new(Cell::new(0));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(
+        Box::new(RejectFirstView {
+            inner: down,
+            seen: 0,
+            rejected_message: None,
+            rejected: rejected.clone(),
+            accepted: accepted.clone(),
+        }),
+        author,
+        BTreeMap::new(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&query, opts.clone())
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        relay.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    let later = row(0x7a);
+    relay
+        .insert_with_id_attributed(author, "todos", later, cells("later", false, author))
+        .unwrap();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        if let Err(error) = block_on(relay.tick()) {
+            assert_eq!(error.code, ErrorCode::Backpressure);
+        }
+    }
+    assert!(
+        rejected.get(),
+        "fixture must reject the incremental ViewUpdate"
+    );
+    assert!(
+        foreground.query_attachment_is_covered(&attachment),
+        "the established Local attachment remains covered while its incremental update retries"
+    );
+    assert_eq!(
+        row_ids(&block_on(foreground.all(&query, opts)).unwrap()),
+        vec![cached, later]
+    );
+    assert_eq!(
+        accepted.get(),
+        2,
+        "retry accepts one initial opening and one incremental update"
+    );
+    foreground.detach_query(attachment);
+}
+
+/// Alice must not receive Bob's never-accepted opening after policy revocation.
+/// Bob --opening/backpressure--> policy False --> fresh denied reset --> Alice.
+/// Internal transport control is needed to distinguish unaccepted bytes from
+/// previously delivered copies under INV-SYNC-13/14 (#2653).
+#[test]
+fn retained_initial_opening_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(false);
+}
+
+/// Alice's established subscription must not receive a retained forbidden delta.
+/// The old local copy may remain, but the future settled view must become empty.
+#[test]
+fn retained_incremental_update_is_reauthorized_after_policy_revocation() {
+    assert_retained_publication_policy_revocation(true);
+}
+
+fn assert_retained_publication_policy_revocation(incremental: bool) {
+    struct PolicyBoundaryTransport {
+        inner: Box<dyn Transport>,
+        reject_at: usize,
+        sent_views: usize,
+        rejected: Rc<RefCell<Option<SyncMessage>>>,
+        revoked: Rc<Cell<bool>>,
+        after_revocation: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+    impl Transport for PolicyBoundaryTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if let SyncMessage::ViewUpdate(update) = &message {
+                if self.sent_views + 1 == self.reject_at && self.rejected.borrow().is_none() {
+                    *self.rejected.borrow_mut() = Some(message);
+                    return Err(TransportError::Backpressure);
+                }
+                if self.revoked.get() {
+                    assert!(
+                        update.version_carriers.is_empty(),
+                        "never-accepted version carriers must not leak after policy revocation"
+                    );
+                    assert!(
+                        update.result_member_adds.is_empty(),
+                        "forbidden result members must not be published after revocation"
+                    );
+                    assert!(
+                        !update.program_fact_adds.iter().any(|fact| matches!(
+                            fact,
+                            crate::protocol::ProgramFactEntry::CoveredInput(_)
+                        )),
+                        "forbidden CoveredInput additions must not survive in the saved envelope"
+                    );
+                    self.after_revocation.borrow_mut().push(message.clone());
+                }
+                self.sent_views += 1;
+            }
+            self.inner.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+    }
+    let schema = owner_read_schema();
+    let author = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let authority = open_core(0x7b, AuthorSubject::SYSTEM, &schema);
+    let claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(author.test_uuid()))]);
+    let first = row(0x7c);
+    authority
+        .insert_with_id("todos", first, cells("saved", false, author))
+        .unwrap();
+    let foreground = open_db(0x7d, author, &schema);
+    foreground.set_test_provider_claims(author, claims.clone());
+    foreground.set_non_durable_client();
+    let rejected = Rc::new(RefCell::new(None));
+    let revoked = Rc::new(Cell::new(false));
+    let after_revocation = Rc::new(RefCell::new(Vec::new()));
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = authority.accept_subscriber_with_claims(
+        Box::new(PolicyBoundaryTransport {
+            inner: down,
+            reject_at: if incremental { 2 } else { 1 },
+            sent_views: 0,
+            rejected: rejected.clone(),
+            revoked: revoked.clone(),
+            after_revocation: after_revocation.clone(),
+        }),
+        author,
+        claims.clone(),
+    );
+    let query = prepared(&foreground, &Query::from("todos"));
+    let attachment = foreground
+        .attach_query_with_opts(&query, global_subscribe_opts())
+        .unwrap();
+    if incremental {
+        for _ in 0..16 {
+            foreground.tick().unwrap();
+            authority.tick().unwrap();
+        }
+        assert!(foreground.query_attachment_is_covered(&attachment));
+        assert_eq!(
+            row_ids(&block_on(foreground.all(&query, global_subscribe_opts())).unwrap()),
+            vec![first]
+        );
+        authority
+            .insert_with_id("todos", row(0x7e), cells("unsent", false, author))
+            .unwrap();
+    }
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        authority.tick().unwrap();
+        if rejected.borrow().is_some() {
+            break;
+        }
+    }
+    {
+        let rejected = rejected.borrow();
+        let Some(SyncMessage::ViewUpdate(update)) = rejected.as_ref() else {
+            panic!("fixture must retain a real publication");
+        };
+        assert!(
+            !update.version_carriers.is_empty(),
+            "blocked publication must contain sensitive row bytes"
+        );
+        assert!(
+            update
+                .program_fact_adds
+                .iter()
+                .any(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_))),
+            "blocked publication must contain an authorized input fact"
+        );
+    }
+    let denied_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::False)),
+        ),
+    );
+    assert_eq!(schema.version_id(), denied_schema.version_id());
+    let catalogue_seq = authority.server.node().borrow().active_catalogue_seq();
+    authority
+        .publish_schema(SchemaVersion::new(denied_schema))
+        .unwrap();
+    assert_eq!(
+        authority.server.node().borrow().active_catalogue_seq(),
+        catalogue_seq,
+        "same-version policy activation is not a lineage-sequence change"
+    );
+    revoked.set(true);
+
+    // A fresh subscriber independently proves that the governing policy is
+    // active before the old connection is allowed to retry its saved payload.
+    let fresh = open_db(0x7f, author, &schema);
+    fresh.set_test_provider_claims(author, claims.clone());
+    let (up, down) = duplex();
+    let _fresh_upstream = block_on(fresh.connect_upstream(up));
+    let fresh_subscriber = authority.accept_subscriber_with_claims(down, author, claims);
+    let fresh_query = prepared(&fresh, &Query::from("todos"));
+    let fresh_attachment = fresh
+        .attach_query_with_opts(&fresh_query, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..16 {
+        fresh.tick().unwrap();
+        fresh_subscriber.borrow_mut().tick().unwrap();
+    }
+    assert!(fresh.query_attachment_is_covered(&fresh_attachment));
+    assert!(
+        block_on(fresh.all(&fresh_query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    fresh.detach_query(fresh_attachment);
+
+    for _ in 0..16 {
+        authority.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(foreground.all(&query, global_subscribe_opts()))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(after_revocation.borrow().iter().any(|message| matches!(message,
+        SyncMessage::ViewUpdate(update) if update.reset_result_set && !update.peer_payload_inventory.opening_pending
+            && update.program_fact_adds.iter().any(|fact| matches!(fact,
+                crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete)))),
+        "replacement must carry a complete, truthful empty coverage opening");
+    foreground.detach_query(attachment);
+}
+
 /// Alice's fresh foreground cannot treat its empty memory as the persistent
 /// owner's answer. Initial local delivery must work without any authority.
 /// Foreground --Local query--> same-scope relay --cached rows/empty--> foreground.
@@ -255,7 +926,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
             "members",
             [
                 public_outer_eq("room", "id"),
-                public_session_eq("author", &["user"]),
+                public_session_eq("author", &["user", "identity", "subject"]),
             ],
         ),
     ]);
@@ -356,7 +1027,7 @@ fn scope_relay_delivers_existing_room_when_membership_grants_read_access() {
             "members",
             BTreeMap::from([
                 ("room".into(), Value::Uuid(room.0)),
-                ("author".into(), Value::String(bob.canonical().into())),
+                ("author".into(), Value::String(bob.principal_parts().1)),
             ]),
             crate::db::InsertOptions {
                 row_id: Some(row(0x76)),
@@ -1181,6 +1852,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         context,
+        context.link,
         Some(GlobalTime(17)),
     ));
     assert!(
@@ -1190,6 +1862,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
                 ..receipt.clone()
             },
             context,
+            context.link,
             Some(GlobalTime(17)),
         ),
         "a stale authorization generation must not ride a fresh support view"
@@ -1201,6 +1874,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
                 ..receipt
             },
             context,
+            context.link,
             Some(GlobalTime(17)),
         ),
         "a stale support cut must not ride a fresh authorization generation"

@@ -10,6 +10,7 @@ import {
   isWireHello,
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
+import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { type TxId, type WriteReceipt } from "../client.js";
 
@@ -31,10 +32,12 @@ async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe("NativeRuntimeAdapter server transport", () => {
@@ -240,6 +243,305 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(sockets[1]!.closed).toBe(true);
   });
+
+  it("reconnects an established upstream after a retryable server restart without publishing a terminal error", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitServerClose();
+    await runtime.waitForUpstreamServerConnection();
+    expect(sockets).toHaveLength(2);
+    expect(transports).toHaveLength(2);
+    expect(transports[0]!.closed).toBe(true);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
+  it.each(["disconnect", "close"] as const)(
+    "cancels an established-network retry on %s",
+    async (action) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      sockets[0]!.emitServerClose();
+      await runtime[action]();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(sockets).toHaveLength(1);
+      expect(terminal).not.toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
+
+  it("exhausts network retries and rejects an already armed remote wait", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        if (sockets.length > 1) queueMicrotask(() => this.emitServerClose());
+      }
+    } as unknown as typeof WebSocket;
+    const armed = deferred<void>();
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => {
+        if (tier === "local") return Promise.resolve();
+        armed.resolve();
+        return settlement.promise;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const txId = await committedTxId(
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "pending during outage" } },
+        null,
+        "00000000-0000-0000-0000-000000000009",
+      ),
+    );
+    const pending = runtime.waitForTransaction(txId, "edge");
+    const rejected = expect(pending).rejects.toThrow("websocket closed");
+    await armed.promise;
+    sockets[0]!.emitServerClose();
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("websocket closed");
+    await rejected;
+    expect(sockets).toHaveLength(11);
+    expect(terminal).toHaveBeenCalledTimes(1);
+    settlement.resolve();
+    await runtime.close();
+  }, 15_000);
+
+  it("does not resurrect the previous account transport after replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitServerClose();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(sockets.map((socket) => socket.url)).toEqual([
+      "ws://127.0.0.1:4200/apps/app-a/ws",
+      "ws://127.0.0.1:4200/apps/app-b/ws",
+    ]);
+    await runtime.close();
+  });
+
+  it.each([
+    "none",
+    "auth-refresh",
+    "disconnect",
+    "authority-replacement",
+    "account-replacement",
+  ] as const)("settles a strict remote query begun during backoff after %s", async (action) => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: () => ({}),
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitServerClose();
+    // Bound the historical synchronous-spin regression so it fails this test
+    // instead of freezing the test process and preventing the retry timer.
+    const internal = runtime as unknown as { hasUpstream(): boolean };
+    const hasUpstream = internal.hasUpstream.bind(runtime);
+    const entered = deferred<void>();
+    let probes = 0;
+    internal.hasUpstream = () => {
+      if (++probes > 1000) throw new Error("remote gate spun without yielding");
+      entered.resolve();
+      return hasUpstream();
+    };
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const result =
+      action === "disconnect"
+        ? expect(read).rejects.toThrow("server transport disconnected")
+        : action === "authority-replacement" || action === "account-replacement"
+          ? expect(read).rejects.toThrow("server transport scope changed")
+          : expect(read).resolves.toEqual([]);
+    await entered.promise;
+    if (action === "auth-refresh")
+      await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    if (action === "disconnect") await runtime.disconnect();
+    if (action === "authority-replacement")
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    if (action === "account-replacement")
+      await runtime.updateAuth(
+        JSON.stringify({
+          jwt_token:
+            "e30." +
+            Buffer.from(JSON.stringify({ iss: "urn:jazz:test", sub: "another" })).toString(
+              "base64url",
+            ) +
+            ".signature",
+        }),
+      );
+    await result;
+    expect(sockets).toHaveLength(action === "disconnect" ? 1 : 2);
+    await runtime.close();
+  });
+
+  it.each([
+    [3, 1, "authentication expired"],
+    [2, 0, "malformed protocol frame"],
+  ] as const)(
+    "does not retry a close after terminal wire error %s",
+    async (code, retry, message) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const frame = new PostcardWriter();
+      frame.u64(2);
+      frame.u64(code);
+      frame.u64(retry);
+      frame.string(message);
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([frame.finish()]));
+      await vi.waitFor(() => expect(terminal).toHaveBeenCalledTimes(1));
+      sockets[0]!.emitServerClose();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(sockets).toHaveLength(1);
+      await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(message);
+      expect(terminal).toHaveBeenCalledTimes(1);
+      await runtime.close();
+    },
+  );
 
   it("identifies a missing wire mask as a generic native-runtime artifact mismatch", () => {
     const runtime = new NativeRuntimeAdapter(
@@ -856,7 +1158,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     const progress = runtime.progressPeerTransport();
     await Promise.resolve();
-    const admission = runtime.acceptPeerWhenIdle();
+    const admission = runtime.acceptPeer();
     await Promise.resolve();
     expect(accepted).toBe(0);
 
@@ -907,13 +1209,214 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     schedule("immediate");
-    const admission = runtime.acceptPeerWhenIdle();
+    const admission = runtime.acceptPeer();
     try {
       await expect(admission).resolves.toBe(transport);
-      expect(tickHoldingNode).toBe(true);
     } finally {
-      releaseTick();
+      releaseTick?.();
       await runtime.close();
+    }
+  });
+
+  // Deferred binding operations pin ownership races that real IndexedDB timing
+  // cannot reliably arrange. The browser restart receipt covers the real I/O.
+  it("waits for a real tick and defers retirement while subscriber admission is suspended", async () => {
+    const storage = deferred<Transport>();
+    const finishTick = deferred<void>();
+    const transport = new FakeTransport([]);
+    let admitting = true;
+    let ticks = 0;
+    let retired = false;
+    const oldTransport = new FakeTransport([]);
+    oldTransport.close = () => {
+      if (admitting) throw new Error("retirement reentered subscriber recovery");
+      retired = true;
+      return true;
+    };
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        acceptSubscriber: async () => {
+          try {
+            return await storage.promise;
+          } finally {
+            admitting = false;
+          }
+        },
+        tick: async () => {
+          if (admitting) throw new Error("tick reentered subscriber recovery");
+          ticks++;
+          await finishTick.promise;
+        },
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const admission = runtime.acceptPeer();
+    let progressed = false;
+    const progress = runtime.progressPeerTransport().then(() => {
+      progressed = true;
+    });
+    const retirement = runtime.retirePeerTransport(oldTransport);
+    try {
+      await Promise.resolve();
+      expect(progressed).toBe(false);
+      expect(retired).toBe(false);
+      storage.resolve(transport);
+      await admission;
+      await retirement;
+      expect(retired).toBe(true);
+      await vi.waitFor(() => expect(ticks).toBeGreaterThan(0));
+      expect(progressed).toBe(false);
+      finishTick.resolve();
+      await progress;
+    } finally {
+      storage.resolve(transport);
+      finishTick.resolve();
+      await Promise.allSettled([admission, progress, retirement]);
+      await runtime.close();
+    }
+  });
+
+  it("releases queued admission and preserves a tick wake after recovery and retirement fail", async () => {
+    const storage = deferred<Transport>();
+    const readError = new Error("page read failed");
+    const retirementError = new Error("old transport retirement failed");
+    const transport = new FakeTransport([]);
+    const oldTransport = new FakeTransport([]);
+    oldTransport.close = () => {
+      throw retirementError;
+    };
+    let schedule!: (urgency: "immediate" | "deferred") => void;
+    let firstAdmission = true;
+    let recovering = true;
+    let ticks = 0;
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setTickScheduler: (callback: typeof schedule) => {
+          schedule = callback;
+        },
+        acceptSubscriber: async () => {
+          if (firstAdmission) {
+            firstAdmission = false;
+            try {
+              return await storage.promise;
+            } finally {
+              recovering = false;
+            }
+          }
+          if (recovering) throw new Error("second admission reentered recovery");
+          return transport;
+        },
+        tick: () => {
+          if (recovering) throw new Error("scheduled tick reentered recovery");
+          ticks++;
+        },
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const failedAdmission = expect(runtime.acceptPeer()).rejects.toBe(readError);
+    const nextAdmission = runtime.acceptPeer();
+    const retirement = expect(runtime.retirePeerTransport(oldTransport)).rejects.toBe(
+      retirementError,
+    );
+    schedule("immediate");
+    try {
+      storage.reject(readError);
+      await failedAdmission;
+      await retirement;
+      await expect(nextAdmission).resolves.toBe(transport);
+      await vi.waitFor(() => expect(ticks).toBeGreaterThan(0));
+    } finally {
+      storage.reject(readError);
+      await Promise.allSettled([failedAdmission, nextAdmission, retirement]);
+      await runtime.close();
+    }
+  });
+
+  it("closes a late subscriber before disposing its owner and rejects queued admission", async () => {
+    const storage = deferred<Transport>();
+    const transport = new FakeTransport([]);
+    let recovering = true;
+    let subscriberClosed = false;
+    let ownerClosed = false;
+    transport.close = () => {
+      if (recovering || ownerClosed) throw new Error("subscriber retired outside owner lifetime");
+      subscriberClosed = true;
+      return true;
+    };
+    const admit = vi.fn(async () => {
+      try {
+        return await storage.promise;
+      } finally {
+        recovering = false;
+      }
+    });
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        acceptSubscriber: admit,
+        tick: () => {
+          throw new Error("closing owner must not start a queued tick");
+        },
+        close: () => {
+          if (recovering || !subscriberClosed) throw new Error("owner disposed before subscriber");
+          ownerClosed = true;
+        },
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const admission = expect(runtime.acceptPeer()).rejects.toBeInstanceOf(Error);
+    const queued = expect(runtime.acceptPeer()).rejects.toBeInstanceOf(Error);
+    const progress = runtime.progressPeerTransport();
+    const closing = runtime.close();
+    try {
+      await Promise.resolve();
+      expect(ownerClosed).toBe(false);
+      storage.resolve(transport);
+      await Promise.all([admission, queued, progress, closing]);
+      expect(subscriberClosed).toBe(true);
+      expect(ownerClosed).toBe(true);
+      expect(admit).toHaveBeenCalledOnce();
+    } finally {
+      storage.resolve(transport);
+      await Promise.allSettled([admission, queued, progress, closing]);
+    }
+  });
+
+  it("rejects admission queued behind a tick when owner closure wins", async () => {
+    const finishTick = deferred<void>();
+    const admit = vi.fn(() => new FakeTransport([]));
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        acceptSubscriber: admit,
+        tick: () => finishTick.promise,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const progress = runtime.progressPeerTransport();
+    const admission = expect(runtime.acceptPeer()).rejects.toBeInstanceOf(Error);
+    const closing = runtime.close();
+    try {
+      finishTick.resolve();
+      await Promise.all([progress, admission, closing]);
+      expect(admit).not.toHaveBeenCalled();
+    } finally {
+      finishTick.resolve();
+      await Promise.allSettled([progress, admission, closing]);
     }
   });
 
@@ -950,6 +1453,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBeGreaterThan(0);
     expect(dbTicks).toBeLessThanOrEqual(4);
     runtime.close();
+  });
+
+  it("yields recurring deferred core work with an attached peer pump to the host task", async () => {
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let dbTicks = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedulerCallback) => {
+              schedulerCallback = callback;
+            },
+            tick: () => {
+              dbTicks += 1;
+              // Bound a broken implementation without relying on a timeout that
+              // cannot fire while microtasks starve the host task queue.
+              if (dbTicks < 64) schedulerCallback?.("deferred");
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const errors: unknown[] = [];
+    const hostTask = new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const pump = new BrowserWorkerTransportPump(
+      runtime,
+      new FakeTransport([]),
+      () => undefined,
+      (error) => errors.push(error),
+    );
+    try {
+      schedulerCallback?.("deferred");
+      await hostTask;
+      expect(errors).toEqual([]);
+      expect(dbTicks).toBeGreaterThan(0);
+      expect(dbTicks).toBeLessThanOrEqual(4);
+    } finally {
+      pump.close();
+      await runtime.close();
+    }
   });
 
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {
@@ -1181,6 +1731,7 @@ class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
+  private readonly closeListeners: Array<(event: { data: unknown }) => void> = [];
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
@@ -1209,6 +1760,13 @@ class FakeWebSocket {
 
   addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
     if (type === "message") this.messageListeners.push(listener);
+    if (type === "close") this.closeListeners.push(listener);
+  }
+
+  emitServerClose(): void {
+    this.closed = true;
+    for (const listener of this.closeListeners)
+      listener({ code: 1012, reason: "server shutting down" } as never);
   }
 
   emitMessage(data: Uint8Array): void {

@@ -118,11 +118,13 @@ open an explicitly selected name atomically pins that identity beside the page
 store manifest. The same owner may release and reopen it across worker restarts;
 an incompatible owner fails before receiving a page-store handle or mutating a
 page. The marker is canonical JSON `{version: 1, appId, env, auth}`. `auth` is
-either `{kind: "anonymous"}`, `{kind: "system"}`, or
-`{kind: "principal", authMode, user}`, where `user` is the normal canonical
-`session.user` JSON encoding of the exact `[issuer, subject]` pair. It contains
-neither tokens, secrets, expiry nor claims, and is never hashed, truncated or
-otherwise replaced with a collision-prone surrogate. Deleting the entire browser
+`{kind: "account", account: accountUUID, registry: canonicalRegistryURL}` for
+public account contexts. The acting issuer/subject scopes the live attachment
+but does not split durable storage for identities linked to that account.
+Internal anonymous/system and principal scopes remain explicit separate kinds;
+a principal scope uses the exact canonical identity spelling, never an intern
+handle. The owner marker contains neither tokens, secrets, expiry nor provider
+claims. It is never replaced with a collision-prone surrogate. Deleting the entire browser
 namespace is the explicit ownership-transfer operation. This physical ownership
 is distinct from a foreground replica/node ID, which remains per live client,
 and from credentials, which are never persisted as the ownership marker.

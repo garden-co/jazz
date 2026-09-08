@@ -1,10 +1,12 @@
 // Platform substitution only: database operations and command codecs remain
 // the real RN implementation. No React Native/JSI behavior is claimed here.
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import type { NativeForegroundRuntime } from "../../src/react-native/native-foreground-db.js";
 
 type NativeHandle = object; // NAPI External with Rust Drop, never a pointer number.
 interface TestBinding {
+  mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string;
   __testRnDecodeForegroundCommand(command: Uint8Array): string;
   __testRnForegroundResponseCorpus(): string;
   nativeArtifactFingerprint(): string;
@@ -13,6 +15,18 @@ interface TestBinding {
   __testRnHostAdmit(host: NativeHandle, config: string): Uint8Array;
   __testRnHostOpenAttached(host: NativeHandle, capability: Uint8Array): NativeHandle;
   __testRnHostClose(host: NativeHandle): boolean;
+  __testRnHostBeginAccountSession(host: NativeHandle, config: string, root: string): Uint8Array;
+  __testRnHostAttachAccountSchema(
+    host: NativeHandle,
+    capability: Uint8Array,
+    schema: string,
+  ): Uint8Array;
+  __testRnHostRefreshAccountSession(
+    host: NativeHandle,
+    capability: Uint8Array,
+    token: string,
+  ): void;
+  __testRnHostReleaseAccountSession(host: NativeHandle, capability: Uint8Array): void;
   __testRnHostBeginPrivateSession(host: NativeHandle, config: string): Uint8Array;
   __testRnHostAttachCanonicalSchema(
     host: NativeHandle,
@@ -41,10 +55,26 @@ const probe = binding.__testRnHostNew();
 const abiVersion = binding.__testRnHostAbiVersion(probe);
 binding.__testRnHostClose(probe);
 
-export function createPlatformHost() {
+export function createPlatformHost(storageRoot?: string) {
   const nativeHost = binding.__testRnHostNew();
   return {
     abiVersion,
+    // Platform entropy is substituted; signing still uses the shared Rust JWT implementation.
+    accountSecret: () => new Uint8Array(randomBytes(32)),
+    mintLocalFirstToken: (secret: Uint8Array, audience: string, ttlSeconds: number) =>
+      binding.mintLocalFirstToken(Buffer.from(secret).toString("base64url"), audience, ttlSeconds),
+    beginAccountSession: (config: string) => {
+      if (!storageRoot) throw new Error("RN fixture requires a platform storage root");
+      return new Uint8Array(
+        binding.__testRnHostBeginAccountSession(nativeHost, config, storageRoot),
+      );
+    },
+    attachAccountSchema: (capability: Uint8Array, schema: string) =>
+      new Uint8Array(binding.__testRnHostAttachAccountSchema(nativeHost, capability, schema)),
+    refreshAccountSession: (capability: Uint8Array, token: string) =>
+      binding.__testRnHostRefreshAccountSession(nativeHost, capability, token),
+    releaseAccountSession: (capability: Uint8Array) =>
+      binding.__testRnHostReleaseAccountSession(nativeHost, capability),
     // NAPI bytes originate in Node's realm; JSI constructs Uint8Array in the
     // calling runtime. Preserve that contract when the renderer uses jsdom.
     admit: (config: string) => new Uint8Array(binding.__testRnHostAdmit(nativeHost, config)),
@@ -71,7 +101,16 @@ export function createPlatformHost() {
 export function installPlatformHost(host: ReturnType<typeof createPlatformHost>) {
   Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV1", {
     configurable: true,
-    value: { abiVersion: host.abiVersion, openAttached: host.openAttached },
+    value: {
+      abiVersion: host.abiVersion,
+      accountSecret: host.accountSecret,
+      mintLocalFirstToken: host.mintLocalFirstToken,
+      openAttached: host.openAttached,
+      beginAccountSession: host.beginAccountSession,
+      attachAccountSchema: host.attachAccountSchema,
+      refreshAccountSession: host.refreshAccountSession,
+      releaseAccountSession: host.releaseAccountSession,
+    },
   });
 }
 export default { getAbiVersion: () => abiVersion };

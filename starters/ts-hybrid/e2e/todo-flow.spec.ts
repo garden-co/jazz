@@ -36,12 +36,32 @@ test("signup → add todo → reload → todo persists", async ({ page }) => {
   const todo = `Buy milk ${runId}`;
 
   await page.goto("/");
-  await signUp(page, email, password, "Alice");
   await waitForTodoApp(page);
+  const localTodo = `Before signup ${runId}`;
+  await addTodo(page, localTodo);
+  const linked = page.waitForResponse(
+    (response) =>
+      /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+      response.request().method() === "POST",
+  );
+  await signUp(page, email, password, "Alice");
+  expect((await linked).ok()).toBe(true);
+  await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   await addTodo(page, todo);
 
   await page.reload();
   await waitForTodoApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  // Complete the session switch, then re-admit the provider identity. A provider
+  // session alone must not make a pending/failed Jazz link look successful.
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(0, { timeout: TIMEOUT });
+  await signIn(page, email, password);
+  await waitForTodoApp(page);
+  await expect(page.getByText(localTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
 
@@ -56,7 +76,67 @@ test("signin with existing account shows todos", async ({ page }) => {
   await waitForTodoApp(page);
   await addTodo(page, todo);
 
-  await page.goto("/");
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await waitForTodoApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(0, { timeout: TIMEOUT });
+  await signIn(page, email, password);
   await waitForTodoApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+});
+
+test("a separate account sees only its own todos", async ({ page, browser }) => {
+  const runId = Date.now();
+  await page.goto("/");
+  await waitForTodoApp(page);
+  const ownerTodo = `Private owner todo ${runId}`;
+  await addTodo(page, ownerTodo);
+  const linked = page.waitForResponse(
+    (response) =>
+      /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+      response.request().method() === "POST",
+  );
+  await signUp(page, `owner-${runId}@example.com`, "s3cr3tpassword", "Owner");
+  expect((await linked).ok()).toBe(true);
+  await waitForTodoApp(page);
+  await expect(page.getByText(ownerTodo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
+
+  const otherContext = await browser.newContext();
+  try {
+    const other = await otherContext.newPage();
+    await other.goto(page.url());
+    await waitForTodoApp(other);
+    const otherLinked = other.waitForResponse(
+      (response) =>
+        /\/accounts\/links\/accept(?:\?|$)/.test(response.url()) &&
+        response.request().method() === "POST",
+    );
+    await signUp(other, `other-${runId}@example.com`, "s3cr3tpassword", "Other");
+    expect((await otherLinked).ok()).toBe(true);
+    await waitForTodoApp(other);
+    const otherTodo = `Private other todo ${runId}`;
+    await addTodo(other, otherTodo);
+    // Fresh contexts have no Jazz row cache: seeing the account's own row is
+    // a positive remote-delivery barrier before checking the same query's isolation.
+    for (const [email, visible, hidden] of [
+      [`owner-${runId}@example.com`, ownerTodo, otherTodo],
+      [`other-${runId}@example.com`, otherTodo, ownerTodo],
+    ]) {
+      const freshContext = await browser.newContext();
+      try {
+        const fresh = await freshContext.newPage();
+        await fresh.goto(page.url());
+        await waitForTodoApp(fresh);
+        await signIn(fresh, email, "s3cr3tpassword");
+        await waitForTodoApp(fresh);
+        await expect(fresh.getByText(visible, { exact: true })).toHaveCount(1, {
+          timeout: TIMEOUT,
+        });
+        await expect(fresh.getByText(hidden, { exact: true })).toHaveCount(0);
+      } finally {
+        await freshContext.close();
+      }
+    }
+  } finally {
+    await otherContext.close();
+  }
 });

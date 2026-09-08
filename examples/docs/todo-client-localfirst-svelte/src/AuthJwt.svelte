@@ -1,17 +1,10 @@
 <!-- #region auth-jwt-svelte -->
 <script lang="ts">
-  import { JazzSvelteProvider, type JazzContext } from 'jazz-tools/svelte';
-
-  const config = {
-    appId: 'my-app',
-    serverUrl: 'http://127.0.0.1:4200',
-    jwtToken: '<provider-jwt>',
-  };
+  import type { Snippet } from "svelte";
+  import type { DbConfig } from "jazz-tools";
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // Prepare a handle outside this context with createAccountManager.
+  let { config, children }: { config: DbConfig; children: Snippet } = $props();
 </script>
-
-<JazzSvelteProvider {config}>
-  {#snippet children({ db }: { db: NonNullable<JazzContext["db"]> })}
-    <slot />
-  {/snippet}
-</JazzSvelteProvider>
+<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
 <!-- #endregion auth-jwt-svelte -->

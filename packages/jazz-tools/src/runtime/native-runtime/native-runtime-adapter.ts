@@ -1,3 +1,6 @@
+import { Utf8Decoder } from "../utf8.js";
+import { runtimeRandomBytes } from "../runtime-entropy.js";
+import { stripColumnQualifier } from "../query-column-name.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -32,14 +35,16 @@ import type {
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   SYSTEM_SESSION_ISSUER,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   isReservedJazzIssuer,
   isTrustedReservedSession,
+  trustedReservedSessionToken,
 } from "../client-session.js";
 import {
   authorBytesForSession,
-  decodeCanonicalAuthorSubjectBytes,
+  validateStructuredAuthorValue,
   isUsableSubject,
   parseCanonicalAuthorSubject,
 } from "../author-id.js";
@@ -73,6 +78,7 @@ import {
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   type WebSocketNegotiation,
+  type WireError,
   wireAuthFailureReason,
 } from "./websocket.js";
 import {
@@ -98,6 +104,7 @@ import {
 export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
+const NETWORK_RETRY_LIMIT = 10;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
@@ -187,6 +194,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
@@ -216,6 +224,7 @@ type NativeDb = {
     openTransactionId?: OpenTransactionId,
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
+  admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -288,14 +297,31 @@ type NativeDb = {
     head?: unknown,
     base?: unknown,
   ): NativeStreamingMutation;
-  requestInsertPermissionAdvice?(table: string, cells: Uint8Array): NativePermissionAdviceResult;
-  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
+  requestInsertPermissionAdvice?(
+    table: string,
+    cells: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativePermissionAdviceResult;
+  requestReadPermissionAdvice?(
+    table: string,
+    rowId: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativePermissionAdviceResult;
   requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
-  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
+  requestDeletePermissionAdvice?(
+    table: string,
+    rowId: Uint8Array,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativePermissionAdviceResult;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -327,13 +353,16 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
-  acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
+  acceptSubscriber?(
+    author: Uint8Array,
+    claims: Record<string, unknown>,
+  ): Transport | Promise<Transport>;
   acceptSubscriberWithSelfSignedProof?(
     claims: Record<string, unknown>,
     token: string,
     appId: string,
     claimedAuthor: string,
-  ): Transport;
+  ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
@@ -437,6 +466,7 @@ type ServerConnectionAttempt = {
   outcome: Error | null;
   transport: Transport | null;
   retirement: Promise<void> | null;
+  recovery?: Promise<WebSocketCarrier>;
 };
 
 type AuxiliaryRelayTrace = {
@@ -452,6 +482,7 @@ type AuxiliaryRelayTrace = {
 };
 
 type RuntimeSession = {
+  account_id?: string;
   issuer: string;
   user_id: string;
   authMode?: string;
@@ -529,7 +560,7 @@ type NativeRowFieldPlan = {
   includeInValues: boolean;
 };
 
-const textDecoder = new TextDecoder();
+const textDecoder = new Utf8Decoder({ fatal: true });
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 const MAX_DEFERRED_PLACEHOLDER_CHUNKS = 16;
@@ -658,6 +689,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private serverReconnectReject: ((error: Error) => void) | null = null;
   private preHelloRetryCount = 0;
+  private networkRetryCount = 0;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
@@ -674,9 +706,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
   private coreTickScheduled = false;
-  private coreTickRunning = false;
   private coreTickAgain = false;
-  private coreTickCompletion: Promise<void> | null = null;
+  private coreOperation: {
+    kind: "tick" | "admission";
+    completion: Promise<void>;
+  } | null = null;
   private readonly pendingTransportRetirements = new Map<
     Transport,
     Array<{ resolve: () => void; reject: (error: unknown) => void }>
@@ -880,6 +914,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
     const activityReadyForProcessing = this.peerTransportActivityEpoch;
     await this.runCoreTick();
+    if (this.closed) return;
     this.peerTransportProcessedActivityEpoch = Math.max(
       this.peerTransportProcessedActivityEpoch,
       activityReadyForProcessing,
@@ -888,7 +923,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   retirePeerTransport(transport: Transport): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
-    if (!this.coreTickRunning) {
+    if (!this.coreOperation) {
       transport.close();
       return Promise.resolve();
     }
@@ -940,7 +975,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async captureForegroundTxTimeHighWater(): Promise<bigint> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
-    await this.coreTickCompletion?.catch(() => undefined);
+    await this.coreOperation?.completion.catch(() => undefined);
     return this.foregroundTxTimeHighWater();
   }
 
@@ -985,41 +1020,67 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  acceptPeer(claims: Record<string, unknown> = {}): Transport {
+  async acceptPeer(claims: Record<string, unknown> = {}): Promise<Transport> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
-    const proof = this.selfSignedClientProof;
-    if (proof) {
-      if (!this.db.acceptSubscriberWithSelfSignedProof) {
-        throw new Error(
-          "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
-        );
+    if (this.closed) throw new Error("Native runtime is closed");
+    return this.runWhenCoreIdle(async () => {
+      if (this.closed) throw new Error("Native runtime is closed");
+      // Reserve ownership before entering the binding: replay can suspend on
+      // storage while ticks, other admissions and transport retirement arrive.
+      let release!: () => void;
+      this.coreOperation = {
+        kind: "admission",
+        completion: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      try {
+        const proof = this.selfSignedClientProof;
+        let subscriber: Transport;
+        if (proof) {
+          if (!this.db.acceptSubscriberWithSelfSignedProof) {
+            throw new Error(
+              "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
+            );
+          }
+          subscriber = await this.db.acceptSubscriberWithSelfSignedProof(
+            claims,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+          );
+        } else {
+          if (!this.db.acceptSubscriber) {
+            throw new Error("Native runtime does not expose subscriber links");
+          }
+          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims);
+        }
+        if (this.closed) {
+          // We still own the slot. Awaiting gated retirement here would wait
+          // on this admission itself; the native future has already unwound.
+          subscriber.close();
+          throw new Error("Native runtime closed during subscriber admission");
+        }
+        return subscriber;
+      } finally {
+        this.drainTransportRetirements();
+        this.coreOperation = null;
+        // This is an ownership barrier, not the admission result. A failed
+        // page read must not poison queued work with its rejection.
+        release();
+        if (this.coreTickAgain && !this.closed) this.scheduleCoreTick();
       }
-      return this.db.acceptSubscriberWithSelfSignedProof(
-        claims,
-        proof.token,
-        proof.appId,
-        proof.claimedAuthor,
-      );
-    }
-    if (!this.db.acceptSubscriber) {
-      throw new Error("Native runtime does not expose subscriber links");
-    }
-    return this.db.acceptSubscriber(this.peerIdentity, claims);
+    });
   }
 
-  async acceptPeerWhenIdle(claims: Record<string, unknown> = {}): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeerWhenIdle(claims);
-    return this.runWhenCoreIdle(() => this.acceptPeer(claims));
-  }
-
-  private async runWhenCoreIdle<T>(operation: () => T): Promise<T> {
+  private async runWhenCoreIdle<T>(operation: () => T | Promise<T>): Promise<T> {
     const owner = this.ownerRuntime;
-    while (owner.coreTickRunning) {
-      await owner.coreTickCompletion;
+    while (owner.coreOperation) {
+      await owner.coreOperation.completion;
     }
     // Run in the same continuation as the final idle check. Returning an
-    // "idle" promise first would let a queued tick acquire the node before
-    // the caller's continuation performs its synchronous operation.
+    // "idle" promise first would let queued work acquire the node before the
+    // caller's operation runs or reserves its own asynchronous admission.
     return operation();
   }
 
@@ -1058,7 +1119,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
-    await this.coreTickCompletion?.catch(() => undefined);
+    await this.coreOperation?.completion.catch(() => undefined);
     this.closeRuntimeState(true);
     await this.db.close?.();
     // wasm-bindgen futures may retain this receiver after logical closure.
@@ -1213,7 +1274,7 @@ export class NativeRuntimeAdapter implements Runtime {
         `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
       );
     }
-    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const rowId = objectId ? parseUuid(objectId) : runtimeRandomBytes(16);
     const cells =
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
@@ -1551,26 +1612,60 @@ export class NativeRuntimeAdapter implements Runtime {
     return "unknown";
   }
 
+  private isScopedPermissionAdvice(session?: Session): boolean {
+    // #2614: scope intents currently carry the authenticated connection's identity,
+    // not an immutable per-request binding. Never answer a user-scoped call
+    // with the shared backend connection's SYSTEM authority.
+    if (this.readAuthorizationHost !== "trusted-serving" || !session) return false;
+    return !(
+      this.trustedBackend &&
+      session.issuer === SYSTEM_SESSION_ISSUER &&
+      session.user_id === SYSTEM_AUTHOR_ID &&
+      isTrustedReservedSession(session, trustedReservedSessionToken(session))
+    );
+  }
+
+  /** Backend-only conversion of a public session into the immutable native
+   * binding carried by one advice request. */
+  private delegatedPermissionAdviceSession(session?: Session): RuntimeSession | null {
+    if (!this.trustedBackend || !session || !this.isScopedPermissionAdvice(session)) return null;
+    try {
+      return readSession(JSON.stringify(session));
+    } catch {
+      return null;
+    }
+  }
+
   requestInsertPermissionAdvice(
     table: string,
     values: InsertValues,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestInsertPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const cells = encodeCellsForRow(this.table(table), values, table);
-    return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, cells, delegated?.identity, delegated?.claims),
+    );
   }
 
   requestReadPermissionAdvice(
     table: string,
     objectId: string,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestReadPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId)),
+      request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
   }
 
@@ -1578,25 +1673,40 @@ export class NativeRuntimeAdapter implements Runtime {
     table: string,
     objectId: string,
     values: Record<string, Value>,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestUpdatePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId), patch),
+      request.call(
+        this.db,
+        table,
+        parseUuid(objectId),
+        patch,
+        delegated?.identity,
+        delegated?.claims,
+      ),
     );
   }
 
   requestDeletePermissionAdvice(
     table: string,
     objectId: string,
-    _session?: Session,
+    session?: Session,
   ): Promise<PermissionAdvice> {
+    if (this.isScopedPermissionAdvice(session) && !this.trustedBackend)
+      return Promise.resolve("unknown");
+    const delegated = this.delegatedPermissionAdviceSession(session);
+    if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
     const request = this.db.requestDeletePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     return this.withPermissionAdviceTimeout(() =>
-      request.call(this.db, table, parseUuid(objectId)),
+      request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
   }
 
@@ -1895,7 +2005,11 @@ export class NativeRuntimeAdapter implements Runtime {
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
-    void this.disconnect({ rejectWaiters: false, preservePreHelloRetry: true });
+    void this.disconnect({
+      rejectWaiters: false,
+      preservePreHelloRetry: true,
+      preserveRemoteWaiters: this.networkRetryCount > 0,
+    });
     const generation = ++this.serverConnectionGeneration;
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     this.serverTransportError = null;
@@ -1931,6 +2045,12 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onError: (error) => {
         if (error.code === "not_ready" && error.retry === "later") return;
+        if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
+        if (
+          this.serverTransportError &&
+          (error.code === "websocket_closed" || error.code === "websocket_error")
+        )
+          return;
         this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
@@ -1938,7 +2058,14 @@ export class NativeRuntimeAdapter implements Runtime {
       onTerminal: (error) => {
         if (!attempt) return;
         if (error.code === "not_ready" && error.retry === "later") return;
-        this.finishServerConnectionAttempt(attempt, new Error(error.message));
+        if (this.canRetryNetworkConnection(attempt, error)) {
+          const recovery = this.retryNetworkConnection(attempt, error);
+          if (recovery) return;
+        }
+        this.finishServerConnectionAttempt(
+          attempt,
+          this.serverTransportError ?? new Error(error.message),
+        );
       },
     });
     attempt = {
@@ -1990,6 +2117,7 @@ export class NativeRuntimeAdapter implements Runtime {
           await this.retirePeerTransport(transport);
           return carrier;
         }
+        this.networkRetryCount = 0;
         attempt.transport = transport;
         this.serverTransport = transport;
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
@@ -2000,6 +2128,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return carrier;
       })
       .catch((error) => {
+        if (attempt.recovery) return attempt.recovery;
         if (isRetryablePreHelloWireError(error)) {
           const retry = this.retryPreHelloConnection(attempt);
           if (retry) return retry;
@@ -2051,7 +2180,11 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   async disconnect(
-    options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
+    options: {
+      rejectWaiters?: boolean;
+      preservePreHelloRetry?: boolean;
+      preserveRemoteWaiters?: boolean;
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.db?.disconnectNativeUpstream) {
@@ -2060,7 +2193,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
-    if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;
+    if (!options.preservePreHelloRetry) {
+      this.preHelloRetryCount = 0;
+      this.networkRetryCount = 0;
+    }
     const attempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (attempt) {
@@ -2072,7 +2208,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportError = null;
     if (options.rejectWaiters ?? true) {
       this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
-    } else {
+    } else if (!options.preserveRemoteWaiters) {
       this.clearServerTransportErrorWaiters();
     }
     this.resolveServerTransportWorkWaiters();
@@ -2137,6 +2273,27 @@ export class NativeRuntimeAdapter implements Runtime {
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);
+  }
+
+  /** General graceful-shutdown barrier, including recovered durable writes. */
+  async waitForPendingWrites(tier = "global"): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier);
+    if (!this.db.waitForPendingWrites)
+      throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
+    await this.flushLocalSettlements();
+    this.throwServerTransportErrorForTier(tier);
+    void this.pumpServerTransport();
+    const failure = this.waitForServerTransportError(tier);
+    try {
+      const wait = this.awaitNativeRead(
+        Promise.resolve(this.db.waitForPendingWrites(tier)).then(
+          (result) => result ?? new Uint8Array(),
+        ),
+      );
+      await (failure ? Promise.race([wait, failure.promise]) : wait);
+    } finally {
+      failure?.cancel();
+    }
   }
 
   async flushLocalSettlements(): Promise<void> {
@@ -2433,11 +2590,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (typeof attribution !== "string") {
       throw new Error("backend attribution must be a canonical author subject string");
     }
-    const author = parsePublicCanonicalAuthor(attribution);
+    const author = parseCanonicalAuthorSubject(attribution);
     if (!author) {
       throw new Error("backend attribution must be a canonical author subject string");
     }
-    return authorBytesForSession({ issuer: author.issuer, user_id: author.user_id });
+    // Parse the whole context so reserved provenance requires its exact
+    // verified-session capability; backend authority alone does not admit it.
+    const session = sessionFromWriteContext(writeContext);
+    if (!session) throw new Error("backend attribution requires a valid author");
+    return session.identity;
   }
 
   private stagedRowForWriteMerge(
@@ -2578,6 +2739,8 @@ export class NativeRuntimeAdapter implements Runtime {
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "edge" && tier !== "global") return;
+    const endpoint = this.serverEndpointUrl;
+    const identity = peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity);
     // `connect()` starts its WebSocket handshake before it can admit the
     // native transport. A strict remote read begun in that interval must
     // await the in-flight connection instead of falling through to a local
@@ -2586,20 +2749,29 @@ export class NativeRuntimeAdapter implements Runtime {
       const pendingConnection = this.serverCarrierPromise;
       if (!pendingConnection) return;
       const attempt = this.serverConnectionAttempt;
+      const connectionOutcome = pendingConnection.then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error : new Error(errorMessage(error))),
+      );
       const terminal =
         attempt?.carrier === this.serverCarrier
-          ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
-          : null;
+          ? await Promise.race([connectionOutcome, attempt.terminal])
+          : await connectionOutcome;
       if (this.closed) return;
+      if (
+        this.serverCarrierPromise &&
+        (this.serverEndpointUrl !== endpoint ||
+          !bytesEqual(
+            identity,
+            peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity),
+          ))
+      )
+        throw new Error("server transport scope changed while waiting for remote query");
       // Reauthentication/reconnect can retire a stalled carrier while this
       // query is waiting. Follow the replacement attempt; only surface a
       // terminal error when this was still the current connection.
       if (terminal) {
-        if (
-          this.serverCarrierPromise !== null &&
-          this.serverCarrierPromise !== pendingConnection &&
-          this.serverConnectionAttempt?.carrier === this.serverCarrier
-        ) {
+        if (this.serverCarrierPromise !== null && this.serverCarrierPromise !== pendingConnection) {
           continue;
         }
         throw terminal;
@@ -2652,6 +2824,23 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  admitLocalFirstSession(session: Session, token: string, appId: string): void {
+    if (
+      !this.trustedBackend ||
+      session.issuer !== LOCAL_FIRST_JWT_ISSUER ||
+      !session.account_id ||
+      !isTrustedReservedSession(session, trustedReservedSessionToken(session))
+    ) {
+      throw new Error("Local-first native admission requires a verified account session");
+    }
+    if (!this.db.admitLocalFirstSession)
+      throw new Error("Native runtime lacks local-first session admission");
+    this.db.admitLocalFirstSession(
+      token,
+      appId,
+      new Utf8Decoder().decode(authorBytesForSession(session)),
+    );
+  }
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
@@ -2825,7 +3014,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreTick(): void {
     if (this.closed) return;
-    if (this.coreTickRunning) {
+    if (this.coreOperation) {
       this.coreTickAgain = true;
       return;
     }
@@ -2850,18 +3039,22 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private runCoreTick(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.coreTickRunning) {
+    const operation = this.coreOperation;
+    if (operation) {
       this.coreTickAgain = true;
-      return this.coreTickCompletion ?? Promise.resolve();
+      // Admission completion is not an evaluator pass. Explicit progress
+      // waiters must join a real tick before marking ingress as processed.
+      return operation.kind === "tick"
+        ? operation.completion
+        : operation.completion.then(() => this.runCoreTick());
     }
-    this.coreTickRunning = true;
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
     const completion = new Promise<void>((onResolve, onReject) => {
       resolve = onResolve;
       reject = onReject;
     });
-    this.coreTickCompletion = completion;
+    this.coreOperation = { kind: "tick", completion };
     void this.driveCoreTicks().then(resolve, reject);
     return completion;
   }
@@ -2883,8 +3076,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     } finally {
       this.drainTransportRetirements();
-      this.coreTickRunning = false;
-      this.coreTickCompletion = null;
+      this.coreOperation = null;
     }
     if (yielded && !this.closed) {
       setTimeout(() => this.scheduleCoreTick(), 0);
@@ -2938,6 +3130,17 @@ export class NativeRuntimeAdapter implements Runtime {
           );
         }
       }
+    } catch (error) {
+      if (
+        !this.closed &&
+        !subscription.cancelled &&
+        this.subscriptions.get(handle) === subscription
+      ) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     } finally {
       source.reading = false;
     }
@@ -2970,6 +3173,17 @@ export class NativeRuntimeAdapter implements Runtime {
           }
         }
         if (batch.length === 0) return;
+      }
+    } catch (error) {
+      if (
+        !this.closed &&
+        !subscription.cancelled &&
+        this.subscriptions.get(handle) === subscription
+      ) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
     } finally {
       source.reading = false;
@@ -3036,16 +3250,16 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.terminalOperations,
         subscription.outputColumns?.rootColumns,
       );
-      if (
-        subscriptionRowsRequireBufferedPublication(
-          subscription.rows,
-          this.schema,
-          subscription.outputColumns,
-        )
-      ) {
+      const unresolvedPlaceholder = unresolvedSubscriptionPlaceholder(
+        subscription.rows,
+        this.schema,
+        subscription.outputColumns,
+      );
+      if (unresolvedPlaceholder) {
         if (chunk.settled === true) {
           throw new Error(
-            "settled relation subscription chunk retained unresolved placeholder rows",
+            "settled relation subscription chunk retained unresolved placeholder rows " +
+              `(${unresolvedPlaceholder.table}.${unresolvedPlaceholder.column} on ${unresolvedPlaceholder.id})`,
           );
         }
         this.deferSubscriptionRows(
@@ -3358,6 +3572,66 @@ export class NativeRuntimeAdapter implements Runtime {
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
 
+  private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
+    return (
+      !this.closed &&
+      this.serverTransportError === null &&
+      attempt === this.serverConnectionAttempt &&
+      attempt.generation === this.serverConnectionGeneration &&
+      error.retry === "later" &&
+      (error.code === "websocket_closed" || error.code === "websocket_error") &&
+      (attempt.transport !== null || this.networkRetryCount > 0) &&
+      this.networkRetryCount < NETWORK_RETRY_LIMIT
+    );
+  }
+
+  /** Retry an established upstream without turning a temporary outage into a query failure. */
+  private retryNetworkConnection(
+    attempt: ServerConnectionAttempt,
+    error: WireError,
+  ): Promise<WebSocketCarrier> | null {
+    if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
+    const url = this.serverEndpointUrl;
+    const authJson = this.serverAuthJson;
+    const delay = Math.min(100 * 2 ** this.networkRetryCount++, 1_000);
+    // Retire this generation before any suspended pump or handshake can report
+    // its close as a terminal failure. Native subscriptions survive the detach.
+    this.serverConnectionGeneration += 1;
+    this.serverConnectionAttempt = null;
+    this.serverCarrier = null;
+    this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    const generation = this.serverConnectionGeneration;
+    this.resolveServerTransportWorkWaiters();
+    const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
+      this.serverReconnectReject = reject;
+      this.serverReconnectTimer = setTimeout(() => {
+        this.serverReconnectTimer = null;
+        this.serverReconnectReject = null;
+        void (async () => {
+          await attempt.retirement;
+          if (
+            this.closed ||
+            generation !== this.serverConnectionGeneration ||
+            this.serverEndpointUrl !== url ||
+            this.serverAuthJson !== authJson
+          ) {
+            throw new Error("server transport disconnected");
+          }
+          this.connect(url, authJson);
+          if (!this.serverCarrierPromise)
+            throw new Error("server transport reconnect was not started");
+          return await this.serverCarrierPromise;
+        })().then(resolve, reject);
+      }, delay);
+    });
+    attempt.recovery = recovery;
+    this.serverCarrierPromise = recovery;
+    // Each attempt's catch already reports terminal failures. Cancellation by
+    // explicit disconnect/close must not publish a historical transport error.
+    void recovery.catch(() => undefined);
+    return recovery;
+  }
+
   /**
    * A server may reject the first handshake while its authoritative catalogue
    * is still bootstrapping. This is a protocol-level retry, not a failed
@@ -3461,7 +3735,15 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.openingAbort?.abort();
     subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
-    closeSubscriptionSourceState(subscription);
+    for (const source of subscription.sources) {
+      try {
+        closeSubscriptionSource(source.source);
+      } catch (cleanupError) {
+        // Resource retirement must not replace the causal subscription error
+        // or prevent its once-only delivery to the application.
+        console.error("Jazz subscription source cleanup failed", cleanupError);
+      }
+    }
     this.deliverSubscriptionFailure(subscription);
   }
 
@@ -3680,6 +3962,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
+      account_id?: unknown;
       issuer?: unknown;
       user_id?: unknown;
       claims?: unknown;
@@ -3687,6 +3970,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       attribution?: unknown;
       [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
       session?: {
+        account_id?: unknown;
         issuer?: unknown;
         user_id?: unknown;
         claims?: unknown;
@@ -3699,8 +3983,11 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     }
     const attributedAuthor =
       typeof parsed.attribution === "string"
-        ? parsePublicCanonicalAuthor(parsed.attribution)
+        ? parseCanonicalAuthorSubject(parsed.attribution)
         : null;
+    if (attributedAuthor?.issuer === SYSTEM_SESSION_ISSUER) {
+      throw new Error("Native runtime public session uses reserved issuer");
+    }
     const userId =
       attributedAuthor?.user_id ??
       (typeof parsed.user_id === "string"
@@ -3713,7 +4000,10 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
       throw new Error("session is missing issuer");
     }
-    const session: Pick<Session, "issuer" | "user_id" | "authMode"> = {
+    const session: Pick<Session, "account_id" | "issuer" | "user_id" | "authMode"> = {
+      account_id: parsedAccountId(
+        attributedAuthor ? attributedAuthor.account_id : (parsed.session ?? parsed).account_id,
+      ),
       issuer,
       user_id: userId,
       authMode: (typeof parsed.session?.authMode === "string"
@@ -3728,6 +4018,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       session.authMode,
       parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
         parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+      session.account_id,
     );
     const reservedToken =
       parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
@@ -3746,6 +4037,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     if (
       error instanceof Error &&
       (error.message === "session is missing issuer" ||
+        error.message === "session has invalid account_id" ||
         error.message === "Native runtime public session uses reserved issuer")
     ) {
       throw error;
@@ -3754,25 +4046,21 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   }
 }
 
-function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
-  const parsed = parseCanonicalAuthorSubject(value);
-  if (parsed && isReservedJazzIssuer(parsed.issuer)) {
-    throw new Error("Native runtime public session uses reserved issuer");
-  }
-  return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
-}
-
 function assertPublicSessionIssuer(
   issuer: string,
   userId: string,
   authMode: string | undefined,
   trustedToken?: unknown,
+  accountId?: string,
 ): void {
   if (
     isReservedJazzIssuer(issuer) &&
     !(
       (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
-      isTrustedReservedSession({ issuer, user_id: userId, authMode }, trustedToken)
+      isTrustedReservedSession(
+        { issuer, user_id: userId, authMode, account_id: accountId },
+        trustedToken,
+      )
     )
   ) {
     throw new Error("Native runtime public session uses reserved issuer");
@@ -3894,9 +4182,21 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
   if (optionsJson != null) readSupportedReadOptions(optionsJson);
 }
 
+function parsedAccountId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+  ) {
+    throw new Error("session has invalid account_id");
+  }
+  return value;
+}
+
 function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
   const parsed = JSON.parse(sessionJson) as {
+    account_id?: unknown;
     issuer?: unknown;
     user_id?: unknown;
     claims?: unknown;
@@ -3910,6 +4210,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     throw new Error("Native runtime session is missing issuer");
   }
   const session = {
+    account_id: parsedAccountId(parsed.account_id),
     issuer: parsed.issuer,
     user_id: parsed.user_id,
     authMode: (typeof parsed.authMode === "string"
@@ -3921,6 +4222,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     session.user_id,
     session.authMode,
     parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+    session.account_id,
   );
   const backendAuthority =
     session.issuer === SYSTEM_SESSION_ISSUER &&
@@ -4158,7 +4460,7 @@ function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
 }
 
 function unqualifiedColumn(column: string): string {
-  return column.split(".").at(-1) ?? column;
+  return stripColumnQualifier(column);
 }
 
 function subscriptionOutputColumns(
@@ -4290,7 +4592,11 @@ function outputColumnsForTable(
       if (declared) return wildcard && rootTerminal ? { ...declared, sparse: true } : declared;
       const magicType = magicColumnType(columnName);
       return magicType
-        ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
+        ? ({
+            name: columnName,
+            column_type: magicType,
+            nullable: false,
+          } satisfies ColumnDescriptor)
         : undefined;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);
@@ -4335,7 +4641,7 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
         if (!nested || typeof nested !== "object") continue;
         const outerColumn = (nested as { outer_column?: unknown }).outer_column;
         if (typeof outerColumn !== "string") continue;
-        const column = outerColumn.split(".").at(-1) ?? outerColumn;
+        const column = stripColumnQualifier(outerColumn);
         if (!(readSelectColumns(record.select_columns) ?? []).includes(column)) {
           record.select_columns.push(column);
         }
@@ -5103,7 +5409,7 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
     }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
-    const column = record.column.split(".").at(-1) ?? record.column;
+    const column = stripColumnQualifier(record.column);
     switch (record.op) {
       case "eq":
         if (record.value === null) {
@@ -5274,7 +5580,7 @@ function readColumnRef(value: unknown): string | null {
   if (!value || typeof value !== "object") return null;
   const column = (value as { column?: unknown }).column;
   if (typeof column !== "string") return null;
-  return column.split(".").at(-1) ?? column;
+  return stripColumnQualifier(column);
 }
 
 function readLiteral(value: unknown): QueryLiteral | null {
@@ -5870,14 +6176,6 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      if (
-        fieldName !== undefined &&
-        isProvenanceMagicColumn(fieldName) &&
-        type.type === "Text" &&
-        storageType?.tag === 8
-      ) {
-        return { type: "Text", value: decodeProvenanceText(bytes) };
-      }
       if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
@@ -5897,8 +6195,8 @@ function decodeBytes(
           nestedRowCarrier,
         ),
       };
-    case "Row":
-      return {
+    case "Row": {
+      const value: Value = {
         type: "Row",
         value: decodeNestedRowBytes(
           type.columns,
@@ -5907,11 +6205,11 @@ function decodeBytes(
           nestedRowCarrier,
         ),
       };
+      if (fieldName === "$createdBy" || fieldName === "$updatedBy")
+        validateStructuredAuthorValue(value);
+      return value;
+    }
   }
-}
-
-function decodeProvenanceText(bytes: Uint8Array): string {
-  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
@@ -6446,24 +6744,28 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
   return values;
 }
 
-function subscriptionRowsRequireBufferedPublication(
+function unresolvedSubscriptionPlaceholder(
   rows: RowState[],
   schema: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null,
-): boolean {
-  return rows.some((row) => {
+): { table: string; id: string; column: string } | undefined {
+  for (const row of rows) {
     const columns =
       outputColumns && row.table === outputColumns.rootTable
         ? outputColumns.rootColumns
         : schema[row.table]?.columns;
-    if (!columns) return false;
-    return valuesForNativeFrame(row, logicalStorageColumns(columns)).some(
-      (value, index) =>
-        value.type === "Null" &&
-        logicalStorageColumns(columns)[index]?.nullable === false &&
-        logicalStorageColumns(columns)[index]?.column_type.type !== "Array",
+    if (!columns) continue;
+    const logicalColumns = logicalStorageColumns(columns);
+    const values = valuesForNativeFrame(row, logicalColumns);
+    const missing = logicalColumns.find(
+      (column, index) =>
+        values[index]?.type === "Null" &&
+        column.nullable === false &&
+        column.column_type.type !== "Array",
     );
-  });
+    if (missing) return { table: row.table, id: row.id, column: missing.name };
+  }
+  return undefined;
 }
 
 function ordinaryResultKey(id: string): Uint8Array {
@@ -6497,8 +6799,13 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
     case "BigInt":
     case "Double":
     case "Timestamp":
-    case "Row":
       return "value" in right && left.value === right.value;
+    case "Row":
+      return (
+        right.type === "Row" &&
+        left.value.id === right.value.id &&
+        rowValuesEqual(left.value.values, right.value.values)
+      );
   }
 }
 

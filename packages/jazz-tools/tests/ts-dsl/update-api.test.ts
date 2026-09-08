@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db } from "../../src/runtime/db.js";
 import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
@@ -9,14 +10,8 @@ describe("TS Update API", () => {
 
   beforeEach(async () => {
     db = await createDb({
-      appId: "test-app",
+      ...(await localAccountConfig("test-app")),
       driver: { type: "persistent" },
-      cookieSession: {
-        issuer: "https://issuer.example",
-        user_id: "todo-client-localfirst-update",
-        claims: {},
-        authMode: "external",
-      },
     });
   });
 

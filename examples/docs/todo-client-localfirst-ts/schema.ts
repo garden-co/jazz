@@ -10,7 +10,7 @@ const schema = {
     done: s.boolean(),
     priority: s.int().optional(),
     description: s.string().optional(),
-    owner_id: s.string().optional(),
+    owner_id: s.uuid().optional(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
   }),

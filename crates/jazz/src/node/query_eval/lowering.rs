@@ -6,6 +6,35 @@
 //! in their neighboring stages.
 
 use super::*;
+
+#[cfg(test)]
+pub(super) struct ScopedPolicyGraphReplacementPause;
+
+#[cfg(test)]
+thread_local! {
+    static SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl Drop for ScopedPolicyGraphReplacementPause {
+    fn drop(&mut self) {
+        SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn pause_scoped_policy_graph_replacement_for_test() -> ScopedPolicyGraphReplacementPause
+{
+    SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(true));
+    ScopedPolicyGraphReplacementPause
+}
+
+#[cfg(test)]
+async fn wait_for_scoped_policy_graph_replacement_for_test() {
+    if SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.get()) {
+        std::future::pending::<()>().await;
+    }
+}
 fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
     app_row_terminal_schema(output).and_then(|app_rows| {
         app_rows
@@ -539,6 +568,7 @@ where
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
+        self.restore_expired_policy_compilation_state();
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && !covered_input_sources.is_empty()
         {
@@ -548,9 +578,13 @@ where
                 covered_input_sources.keys().collect::<Vec<_>>(),
             );
         }
-        let replaced_policy_graphs =
-            Box::pin(self.prepare_query_program_policy_dependencies(&request, &access_paths))
-                .await?;
+        let policy_replacement_lease = std::rc::Rc::new(());
+        Box::pin(self.prepare_query_program_policy_dependencies(
+            &request,
+            &access_paths,
+            &policy_replacement_lease,
+        ))
+        .await?;
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = JazzSourceGraphPreparer {
@@ -568,7 +602,7 @@ where
         let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
         resolver
             .node
-            .restore_policy_authorization_graphs(replaced_policy_graphs);
+            .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
@@ -584,7 +618,8 @@ where
         &mut self,
         request: &QueryProgramRequest,
         outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
-    ) -> Result<BTreeMap<String, Option<PolicyAuthorizationGraph>>, Error> {
+        lease: &std::rc::Rc<()>,
+    ) -> Result<(), Error> {
         let source_requests = query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         // A deletion terminal carries the raw register but must be gated by
@@ -630,7 +665,6 @@ where
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut replaced = BTreeMap::new();
         for (cache_key, dependency) in dependencies {
             let point_path = match &dependency.policy {
                 PolicyContext::AuthorizationSubplan {
@@ -646,10 +680,7 @@ where
                 _ => None,
             };
             if let Some(access_paths) = point_path {
-                let previous = self
-                    .query
-                    .policy_authorization_graph_cache
-                    .remove(&cache_key);
+                self.begin_scoped_policy_authorization_graph_replacement(&cache_key, lease);
                 match Box::pin(
                     self.point_policy_authorization_row_id_graph(dependency, access_paths),
                 )
@@ -659,15 +690,11 @@ where
                         self.query
                             .policy_authorization_graph_cache
                             .insert(cache_key.clone(), graph);
-                        replaced.insert(cache_key, previous);
+                        #[cfg(test)]
+                        wait_for_scoped_policy_graph_replacement_for_test().await;
                     }
                     Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
-                        self.restore_policy_authorization_graphs(replaced);
-                        if let Some(previous) = previous {
-                            self.query
-                                .policy_authorization_graph_cache
-                                .insert(cache_key, previous);
-                        }
+                        self.restore_scoped_policy_authorization_graphs(lease);
                         return Err(Error::QueryCapability(error));
                     }
                     Err(Error::QueryCapability(_)) => {
@@ -679,15 +706,9 @@ where
                                 access_paths: BTreeMap::new(),
                             },
                         );
-                        replaced.insert(cache_key, previous);
                     }
                     Err(error) => {
-                        self.restore_policy_authorization_graphs(replaced);
-                        if let Some(previous) = previous {
-                            self.query
-                                .policy_authorization_graph_cache
-                                .insert(cache_key, previous);
-                        }
+                        self.restore_scoped_policy_authorization_graphs(lease);
                         return Err(error);
                     }
                 }
@@ -695,10 +716,11 @@ where
                 match Box::pin(self.policy_authorization_row_id_graph(dependency)).await {
                     Ok(_) => {}
                     Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
-                        self.restore_policy_authorization_graphs(replaced);
+                        self.restore_scoped_policy_authorization_graphs(lease);
                         return Err(Error::QueryCapability(error));
                     }
                     Err(Error::QueryCapability(_)) => {
+                        self.begin_scoped_policy_authorization_graph_replacement(&cache_key, lease);
                         self.query.policy_authorization_graph_cache.insert(
                             cache_key,
                             PolicyAuthorizationGraph {
@@ -709,31 +731,125 @@ where
                         );
                     }
                     Err(error) => {
-                        self.restore_policy_authorization_graphs(replaced);
+                        self.restore_scoped_policy_authorization_graphs(lease);
                         return Err(error);
                     }
                 }
             }
         }
-        Ok(replaced)
+        Ok(())
     }
 
-    fn restore_policy_authorization_graphs(
+    pub(super) fn restore_expired_policy_compilation_state(&mut self) {
+        self.query
+            .policy_proof_stack
+            .retain(|entry| entry.lease.strong_count() > 0);
+        let expired = self
+            .query
+            .policy_authorization_graph_replacements
+            .iter()
+            .filter_map(|(key, replacements)| {
+                replacements
+                    .last()
+                    .filter(|replacement| replacement.lease.strong_count() == 0)
+                    .map(|_| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in expired {
+            while self
+                .query
+                .policy_authorization_graph_replacements
+                .get(&key)
+                .and_then(|replacements| replacements.last())
+                .is_some_and(|replacement| replacement.lease.strong_count() == 0)
+            {
+                self.restore_scoped_policy_authorization_graph(&key);
+            }
+        }
+    }
+
+    pub(super) fn policy_authorization_graph_cache_get(
         &mut self,
-        replaced: BTreeMap<String, Option<PolicyAuthorizationGraph>>,
+        cache_key: &str,
+    ) -> Option<PolicyAuthorizationGraph> {
+        self.restore_expired_policy_compilation_state();
+        self.query
+            .policy_authorization_graph_cache
+            .get(cache_key)
+            .cloned()
+    }
+
+    fn begin_scoped_policy_authorization_graph_replacement(
+        &mut self,
+        cache_key: &str,
+        lease: &std::rc::Rc<()>,
     ) {
-        for (cache_key, previous) in replaced {
-            match previous {
-                Some(graph) => {
-                    self.query
-                        .policy_authorization_graph_cache
-                        .insert(cache_key, graph);
-                }
-                None => {
-                    self.query
-                        .policy_authorization_graph_cache
-                        .remove(&cache_key);
-                }
+        self.restore_expired_policy_compilation_state();
+        let previous = self
+            .query
+            .policy_authorization_graph_cache
+            .remove(cache_key);
+        self.query
+            .policy_authorization_graph_replacements
+            .entry(cache_key.to_owned())
+            .or_default()
+            .push(ScopedPolicyAuthorizationGraphReplacement {
+                previous,
+                lease: std::rc::Rc::downgrade(lease),
+            });
+    }
+
+    fn restore_scoped_policy_authorization_graphs(&mut self, lease: &std::rc::Rc<()>) {
+        let keys = self
+            .query
+            .policy_authorization_graph_replacements
+            .iter()
+            .filter_map(|(key, replacements)| {
+                replacements
+                    .last()
+                    .filter(|replacement| {
+                        std::rc::Weak::ptr_eq(&replacement.lease, &std::rc::Rc::downgrade(lease))
+                    })
+                    .map(|_| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.restore_scoped_policy_authorization_graph(&key);
+        }
+    }
+
+    fn restore_scoped_policy_authorization_graph(&mut self, cache_key: &str) {
+        let (replacement, emptied) = {
+            let Some(replacements) = self
+                .query
+                .policy_authorization_graph_replacements
+                .get_mut(cache_key)
+            else {
+                return;
+            };
+            let replacement = replacements
+                .pop()
+                .expect("policy graph replacement stack is non-empty");
+            (replacement, replacements.is_empty())
+        };
+        if emptied {
+            self.query
+                .policy_authorization_graph_replacements
+                .remove(cache_key);
+        }
+        self.query
+            .policy_authorization_graph_cache
+            .remove(cache_key);
+        match replacement.previous {
+            Some(graph) => {
+                self.query
+                    .policy_authorization_graph_cache
+                    .insert(cache_key.to_owned(), graph);
+            }
+            None => {
+                self.query
+                    .policy_authorization_graph_cache
+                    .remove(cache_key);
             }
         }
     }

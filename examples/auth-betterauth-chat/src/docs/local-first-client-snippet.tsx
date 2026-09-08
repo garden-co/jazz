@@ -1,21 +1,17 @@
 // #region local-first-client-setup
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { JazzSessionProvider } from "jazz-tools/react";
 
 function App() {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  if (isLoading || !secret) return <p>Loading…</p>;
-
   return (
-    <JazzProvider
+    <JazzSessionProvider
       config={{
         appId: "my-app",
         serverUrl: "wss://your-jazz-server.example.com",
-        secret,
+        initial: "local-first",
       }}
     >
       <YourApp />
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion local-first-client-setup
@@ -23,5 +19,4 @@ function App() {
 function YourApp() {
   return null;
 }
-
 export default App;

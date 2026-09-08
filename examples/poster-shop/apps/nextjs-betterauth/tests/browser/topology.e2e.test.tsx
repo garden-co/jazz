@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
+import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
+import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -155,21 +156,21 @@ describe("PosterShop cross-topology recovery", () => {
               await owner
                 .insert(app.canvasMembers, {
                   canvasId: canvas.id,
-                  memberAuthor: authorFromToken(ownerToken),
+                  memberAuthor: accountFromDb(owner),
                   role: "admin",
                 })
                 .wait({ tier: "global" });
               editorMembership = await owner
                 .insert(app.canvasMembers, {
                   canvasId: canvas.id,
-                  memberAuthor: authorFromToken(editorToken),
+                  memberAuthor: accountFromDb(editor),
                   role: "editor",
                 })
                 .wait({ tier: "global" });
               await owner
                 .insert(app.canvasMembers, {
                   canvasId: canvas.id,
-                  memberAuthor: authorFromToken(readerToken),
+                  memberAuthor: accountFromDb(reader),
                   role: "viewer",
                 })
                 .wait({ tier: "global" });
@@ -243,15 +244,7 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "revoke editor before owner lifecycle fault",
             run: async () => {
-              const authority = ctx.track(
-                await createDb({
-                  appId: server.appId,
-                  serverUrl: server.serverUrl,
-                  adminSecret: server.adminSecret,
-                  driver: { type: "memory" },
-                }),
-              );
-              await authority.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
+              await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
           },
@@ -376,9 +369,10 @@ describe("PosterShop cross-topology recovery", () => {
   }, 75_000);
 });
 
-function authorFromToken(token: string): string {
-  const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string; sub: string };
-  return JSON.stringify([claims.iss, claims.sub]);
+function accountFromDb(db: Db): string {
+  const account = db.getAuthState().session?.user.account;
+  if (!account) throw new Error("test client is missing an admitted account");
+  return account;
 }
 
 function shape(canvasId: string, layerId: string, zIndex: number) {
@@ -413,10 +407,11 @@ async function openClient(
   dbName = uniqueDbName(`poster-shop-${label}`),
 ): Promise<Db> {
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       serverUrl,
       jwtToken,
+      registerJwt: true,
       driver: { type: "persistent", dbName },
     }),
   );

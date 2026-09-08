@@ -1,91 +1,128 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
-import { JazzProvider as JazzBaseProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { createContext, useContext, useEffect, useState, useRef, StrictMode } from "react";
+import { JazzProvider as Provider, useJazzAuth } from "jazz-tools/react";
 import { authClient } from "./auth-client";
+import { getToken } from "./accounts";
+import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./App.css";
+const APP_ID = import.meta.env.VITE_JAZZ_APP_ID;
+const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL;
+const ProviderErrorContext = createContext<React.Dispatch<React.SetStateAction<Error | undefined>>>(
+  () => {},
+);
+export const useProviderError = () => useContext(ProviderErrorContext);
 
-const APP_ID = import.meta.env.VITE_JAZZ_APP_ID as string | undefined;
-const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL as string | undefined;
-
-function JwtRefresh() {
-  const db = useDb();
-  useEffect(
-    () =>
-      db.onAuthChanged((state) => {
-        if (state.error !== "expired") return;
-        authClient
-          .$fetch<{ token: string }>("/token", { method: "GET" })
-          .then(({ data, error }) => {
-            if (!error && data?.token) db.updateAuthToken(data.token);
-          });
-      }),
-    [db],
-  );
-  return null;
-}
-
-/**
- * Hybrid provider: renders JazzProvider regardless of BetterAuth session state.
- * Anonymous visitors get a local-first identity (from useLocalFirstAuth);
- * signed-in users get a BetterAuth-issued JWT. Switching between the two
- * triggers JazzProvider to rebuild against the new config.
- */
-function HybridProvider({ children }: React.PropsWithChildren) {
-  const { data: authSession, isPending } = authClient.useSession();
-  const { secret, isLoading: secretLoading } = useLocalFirstAuth();
-  const [jwtToken, setJwtToken] = useState<string | null>(null);
-  const authenticated = Boolean(authSession?.session);
-
-  useEffect(() => {
-    if (!authenticated) {
-      setJwtToken(null);
-      return;
-    }
-    let cancelled = false;
-    authClient.$fetch<{ token: string }>("/token", { method: "GET" }).then(({ data, error }) => {
-      if (cancelled) return;
-      if (!error && data?.token) setJwtToken(data.token);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [authenticated]);
-
-  const config = useMemo<DbConfig | null>(() => {
-    if (!APP_ID || !SERVER_URL) {
-      const missing = [!APP_ID && "VITE_JAZZ_APP_ID", !SERVER_URL && "VITE_JAZZ_SERVER_URL"]
-        .filter((v) => !!v)
-        .join(" & ");
-      throw new Error(
-        `${missing} not set. The jazzPlugin Vite plugin injects these at dev time; in production, set them explicitly in your environment.`,
-      );
-    }
-    if (authenticated) {
-      return jwtToken ? { appId: APP_ID, serverUrl: SERVER_URL, jwtToken } : null;
-    }
-    if (secretLoading || !secret) return null;
-    return { appId: APP_ID, serverUrl: SERVER_URL, secret };
-  }, [authenticated, jwtToken, secret, secretLoading]);
-  const lastConfig = useRef<DbConfig | null>(null);
-  if (config) lastConfig.current = config;
-  const providerConfig = config ?? lastConfig.current;
-
-  if (!providerConfig) return null;
+function SessionContent({
+  children,
+  providerError,
+}: React.PropsWithChildren<{ providerError?: Error }>) {
+  const { status, error: sessionError, sessionActions } = useJazzAuth();
+  const { loginOrRegisterJWT, linkJWT, createLocalFirst, retry } = sessionActions;
+  const error = sessionError ?? providerError;
+  const reportError = useProviderError();
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
 
   return (
-    <JazzBaseProvider config={providerConfig} fallback={<p>Loading...</p>}>
-      {authenticated && <JwtRefresh />}
-      {!isPending && config ? children : null}
-    </JazzBaseProvider>
+    <>
+      {error && (
+        <aside className="alert-error" role="alert">
+          {error.message}
+          <button
+            type="button"
+            onClick={() =>
+              void linkJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry linking
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry account preparation
+          </button>
+        </aside>
+      )}
+      {status === "ready" ? (
+        children
+      ) : status === "signed-out" ? (
+        <div>
+          <button
+            onClick={() =>
+              void loginOrRegisterJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
+        </div>
+      ) : (
+        <p>Loading...</p>
+      )}
+    </>
+  );
+}
+
+export function JazzProvider({ children }: React.PropsWithChildren) {
+  if (!APP_ID || !SERVER_URL) throw new Error("Jazz app ID and server URL must be set");
+  const [providerError, setProviderError] = useState<Error>();
+  const restored = useRef(false);
+  const fallback = <SessionContent providerError={providerError} />;
+  return (
+    <ProviderErrorContext.Provider value={setProviderError}>
+      <Provider
+        appId={APP_ID}
+        serverUrl={SERVER_URL}
+        initial="local-first"
+        signedOut={fallback}
+        loading={fallback}
+        error={fallback}
+      >
+        <RestoreProviderSession restored={restored} />
+        <SessionContent providerError={providerError}>{children}</SessionContent>
+      </Provider>
+    </ProviderErrorContext.Provider>
   );
 }
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <HybridProvider>
+    <JazzProvider>
       <App />
-    </HybridProvider>
+    </JazzProvider>
   </StrictMode>,
 );
+
+function RestoreProviderSession({ restored }: { restored: React.RefObject<boolean> }) {
+  const { sessionActions } = useJazzAuth();
+  const reportError = useProviderError();
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    // Manual source: signup explicitly links the fresh provider identity first.
+    void authClient
+      .getSession()
+      .then((auth) =>
+        auth.data?.session ? sessionActions.loginOrRegisterJWT({ getToken }) : undefined,
+      )
+      .catch((cause) => reportError(cause instanceof Error ? cause : new Error(String(cause))));
+  }, [restored, sessionActions, reportError]);
+  return null;
+}

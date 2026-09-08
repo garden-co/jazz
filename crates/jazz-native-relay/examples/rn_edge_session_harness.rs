@@ -1,6 +1,5 @@
-//! Local-only Edge/Core session issuer for the Android/iOS installed-artifact
-//! acceptance driver. It deliberately prints endpoint and short-lived bearer
-//! material only to its direct parent process, never to a checked-in fixture.
+//! Local-only Edge/Core harness for Android/iOS installed-artifact acceptance.
+//! The device retains its own accounts; the host supplies only endpoint/control metadata.
 
 use std::{
     collections::HashMap,
@@ -66,7 +65,7 @@ async fn run() {
     assert_eq!(
         edge.server_state().edge_upstream_health(),
         EdgeUpstreamHealth::Connected,
-        "local Edge must attach Core before credentials are handed to a device fixture"
+        "local Edge must attach Core before the device starts"
     );
 
     // A fresh, read-only observer attaches directly to Core, never Edge or
@@ -81,6 +80,7 @@ async fn run() {
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         storage_factory: None,
+        account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
         backend_secret: None,
         admin_secret: Some(core.admin_secret().to_owned()),
@@ -93,9 +93,6 @@ async fn run() {
     // process means the same harness remains usable by non-Android hosts.
     let receipt = serde_json::json!({
         "edge_port": edge.port(),
-        "app_id": core.app_id().to_string(),
-        "bearer_a": TestJwtIssuer::jwt_for_user("rn-device-private-a"),
-        "bearer_b": TestJwtIssuer::jwt_for_user("rn-device-private-b"),
     });
     println!("JAZZ_RN_EDGE_SESSION {receipt}");
     std::io::stdout().flush().expect("flush harness receipt");
@@ -176,6 +173,7 @@ async fn run() {
         data_dir: writer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         storage_factory: None,
+        account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user(
             "rn-device-core-recovery-writer",
         )),

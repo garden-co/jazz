@@ -1,6 +1,7 @@
-import { JazzProvider, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
-import { Suspense, useEffect } from "react";
+import { JazzProvider, useJazzClient } from "jazz-tools/react";
+import { Suspense, useEffect, useState } from "react";
 import type { DbConfig } from "jazz-tools";
+import { prepareAccountConfig } from "./account";
 
 import { Loader2Icon } from "lucide-react";
 import { CreateChatRedirect } from "@/components/CreateChatRedirect";
@@ -11,19 +12,6 @@ import { InviteHandler } from "@/components/InviteHandler";
 import { NavBar } from "@/components/navbar/NavBar";
 import Router from "@/components/Router";
 import { RouterScope } from "@/hooks/useRouter";
-
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  return {
-    appId,
-    env: "dev",
-    serverUrl,
-    secret,
-    ...overrides,
-  };
-}
 
 interface AppProps {
   config?: Partial<DbConfig>;
@@ -40,19 +28,27 @@ export function App({ config, initialPath }: AppProps = {}) {
 }
 
 function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const auth = useLocalFirstAuth();
-  const secret = config?.secret ?? auth.secret;
-  const isLoading = config?.secret === undefined && auth.isLoading;
-
-  if (isLoading || !secret) {
-    return <p id="joining-chat">Loading...</p>;
-  }
+  const [resolved, setResolved] = useState<DbConfig>();
+  const [error, setError] = useState<Error>();
+  useEffect(() => {
+    let cancelled = false;
+    prepareAccountConfig(config).then(
+      (value) => {
+        if (!cancelled) setResolved(value);
+      },
+      (cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+  if (error) throw error;
+  if (!resolved) return <p id="joining-chat">Loading...</p>;
 
   return (
-    <JazzProvider
-      config={defaultConfig(secret, config)}
-      fallback={<p id="joining-chat">Loading...</p>}
-    >
+    <JazzProvider config={resolved} fallback={<p id="joining-chat">Loading...</p>}>
       <ExposeDevClient />
       <AppContent />
     </JazzProvider>

@@ -1,24 +1,33 @@
 import { useState } from "react";
-import { useLocalFirstAuth } from "jazz-tools/react";
 import { authClient, useSession } from "./auth-client";
 import { AuthBackup } from "./auth-backup";
 import { SignInForm } from "./sign-in-form";
 import { SignUpForm } from "./sign-up-form";
 import { TodoWidget } from "./todo-widget";
+import { useJazzAuth } from "jazz-tools/react";
+import { useProviderError } from "./main";
 
 type View = "dashboard" | "signin" | "signup";
 
 export function App() {
+  const lifecycle = useJazzAuth();
+  const reportError = useProviderError();
   const { data: session, isPending } = useSession();
-  const auth = useLocalFirstAuth();
   const [view, setView] = useState<View>("dashboard");
 
   if (isPending) return <div>Loading…</div>;
 
   async function handleSignOut() {
-    await auth.signOut();
-    await authClient.signOut();
-    setView("dashboard");
+    reportError(undefined);
+    try {
+      await lifecycle.sessionActions.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await lifecycle.sessionActions.createLocalFirst();
+      setView("dashboard");
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+    }
   }
 
   if (!session && view === "signup") {

@@ -37,9 +37,7 @@ impl Drop for EphemeralGraphInstall<'_> {
         if self.committed {
             return;
         }
-        for node in self.runtime.gc_ephemeral_nodes(0) {
-            self.runtime.remove_node_runtime(node);
-        }
+        self.runtime.collect_unretained_ephemeral_nodes();
     }
 }
 
@@ -62,6 +60,15 @@ impl IvmRuntime {
 
         for root in roots {
             self.graph.mark_ancestors(root, &mut retained);
+        }
+
+        // A queued evaluation has already discovered every node it may resume
+        // through. Its graph slice must remain live even when the public
+        // subscription that originally retained a root has just been closed.
+        // Traverse each queued node after normal roots so a continuation also
+        // retains the graph dependencies it may revisit on resume.
+        for node in self.pending_incremental.registered_nodes() {
+            self.graph.mark_ancestors(node, &mut retained);
         }
 
         retained
@@ -166,9 +173,7 @@ impl IvmRuntime {
                 &Retainer::Subscription(subscription_id.retainer_key()),
             );
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
+        self.collect_unretained_ephemeral_nodes();
         removed
     }
 
@@ -202,6 +207,23 @@ impl IvmRuntime {
         }
 
         removable
+    }
+
+    /// Reclaim unretained nodes only while all pending evaluator queues are
+    /// visible through `pending_incremental`. During a poll that queue lives
+    /// in a local variable, so reclaiming then could invalidate an in-flight
+    /// evaluation before it resumes.
+    pub(super) fn collect_unretained_ephemeral_nodes(&mut self) {
+        self.ephemeral_graph_gc_pending = true;
+        if self.pending_incremental_polling {
+            return;
+        }
+        for node in self.gc_ephemeral_nodes(0) {
+            self.remove_node_runtime(node);
+        }
+        if !self.pending_incremental.is_pending() {
+            self.ephemeral_graph_gc_pending = false;
+        }
     }
 
     pub(super) fn remove_node_runtime(&mut self, node: NodeId) {

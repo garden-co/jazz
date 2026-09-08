@@ -117,6 +117,7 @@ const rnNativeArtifactPushPaths = [
   "crates/jazz/**",
   "crates/jazz-compression/**",
   "crates/jazz-native-relay/**",
+  "crates/jazz-native-transport/**",
   "crates/jazz-storage-sqlite/**",
   "crates/jazz-rn/**",
 ];
@@ -1849,7 +1850,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /--concurrency=2/);
   assert.match(
     runner,
-    /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth test:browser/,
+    /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser/,
   );
   assert.match(runner, /set -m/);
   assert.match(runner, /bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);

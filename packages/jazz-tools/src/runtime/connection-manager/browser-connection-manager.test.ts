@@ -12,6 +12,88 @@ function deferred() {
   return { promise, resolve };
 }
 
+function admissionManager(retryable = true) {
+  let pinned = true;
+  const error = new Error("incompatible persistent browser configuration");
+  const connections: Array<BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> }> = [];
+  const host = {
+    config: {},
+    isShuttingDown: false,
+    runtimeSource: {
+      createBrowserWorkerConnection: vi.fn(() => {
+        const rejected = pinned;
+        const connection = {
+          ready: async () => {
+            if (rejected) throw error;
+          },
+          canRetryInitialConfigurationAdmission: () => rejected && retryable,
+          shutdown: vi.fn(async () => undefined),
+        } as unknown as BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> };
+        connections.push(connection);
+        return connection;
+      }),
+    },
+    clearAuthenticatedInspectorLocalReads: vi.fn(),
+  };
+  const manager = new BrowserConnectionManager(host as unknown as DbForConnection);
+  (manager as unknown as { onClientCreated(input: unknown): void }).onClientCreated({
+    schemaKey: "empty",
+    schema: {},
+    client: {} as JazzClient,
+  });
+  return {
+    manager,
+    host,
+    connections,
+    error,
+    unpin: () => {
+      pinned = false;
+    },
+  };
+}
+
+describe("Browser configuration admission retries", () => {
+  it("rejects each attempt visibly and only reattaches on a later explicit call", async () => {
+    const { manager, connections, error, unpin } = admissionManager();
+    const first = manager.ensureReady("local");
+    const concurrent = manager.ensureReady("local");
+    await expect(first).rejects.toBe(error);
+    await expect(concurrent).rejects.toBe(error);
+    expect(connections).toHaveLength(1);
+    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    expect(connections).toHaveLength(2);
+    expect(connections[0]!.shutdown).toHaveBeenCalledOnce();
+    unpin();
+    await Promise.resolve();
+    expect(connections).toHaveLength(2);
+    await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+    expect(connections).toHaveLength(3);
+    expect(connections[1]!.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry other initial failures even with matching error text", async () => {
+    const { manager, connections, error } = admissionManager(false);
+    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    expect(connections).toHaveLength(1);
+  });
+
+  it("shares one candidate and cannot reopen while shutdown begins during retirement", async () => {
+    const { manager, host, connections, error } = admissionManager();
+    await expect(manager.ensureReady("local")).rejects.toBe(error);
+    const retirement = deferred();
+    connections[0]!.shutdown.mockImplementation(() => retirement.promise);
+    const retry = manager.ensureReady("local");
+    const concurrent = manager.ensureReady("local");
+    await Promise.resolve();
+    expect(connections[0]!.shutdown).toHaveBeenCalledOnce();
+    host.isShuttingDown = true;
+    retirement.resolve();
+    await Promise.all([retry, concurrent]);
+    expect(connections).toHaveLength(1);
+  });
+});
+
 describe("BrowserConnectionManager.shutdown", () => {
   it("continues teardown after flush fails and preserves the flush error", async () => {
     const flushError = new Error("flush failed");
@@ -19,6 +101,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     const connection: BrowserWorkerConnection = {
       ready: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       updateAuth: vi.fn(async () => undefined),
       disconnect: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
@@ -96,6 +179,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(() => firstReady.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
     } as unknown as BrowserWorkerConnection;
@@ -103,6 +187,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(() => secondReady.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "same-coordinate"),
     } as unknown as BrowserWorkerConnection;
@@ -203,6 +288,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       disconnect: vi.fn(() => disconnectGate.promise),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
     } as unknown as BrowserWorkerConnection;
     const manager = new BrowserConnectionManager({
       config: { serverUrl: "https://example.test" },
@@ -258,12 +344,14 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       ready: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
     } as unknown as BrowserWorkerConnection;
     const second = {
       ready: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
     } as unknown as BrowserWorkerConnection;
     const callbacks: Array<{ onFailure(error: unknown): void }> = [];

@@ -2769,8 +2769,36 @@ async fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangeme
             child,
         ))])
         .unwrap();
+    let runtime_key = encoded_record_key_part(descriptor, &record, &[0]).unwrap();
+    // Runtime grouping supports whole records; durable arrangement keys do not.
     assert!(matches!(
-        encoded_record_key_part(descriptor, &record, &[0]),
+        encoded_arrangement_key_part(descriptor, &record, &[0]),
         Err(IvmRuntimeError::UnsupportedJoinKey)
     ));
+
+    // Identical payload bytes under distinct contained descriptors must not
+    // collapse into one authorization/window group.
+    let other_child = RecordDescriptor::new([("other_id", ValueType::U64)]);
+    let other_descriptor =
+        RecordDescriptor::new([("child", ValueType::Record(Box::new(other_child)))]);
+    let other_record = other_descriptor
+        .create(&[Value::Record(records::OwnedRecord::new(
+            other_child.create(&[Value::U64(7)]).unwrap(),
+            other_child,
+        ))])
+        .unwrap();
+    assert_ne!(
+        runtime_key,
+        encoded_record_key_part(other_descriptor, &other_record, &[0]).unwrap()
+    );
+    let changed_record = descriptor
+        .create(&[Value::Record(records::OwnedRecord::new(
+            child.create(&[Value::U64(8)]).unwrap(),
+            child,
+        ))])
+        .unwrap();
+    assert_ne!(
+        runtime_key,
+        encoded_record_key_part(descriptor, &changed_record, &[0]).unwrap()
+    );
 }

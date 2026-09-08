@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../../index.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 import { createOpenTransactionId } from "../client.js";
+import { testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -20,7 +21,7 @@ describe("WASM backend read capability parity", () => {
         encodeSchema(app.wasmSchema),
         openConfig(
           new Uint8Array(16).fill(backend ? 1 : 2),
-          new TextEncoder().encode('["https://issuer.example","reader"]'),
+          testAuthorBytes(`wasm-backend-read-contract:${backend ? "backend" : "ordinary"}`),
           1,
           true,
         ),

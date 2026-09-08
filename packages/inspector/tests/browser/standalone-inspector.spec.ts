@@ -1,7 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
-import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
+import { expect, test, type Page } from "./fixtures.js";
+import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV } from "./test-constants.js";
 
-const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
+const SERVER_URL = process.env.JAZZ_INSPECTOR_TEST_SERVER_URL!;
 const SCHEMA_HASH = process.env.PUBLISHED_SCHEMA_HASH;
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 

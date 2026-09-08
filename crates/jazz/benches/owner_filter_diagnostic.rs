@@ -26,11 +26,11 @@ const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a
 const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
 
 fn author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(AUTHOR_UUID)
+    schema_fixture::account_author_uuid(AUTHOR_UUID)
 }
 
 fn other_author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(OTHER_AUTHOR_UUID)
+    schema_fixture::account_author_uuid(OTHER_AUTHOR_UUID)
 }
 
 fn main() {

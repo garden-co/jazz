@@ -12,16 +12,23 @@ pub fn compile(builder: SchemaBuilder) -> JazzSchema {
     JazzSchema::new(&builder.build()).expect("benchmark public schema compiles")
 }
 
-/// Compare a text column with the authenticated session identity.
-///
-/// Public schemas expose that identity as `session.user`; JWT `sub` is an
-/// authentication transport detail, not a policy-session field.
+/// UUID ownership in account-aware benchmark fixtures.
 pub fn session_user_id_column(column: &str) -> PolicyExpr {
-    PolicyExpr::Cmp {
-        column: column.to_owned(),
-        op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
-    }
+    PolicyExpr::eq_session(column, vec!["user".into(), "account".into()])
+}
+
+/// Exact subject ownership for benchmark actors sharing the fixed test issuer.
+pub fn session_subject_column(column: &str) -> PolicyExpr {
+    PolicyExpr::eq_session(
+        column,
+        vec!["user".into(), "identity".into(), "subject".into()],
+    )
+}
+
+/// Fixture-only stand-in for an already-admitted account in direct-Db
+/// benchmarks. UUID ownership values stay unchanged.
+pub fn account_author_uuid(id: uuid::Uuid) -> jazz::ids::AuthorSubject {
+    jazz::ids::AuthorSubject::for_test_uuid(id).with_account(jazz::account_registry::AccountId(id))
 }
 
 pub fn all_operations(policy: PolicyExpr) -> TablePolicies {

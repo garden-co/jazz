@@ -44,7 +44,7 @@ use serde::Deserialize;
 #[napi]
 pub type JsonValue = serde_json::Value;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -83,6 +83,7 @@ use jazz::ids::{
 };
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
+    DelegatedSessionBinding as CoreDelegatedSessionBinding,
     PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
     ReadViewSpec as CoreReadViewSpec,
 };
@@ -157,6 +158,55 @@ struct CoreSelfSignedClientProof {
     token: String,
     app_id: String,
     claimed_author: String,
+}
+
+/// Proof capabilities belong to one native runtime, including its schema and Tx views.
+/// Claims remain operation-local; this map admits only the exact structured author.
+#[derive(Clone, Default)]
+struct NativeAuthorAdmissions(Rc<RefCell<HashMap<String, CoreSelfSignedClientProof>>>);
+
+impl NativeAuthorAdmissions {
+    fn verify(proof: &CoreSelfSignedClientProof) -> napi::Result<CoreAuthorSubject> {
+        let author = identity::verify_client_runtime_author(
+            &proof.token,
+            &proof.app_id,
+            &proof.claimed_author,
+        )
+        .map_err(napi::Error::from_reason)?;
+        if author.principal_parts().0 != identity::LOCAL_FIRST_ISSUER
+            || author.account_id().is_none()
+        {
+            return Err(napi::Error::from_reason(
+                "session admission requires an account-bound local-first proof",
+            ));
+        }
+        Ok(author)
+    }
+
+    fn admit(&self, proof: CoreSelfSignedClientProof) -> napi::Result<()> {
+        Self::verify(&proof)?;
+        self.0
+            .borrow_mut()
+            .insert(proof.claimed_author.clone(), proof);
+        Ok(())
+    }
+
+    fn resolve(&self, bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
+        match core_author_id_from_bytes(bytes) {
+            Ok(author) => Ok(author),
+            Err(error) => {
+                let canonical = std::str::from_utf8(bytes).map_err(|_| {
+                    napi::Error::from_reason("author subject must be canonical UTF-8 JSON")
+                })?;
+                let proofs = self.0.borrow();
+                let Some(proof) = proofs.get(canonical) else {
+                    return Err(error);
+                };
+                // Recheck expiry and all cryptographic bindings for every ingress.
+                Self::verify(proof)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -250,6 +300,7 @@ struct WriteResult {
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
+#[derive(Clone)]
 enum NapiDbInnerStorage {
     Memory(Rc<CoreDb<CoreMemoryStorage>>),
     Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
@@ -1259,6 +1310,7 @@ pub struct NapiDb {
     // Only explicit backend opens mint this in-process capability. It is
     // independent of the SYSTEM author value.
     trusted_backend: bool,
+    author_admissions: NativeAuthorAdmissions,
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
@@ -1390,15 +1442,29 @@ impl NapiDb {
     fn request_permission_advice(
         &self,
         action: CorePermissionAdviceAction,
+        delegated_session: Option<CoreDelegatedSessionBinding>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        if delegated_session.is_some() {
+            self.require_trusted_backend()?;
+        }
         let advice = {
             let db = self.inner.borrow();
             let db = db
                 .as_ref()
                 .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
             match db {
-                NapiDbInnerStorage::Memory(db) => db.request_permission_advice(action),
-                NapiDbInnerStorage::Persistent(db) => db.request_permission_advice(action),
+                NapiDbInnerStorage::Memory(db) => delegated_session.map_or_else(
+                    || db.request_permission_advice(action.clone()),
+                    |session| {
+                        db.request_permission_advice_with_delegated_session(action.clone(), session)
+                    },
+                ),
+                NapiDbInnerStorage::Persistent(db) => delegated_session.map_or_else(
+                    || db.request_permission_advice(action.clone()),
+                    |session| {
+                        db.request_permission_advice_with_delegated_session(action.clone(), session)
+                    },
+                ),
             }
         };
         native_permission_advice_or_pending(Box::pin(async move {
@@ -1411,11 +1477,18 @@ impl NapiDb {
         &self,
         table: String,
         cells: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Insert {
-            table,
-            cells: decode_core_cells(&cells)?,
-        })
+        let delegated_session =
+            core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Insert {
+                table,
+                cells: decode_core_cells(&cells)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestReadPermissionAdvice")]
@@ -1423,11 +1496,18 @@ impl NapiDb {
         &self,
         table: String,
         row_id: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Read {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
-        })
+        let delegated_session =
+            core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Read {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestUpdatePermissionAdvice")]
@@ -1436,12 +1516,19 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Update {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
-            patch: decode_core_cells(&patch)?,
-        })
+        let delegated_session =
+            core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Update {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+                patch: decode_core_cells(&patch)?,
+            },
+            delegated_session,
+        )
     }
 
     #[napi(js_name = "requestDeletePermissionAdvice")]
@@ -1449,10 +1536,36 @@ impl NapiDb {
         &self,
         table: String,
         row_id: Uint8Array,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(CorePermissionAdviceAction::Delete {
-            table,
-            row: core_row_uuid_from_bytes(&row_id)?,
+        let delegated_session =
+            core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
+        self.request_permission_advice(
+            CorePermissionAdviceAction::Delete {
+                table,
+                row: core_row_uuid_from_bytes(&row_id)?,
+            },
+            delegated_session,
+        )
+    }
+
+    /// Admit a verified local-first account for this backend runtime only.
+    #[napi]
+    pub fn admit_local_first_session(
+        &self,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> napi::Result<()> {
+        self.require_trusted_backend()?;
+        if self.inner.borrow().is_none() {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        self.author_admissions.admit(CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
         })
     }
 
@@ -1469,7 +1582,7 @@ impl NapiDb {
         options: Option<InsertOptions>,
     ) -> napi::Result<Write> {
         let cells = decode_core_cells(&cells)?;
-        let options = core_insert_options(options)?;
+        let options = core_insert_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1504,7 +1617,7 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let cells = decode_core_cells(&cells)?;
-        let options = core_insert_options(options)?;
+        let options = core_insert_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1534,7 +1647,7 @@ impl NapiDb {
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
-        let options = core_update_options(options)?;
+        let options = core_update_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1571,7 +1684,7 @@ impl NapiDb {
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
-        let options = core_update_options(options)?;
+        let options = core_update_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1649,8 +1762,10 @@ impl NapiDb {
         // Reject an obsolete JavaScript shape before inspecting mutation bytes:
         // callers should get the actionable API error, and no malformed row
         // payload can mask a Root-target compatibility violation.
-        let options = parse_upsert_options(options)?;
-        let options = core_upsert_options(options)?;
+        let options = core_upsert_options_with_admissions(
+            parse_upsert_options(options)?,
+            &self.author_admissions,
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
@@ -1688,7 +1803,7 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let options = parse_upsert_options(options)?;
-        let options = core_upsert_options(options)?;
+        let options = core_upsert_options_with_admissions(options, &self.author_admissions)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let db = self.inner.borrow();
@@ -1717,7 +1832,7 @@ impl NapiDb {
         options: Option<DeleteOptions>,
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let options = core_delete_options(options)?;
+        let options = core_delete_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1752,7 +1867,7 @@ impl NapiDb {
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let options = core_delete_options(options)?;
+        let options = core_delete_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1781,7 +1896,7 @@ impl NapiDb {
     ) -> napi::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
-        let options = core_restore_options(options)?;
+        let options = core_restore_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1818,7 +1933,7 @@ impl NapiDb {
             .map_err(napi::Error::from_reason)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
-        let options = core_restore_options(options)?;
+        let options = core_restore_options_with_admissions(options, &self.author_admissions)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1878,7 +1993,7 @@ impl NapiDb {
                 ));
             }
         }
-        let identity = core_write_identity(author, attribution)?;
+        let identity = core_write_identity(author, attribution, &self.author_admissions)?;
         let head = head.map(core_branch_selector_from_json).transpose()?;
         let base = core_branch_base_from_json(base)?;
         if base.is_some() && head.is_none() {
@@ -1938,6 +2053,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -1961,6 +2077,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: true,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -1997,6 +2114,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -2017,6 +2135,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -2039,6 +2158,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: true,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -2067,6 +2187,7 @@ impl NapiDb {
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         })
     }
 
@@ -2093,6 +2214,7 @@ impl NapiDb {
             owns_runtime: false,
             non_durable_client: Rc::clone(&self.non_durable_client),
             trusted_backend: self.trusted_backend,
+            author_admissions: self.author_admissions.clone(),
         })
     }
 
@@ -2110,11 +2232,11 @@ impl NapiDb {
             .map_err(napi::Error::from_reason)?;
         let author = author
             .as_deref()
-            .map(core_author_id_from_bytes)
+            .map(|author| self.author_admissions.resolve(author))
             .transpose()?;
         let attribution = attribution
             .as_deref()
-            .map(core_author_id_from_bytes)
+            .map(|author| self.author_admissions.resolve(author))
             .transpose()?;
         if attribution.is_some() {
             self.require_trusted_backend()?;
@@ -2265,7 +2387,7 @@ impl NapiDb {
 
         let admission = author
             .map(|author| {
-                let author = core_author_id_from_bytes(&author)?;
+                let author = self.author_admissions.resolve(&author)?;
                 Ok::<_, napi::Error>((author, core_claims_from_json(author, claims)?))
             })
             .transpose()?;
@@ -2341,7 +2463,7 @@ impl NapiDb {
             .transpose()
             .map_err(napi::Error::from_reason)?;
         let author = match author {
-            Some(author) => Some(core_author_id_from_bytes(&author)?),
+            Some(author) => Some(self.author_admissions.resolve(&author)?),
             None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
             None => None,
         };
@@ -2452,6 +2574,10 @@ impl NapiDb {
         }
     }
 
+    /// Set ambient claims for mutation and other explicitly serialized
+    /// identity operations. Prepared queries capture scoped identity and
+    /// claims at preparation time, so concurrent reads do not consult this
+    /// shared map.
     #[napi(js_name = "setIdentityClaims")]
     pub fn set_identity_claims(
         &self,
@@ -2460,7 +2586,7 @@ impl NapiDb {
             JsonValue,
         >,
     ) -> napi::Result<()> {
-        let author = core_author_id_from_bytes(&author)?;
+        let author = self.author_admissions.resolve(&author)?;
         let claims = core_claims_from_json(author, claims)?;
         let db = self.inner.borrow();
         let db = db
@@ -2503,13 +2629,24 @@ impl NapiDb {
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
     ) -> napi::Result<Either<Subscription, PendingNativeSubscription>> {
-        let query = query.inner.clone();
+        let opts = core_read_opts_from_json(opts)?;
+        let trusted_client = self.trusted_backend;
         let author = match author {
-            Some(author) => Some(core_author_id_from_bytes(&author)?),
+            Some(author) => Some(self.author_admissions.resolve(&author)?),
             None if self.trusted_backend => Some(CoreAuthorSubject::SYSTEM),
             None => None,
         };
-        let opts = core_read_opts_from_json(opts)?;
+        if trusted_client
+            && author.is_some_and(|author| {
+                author != CoreAuthorSubject::SYSTEM
+                    && query.inner.request_identity() != Some(author)
+            })
+        {
+            return Err(napi::Error::from_reason(
+                "trusted client subscription requires immutable request claims",
+            ));
+        }
+        let query = query.inner.clone();
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -2521,6 +2658,9 @@ impl NapiDb {
                     wake: RefCell::new(None),
                     future: RefCell::new(Some(Box::pin(async move {
                         let stream = match author {
+                            Some(author) if trusted_client => {
+                                db.subscribe_client_for_identity(&query, opts, author).await
+                            }
                             Some(author) => db.subscribe_for_identity(&query, opts, author).await,
                             None => db.subscribe(&query, opts).await,
                         }
@@ -2637,16 +2777,20 @@ impl NapiDb {
         // The JS WebSocket carrier has no authenticated endpoint context for
         // scoped receipt/view frames. Keep this upstream transport aligned
         // with its authority-unbound Hello until such a context is plumbed.
-        let transport = Box::new(CoreWireTransportAdapter::new(
-            NapiWireTransport {
-                queues: queues.clone(),
-            },
-            jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
-            None,
-        ));
+        let transport = Box::new(
+            CoreWireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                NapiWireTransport {
+                    queues: queues.clone(),
+                },
+                jazz::wire::WIRE_PROTOCOL_VERSION,
+                jazz::wire::current_wire_features()
+                    & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                        | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                None,
+                None,
+                self.trusted_backend,
+            ),
+        );
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
@@ -2721,15 +2865,18 @@ impl NapiDb {
             link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features,
         };
-        let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
-            NapiWireTransport {
-                queues: queues.clone(),
-            },
-            protocol_version,
-            features,
-            None,
-            Some(session_context),
-        ));
+        let transport = Box::new(
+            CoreWireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                NapiWireTransport {
+                    queues: queues.clone(),
+                },
+                protocol_version,
+                features,
+                None,
+                Some(session_context),
+                self.trusted_backend,
+            ),
+        );
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
@@ -2748,6 +2895,68 @@ impl NapiDb {
         })
     }
 
+    /// Return the originating node clock before a host releases its memory runtime.
+    #[napi(js_name = "foregroundTxTimeHighWater")]
+    pub fn foreground_tx_time_high_water(&self) -> napi::Result<BigInt> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let value = match db {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.foreground_tx_time_high_water()).0,
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.foreground_tx_time_high_water()).0
+            }
+        };
+        Ok(BigInt::from(value))
+    }
+
+    /// Merge a checked host-retained node clock before opening new local writes.
+    #[napi(js_name = "seedForegroundTxTimeHighWater")]
+    pub fn seed_foreground_tx_time_high_water(&self, high_water: BigInt) -> napi::Result<()> {
+        let high_water = jazz::time::TxTime(authority_epoch_from_bigint(
+            high_water,
+            "node clock high-water",
+        )?);
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.seed_foreground_tx_time_high_water(high_water))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.seed_foreground_tx_time_high_water(high_water))
+            }
+        }
+        Ok(())
+    }
+
+    #[napi(js_name = "waitForPendingWrites")]
+    pub fn wait_for_pending_writes(
+        &self,
+        tier: String,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let tier = core_durability_tier_from_str(&tier)?;
+        let inner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| napi::Error::from_reason("database closed"))?;
+        native_read_or_pending(Box::pin(async move {
+            match inner {
+                NapiDbInnerStorage::Memory(db) => {
+                    db.wait_for_pending_writes(tier).await.map_err(napi_error)?
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.wait_for_pending_writes(tier).await.map_err(napi_error)?
+                }
+            }
+            Ok(Uint8Array::new(Vec::new()))
+        }))
+    }
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let inner = self.inner.borrow_mut().take();
@@ -2973,6 +3182,22 @@ fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
         .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
+fn core_delegated_session_from_napi(
+    author: Option<Uint8Array>,
+    claims: Option<JsonValue>,
+    admissions: &NativeAuthorAdmissions,
+) -> napi::Result<Option<CoreDelegatedSessionBinding>> {
+    author
+        .map(|author| {
+            let identity = admissions.resolve(&author)?;
+            Ok(CoreDelegatedSessionBinding {
+                claims: core_claims_from_json(identity, claims)?,
+                identity,
+            })
+        })
+        .transpose()
+}
+
 fn core_write_memory(
     db: Rc<CoreDb<CoreMemoryStorage>>,
     write: WriteHandle<CoreMemoryStorage>,
@@ -3050,9 +3275,7 @@ fn core_claims_from_json(
     // or one already verified by a distinct first-party proof ABI. The shared
     // constructor namespaces raw provider values and derives reserved fields.
     Ok(jazz::tools::policy_claims::canonical_policy_binding_claims(
-        &author,
-        claims,
-        CoreValue::String,
+        &author, claims,
     ))
 }
 
@@ -3263,22 +3486,26 @@ fn core_branch_base_from_json(
 fn core_write_identity(
     author: Option<Uint8Array>,
     attribution: Option<Uint8Array>,
+    admissions: &NativeAuthorAdmissions,
 ) -> napi::Result<jazz::db::WriteIdentity> {
     match (author, attribution) {
         (Some(_), Some(_)) => Err(napi::Error::from_reason(
             "write identity cannot contain both author and attribution",
         )),
-        (Some(author), None) => {
-            core_author_id_from_bytes(&author).map(jazz::db::WriteIdentity::Session)
-        }
-        (None, Some(attribution)) => {
-            core_author_id_from_bytes(&attribution).map(jazz::db::WriteIdentity::Attribution)
-        }
+        (Some(author), None) => admissions
+            .resolve(&author)
+            .map(jazz::db::WriteIdentity::Session),
+        (None, Some(attribution)) => admissions
+            .resolve(&attribution)
+            .map(jazz::db::WriteIdentity::Attribution),
         (None, None) => Ok(jazz::db::WriteIdentity::Database),
     }
 }
 
-fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db::InsertOptions> {
+fn core_insert_options_with_admissions(
+    options: Option<InsertOptions>,
+    admissions: &NativeAuthorAdmissions,
+) -> napi::Result<jazz::db::InsertOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
     };
@@ -3287,7 +3514,7 @@ fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db:
             .row_id
             .map(|row_id| core_row_uuid_from_bytes(&row_id))
             .transpose()?,
-        identity: core_write_identity(options.author, options.attribution)?,
+        identity: core_write_identity(options.author, options.attribution, admissions)?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -3301,7 +3528,15 @@ fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db:
     })
 }
 
-fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db::UpdateOptions> {
+#[cfg(test)]
+fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db::InsertOptions> {
+    core_insert_options_with_admissions(options, &NativeAuthorAdmissions::default())
+}
+
+fn core_update_options_with_admissions(
+    options: Option<UpdateOptions>,
+    admissions: &NativeAuthorAdmissions,
+) -> napi::Result<jazz::db::UpdateOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
     };
@@ -3318,13 +3553,18 @@ fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db:
         }
     };
     Ok(jazz::db::UpdateOptions {
-        identity: core_write_identity(options.author, options.attribution)?,
+        identity: core_write_identity(options.author, options.attribution, admissions)?,
         target,
         updated_at_ms: options
             .updated_at_ms
             .map(|value| checked_u64(value, "updatedAtMs"))
             .transpose()?,
     })
+}
+
+#[cfg(test)]
+fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db::UpdateOptions> {
+    core_update_options_with_admissions(options, &NativeAuthorAdmissions::default())
 }
 
 /// Parse upsert options without erasing whether the removed `branch` key was
@@ -3350,8 +3590,9 @@ fn parse_upsert_options(options: Option<Unknown<'_>>) -> napi::Result<Option<Par
     }))
 }
 
-fn core_upsert_options(
+fn core_upsert_options_with_admissions(
     options: Option<ParsedUpsertOptions>,
+    admissions: &NativeAuthorAdmissions,
 ) -> napi::Result<jazz::db::UpsertOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
@@ -3374,7 +3615,7 @@ fn core_upsert_options(
         }
     };
     Ok(jazz::db::UpsertOptions {
-        identity: core_write_identity(options.author, options.attribution)?,
+        identity: core_write_identity(options.author, options.attribution, admissions)?,
         target,
         updated_at_ms: options
             .updated_at_ms
@@ -3383,7 +3624,17 @@ fn core_upsert_options(
     })
 }
 
-fn core_delete_options(options: Option<DeleteOptions>) -> napi::Result<jazz::db::DeleteOptions> {
+#[cfg(test)]
+fn core_upsert_options(
+    options: Option<ParsedUpsertOptions>,
+) -> napi::Result<jazz::db::UpsertOptions> {
+    core_upsert_options_with_admissions(options, &NativeAuthorAdmissions::default())
+}
+
+fn core_delete_options_with_admissions(
+    options: Option<DeleteOptions>,
+    admissions: &NativeAuthorAdmissions,
+) -> napi::Result<jazz::db::DeleteOptions> {
     let options = options.map(|options| UpdateOptions {
         author: options.author,
         attribution: options.attribution,
@@ -3391,7 +3642,7 @@ fn core_delete_options(options: Option<DeleteOptions>) -> napi::Result<jazz::db:
         base: options.base,
         updated_at_ms: options.updated_at_ms,
     });
-    let options = core_update_options(options)?;
+    let options = core_update_options_with_admissions(options, admissions)?;
     Ok(jazz::db::DeleteOptions {
         identity: options.identity,
         target: options.target,
@@ -3399,12 +3650,15 @@ fn core_delete_options(options: Option<DeleteOptions>) -> napi::Result<jazz::db:
     })
 }
 
-fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::db::RestoreOptions> {
+fn core_restore_options_with_admissions(
+    options: Option<RestoreOptions>,
+    admissions: &NativeAuthorAdmissions,
+) -> napi::Result<jazz::db::RestoreOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
     };
     Ok(jazz::db::RestoreOptions {
-        identity: core_write_identity(options.author, options.attribution)?,
+        identity: core_write_identity(options.author, options.attribution, admissions)?,
         target: options
             .branch
             .map(core_branch_selector_from_json)
@@ -3416,6 +3670,11 @@ fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::d
             .map(|value| checked_u64(value, "updatedAtMs"))
             .transpose()?,
     })
+}
+
+#[cfg(test)]
+fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::db::RestoreOptions> {
+    core_restore_options_with_admissions(options, &NativeAuthorAdmissions::default())
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
@@ -4122,8 +4381,8 @@ mod tests {
 
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
-        NapiDb, NapiDbInnerStorage, NapiWrite, ParsedUpsertOptions, PendingNativeRead,
-        PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
+        NapiDb, NapiDbInnerStorage, NapiWrite, NativeAuthorAdmissions, ParsedUpsertOptions,
+        PendingNativeRead, PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
         PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, UpdateOptions,
         authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes, core_block_on,
         core_claim_value_from_json, core_drive_direct_mutation_once, core_insert_options,
@@ -4479,6 +4738,7 @@ mod tests {
         drop(active_request);
     }
     use groove::storage::TestStorage;
+    use jazz::account_registry::AccountId;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
@@ -4488,7 +4748,8 @@ mod tests {
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{
-        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowAuthor as CoreRowAuthor,
+        RowUuid as CoreRowUuid,
     };
     use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
     use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
@@ -4772,7 +5033,9 @@ mod tests {
 
     #[test]
     fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {
-        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(AccountId(uuid::Uuid::from_bytes([0xa2; 16])));
         let claims = crate::core_claims_from_json(
             author,
             Some(json!({
@@ -4787,8 +5050,12 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(author.canonical().to_owned())),
-            "session.user must come from the supplied canonical author"
+            Some(
+                &CoreRowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            ),
+            "session.user must come from the supplied structured author"
         );
         assert_eq!(
             claims.get("authMode"),
@@ -4846,14 +5113,26 @@ mod tests {
 
     #[test]
     fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
-        let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
-            .expect("canonical first-party author");
+        let account = AccountId(uuid::Uuid::from_bytes([0xa3; 16]));
+        let author = CoreAuthorSubject::from_canonical(
+            &serde_json::to_string(&(
+                account.0.to_string(),
+                CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+                "alice",
+            ))
+            .expect("serialize canonical admitted first-party author"),
+        )
+        .expect("parse canonical admitted first-party author");
         let claims = crate::core_claims_from_json(author, Some(json!({ "authMode": "external" })))
             .expect("NAPI claims are scalar provider data");
 
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(author.canonical().to_owned()))
+            Some(
+                &CoreRowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            )
         );
         assert_eq!(
             claims.get("authMode"),
@@ -5442,6 +5721,189 @@ mod tests {
         ));
     }
 
+    // The capability is binding-local, so exercise native ABI ingress directly.
+    #[test]
+    fn native_local_first_session_admission_is_exact_and_runtime_scoped() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column("label", ColumnType::Text))
+            .build();
+        let schema_bytes = || Uint8Array::from(serde_json::to_vec(&schema).unwrap());
+        let config = || {
+            Uint8Array::from(encode_persistent_open_config(
+                CoreAuthorSubject::for_test_bytes([0x92; 16]),
+            ))
+        };
+        let backend = NapiDb::open_memory_as_backend(schema_bytes(), config()).unwrap();
+        let other = NapiDb::open_memory_as_backend(schema_bytes(), config()).unwrap();
+        let ordinary = NapiDb::open_memory(schema_bytes(), config()).unwrap();
+        let app_id = "native-session-admission";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x93; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            app_id,
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, app_id).unwrap();
+        let app = jazz::tools::AppId::from_name(app_id);
+        let account =
+            jazz::account_registry::local_first_account_id(*app.uuid(), &verified.user_id);
+        let author = CoreAuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, &verified.user_id))
+                .unwrap(),
+        )
+        .unwrap()
+        .with_account(account);
+        let canonical = author.canonical().to_owned();
+        let bytes = || Uint8Array::from(canonical.as_bytes().to_vec());
+        assert!(backend.set_identity_claims(bytes(), None).is_err());
+        assert!(
+            ordinary
+                .admit_local_first_session(token.clone(), app_id.into(), canonical.clone())
+                .is_err()
+        );
+        assert!(
+            backend
+                .admit_local_first_session(token.clone(), "wrong-app".into(), canonical.clone())
+                .is_err()
+        );
+        assert!(backend.set_identity_claims(bytes(), None).is_err());
+        let wrong_account = author.with_account(jazz::account_registry::local_first_account_id(
+            *app.uuid(),
+            "wrong-user",
+        ));
+        assert!(
+            backend
+                .admit_local_first_session(
+                    token.clone(),
+                    app_id.into(),
+                    wrong_account.canonical().into()
+                )
+                .is_err()
+        );
+        for claimed in [
+            serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, &verified.user_id))
+                .unwrap(),
+            CoreAuthorSubject::SYSTEM.canonical().to_owned(),
+            serde_json::to_string(&(jazz::tools::identity::ANONYMOUS_ISSUER, &verified.user_id))
+                .unwrap(),
+        ] {
+            assert!(
+                backend
+                    .admit_local_first_session(token.clone(), app_id.into(), claimed)
+                    .is_err()
+            );
+        }
+        backend
+            .admit_local_first_session(token.clone(), app_id.into(), canonical.clone())
+            .unwrap();
+        backend.set_identity_claims(bytes(), None).unwrap();
+        assert!(other.set_identity_claims(bytes(), None).is_err());
+        assert!(ordinary.set_identity_claims(bytes(), None).is_err());
+        assert!(
+            backend
+                .admit_local_first_session(
+                    "forged.token.proof".into(),
+                    app_id.into(),
+                    canonical.clone()
+                )
+                .is_err()
+        );
+        backend.set_identity_claims(bytes(), None).unwrap();
+        let batch = CoreOpenTransactionId::new().to_string();
+        backend
+            .begin_transaction_attributed(batch.clone(), bytes())
+            .unwrap();
+        let mut tx = backend.attach_mergeable_tx(batch.clone()).unwrap();
+        let descriptor = RecordDescriptor::new([("label", ValueType::String)]);
+        let raw = descriptor
+            .create(&[CoreValue::String("admitted Tx".to_owned())])
+            .unwrap();
+        let cells = jazz::binding_codec::encode_named_cells(
+            &jazz::groove::records::OwnedRecord::new(raw, descriptor),
+        )
+        .unwrap();
+        tx.insert_encoded_with_options(
+            "items".into(),
+            Uint8Array::from(cells),
+            Some(InsertOptions {
+                row_id: None,
+                author: Some(bytes()),
+                branch: None,
+                updated_at_ms: None,
+            }),
+        )
+        .unwrap();
+        tx.close();
+        backend
+            .commit_transaction(batch, Some("mergeable".into()))
+            .unwrap();
+        // A schema view shares the exact owner's admission map.
+        let view = backend.register_schema(schema_bytes()).unwrap();
+        view.set_identity_claims(bytes(), None).unwrap();
+        view.close().unwrap();
+        backend.close().unwrap();
+        assert!(
+            backend
+                .admit_local_first_session(token, app_id.into(), canonical)
+                .is_err()
+        );
+        other.close().unwrap();
+        ordinary.close().unwrap();
+    }
+
+    #[test]
+    fn native_node_clock_handoff_preserves_u64_and_rejects_lossy_inputs() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column("label", ColumnType::Text))
+            .build();
+        let open = || {
+            NapiDb::open_memory_as_backend(
+                Uint8Array::from(serde_json::to_vec(&schema).unwrap()),
+                Uint8Array::from(encode_persistent_open_config(
+                    CoreAuthorSubject::for_test_bytes([0x91; 16]),
+                )),
+            )
+            .unwrap()
+        };
+        let first = open();
+        first
+            .seed_foreground_tx_time_high_water(BigInt::from(u64::MAX - 1))
+            .unwrap();
+        let high_water = first.foreground_tx_time_high_water().unwrap();
+        assert_eq!(high_water.get_u64(), (false, u64::MAX - 1, true));
+        first.close().unwrap();
+        let second = open();
+        second
+            .seed_foreground_tx_time_high_water(high_water)
+            .unwrap();
+        second
+            .seed_foreground_tx_time_high_water(BigInt::from(1_u64))
+            .unwrap();
+        assert_eq!(
+            second.foreground_tx_time_high_water().unwrap().get_u64(),
+            (false, u64::MAX - 1, true)
+        );
+        for invalid in [
+            BigInt {
+                sign_bit: true,
+                words: vec![1],
+            },
+            BigInt {
+                sign_bit: false,
+                words: vec![0, 1],
+            },
+        ] {
+            assert!(second.seed_foreground_tx_time_high_water(invalid).is_err());
+        }
+        assert_eq!(
+            second.foreground_tx_time_high_water().unwrap().get_u64(),
+            (false, u64::MAX - 1, true)
+        );
+        second.close().unwrap();
+    }
+
     #[test]
     fn authority_epoch_bigint_rejects_lossy_values_and_preserves_u64() {
         let above_u32 = BigInt {
@@ -5899,6 +6361,7 @@ mod tests {
             owns_runtime: false,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenTransactionId::new();
@@ -5926,6 +6389,7 @@ mod tests {
             owns_runtime: false,
             non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
+            author_admissions: NativeAuthorAdmissions::default(),
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),

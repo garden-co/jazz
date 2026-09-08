@@ -5,34 +5,51 @@
  * `admin` may insert, update, or delete Announcements while generic-chat
  * updates and deletes remain bound to the message creator.
  *
- * NOT covered by `pnpm test`: Better Auth's sign-up / sign-in API
- * (`src/lib/auth.ts`), the JWKS endpoint at `/api/auth/jwks`, the
- * AuthCard UI, or session cookies. Those run in `pnpm dev` against the
- * actual Better Auth server and aren't exercised here.
+ * The server suite separately exercises the actual Better Auth handler,
+ * session cookies and JWT signing; these browser tests exercise Jazz policies.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { type JazzClient, createJazzClient } from "jazz-tools/react";
+import { type JazzClient, createJazzSession } from "jazz-tools/react";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
-const clients: JazzClient[] = [];
+const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
+const registered = new Set<string>();
 
 afterEach(async () => {
-  while (clients.length > 0) {
-    await clients.pop()!.shutdown();
-  }
+  while (sessions.length > 0) await sessions.pop()!.close();
 });
 
 async function makeClient(jwt?: string): Promise<JazzClient> {
-  const client = await createJazzClient({
+  let stored: string | null = null;
+  const session = await createJazzSession({
     appId: __APP_ID__,
     serverUrl: __JAZZ_SERVER_URL__,
     driver: { type: "memory" },
-    ...(jwt ? { jwtToken: jwt } : {}),
+    initial: jwt ? undefined : "local-first",
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
   });
-  clients.push(client);
-  return client;
+  sessions.push(session);
+  if (jwt) {
+    if (registered.has(jwt)) await session.loginJWT(jwt);
+    else {
+      await session.registerJWT(jwt);
+      registered.add(jwt);
+    }
+  }
+  const snapshot = session.getSnapshot();
+  if (snapshot.status !== "ready" || !snapshot.client) {
+    throw snapshot.error ?? new Error("Test session is not ready");
+  }
+  return snapshot.client;
 }
 
 async function send(client: JazzClient, chat_id: string, text: string): Promise<string> {

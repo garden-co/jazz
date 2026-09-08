@@ -1,3 +1,4 @@
+import type { DbConfig } from "../../runtime/db.js";
 import type {
   BrowserInspectorContext,
   BrowserInspectorControlEvent,
@@ -8,7 +9,7 @@ import {
   serializeBrowserRelayError,
 } from "../../runtime/native-runtime/browser-worker-protocol.js";
 
-type ControlPortFactory = () => Promise<MessagePort>;
+type ControlPortFactory = (() => Promise<MessagePort>) & { getConfig?: () => DbConfig };
 type ControlRequestWithoutId = BrowserInspectorControlRequest extends infer Request
   ? Request extends { id: number }
     ? Omit<Request, "id">
@@ -23,11 +24,24 @@ function registry(): RegistryState {
   return (scope[REGISTRY_KEY] ??= { factories: new Map(), nextFactoryId: 1 });
 }
 
-export function registerBrowserInspectorControl(factory: ControlPortFactory): () => void {
+export function registerBrowserInspectorControl(
+  factory: ControlPortFactory,
+  getConfig?: () => DbConfig,
+): () => void {
+  factory.getConfig = getConfig;
   const state = registry();
   const id = state.nextFactoryId++;
   state.factories.set(id, factory);
   return () => state.factories.delete(id);
+}
+
+/** Resolve only a context routed through this page's registered control ports. */
+export function getRegisteredInspectorConfig(contextKey: string): DbConfig {
+  const separator = contextKey.indexOf(":");
+  const id = Number(contextKey.slice(0, separator));
+  const config = registry().factories.get(id)?.getConfig?.();
+  if (separator < 1 || !config) throw new Error("Inspector host context is no longer available");
+  return config;
 }
 
 export async function openAggregatedBrowserInspectorControlPort(

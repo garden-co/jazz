@@ -108,8 +108,11 @@ aliases, migration paths, or old wire decoders. `VersionBundle` remains the sema
 carrier is expanded and remains the direct payload of `RowVersionPayloads`
 repair responses.
 
-Transaction, row-version, session, and claim authors use the exact canonical
-`[iss,sub]` JSON string. Large scalar descriptors use Groove's canonical
+Transaction and row-version authors use the native record
+`{account: UUID, identity: {issuer: String, subject: String}}`. System authors
+carry the reserved nil account and issuer plus originating node UUID subject;
+forwarding preserves that origin. This data is never a permission capability.
+Accountless reader sessions remain distinct from non-null row authors. Large scalar descriptors use Groove's canonical
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol

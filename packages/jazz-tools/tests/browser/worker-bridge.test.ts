@@ -8,7 +8,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
+import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
 import {
   Db,
   getDbSubscriptionSource,
@@ -33,6 +34,7 @@ import {
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
 import {
   TestCleanup,
+  acquireBrowserTestAccount,
   createSyncedDb,
   sleep,
   uniqueDbName,
@@ -1491,6 +1493,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1520,6 +1523,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1538,6 +1542,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
         jwtToken,
+        registerJwt: true,
         driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
       }),
     );
@@ -1991,7 +1996,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }, 60000);
 
   it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl, adminSecret } =
+    const { appId, serverUrl } =
       await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
     const db = track(
       await createDb({
@@ -2001,8 +2006,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
           dbName: uniqueDbName("subscribe-initial-jwt"),
         },
         serverUrl,
-        adminSecret,
         jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
+        registerJwt: true,
       }),
     );
 
@@ -2249,8 +2254,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-admin-write-authority",
       readOnlyPermissions,
     );
-    const db = track(
-      await createDb({
+    // A browser worker is a persistent client runtime, never a trusted
+    // backend. Keeping backend credentials out of it avoids handing a
+    // privileged capability to browser storage or worker ports.
+    await expect(
+      createPublicDb({
         appId: syncServer.appId,
         serverUrl: syncServer.serverUrl,
         adminSecret: syncServer.adminSecret,
@@ -2259,15 +2267,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
           dbName: uniqueDbName("sync-admin-write-authority"),
         },
         schema: app,
-      }),
-    );
-
-    // A browser worker is a persistent client runtime, never a trusted
-    // backend. Keeping backend credentials out of it avoids handing a
-    // privileged capability to browser storage or worker ports.
-    expect(() => db.insert(todos, { title: `backend-write-${Date.now()}`, done: false })).toThrow(
-      "Persistent browser workers require a verified client session",
-    );
+      } as never),
+    ).rejects.toThrow("account_handle_required");
   });
 
   it("server permissions check rejects client optimistic insert - wait notification", async () => {
@@ -2365,11 +2366,39 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     const txId = await insertResult.txId;
-    await waitForCondition(
-      async () => mutationErrorSpy.mock.calls.length > 0,
-      5000,
-      "onMutationError handler should be called",
-    );
+    try {
+      await waitForCondition(
+        async () => mutationErrorSpy.mock.calls.length > 0,
+        5000,
+        "onMutationError handler should be called",
+      );
+    } catch (error) {
+      console.error("[mutation notification failure]", {
+        transactionAllocated: txId !== undefined,
+        callbackCount: mutationErrorSpy.mock.calls.length,
+      });
+      // #2677: Read the existing redacted ledger only after failure. An edge wait
+      // would consume rejection handling and change the behavior under test.
+      const inspection = (async () => {
+        const port = await db.openInspectorControlPort();
+        port.start();
+        try {
+          return await withTimeout(listWorkerLifecycle(port), 1000, "worker lifecycle reply");
+        } finally {
+          port.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+          port.close();
+        }
+      })();
+      try {
+        console.error(
+          "[mutation notification worker lifecycle]",
+          await withTimeout(inspection, 1500, "worker lifecycle inspection"),
+        );
+      } catch (diagnosticError) {
+        console.error("[mutation notification inspection unavailable]", String(diagnosticError));
+      }
+      throw error;
+    }
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
       reason: "Write rejected by server authorization",
@@ -2417,14 +2446,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-on-mutation-error-restart",
     );
 
-    const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-restart");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret: sharedLocalAuthToken,
+        account,
       });
 
     const dbBeforeRestart = track(await createPersistentDb(syncServer.serverUrl));
@@ -2526,14 +2559,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       readOnlyPermissions,
     );
 
-    const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-undelivered-restart");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret: sharedLocalAuthToken,
+        account,
       });
 
     const dbBeforeRestart = track(await createPersistentDb(undefined));
@@ -2615,14 +2652,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "sync-recovery-terminal-pair",
       recoveryTerminalPermissions,
     );
-    const secret = generateAuthSecret();
     const dbName = uniqueDbName("sync-recovery-terminal-pair");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
     const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
         serverUrl,
-        secret,
+        account,
       });
 
     const first = track(await createPersistentDb(undefined));
@@ -2785,14 +2826,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           readOnlyPermissions,
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-insert");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const dbBeforeRestart = track(await createPersistentDb(undefined));
@@ -2826,14 +2871,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           "sync-restart-revert-update",
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-update");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const seeder = track(await createPersistentDb(syncServer.serverUrl));
@@ -2878,14 +2927,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
           "sync-restart-revert-delete",
         );
 
-        const sharedLocalAuthToken = generateAuthSecret();
         const dbName = uniqueDbName("sync-restart-revert-delete");
+        const account = await acquireBrowserTestAccount({
+          appId: syncServer.appId,
+          serverUrl: syncServer.serverUrl,
+          key: dbName,
+        });
         const createPersistentDb = (serverUrl?: string) =>
           createDb({
             appId: syncServer.appId,
             driver: { type: "persistent" as const, dbName },
             serverUrl,
-            secret: sharedLocalAuthToken,
+            account,
           });
 
         const seeder = track(await createPersistentDb(syncServer.serverUrl));
@@ -2928,7 +2981,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = syncServer;
+    const { appId, serverUrl } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
@@ -2938,7 +2991,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
-      adminSecret,
       localFirstSecret: sharedLocalAuthToken,
     });
 
@@ -3092,7 +3144,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = syncServer;
+    const { appId, serverUrl } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
@@ -3102,7 +3154,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
       table: "todos",
       schemaJson: JSON.stringify(app.wasmSchema),
       serverUrl,
-      adminSecret,
       localFirstSecret: sharedLocalAuthToken,
     });
 
@@ -3760,35 +3811,39 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsubscribe();
   });
 
-  it.fails("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
+  it("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
     const dbName = uniqueDbName("schema-mismatch-recovery");
+    // Both versions must already be admitted with their lineage lens. Merely
+    // supplying a new schema at reopen is not a catalogue publication.
+    const server = await publishCatalogueSchemaFamily("schema-mismatch-recovery");
+    const nextApp = catalogueAppV2;
     const oldTab = track(
       await createDb({
-        appId: "test-app",
+        appId: server.appId,
+        serverUrl: server.serverUrl,
         driver: { type: "persistent", dbName },
       }),
     );
-    oldTab.insert(todos, { title: "Old schema row", done: false });
+    await withTimeout(
+      oldTab
+        .insert(catalogueAppV1.todos, { title: "Old schema row", completed: false })
+        .wait({ tier: "edge" }),
+      8000,
+      "Old tab should receive the published catalogue before pinning its schema",
+    );
     await waitForCondition(
       async () => {
-        const rows = await oldTab.all(allTodos, { tier: "local" });
+        const rows = await oldTab.all(catalogueAppV1.todos, { tier: "local" });
         return rows.some((row) => row.title === "Old schema row");
       },
       8000,
       "Old tab should be durable-ready with the original schema",
     );
 
-    const nextApp = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        done: s.boolean(),
-        priority: s.string().optional(),
-      }),
-    });
-
     const newTab = track(
       await createDb({
-        appId: "test-app",
+        appId: server.appId,
+        serverUrl: server.serverUrl,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3798,7 +3853,31 @@ describe("SharedWorker bridge with IndexedDB", () => {
         8000,
         "Schema-blocked tab query should reject instead of hanging",
       ),
-    ).rejects.toThrow("incompatible persistent browser schema");
+    ).rejects.toThrow("incompatible persistent browser configuration");
+
+    // Each later call gets one fresh admission attempt, and must still fail
+    // visibly while the incompatible worker remains pinned.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(
+        withTimeout(
+          newTab.all(nextApp.todos, { tier: "local" }),
+          8000,
+          "Repeated schema-blocked query should reject instead of hanging",
+        ),
+      ).rejects.toThrow("incompatible persistent browser configuration");
+    }
+
+    const failedTab = track(
+      await createDb({
+        appId: server.appId,
+        serverUrl: server.serverUrl,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    await expect(failedTab.all(nextApp.todos, { tier: "local" })).rejects.toThrow(
+      "incompatible persistent browser configuration",
+    );
+    await failedTab.shutdown();
 
     await oldTab.shutdown();
     const rows = await withTimeout(
@@ -3807,27 +3886,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "Recovered tab should be able to query with its own schema",
     );
     expect(Array.isArray(rows)).toBe(true);
+    expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
   });
 
   it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
     const appId = uniqueDbName("explicit-browser-owner-app");
     const dbName = uniqueDbName("shared-device-cache");
-    const aliceJwt = makeStructurallyValidJwt("explicit-base-alice");
-    const bobJwt = makeStructurallyValidJwt("explicit-base-bob");
+    const aliceSecret = generateAuthSecret();
+    const bobSecret = generateAuthSecret();
     const aliceConfig = {
       appId,
-      jwtToken: aliceJwt,
+      secret: aliceSecret,
       driver: { type: "persistent" as const, dbName },
     };
-    const bobConfig = { appId, jwtToken: bobJwt, driver: { type: "persistent" as const, dbName } };
-    const alicePhysicalName = resolveDefaultPersistentDbName(aliceConfig);
-    const bobPhysicalName = resolveDefaultPersistentDbName(bobConfig);
-    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
-    expect(alicePhysicalName).not.toBe(bobPhysicalName);
-    expect(alicePhysicalName).not.toContain(aliceJwt);
-    expect(bobPhysicalName).not.toContain(bobJwt);
+    const bobConfig = { appId, secret: bobSecret, driver: { type: "persistent" as const, dbName } };
 
     let alice: Db | null = track(await createDb(aliceConfig));
+    const alicePhysicalName = resolveDefaultPersistentDbName(alice.config);
+    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
+    expect(alicePhysicalName).not.toContain(aliceSecret);
+
     let aliceSecondTab: Db | null = null;
     let bob: Db | null = null;
     let aliceReopened: Db | null = null;
@@ -3847,6 +3925,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (await aliceSecondTab.all(allTodos, { tier: "local" })).map((row) => row.title),
       ).toEqual(["Alice durable row"]);
       bob = track(await createDb(bobConfig));
+      const bobPhysicalName = resolveDefaultPersistentDbName(bob.config);
+      expect(alicePhysicalName).not.toBe(bobPhysicalName);
+      expect(bobPhysicalName).not.toContain(bobSecret);
       await expect(bob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
       bob.insert(todos, { title: "Bob durable row", done: false });
       await waitForTodos(
@@ -3895,6 +3976,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId,
         serverUrl,
         jwtToken: validJwt,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3903,6 +3985,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         appId,
         serverUrl,
         jwtToken: validJwt,
+        registerJwt: true,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -3949,8 +4032,92 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   }, 60000);
 
+  it("returns an existing worker row to a fresh local follower after a rejected principal change", async () => {
+    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions(
+      "cold-local-follower-principal-guard",
+    );
+    const dbName = uniqueDbName("cold-local-follower-principal-guard");
+    const aliceJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000ca11",
+      undefined,
+      appId,
+    );
+    const bobJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000cb22",
+      undefined,
+      appId,
+    );
+    const config = {
+      appId,
+      serverUrl,
+      jwtToken: aliceJwt,
+      registerJwt: true,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const owner = track(await createDb(config));
+    let follower: Db | null = null;
+    try {
+      const knownOwnerRow = await owner
+        .insert(todos, { title: "owner row before follower opens", done: false })
+        .wait({ tier: "edge" });
+
+      // The follower has not inserted or queried this table. Its first local
+      // attachment must wait for the persistent owner's existing snapshot,
+      // rather than returning the follower's initially empty replica.
+      const freshFollower = track(await createDb(config));
+      follower = freshFollower;
+      await expect(
+        withTimeout(
+          freshFollower.all(allTodos, { tier: "local" }),
+          3_000,
+          "Fresh follower local read did not receive the persistent owner row",
+        ),
+      ).resolves.toEqual([knownOwnerRow]);
+
+      const aliceState = freshFollower.getAuthState();
+      expect(aliceState.session?.user).toBeDefined();
+      const followerRuntime = (
+        freshFollower as unknown as {
+          getClient(schema: typeof todos._schema): {
+            getRuntime(): { notifyPeerTransportActivity(): void };
+          };
+        }
+      )
+        .getClient(todos._schema)
+        .getRuntime();
+      // Model the relevant terminal condition: Bob's rejected update cannot
+      // yield a future worker acknowledgement. The local attachment still
+      // receives the persistent owner's already covered row.
+      const suppressFuturePeerActivity = vi
+        .spyOn(followerRuntime, "notifyPeerTransportActivity")
+        .mockImplementation(() => undefined);
+      try {
+        expect(() => freshFollower.updateAuthToken(bobJwt)).toThrow(
+          "Changing auth principal on a live client is not supported. Recreate the Db.",
+        );
+        expect(freshFollower.getAuthState()).toEqual(aliceState);
+
+        await expect(
+          withTimeout(
+            freshFollower.all(allTodos, { tier: "local" }),
+            3_000,
+            "Local read waited for a peer frame after principal rejection",
+          ),
+        ).resolves.toEqual([knownOwnerRow]);
+      } finally {
+        suppressFuturePeerActivity.mockRestore();
+      }
+    } finally {
+      await follower?.shutdown().catch(() => undefined);
+      if (follower) untrack(follower);
+      await owner.shutdown();
+      untrack(owner);
+    }
+  }, 60_000);
+
   it("rejects a principal-changing live auth update before local or worker state changes", async () => {
-    const { appId } = await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
+    const { appId, serverUrl } =
+      await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
     const dbName = uniqueDbName("live-auth-owner-guard");
     const aliceJwt = await getJazzServerJwtForUser(
       "00000000-0000-0000-0000-00000000aa11",
@@ -3963,10 +4130,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
       appId,
     );
     const db = track(
-      await createDb({ appId, jwtToken: aliceJwt, driver: { type: "persistent", dbName } }),
+      await createDb({
+        appId,
+        serverUrl,
+        jwtToken: aliceJwt,
+        registerJwt: true,
+        driver: { type: "persistent", dbName },
+      }),
     );
     try {
-      await db.all(allTodos, { tier: "local" });
+      const knownAliceRow = await db
+        .insert(todos, { title: "known Alice local row", done: false })
+        .wait({ tier: "edge" });
+      // Establish default local follower coverage while the worker still owns
+      // Alice's principal. The rejected Bob update below must not require a
+      // new worker frame before returning this already covered local row.
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([knownAliceRow]);
       const aliceState = db.getAuthState();
       expect(aliceState.session?.user).toBeDefined();
 
@@ -3977,7 +4156,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         "Changing auth principal on a live client is not supported. Recreate the Db.",
       );
       expect(db.getAuthState()).toEqual(aliceState);
-      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([knownAliceRow]);
     } finally {
       await db.shutdown();
       untrack(db);

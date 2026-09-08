@@ -135,8 +135,15 @@ where
                     .map(|row| self.version_record_from_row(row))
                     .collect::<Result<Vec<_>, _>>()?;
                 versions.sort();
-                if !known_transaction_payload_matches(&existing.tx, &unit.tx)
-                    || versions != canonical_versions(unit.versions.clone())
+                // A locally pending copy arrived through an untrusted
+                // session/relay and has no durable permission hint. Authority
+                // replay keeps its local capability for restart finalization,
+                // so compare the shared durable payload while redacting only
+                // that non-authoritative field.
+                if !known_transaction_payload_matches_redacted_permission_subject(
+                    &existing.tx,
+                    &unit.tx,
+                ) || versions != canonical_versions(unit.versions.clone())
                 {
                     return Err(Error::ConflictingCommitUnit(unit.tx.tx_id));
                 }

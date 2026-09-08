@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   androidAcceptanceFailure,
+  androidFixtureMetadataDiagnostic,
   androidDeviceDiagnostic,
   androidCoreObservationDiagnostic,
+  androidScopeWriterReadDiagnostic,
+  androidForegroundWakeDiagnostic,
 } from "./android-diagnostics.mjs";
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
   const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
     "08-29 22:52:21.495  4268  4288 E JazzDeviceAcceptance: linked-abi-admission-failed",
     "08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: capability=secret-device-token",
     "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: native-admission-failed",
@@ -19,6 +23,63 @@ test("Android timeout reports only the latest exact allowlisted stage", () => {
     "Timed out waiting for phase seed from the launched Android app; device stage: native-admission-failed",
   );
   assert.doesNotMatch(failure, /secret-device-token|linked-abi-admission/);
+});
+
+test("Android post-commit wake failure retains only allowlisted B bridge stages after its epoch", () => {
+  const output = [
+    "08-29 22:52:21.493  4268  4288 E JazzForegroundWake: requested",
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
+    "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: requested",
+    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: scheduled",
+    "08-29 22:52:21.497  4268  4288 E JazzForegroundWake: delivered",
+    "08-29 22:52:21.498  4268  4288 E JazzForegroundWake: callback-invoked",
+    "08-29 22:52:21.499  4268  4288 E JazzForegroundWake: requested-secret",
+    "08-29 22:52:21.500  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
+  ].join("\n");
+  assert.equal(
+    androidForegroundWakeDiagnostic(output),
+    "requested,scheduled,delivered,callback-invoked",
+  );
+  assert.match(
+    androidAcceptanceFailure("timeout", "seed", output),
+    /foreground wake: requested,scheduled,delivered,callback-invoked/,
+  );
+});
+
+test("Android reports an acknowledged epoch with no later native wake", () => {
+  const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
+    "08-29 22:52:21.500  4268  4288 E JazzDeviceAcceptance: same-runtime-postcommit-wake-failed",
+  ].join("\n");
+  assert.equal(androidForegroundWakeDiagnostic(output), "armed-no-wake");
+  assert.match(
+    androidAcceptanceFailure("timeout", "seed", output),
+    /foreground wake: armed-no-wake/,
+  );
+  assert.equal(androidForegroundWakeDiagnostic("JazzForegroundWake: armed"), undefined);
+});
+
+test("Android distinguishes an enabled B trace from native callback guards", () => {
+  const output = [
+    "08-29 22:52:21.494  4268  4288 E JazzForegroundWake: armed",
+    "08-29 22:52:21.495  4268  4288 E JazzForegroundWake: enabled",
+    "08-29 22:52:21.496  4268  4288 E JazzForegroundWake: inactive",
+  ].join("\n");
+  assert.equal(androidForegroundWakeDiagnostic(output), "enabled,inactive");
+});
+
+test("Android timeout reports only the bounded scope writer-read counters", () => {
+  const detail =
+    "scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no";
+  const output = [
+    `08-29 22:52:21.495  4268  4288 E JazzScopeWriterRead: ${detail}`,
+    "08-29 22:52:21.496  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
+    "08-29 22:52:21.497  4268  4288 E JazzDeviceAcceptance: scope-isolation-writer-read-failed",
+    "08-29 22:52:21.498  4268  4288 E JazzScopeWriterRead: scope-isolation-writer-read-detail:last-pending-wakes-0-polls-0-row-responses-0-ready-no-secret",
+  ].join("\n");
+  assert.equal(androidDeviceDiagnostic(output), "scope-isolation-writer-read-failed");
+  assert.equal(androidScopeWriterReadDiagnostic(output), detail);
+  assert.match(androidAcceptanceFailure("timeout", "seed", output), new RegExp(detail));
 });
 
 test("invalid Android receipt keeps its safe stage without echoing receipt contents", () => {
@@ -110,4 +171,41 @@ test("synchronous seed boundaries survive alongside native acknowledgement witho
     line("js-before-unsubscribe", "ReactNativeJS"),
   ].join("\n");
   assert.equal(androidCoreObservationDiagnostic(output), codes.join(","));
+});
+
+test("metadata causality survives JS retry and rejects secret-bearing near matches", () => {
+  const line = (code, tag = "JazzFixtureMetadata") =>
+    `08-29 22:52:21.495  4268  4288 E ${tag}: ${code}`;
+  const output = [
+    line("receipt-started"),
+    line("receipt-failed-activity"),
+    line("fixture-receipt-call-failed", "JazzDeviceAcceptance"),
+    line("receipt-failed-nonce secret-token"),
+    line("receipt-failed-secret-token"),
+    line("phase-verify-resolved", "ReactNativeJS"),
+    line("phase-verify-resolved", "OtherNativeTag"),
+  ].join("\n");
+  assert.equal(androidFixtureMetadataDiagnostic(output), "receipt-started,receipt-failed-activity");
+  const failure = androidAcceptanceFailure("timeout", "verify", output);
+  assert.match(failure, /fixture metadata: receipt-started,receipt-failed-activity/);
+  assert.match(failure, /device stage: fixture-receipt-call-failed/);
+  assert.doesNotMatch(failure, /secret-token|phase-verify-resolved/);
+});
+
+test("metadata distinguishes an unresolved package hash from resolved native metadata", () => {
+  const line = (code) => `08-29 22:52:21.495  4268  4288 E JazzFixtureMetadata: ${code}`;
+  for (const codes of [
+    ["receipt-started", "package-hash-started"],
+    ["receipt-started", "package-hash-started", "receipt-failed-package-hash"],
+    [
+      "receipt-started",
+      "package-hash-started",
+      "receipt-resolved",
+      "phase-started",
+      "phase-activity-unavailable",
+      "phase-seed-resolved",
+    ],
+    ["phase-started", "phase-failed"],
+  ])
+    assert.equal(androidFixtureMetadataDiagnostic(codes.map(line).join("\n")), codes.join(","));
 });

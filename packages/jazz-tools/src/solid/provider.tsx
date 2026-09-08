@@ -6,7 +6,8 @@ import {
   type SolidJazzClient,
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
-import type { Db, DbConfig } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 type JazzClientContextValue = SolidJazzClient;
@@ -40,11 +41,11 @@ export function JazzClientProvider(props: JazzClientProviderProps) {
   );
 }
 
-export type JazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
+export type LegacyJazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
   config: DbConfig;
 };
 
-export function JazzProvider(props: JazzProviderProps) {
+export function LegacyJazzProvider(props: LegacyJazzProviderProps) {
   const client = createSolidJazzClient(() => props.config);
 
   return (
@@ -80,3 +81,5 @@ export function useAuthState() {
   const client = useJazzClient();
   return () => client.authState;
 }
+
+export { JazzProvider, type JazzProviderProps } from "./app.js";

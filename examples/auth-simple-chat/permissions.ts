@@ -7,11 +7,7 @@ import { app } from "./schema.js";
 export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
   const isMemberOrAdmin = session.where({ "claims.role": { in: ["admin", "member"] } });
-  const canMutateGenericChat = anyOf([{ $createdBy: session.user }, isAdmin]);
-  const canMutateMessage = anyOf([
-    allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]),
-    allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]),
-  ]);
+  const canMutateGenericChat = anyOf([{ "$createdBy.account": session.user.account }, isAdmin]);
 
   policy.messages.allowRead.where({ chat_id: ANNOUNCEMENTS_CHAT_ID });
   policy.messages.allowRead.where(allOf([{ chat_id: CHAT_ID }, isMemberOrAdmin]));

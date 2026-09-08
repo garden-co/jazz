@@ -24,6 +24,9 @@ catalogs:
     '@vitest/browser-playwright':
       specifier: 4.1.0
       version: 4.1.0
+    jsdom:
+      specifier: 26.1.0
+      version: 26.1.0
     next:
       specifier: 16.2.11
       version: 16.2.11
@@ -55,6 +58,11 @@ catalogs:
 overrides:
   react: 19.2.4
   react-dom: 19.2.4
+
+patchedDependencies:
+  playwright-core@1.58.2:
+    hash: adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5
+    path: patches/playwright-core@1.58.2.patch
 
 importers:
 
@@ -210,9 +218,15 @@ importers:
       expo:
         specifier: ^54.0.0
         version: 54.0.37(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
+      expo-crypto:
+        specifier: ~15.0.9
+        version: 15.0.9(expo@54.0.37)
       expo-dev-client:
         specifier: ~6.0.0
         version: 6.0.21(expo@54.0.37)
+      expo-secure-store:
+        specifier: ~15.0.8
+        version: 15.0.8(expo@54.0.37)
       jazz-rn:
         specifier: workspace:*
         version: link:../../crates/jazz-rn
@@ -455,6 +469,9 @@ importers:
       '@vitest/browser-playwright':
         specifier: catalog:default
         version: 4.1.0(playwright@1.58.2)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.1.0)
+      jsdom:
+        specifier: catalog:default
+        version: 26.1.0
       tsx:
         specifier: ^4.0.0
         version: 4.21.0
@@ -472,7 +489,7 @@ importers:
         version: 3.6.0(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
       vitest:
         specifier: catalog:default
-        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@28.1.0(@noble/hashes@2.3.0))(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@26.1.0)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
 
   examples/auth-workos-chat:
     dependencies:
@@ -510,6 +527,9 @@ importers:
       jose:
         specifier: ^6.2.1
         version: 6.2.2
+      jsdom:
+        specifier: catalog:default
+        version: 26.1.0
       typescript:
         specifier: catalog:default
         version: 6.0.2
@@ -524,7 +544,7 @@ importers:
         version: 3.6.0(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
       vitest:
         specifier: catalog:default
-        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@28.1.0(@noble/hashes@2.3.0))(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@26.1.0)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
 
   examples/band-chat/apps/nextjs-betterauth:
     dependencies:
@@ -769,6 +789,9 @@ importers:
 
   examples/cloudflare-worker-runtime-ts:
     dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
@@ -1565,6 +1588,9 @@ importers:
       '@vitest/browser-playwright':
         specifier: catalog:default
         version: 4.1.0(playwright@1.58.2)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.1.0)
+      jsdom:
+        specifier: ^28.1.0
+        version: 28.1.0(@noble/hashes@2.3.0)
       typescript:
         specifier: catalog:default
         version: 6.0.2
@@ -1806,6 +1832,12 @@ importers:
       web-streams-polyfill:
         specifier: ^4.2.0
         version: 4.2.0
+      whatwg-url-without-unicode:
+        specifier: 8.0.0-3
+        version: 8.0.0-3
+      tr46:
+        specifier: 5.1.1
+        version: 5.1.1
     devDependencies:
       '@better-auth/test-utils':
         specifier: ^1.7.1
@@ -2031,6 +2063,9 @@ importers:
       concurrently:
         specifier: ^9.1.0
         version: 9.2.1
+      happy-dom:
+        specifier: ^20.8.4
+        version: 20.8.4
       tsx:
         specifier: ^4.19.4
         version: 4.21.0
@@ -2265,6 +2300,9 @@ importers:
       concurrently:
         specifier: ^9.1.0
         version: 9.2.1
+      jsdom:
+        specifier: catalog:default
+        version: 26.1.0
       tsx:
         specifier: ^4.19.4
         version: 4.21.0
@@ -2276,7 +2314,7 @@ importers:
         version: 8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
       vitest:
         specifier: catalog:default
-        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@28.1.0(@noble/hashes@2.3.0))(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+        version: 4.1.0(@edge-runtime/vm@3.2.0)(@opentelemetry/api@1.9.1)(@types/node@22.19.13)(@vitest/browser-playwright@4.1.0)(@vitest/ui@4.1.0)(happy-dom@20.8.4)(jsdom@26.1.0)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
       wait-on:
         specifier: ^8.0.2
         version: 8.0.5
@@ -8804,6 +8842,11 @@ packages:
     peerDependencies:
       expo: '*'
 
+  expo-crypto@15.0.9:
+    resolution: {integrity: sha512-SNWKa2fXx7v9gkp1h/7nqXY5XN7qgNDn3yRc2aO0gWGbeMbvob/haMxxsPFe9f51aqH5NjNCqHf2kvLhvAd8KQ==}
+    peerDependencies:
+      expo: '*'
+
   expo-crypto@57.0.1:
     resolution: {integrity: sha512-xwegXQw3ATgeL1ZuqbSNrGzOeG+zNeh6Z6DSJk825Qpa3TEQQ1kG3ioE1p3g/SNF373BAVz2iBKUTSytlIbBRA==}
     peerDependencies:
@@ -8906,6 +8949,11 @@ packages:
 
   expo-secure-store@14.0.1:
     resolution: {integrity: sha512-QUS+j4+UG4jRQalgnpmTvvrFnMVLqPiUZRzYPnG3+JrZ5kwVW2w6YS3WWerPoR7C6g3y/a2htRxRSylsDs+TaQ==}
+    peerDependencies:
+      expo: '*'
+
+  expo-secure-store@15.0.8:
+    resolution: {integrity: sha512-lHnzvRajBu4u+P99+0GEMijQMFCOYpWRO4dWsXSuMt77+THPIGjzNvVKrGSl6mMrLsfVaKL8BpwYZLGlgA+zAw==}
     peerDependencies:
       expo: '*'
 
@@ -20912,6 +20960,11 @@ snapshots:
       base64-js: 1.5.1
       expo: 54.0.37(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
 
+  expo-crypto@15.0.9(expo@54.0.37):
+    dependencies:
+      base64-js: 1.5.1
+      expo: 54.0.37(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
+
   expo-crypto@57.0.1(expo@57.0.7):
     dependencies:
       expo: 57.0.7(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.4(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
@@ -21026,6 +21079,10 @@ snapshots:
       react-native: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4)
 
   expo-secure-store@14.0.1(expo@54.0.37):
+    dependencies:
+      expo: 54.0.37(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
+
+  expo-secure-store@15.0.8(expo@54.0.37):
     dependencies:
       expo: 54.0.37(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
 
@@ -24594,11 +24651,11 @@ snapshots:
       exsolve: 1.1.0
       pathe: 2.0.3
 
-  playwright-core@1.58.2: {}
+  playwright-core@1.58.2(patch_hash=adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5): {}
 
   playwright@1.58.2:
     dependencies:
-      playwright-core: 1.58.2
+      playwright-core: 1.58.2(patch_hash=adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5)
     optionalDependencies:
       fsevents: 2.3.2
 

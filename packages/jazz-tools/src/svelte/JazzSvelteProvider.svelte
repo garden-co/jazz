@@ -4,7 +4,8 @@ Pass a reactive database configuration. The provider creates the client and
 serialises shutdown before starting a replacement.
 -->
 <script lang="ts">
-	import type { Db, DbConfig } from '../runtime/db.js';
+	import type { Db } from '../runtime/db.js';
+	import type { AccountDbConfig as DbConfig } from '../accounts/context.js';
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
 	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
 

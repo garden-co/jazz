@@ -1,3 +1,4 @@
+import { translateQuery } from "./query-adapter.js";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import type { TxId, WriteReceipt } from "./client.js";
@@ -12,6 +13,7 @@ import {
   hasJazzWasmBuild,
   loadWasmModuleForTest,
 } from "./testing/wasm-runtime-test-utils.js";
+import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 
 const app = s.defineApp({
   todos: s.table({
@@ -107,9 +109,7 @@ async function createBrowserWasmFixture() {
   const wasmModule = await loadWasmModuleForTest();
   const node = new Uint8Array(16);
   node[0] = 1;
-  const author = new TextEncoder().encode(
-    JSON.stringify(["urn:jazz:test", "wasm-streaming-abort:author"]),
-  );
+  const author = testAuthorBytes("wasm-streaming-abort:author");
   const pageStore = createTestPageStore();
   const db = await wasmModule.WasmDb.openBrowser(
     pageStore.pageStore,
@@ -340,9 +340,13 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
-  it("selects and filters public provenance authors as canonical text", async () => {
+  it("selects and filters public provenance authors as structured records", async () => {
     const appId = "wasm-public-provenance";
-    const author = JSON.stringify(["urn:jazz:test", `${appId}:test:default:author`]);
+    const authorSeed = `${appId}:test:default:author`;
+    const author = {
+      account: testAccountId(authorSeed),
+      identity: { issuer: "urn:jazz:test", subject: authorSeed },
+    };
     const runtime = await createWasmRuntime(app.wasmSchema, { appId });
     const inserted = runtime.insert("todos", {
       title: { type: "Text", value: "created by canonical author" },
@@ -352,22 +356,13 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
 
     await expect(
       runtime.query(
-        JSON.stringify({
-          table: "todos",
-          select_columns: ["title", "$createdBy", "$updatedBy"],
-          relation_ir: {
-            Filter: {
-              input: { TableScan: { table: "todos" } },
-              predicate: {
-                Cmp: {
-                  left: { column: "$createdBy" },
-                  op: "Eq",
-                  right: { Literal: { type: "Text", value: author } },
-                },
-              },
-            },
-          },
-        }),
+        translateQuery(
+          app.todos
+            .select("title", "$createdBy", "$updatedBy")
+            .where({ $createdBy: author })
+            ._build(),
+          app.wasmSchema,
+        ),
         null,
         "local",
       ),
@@ -377,8 +372,40 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         id: inserted.id,
         values: [
           { type: "Text", value: "created by canonical author" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Uuid", value: author.account },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Uuid", value: author.account },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
         ],
       },
     ]);

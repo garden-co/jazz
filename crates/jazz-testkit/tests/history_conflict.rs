@@ -574,15 +574,16 @@ async fn subscription_reflects_concurrent_update_impl() {
         .connect()
         .await;
 
-    let bob = TestingClient::builder()
+    let (bob_context, bob) = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
         .with_user_id("bob-sub")
         .ready_on("todos", READY_TIMEOUT)
-        .connect()
+        .connect_with_context()
         .await;
     let bob_author = AuthorSubject::authenticated("urn:jazz:test", "bob-sub")
         .expect("test subject is valid")
+        .with_account(bob_context.account_id.expect("Bob registry account"))
         .canonical()
         .to_owned();
 
@@ -1124,6 +1125,9 @@ async fn establish_offline_reconnect_baseline(
         &Uuid::NAMESPACE_URL,
         bob_user_id.as_bytes(),
     )));
+    support::enroll_test_context(&mut bob_ctx)
+        .await
+        .expect("enroll persistent Bob");
     let bob = jazz_testkit::connect(bob_ctx.clone())
         .await
         .expect("connect persistent bob");

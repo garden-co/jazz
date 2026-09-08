@@ -40,10 +40,7 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-Every browser gets its own Ed25519 secret, generated and stored by
-`BrowserAuthSecretStore` on first load. `src/main.ts` calls
-`BrowserAuthSecretStore.getOrCreateSecret()` and hands the result to
-`createDb({ appId, serverUrl, secret })` — no React provider, no hooks.
+`createJazzSession` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
 
 Each widget receives the `Db` handle and wires its DOM straight to it:
 
@@ -87,13 +84,18 @@ session on every row and the permission policy scopes reads/writes to it.
 | `BACKEND_SECRET`       | cloud only | scaffolder or manual                                  |
 
 Leave all four unset for self-hosted mode — the `jazzPlugin` Vite plugin
-spawns a local Jazz dev server and writes `VITE_JAZZ_APP_ID` /
-`VITE_JAZZ_SERVER_URL` into `.env` on first `pnpm dev`. For cloud mode,
+spawns a local Jazz dev server, persists `VITE_JAZZ_APP_ID` in `.env`,
+and injects `VITE_JAZZ_SERVER_URL` while running `pnpm dev`. For cloud mode,
 either scaffold via `create-jazz --hosting hosted` (writes `.env` for you)
 or provision an app at https://v2.dashboard.jazz.tools and paste the four
 values into `.env`.
 
 ## Deploying to production
+
+For either hosting mode, set `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL`
+before running `pnpm build`. Vite embeds these values in the browser bundle;
+setting them only when starting `pnpm preview` does not configure an existing
+build. The dev plugin does not supply a production server URL.
 
 For cloud-hosted deployments, set the four env vars above in your hosting
 provider and your app will sync against Jazz Cloud.
@@ -105,11 +107,8 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **One device per user.** The secret lives in browser storage; clearing
-  site data wipes the identity and the user starts fresh. There is no
-  account portability between devices or browsers.
-- **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `ts-hybrid` starter instead.
+- **Back up before clearing browser storage.** The selected account is local
+  to this browser until the user saves the recovery phrase or passkey backup.
 
 ## Where to go next
 

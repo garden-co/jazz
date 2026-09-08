@@ -1,3 +1,4 @@
+import type { RowAuthor } from "../../src/magic-columns.js";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
@@ -122,6 +123,16 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it("allows a table-inferred variable to be reassigned to a refined query", () => {
+    let query = app.todos;
+
+    query = query.where({ done: true });
+
+    expect(JSON.parse(query._build()).conditions).toEqual([
+      { column: "done", op: "eq", value: true },
+    ]);
+  });
+
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
       table: "todos",
@@ -185,13 +196,17 @@ describe("typed app prototype", () => {
   });
 
   it("serializes provenance magic columns and infers their projected types", () => {
+    const author: RowAuthor = {
+      account: "00000000-0000-0000-0000-000000000001",
+      identity: { issuer: "https://issuer.example", subject: "alice" },
+    };
     const provenanceQuery = app.todos
-      .where({ $createdBy: "alice" })
+      .where({ $createdBy: author })
       .select("title", "$createdBy", "$updatedAt");
 
     expect(JSON.parse(provenanceQuery._build())).toEqual({
       table: "todos",
-      conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+      conditions: [{ column: "$createdBy", op: "eq", value: author }],
       includes: {},
       select: ["title", "$createdBy", "$updatedAt"],
       orderBy: [],
@@ -202,7 +217,7 @@ describe("typed app prototype", () => {
     const row = {} as ProvenanceRow;
 
     expectTypeOf(row.title).toEqualTypeOf<string>();
-    expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
+    expectTypeOf(row.$createdBy).toEqualTypeOf<RowAuthor>();
     expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
   });
 

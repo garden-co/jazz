@@ -591,7 +591,12 @@ pub enum LiteralValue {
     Tuple(Vec<LiteralValue>),
     Array(Vec<LiteralValue>),
     Nullable(Option<Box<LiteralValue>>),
-    /// Record-valued predicates are intentionally unsupported in this stage.
+    /// Native record bytes plus the exact descriptor; no process-local IDs.
+    NativeRecord {
+        descriptor: Vec<u8>,
+        raw: Vec<u8>,
+    },
+    /// Unsupported engine-only values.
     Record,
 }
 
@@ -613,8 +618,12 @@ impl From<Value> for LiteralValue {
             Value::Tuple(values) => Self::Tuple(values.into_iter().map(Into::into).collect()),
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
-            // Neither records nor tagged payload unions are supported predicate literals.
-            Value::Record(_) | Value::Enum(_) | Value::Large(_) => Self::Record,
+            Value::Record(record) => Self::NativeRecord {
+                descriptor: postcard::to_allocvec(record.descriptor())
+                    .expect("native record descriptor"),
+                raw: record.raw().to_vec(),
+            },
+            Value::Enum(_) | Value::Large(_) => Self::Record,
         }
     }
 }
@@ -647,6 +656,9 @@ impl LiteralValue {
                 .value_type()
                 .map(|value_type| ValueType::Nullable(Box::new(value_type))),
             Self::Nullable(None) => None,
+            Self::NativeRecord { descriptor, .. } => postcard::from_bytes(descriptor)
+                .ok()
+                .map(|descriptor| ValueType::Record(Box::new(descriptor))),
             Self::Record => None,
         }
     }
@@ -670,7 +682,15 @@ impl LiteralValue {
             Self::Nullable(value) => {
                 Value::Nullable(value.as_ref().map(|value| Box::new(value.to_value())))
             }
-            Self::Record => unreachable!("record literals are rejected during type validation"),
+            Self::NativeRecord { descriptor, raw } => {
+                Value::Record(crate::records::OwnedRecord::new(
+                    raw.clone(),
+                    postcard::from_bytes(descriptor).expect("validated native record descriptor"),
+                ))
+            }
+            Self::Record => {
+                unreachable!("unsupported literals are rejected during type validation")
+            }
         }
     }
 }

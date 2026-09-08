@@ -1,3 +1,5 @@
+import { schema as s } from "../../schema-namespace.js";
+import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
 import type {
@@ -41,6 +43,7 @@ import {
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
   internalSessionFromVerifiedReservedJwtPayload,
   trustedReservedSessionToken,
+  markTrustedReservedSession,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 
@@ -1543,10 +1546,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               authoritativeChecks += 1;
               return "allowed" as const;
             },
-            authorizeInsertEncodedForIdentity: () => {
-              authoritativeChecks += 1;
-              return "denied" as const;
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1642,6 +1641,65 @@ describe("NativeRuntimeAdapter server transport", () => {
     vi.useRealTimers();
   });
 
+  it("delegates each scoped backend advice request with its immutable session binding", async () => {
+    const authoritative = vi.fn(() => "allowed" as const);
+    const backend = fakeDb({
+      requestInsertPermissionAdvice: authoritative,
+      requestReadPermissionAdvice: authoritative,
+      requestUpdatePermissionAdvice: authoritative,
+      requestDeletePermissionAdvice: authoritative,
+      tick: () => undefined,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      null,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving", backendMode: true, db: backend },
+    );
+    Object.assign(runtime as object, { serverTransport: {}, serverCarrier: {} });
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "requester",
+      claims: {},
+      authMode: "external" as const,
+    };
+    const id = "00000000-0000-0000-0000-000000000001";
+    await expect(
+      Promise.all([
+        runtime.requestInsertPermissionAdvice(
+          "todos",
+          { title: { type: "Text", value: "candidate" } },
+          session,
+        ),
+        runtime.requestReadPermissionAdvice("todos", id, session),
+        runtime.requestUpdatePermissionAdvice("todos", id, {}, session),
+        runtime.requestDeletePermissionAdvice("todos", id, session),
+      ]),
+    ).resolves.toEqual(["allowed", "allowed", "allowed", "allowed"]);
+    expect(authoritative).toHaveBeenCalledTimes(4);
+    const delegatedIdentity = expect.any(Uint8Array);
+    for (const call of authoritative.mock.calls) {
+      expect(call.at(-2)).toEqual(delegatedIdentity);
+      expect(call.at(-1)).toEqual(expect.objectContaining({ authMode: "external" }));
+    }
+    const forgedSystem = { ...session, issuer: SYSTEM_SESSION_ISSUER, user_id: SYSTEM_AUTHOR_ID };
+    await expect(runtime.requestReadPermissionAdvice("todos", id, forgedSystem)).resolves.toBe(
+      "unknown",
+    );
+    expect(authoritative).toHaveBeenCalledTimes(4);
+    const trustedSystem = markTrustedReservedSession({ ...forgedSystem });
+    await expect(runtime.requestReadPermissionAdvice("todos", id, trustedSystem)).resolves.toBe(
+      "allowed",
+    );
+    expect(authoritative).toHaveBeenCalledTimes(5);
+    // The unscoped connection operation still has its ordinary advice path.
+    await expect(runtime.requestReadPermissionAdvice("todos", id)).resolves.toBe("allowed");
+    expect(authoritative).toHaveBeenCalledTimes(6);
+  });
+
   it("fails closed for malformed direct and pollable native permission advice", async () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -1722,7 +1780,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             authorizeReadForIdentity: () => "allowed" as const,
-            authorizeInsertEncodedForIdentity: () => "denied" as const,
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2281,6 +2338,82 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
   });
+
+  it.each(["stream", "native", "native-close-throws"] as const)(
+    "forwards %s subscription source failures exactly once without an unhandled rejection",
+    async (kind) => {
+      const error = new Error("subscription source failed");
+      let controller!: ReadableStreamDefaultController<unknown>;
+      const cleanupError = new Error("source close failed");
+      const cleanupLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      const close = vi.fn(() => true);
+      if (kind === "native-close-throws")
+        close.mockImplementationOnce(() => {
+          throw cleanupError;
+        });
+      const source =
+        kind === "stream"
+          ? new ReadableStream({
+              start(value) {
+                controller = value;
+              },
+            })
+          : {
+              readAll: () => {
+                throw error;
+              },
+              close,
+            };
+      const runtime = runtimeWithSubscriptionSource(source);
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const handle = runtime.createSubscription(app.todos._build());
+      const callback = vi.fn();
+      runtime.executeSubscription(handle, callback);
+      if (kind === "stream") controller.error(error);
+      // Cross a host turn: an escaped void reader promise is an unhandled
+      // rejection here, which Vitest treats as a failed test run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(callback.mock.calls).toEqual([[error]]);
+      runtime.executeSubscription(handle, callback);
+      expect(callback).toHaveBeenCalledTimes(1);
+      if (kind !== "stream") expect(close).toHaveBeenCalledTimes(1);
+      if (kind === "native-close-throws") {
+        expect(cleanupLog).toHaveBeenCalledWith(
+          "Jazz subscription source cleanup failed",
+          cleanupError,
+        );
+      } else expect(cleanupLog).not.toHaveBeenCalled();
+      await runtime.close();
+      cleanupLog.mockRestore();
+    },
+  );
+
+  it.each(["unsubscribe", "close"] as const)(
+    "suppresses a pending stream read rejection after subscription %s",
+    async (termination) => {
+      let rejectRead!: (error: Error) => void;
+      const pending = new Promise<never>((_, reject) => {
+        rejectRead = reject;
+      });
+      // A binding read can already be in flight when its owner is retired.
+      // Cancelling its source must not turn that late rejection into an app error.
+      const cancel = vi.fn(async () => undefined);
+      const runtime = runtimeWithSubscriptionSource({
+        getReader: () => ({ read: () => pending, cancel }),
+      });
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const handle = runtime.createSubscription(app.todos._build());
+      const callback = vi.fn();
+      runtime.executeSubscription(handle, callback);
+      if (termination === "unsubscribe") runtime.unsubscribe(handle);
+      else await runtime.close();
+      rejectRead(new Error("late retired source failure"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(callback).not.toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
 
   it("trusts native subscription snapshots for simple equality relation filters", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
@@ -5261,7 +5394,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("passes canonical text provenance authors through public text subscription frames", () => {
+  it("passes structured provenance authors through public subscription frames", () => {
     const schema = {
       notes: {
         columns: [
@@ -5272,7 +5405,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -5297,31 +5430,35 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(change.row.values).toEqual([
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
-      { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
+      {
+        type: "Row",
+        value: {
+          values: [
+            { type: "Uuid", value: "00000000-0000-4000-8000-000000000001" },
+            {
+              type: "Row",
+              value: {
+                values: [
+                  { type: "Text", value: "https://issuer.example" },
+                  { type: "Text", value: "user-1" },
+                ],
+              },
+            },
+          ],
+        },
+      },
       { type: "Timestamp", value: 123 },
     ]);
   });
 
   it.each([
+    { name: "missing record", provenanceBytes: new Uint8Array() },
+    { name: "truncated record", provenanceBytes: encodedAuthorFixture().subarray(0, 4) },
     {
-      name: "arbitrary text",
-      provenanceBytes: inlineScalar("not-json"),
+      name: "malformed UTF-8 subject",
+      provenanceBytes: encodedAuthorFixture(Uint8Array.of(2, 255)),
     },
-    {
-      name: "double stored-scalar wrapper",
-      provenanceBytes: Uint8Array.from([
-        2,
-        ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
-      ]),
-    },
-    {
-      name: "noncanonical JSON whitespace",
-      provenanceBytes: inlineScalar(`[ "https://issuer.example", "user-1" ]`),
-    },
-    {
-      name: "ASCII-blank component",
-      provenanceBytes: inlineScalar(JSON.stringify(["https://issuer.example", " "])),
-    },
+    { name: "ASCII-blank component", provenanceBytes: encodedAuthorFixture(inlineScalar(" ")) },
   ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
     const schema = {
       notes: {
@@ -5333,7 +5470,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -5353,7 +5490,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
-    ).toThrow(/canonical author subject/);
+    ).toThrow(/record|offset|UTF-8|portable|nonempty/i);
   });
 
   it("keeps ordinary text decoding strict while validating provenance specially", () => {
@@ -5367,7 +5504,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     } satisfies WasmSchema;
     const publicColumns = [
       ...schema.notes.columns,
-      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
     ] as const;
     const nativeDelta = readNativeSubscriptionDelta(
@@ -5954,6 +6091,78 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
+  it("binds reserved backend attribution to the exact verified session capability", () => {
+    const insert = vi.fn(
+      (
+        _table: string,
+        _cells: Uint8Array,
+        options?: { rowId?: Uint8Array; attribution?: Uint8Array },
+      ) => ({
+        ...fakeWrite(),
+        rowId: options?.rowId ?? new Uint8Array(16),
+      }),
+    );
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemoryAsBackend: () => fakeDb({ insert }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const session = internalSessionFromVerifiedReservedJwtPayload(
+      {
+        iss: LOCAL_FIRST_JWT_ISSUER,
+        sub: "verified-attribution",
+      },
+      "local-first",
+    )!;
+    session.account_id = "00000000-0000-4000-8000-000000000001";
+    const token = trustedReservedSessionToken(session);
+    const attribution = JSON.stringify([session.account_id, session.issuer, session.user_id]);
+    const write = (context: object) =>
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: "verified provenance" },
+        },
+        JSON.stringify(context),
+        "00000000-0000-0000-0000-000000000123",
+      );
+    write({ attribution, session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } });
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(insert.mock.calls[0]![2]?.attribution!)).toBe(attribution);
+    for (const context of [
+      { attribution },
+      { attribution, session },
+      {
+        attribution: JSON.stringify([session.account_id, session.issuer, "different-subject"]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+      {
+        attribution: JSON.stringify([
+          "00000000-0000-4000-8000-000000000002",
+          session.issuer,
+          session.user_id,
+        ]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+      {
+        attribution: JSON.stringify([
+          "00000000-0000-0000-0000-000000000000",
+          SYSTEM_SESSION_ISSUER,
+          session.user_id,
+        ]),
+        session: { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token },
+      },
+    ])
+      expect(() => write(context)).toThrow("reserved issuer");
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects reserved public write-context sessions and attributions", async () => {
     const beginStreamingMutation = vi.fn(() => ({
       push: () => undefined,
@@ -6208,6 +6417,27 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
           all: () => new Uint8Array([0]),
           prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+}
+
+function runtimeWithSubscriptionSource(source: unknown): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQuery: () => ({}),
+          subscribe: () => source,
           tick: () => undefined,
         }),
       openBrowser: async () => {
@@ -7148,6 +7378,33 @@ it("preserves the producer's explicit position over lazy relation state", () => 
   ]);
 });
 
+function authorFixtureDescriptor(): DescriptorField[] {
+  return [
+    { name: "account", valueType: { tag: 11 } },
+    {
+      name: "identity",
+      valueType: {
+        tag: 16,
+        record: [
+          { name: "issuer", valueType: { tag: 8 } },
+          { name: "subject", valueType: { tag: 8 } },
+        ],
+      },
+    },
+  ];
+}
+
+function encodedAuthorFixture(subject = inlineScalar("user-1")): Uint8Array {
+  const descriptor = authorFixtureDescriptor();
+  return createRecord(descriptor, [
+    uuidBytes("00000000-0000-4000-8000-000000000001"),
+    createRecord(descriptor[1]!.valueType.record!, [
+      inlineScalar("https://issuer.example"),
+      subject,
+    ]),
+  ]);
+}
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
@@ -7160,7 +7417,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     { name: "row_uuid", valueType: { tag: 11 } },
     { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
-    { name: "$createdBy", valueType: { tag: 8 } },
+    { name: "$createdBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -7178,7 +7435,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(row.titleBytes ?? inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          row.provenanceBytes ?? inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+          row.provenanceBytes ?? encodedAuthorFixture(),
           u64Bytes(123),
         ]),
       );
@@ -7207,9 +7464,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
     { name: "user_name", valueType: { tag: 15, inner: { tag: 8 } } },
     { name: "user_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
     { name: "user_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
-    { name: "$createdBy", valueType: { tag: 8 } },
+    { name: "$createdBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$createdAt", valueType: { tag: 3 } },
-    { name: "$updatedBy", valueType: { tag: 8 } },
+    { name: "$updatedBy", valueType: { tag: 16, record: authorFixtureDescriptor() } },
     { name: "$updatedAt", valueType: { tag: 3 } },
   ];
   const added = delta.added ?? [];
@@ -7237,7 +7494,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
 function writeTeamGatherBatches(
   writer: PostcardWriter,
   rows: Array<{ rowId: Uint8Array; name: string | null }>,
-  descriptor: Array<{ name: string; valueType: { tag: number; inner?: { tag: number } } }>,
+  descriptor: DescriptorField[],
 ): void {
   writer.vec(
     (batch) => {
@@ -7262,9 +7519,9 @@ function writeTeamGatherBatches(
               : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
-            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+            encodedAuthorFixture(),
             u64Bytes(123),
-            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+            encodedAuthorFixture(),
             u64Bytes(123),
           ]),
         );

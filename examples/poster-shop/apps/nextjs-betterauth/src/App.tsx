@@ -21,7 +21,7 @@ export function PosterStudio() {
   const { data: canvases = [] } = useAll(app.canvases);
   const [activeId, setActiveId] = useState<string | null>(null);
   const active = canvases.find((canvas) => canvas.id === activeId) ?? canvases[0];
-  const author = session?.user ?? null;
+  const author = session?.user.account ?? null;
   const { data: memberships = [] } = useAll(app.canvasMembers);
   const role = roleForActiveCanvas(memberships, active?.id, author);
   const canEdit = role === "editor" || role === "admin";

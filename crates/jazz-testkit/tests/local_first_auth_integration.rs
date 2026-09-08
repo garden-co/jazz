@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::tools::{
-    AppContext, AuthMode, ClientId, ClientStorage, ColumnType, Schema, SchemaBuilder, Session,
-    TableSchema, Value, identity,
+    AppContext, ClientId, ClientStorage, ColumnType, Schema, SchemaBuilder, TableSchema, Value,
+    identity,
 };
 use jazz_server::JazzServer;
 use jazz_server::middleware::auth::TestClock;
@@ -66,6 +66,10 @@ fn local_first_context(
         TOKEN_TTL_SECS,
     )
     .expect("mint local-first token");
+    ctx.account_id = Some(jazz::account_registry::local_first_account_id(
+        *server.app_id().uuid(),
+        &user_id,
+    ));
     ctx.jwt_token = Some(token);
     ctx.backend_secret = None;
     ctx.admin_secret = None;
@@ -76,6 +80,31 @@ fn local_first_context(
         ));
     }
     ctx
+}
+
+fn expected_author(
+    account: jazz::account_registry::AccountId,
+    issuer: &str,
+    subject: &str,
+) -> Value {
+    Value::Row {
+        id: None,
+        values: vec![
+            Value::Uuid(jazz::tools::ObjectId::from_uuid(account.0)),
+            Value::Row {
+                id: None,
+                values: vec![Value::Text(issuer.into()), Value::Text(subject.into())],
+            },
+        ],
+    }
+}
+
+fn expected_local_author(server: &JazzServer, subject: &str) -> Value {
+    expected_author(
+        jazz::account_registry::local_first_account_id(*server.app_id().uuid(), subject),
+        identity::LOCAL_FIRST_ISSUER,
+        subject,
+    )
 }
 
 fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
@@ -303,23 +332,16 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
     .expect("connect alice");
 
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
-    let alice_session = Session::new(identity::LOCAL_FIRST_ISSUER, &alice_user_id)
-        .with_auth_mode(AuthMode::LocalFirst);
-    let alice_author = alice_session
-        .author_subject()
-        .expect("local-first session has an author subject")
-        .canonical()
-        .to_owned();
+    let alice_author = expected_local_author(&server, &alice_user_id);
 
     let (todo_id, _, _) = alice
-        .for_session(alice_session)
         .insert("todos", todo_values("provenance check", false))
         .expect("alice creates todo");
 
     let expected = vec![
         Value::Text("provenance check".to_string()),
         Value::Boolean(false),
-        Value::Text(alice_author),
+        alice_author,
     ];
 
     wait_for_rows(
@@ -353,18 +375,11 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             ))
             .await
             .expect("connect alice");
-            let session = Session::new(
-                identity::LOCAL_FIRST_ISSUER,
+            let author = expected_local_author(
+                &server,
                 &identity::derive_user_id(&alice_seed()).to_string(),
-            )
-            .with_auth_mode(AuthMode::LocalFirst);
-            let author = session
-                .author_subject()
-                .expect("Alice's author")
-                .canonical()
-                .to_owned();
+            );
             let (row_id, _, tx) = alice
-                .for_session(session)
                 .insert("todos", todo_values("independent provenance fields", false))
                 .expect("insert Alice's todo");
             support::wait_for_edge_txs(&alice, &[tx.expect("insert transaction")]).await;
@@ -382,8 +397,8 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             .expect("complete provenance query");
             assert_eq!(complete.len(), 1);
             assert_eq!(complete[0].0, row_id);
-            assert_eq!(complete[0].1[0], Value::Text(author.clone()));
-            assert_eq!(complete[0].1[2], Value::Text(author));
+            assert_eq!(complete[0].1[0], author.clone());
+            assert_eq!(complete[0].1[2], author);
             assert!(matches!(complete[0].1[1], Value::Timestamp(value) if value > 0));
             assert_eq!(complete[0].1[1], complete[0].1[3]);
 
@@ -438,42 +453,36 @@ async fn local_first_and_jwt_clients_coexist_impl() {
     let mut bob_ctx = server.make_client_context_for_user(test_schema(), bob_subject);
     bob_ctx.backend_secret = None;
     bob_ctx.admin_secret = None;
+    support::enroll_test_context(&mut bob_ctx)
+        .await
+        .expect("enroll Bob");
+    let bob_author = expected_author(
+        bob_ctx.account_id.unwrap(),
+        jazz_server::TEST_JWT_ISSUER,
+        bob_subject,
+    );
     let bob = jazz_testkit::connect(bob_ctx)
         .await
         .expect("connect bob (jwt)");
 
-    let alice_session = Session::new(identity::LOCAL_FIRST_ISSUER, &alice_user_id)
-        .with_auth_mode(AuthMode::LocalFirst);
-    let alice_author = alice_session
-        .author_subject()
-        .expect("local-first session has an author subject")
-        .canonical()
-        .to_owned();
-    let bob_session = Session::new("urn:jazz:test", bob_subject);
-    let bob_author = bob_session
-        .author_subject()
-        .expect("jwt session has an author subject")
-        .canonical()
-        .to_owned();
+    let alice_author = expected_local_author(&server, &alice_user_id);
 
     let (alice_id, _, _) = alice
-        .for_session(alice_session)
         .insert("todos", todo_values("alice via ed25519", false))
         .expect("alice creates todo");
     let (bob_id, _, _) = bob
-        .for_session(bob_session)
         .insert("todos", todo_values("bob via jwt", true))
         .expect("bob creates todo");
 
     let alice_row = vec![
         Value::Text("alice via ed25519".to_string()),
         Value::Boolean(false),
-        Value::Text(alice_author),
+        alice_author,
     ];
     let bob_row = vec![
         Value::Text("bob via jwt".to_string()),
         Value::Boolean(true),
-        Value::Text(bob_author),
+        bob_author,
     ];
 
     wait_for_rows(

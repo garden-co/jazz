@@ -156,7 +156,7 @@ async fn close_is_idempotent_without_an_exclusive_wasm_receiver() {
 }
 
 #[wasm_bindgen_test]
-fn self_signed_subscriber_admission_requires_the_exact_proof() {
+async fn self_signed_subscriber_admission_requires_the_exact_proof() {
     let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let app_id = "wasm-subscriber-proof";
     let now_seconds = (js_sys::Date::now() / 1_000.0) as u64;
@@ -194,13 +194,16 @@ fn self_signed_subscriber_admission_requires_the_exact_proof() {
         .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL)
         .is_err());
 
-    db.accept_subscriber_with_self_signed_proof(
-        JsValue::NULL,
-        token.clone(),
-        app_id.to_owned(),
-        claimed_author.clone(),
+    await_promise(
+        db.accept_subscriber_with_self_signed_proof(
+            JsValue::NULL,
+            token.clone(),
+            app_id.to_owned(),
+            claimed_author.clone(),
+        )
+        .expect("the exact verified proof admits the local worker follower"),
     )
-    .expect("the exact verified proof admits the local worker follower");
+    .await;
     assert!(db
         .accept_subscriber_with_self_signed_proof(
             JsValue::NULL,

@@ -1,7 +1,8 @@
-import { Component, useEffect, useState, type ReactNode } from "react";
+import { createInspectorAttachmentClient } from "jazz-tools/_dev/inspector-client";
+import { Component, useEffect, useState, useRef, type ReactNode } from "react";
 import { MemoryRouter } from "react-router";
-import type { DbConfig, WasmSchema } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import type { WasmSchema } from "jazz-tools";
+import { JazzClientProvider } from "jazz-tools/react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
 import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import {
@@ -62,17 +63,17 @@ class InspectorConnectionErrorBoundary extends Component<
  * connection config the loader published on `window.__jazzInspectorHost`, opens
  * its own browser client over a peer port minted by the host's SharedWorker.
  * Its main-thread Db remains in-memory while the BrowserConnectionManager
- * joins the selected worker-owned context. The provider
- * supplies the StrictMode-safe,
- * refcounted client lifecycle rather than hand-rolling one — and shows the
- * host's active subscriptions from the one-way push. No devtools bridge.
+ * joins the selected worker-owned context. Attachment transitions close the
+ * previous client before opening the next; the provider observes that client
+ * and the host subscription feed. No live Db crosses the iframe boundary.
  */
 export function InspectorApp() {
   const [session, setSession] = useState<InspectorRuntimeSession | null>(null);
   const [contexts, setContexts] = useState<InspectorRuntimeContext[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const attachmentTransition = useRef<Promise<void>>(Promise.resolve());
   const [connection, setConnection] = useState<{
-    config: DbConfig;
+    client: Awaited<ReturnType<typeof createInspectorAttachmentClient>>;
     schema: WasmSchema;
   } | null>(null);
   const [hostTimedOut, setHostTimedOut] = useState(false);
@@ -130,33 +131,49 @@ export function InspectorApp() {
   useEffect(() => {
     if (!session || !selectedKey) return;
     const context = contexts.find((candidate) => candidate.key === selectedKey);
-    const hostConfig = readInspectorHostConfig();
-    if (!context || !hostConfig) return;
+    if (!context) return;
+    let hostConfig: ReturnType<typeof readInspectorHostConfig>;
     let active = true;
+    let attachedClient: Awaited<ReturnType<typeof createInspectorAttachmentClient>> | undefined;
     setConnection(null);
     setError(null);
-    void session
-      .attach(selectedKey)
-      .then((browserWorkerPort) => {
+    const opening = attachmentTransition.current
+      .then(() => {
+        if (!active) return;
+        hostConfig = readInspectorHostConfig(selectedKey);
+        if (!hostConfig) throw new Error("Inspector host is no longer available");
+        return session.attach(selectedKey);
+      })
+      .then(async (browserWorkerPort) => {
+        if (!browserWorkerPort) return;
         if (!active) {
           browserWorkerPort.close();
           return;
         }
-        setConnection({
-          config: {
-            ...hostConfig,
-            appId: context.appId,
-            driver: { type: "persistent", dbName: context.dbName },
-            runtimeSources: { ...hostConfig.runtimeSources, browserWorkerPort },
-          },
-          schema: context.schema,
-        });
+        const client = await createInspectorAttachmentClient(
+          hostConfig!,
+          context.appId,
+          context.dbName,
+          browserWorkerPort,
+        );
+        if (!active) {
+          await client.shutdown();
+          return;
+        }
+        attachedClient = client;
+        setConnection({ client, schema: context.schema });
       })
       .catch((cause: unknown) => {
         if (active) setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
+    attachmentTransition.current = opening;
     return () => {
       active = false;
+      attachmentTransition.current = opening
+        .then(() => attachedClient?.shutdown())
+        .catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+        });
     };
   }, [contexts, selectedKey, session]);
 
@@ -191,28 +208,30 @@ export function InspectorApp() {
       ) : null}
       <InspectorRuntime
         key={selectedKey}
-        config={connection.config}
+        client={connection.client}
         wasmSchema={connection.schema}
       />
     </>
   );
 }
 
-function InspectorRuntime({ config, wasmSchema }: { config: DbConfig; wasmSchema: WasmSchema }) {
+function InspectorRuntime({
+  client,
+  wasmSchema,
+}: {
+  client: Awaited<ReturnType<typeof createInspectorAttachmentClient>>;
+  wasmSchema: WasmSchema;
+}) {
   const initialRoute = new URLSearchParams(window.location.search).get("route") ?? "/";
   return (
     <InspectorConnectionErrorBoundary>
-      <JazzProvider
-        config={config}
-        autoAttachDevTools={false}
-        fallback={<p style={{ padding: 16 }}>Connecting…</p>}
-      >
+      <JazzClientProvider client={client}>
         <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
           <MemoryRouter initialEntries={[initialRoute]}>
             <InspectorRoutes />
           </MemoryRouter>
         </DevtoolsProvider>
-      </JazzProvider>
+      </JazzClientProvider>
     </InspectorConnectionErrorBoundary>
   );
 }

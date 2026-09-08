@@ -622,7 +622,7 @@ mod relay_topology {
 }
 
 /// Client-facade contracts against the embedded server: transient transport
-/// failures (offline, refused connect, rejected auth) must not release held
+/// failures (offline, failed connect, rejected auth) must not release held
 /// authority-tier subscriptions to settle from the local store.
 mod client_transport {
     use std::time::Duration;
@@ -736,16 +736,87 @@ mod client_transport {
             .await;
     }
 
-    /// A failed connect attempt (refused connection) is transient: it must
+    /// Own the client's address continuously, including while no upstream serves it.
+    /// Closing an accepted socket before upgrade exercises a real retryable connect
+    /// failure without releasing the address for another parallel test to claim.
+    struct RestartGate {
+        address: std::net::SocketAddr,
+        upstream_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RestartGate {
+        async fn start(upstream_port: u16) -> Self {
+            use std::sync::{
+                Arc,
+                atomic::{AtomicU16, Ordering},
+            };
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind continuously owned restart gate");
+            let address = listener.local_addr().expect("restart gate address");
+            let upstream_port = Arc::new(AtomicU16::new(upstream_port));
+            let upstream = upstream_port.clone();
+            let task = tokio::spawn(async move {
+                let mut forwards = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (mut incoming, _) = accepted.expect("accept restart gate connection");
+                            let port = upstream.load(Ordering::SeqCst);
+                            if port == 0 {
+                                drop(incoming);
+                                continue;
+                            }
+                            forwards.spawn(async move {
+                                let mut outgoing = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                                    .await
+                                    .expect("connect restart gate to live upstream");
+                                // Either endpoint may close its transport during shutdown.
+                                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+                            });
+                        }
+                        Some(result) = forwards.join_next(), if !forwards.is_empty() => {
+                            result.expect("restart gate forwarding task");
+                        }
+                    }
+                }
+            });
+            Self {
+                address,
+                upstream_port,
+                task,
+            }
+        }
+
+        async fn shutdown(&mut self) {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+
+        fn forward_to(&self, port: Option<u16>) {
+            self.upstream_port
+                .store(port.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for RestartGate {
+        fn drop(&mut self) {
+            // Dropping the accept task also drops its JoinSet, aborting all forwards.
+            self.task.abort();
+        }
+    }
+
+    /// A failed connect attempt (closed before upgrade) is transient: it must
     /// not release a held authority-tier subscription to settle from the
     /// local store. Once the upstream returns and the client reconnects, the
     /// held subscription settles with the authority's row.
     ///
-    /// Actors: alice; the server restarts on the same address.
+    /// Actors: alice; an owned gate retains the client address while the server restarts.
     ///
     /// ```text
     /// alice ──insert──► server₁ (settled)      server₁ stops
-    /// alice ─reconnect─✗ (refused)  subscribe(authority) ──► nothing
+    /// alice ─reconnect─✗ (gate closed)  subscribe(authority) ──► pending only
     /// server₂ starts  ─reconnect─✓  ──settled row──► alice
     /// ```
     #[tokio::test]
@@ -756,9 +827,8 @@ mod client_transport {
                 let app_id = AppId::random();
                 let data_dir = TempDir::new().expect("server data dir");
 
-                // Let the first server retain the kernel-selected port rather
-                // than reserving and dropping one before it starts: nextest
-                // runs this topology alongside other server tests.
+                // Both server generations use fresh ports. The gate retains the
+                // client's port even during the outage and the second JWKS startup.
                 let first_server = JazzServer::builder()
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
@@ -766,13 +836,17 @@ mod client_transport {
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
                     .await;
-                let port = first_server.port();
-                let alice = TestingClient::builder()
-                    .with_server(&first_server)
-                    .with_schema(schema.clone())
-                    .with_user_id("alice-connect-failure")
-                    .ready_on("documents", Duration::from_secs(30))
-                    .connect()
+                let mut gate = RestartGate::start(first_server.port()).await;
+                let mut context = first_server
+                    .make_client_context_for_user(schema.clone(), "alice-connect-failure");
+                context.server_url = format!("http://{}", gate.address);
+                support::enroll_test_context(&mut context)
+                    .await
+                    .expect("enroll through gate");
+                let alice = support::connect(context)
+                    .await
+                    .expect("connect through gate");
+                support::wait_for_edge_query_ready(&alice, "documents", Duration::from_secs(30))
                     .await;
 
                 let (document_id, _, transaction_id) = alice
@@ -787,7 +861,12 @@ mod client_transport {
                     .expect("document settles before the outage");
 
                 disconnect_client(&alice);
+                gate.forward_to(None);
                 first_server.shutdown().await;
+                assert!(
+                    tokio::net::TcpListener::bind(gate.address).await.is_err(),
+                    "the gate must retain exclusive port ownership throughout the outage",
+                );
 
                 let refused = reconnect_client(&alice).await;
                 assert!(
@@ -812,12 +891,12 @@ mod client_transport {
 
                 let second_server = JazzServer::builder()
                     .with_app_id(app_id)
-                    .with_port(port)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
                     .await;
+                gate.forward_to(Some(second_server.port()));
                 assert!(
                     reconnect_client(&alice)
                         .await
@@ -840,6 +919,7 @@ mod client_transport {
 
                 alice.shutdown().await.expect("shutdown alice");
                 second_server.shutdown().await;
+                gate.shutdown().await;
             })
             .await;
     }

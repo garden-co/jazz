@@ -154,17 +154,22 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         case 5:
           return {
             type: "subscriptionEvents",
-            events: bytes[1]
-              ? [
-                  {
-                    type: "delta",
-                    reset: true,
-                    settled: true,
-                    tier: "local",
-                    delta: new Uint8Array(),
-                  },
-                ]
-              : [],
+            events:
+              bytes[1] === 2
+                ? [{ type: "rejected", message: "fixed fixture rejection" }]
+                : bytes[1] === 3
+                  ? [{ type: "closed" }]
+                  : bytes[1]
+                    ? [
+                        {
+                          type: "delta",
+                          reset: true,
+                          settled: true,
+                          tier: "local",
+                          delta: new Uint8Array(),
+                        },
+                      ]
+                    : [],
           };
         case 6:
           return { type: "unsubscribed", closed: true };
@@ -200,6 +205,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     delayedAReads = 0,
     writerMustProgress = false,
     writerMustYield = false,
+    writerTerminal?: "rejected" | "closed",
   ) => ({
     abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached(capability: Uint8Array) {
@@ -226,7 +232,16 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
               subscribed = true;
               return Uint8Array.of(4);
             case 5:
-              return Uint8Array.of(5, published ? 1 : 0);
+              return Uint8Array.of(
+                5,
+                writerTerminal === "rejected"
+                  ? 2
+                  : writerTerminal === "closed"
+                    ? 3
+                    : published
+                      ? 1
+                      : 0,
+              );
             case 6:
               assert.equal(subscribed, true);
               subscribed = false;
@@ -333,6 +348,79 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       },
     },
   );
+
+  const stalledWriter = scopeFactory(false, false, 1_000);
+  const writerDetails: string[] = [];
+  let stalledWriterClock = 0;
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      stalledWriter,
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      {
+        timeoutMs: 3,
+        now: () => stalledWriterClock,
+        yieldTurn: async () => {
+          stalledWriterClock += 1;
+        },
+      },
+      (detail) => writerDetails.push(detail),
+    ),
+    /did not settle before its bounded deadline/,
+  );
+  assert.deepEqual(writerDetails, [
+    "scope-isolation-writer-read-detail:last-rows-wakes-0-polls-0-row-responses-2-ready-no",
+  ]);
+
+  const rejectedWriter = scopeFactory(false, false, 0, false, false, "rejected");
+  const rejectedWriterDetails: string[] = [];
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      rejectedWriter,
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      (detail) => rejectedWriterDetails.push(detail),
+    ),
+    /subscription ended before its read/,
+  );
+  assert.deepEqual(rejectedWriterDetails, [
+    "scope-isolation-writer-read-detail:last-rejected-wakes-0-polls-0-row-responses-0-ready-no",
+  ]);
+
+  await assert.rejects(
+    proveForegroundScopeIsolation(
+      scopeFactory(false, false, 0, false, false, "rejected"),
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      () => Promise.reject(new Error("diagnostic sink rejected")),
+    ),
+    /subscription ended before its read/,
+  );
+
+  const terminal = await Promise.race([
+    proveForegroundScopeIsolation(
+      scopeFactory(false, false, 0, false, false, "rejected"),
+      scopeA,
+      scopeCodec,
+      { write: "a", contains: ["a"], excludes: ["b"] },
+      undefined,
+      undefined,
+      () => new Promise<void>(() => {}),
+    ).then(
+      () => "unexpected success",
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => setTimeout(() => resolve("diagnostic blocked failure"), 25)),
+  ]);
+  assert.match(terminal, /subscription ended before its read/);
 
   aWasWritten = false;
   bWasWritten = false;
@@ -697,7 +785,10 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   let committed = false;
   let opened = 0;
   let emitCommitWake = true;
+  let postCommitWakeAfterBTicks = 0;
+  let pendingPostCommitWake = false;
   const schedulers: Array<((urgency: string) => void) | undefined> = [];
+  const wakeTraceToggles: boolean[][] = [[], []];
   const ticks = [0, 0];
   const factory = {
     abiVersion: NATIVE_RELAY_ABI_V1,
@@ -721,7 +812,10 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                       ? (setTimeout(() => {
                           committed = true;
                           const bTicksBeforeWake = ticks[1];
-                          if (emitCommitWake) schedulers[1]?.("immediate");
+                          if (emitCommitWake) {
+                            if (postCommitWakeAfterBTicks === 0) schedulers[1]?.("immediate");
+                            else pendingPostCommitWake = true;
+                          }
                           assert.equal(
                             ticks[1],
                             bTicksBeforeWake,
@@ -780,9 +874,16 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         },
         tick() {
           ticks[peer] += 1;
+          if (peer === 1 && pendingPostCommitWake && ticks[peer] >= postCommitWakeAfterBTicks) {
+            pendingPostCommitWake = false;
+            schedulers[peer]?.("immediate");
+          }
         },
         setTickScheduler(callback: (urgency: string) => void) {
           schedulers[peer] = callback;
+        },
+        setWakeTrace(enabled: boolean) {
+          wakeTraceToggles[peer]!.push(enabled);
         },
         close: () => true,
       };
@@ -823,6 +924,80 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "same-runtime-delta-row-id-failed",
     "same-runtime-unsubscribe-failed",
   ]);
+  assert.deepEqual(
+    wakeTraceToggles,
+    [[], [true, false]],
+    "only B enables the default-off bridge trace and disables it during cleanup",
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  const unavailableTraceToggles: boolean[] = [];
+  const unavailableTraceCloses: number[] = [];
+  let unavailableTraceOpened = 0;
+  const unavailableTrace = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = unavailableTraceOpened++;
+      return {
+        ...foreground,
+        setWakeTrace(enabled: boolean) {
+          unavailableTraceToggles.push(enabled);
+          throw new Error("private wake trace unavailable");
+        },
+        close() {
+          unavailableTraceCloses.push(peer);
+          return foreground.close();
+        },
+      };
+    },
+  };
+  await proveSameJsiRuntimeWriteSubscription(
+    unavailableTrace,
+    capability,
+    command,
+    subscriptionRowId,
+  );
+  assert.deepEqual(
+    unavailableTraceToggles,
+    [true, false],
+    "a failing B-only trace toggle cannot replace the successful subscription receipt",
+  );
+  assert.deepEqual(
+    unavailableTraceCloses,
+    [0, 1],
+    "a failing trace disable still closes both foreground aliases",
+  );
+
+  // Android's CallInvoker may need more than the former 96 zero-delay turns
+  // after a release build. The receipt still waits for B's actual scheduler
+  // callback before draining; a late callback may not be replaced with a read.
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  postCommitWakeAfterBTicks = 192;
+  pendingPostCommitWake = false;
+  const lateWake: Array<{ elapsedMs: number; turns: number }> = [];
+  await proveSameJsiRuntimeWriteSubscription(
+    factory,
+    capability,
+    command,
+    subscriptionRowId,
+    undefined,
+    {
+      timeoutMs: 1_000,
+      now: () => performance.now(),
+      yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      onWake: (details) => lateWake.push(details),
+    },
+  );
+  assert.equal(lateWake.length, 1, "the delayed scheduler callback is still required");
+  assert.ok(lateWake[0]!.turns > 96, "the receipt tolerates an Android-late native callback");
+  postCommitWakeAfterBTicks = 0;
 
   committed = false;
   opened = 0;
@@ -1100,11 +1275,66 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  wakeTraceToggles[0]!.length = 0;
+  wakeTraceToggles[1]!.length = 0;
   emitCommitWake = false;
   await assert.rejects(
     async () =>
-      proveSameJsiRuntimeWriteSubscription(factory, capability, command, subscriptionRowId),
-    /did not observe foreground A's committed row/,
+      proveSameJsiRuntimeWriteSubscription(
+        factory,
+        capability,
+        command,
+        subscriptionRowId,
+        undefined,
+        shortPostCommitWakeTiming(),
+      ),
+    /did not observe foreground A's committed row after \d+ turns and \d+ms without a post-commit native wake/,
+  );
+
+  // The diagnostic acknowledgement precedes foreground creation and trace
+  // enable. It cannot reach B's scheduler before A commits when the real
+  // commit wake is suppressed.
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  wakeTraceToggles[0]!.length = 0;
+  wakeTraceToggles[1]!.length = 0;
+  emitCommitWake = false;
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        factory,
+        capability,
+        command,
+        subscriptionRowId,
+        undefined,
+        {
+          ...shortPostCommitWakeTiming(),
+          onPostCommitWakeArmed: () =>
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                assert.deepEqual(
+                  wakeTraceToggles,
+                  [[], []],
+                  "the acknowledged diagnostic boundary precedes B trace enable",
+                );
+                assert.equal(
+                  opened,
+                  0,
+                  "the acknowledged diagnostic boundary precedes foreground creation",
+                );
+                assert.equal(
+                  schedulers[1],
+                  undefined,
+                  "the acknowledged diagnostic boundary precedes foreground creation",
+                );
+                resolve();
+              }, 0);
+            }),
+        },
+      ),
+    /without a post-commit native wake/,
   );
 
   committed = false;
@@ -1126,6 +1356,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         capability,
         command,
         subscriptionRowId,
+        undefined,
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1171,6 +1403,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => noObservationStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1244,6 +1477,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongObservationStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1270,6 +1504,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongResetStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1293,6 +1528,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongMixedStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1318,6 +1554,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         command,
         subscriptionRowId,
         (stage) => wrongWrittenContentStages.push(stage),
+        shortPostCommitWakeTiming(),
       ),
     /did not observe foreground A's committed row/,
   );
@@ -1327,6 +1564,14 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "the written fixture content with another row id is an identity mismatch, not unrelated data",
   );
 });
+
+function shortPostCommitWakeTiming() {
+  return {
+    timeoutMs: 96,
+    now: () => performance.now(),
+    yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+  };
+}
 
 function utf8(value: string): number[] {
   return Array.from(new TextEncoder().encode(value));

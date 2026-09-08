@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { DbConfig } from "jazz-tools";
+import { createAccountManager, type AccountStore, type DbConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
@@ -34,7 +34,7 @@ function failureDiagnostics() {
     rooms: element.querySelectorAll("button.room").length,
     conversation: element.querySelector(".conversation") !== null,
     memberships: element.querySelectorAll("[aria-label='Room membership'] li").length,
-    inviteInput: element.querySelector("input[aria-label='Invite canonical author']") !== null,
+    inviteInput: element.querySelector("input[aria-label='Invite account ID']") !== null,
     alerts: [...element.querySelectorAll("[role='alert']")].map((alert) => {
       const message = alert.textContent ?? "";
       if (/permission|unauthori[sz]ed|forbidden|denied/i.test(message)) return "permission";
@@ -68,20 +68,40 @@ async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000)
   throw new Error(`${message}; diagnostics=${failureDiagnostics()}`);
 }
 
-async function mount(
-  config: DbConfig = {
-    appId: "band-chat-browser-receipt",
+function inMemoryAccountStore(): AccountStore {
+  let selected: string | null = null;
+  return {
+    async read() {
+      return selected;
+    },
+    async update(transform) {
+      selected = transform(selected);
+    },
+  };
+}
+
+async function localPreviewConfig(): Promise<DbConfig> {
+  const appId = "band-chat-browser-receipt";
+  const accounts = await createAccountManager({
+    appId,
+    serverUrl: "https://band-chat-preview.example",
+    store: inMemoryAccountStore(),
+  });
+  return {
+    appId,
     driver: { type: "memory" },
-    secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
-  },
-  label: PreviewLabel = "local",
-) {
+    account: accounts.createLocalFirst(),
+  };
+}
+
+async function mount(config: DbConfig | undefined = undefined, label: PreviewLabel = "local") {
+  const selectedConfig = config ?? (await localPreviewConfig());
   const element = document.createElement("div");
   document.body.append(element);
   const root = createRoot(element);
   mounts.push({ root, element, label });
   await act(async () => {
-    root.render(<BandChatPreview config={config} />);
+    root.render(<BandChatPreview config={selectedConfig} />);
   });
   await waitFor(() => element.querySelector("#room-name") !== null, "room composer should render");
   return element;
@@ -120,13 +140,14 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
   const guestUserId = "browser-guest";
   const ownerToken = await getJazzServerJwtForUser(ownerUserId, undefined, server.appId);
   const guestToken = await getJazzServerJwtForUser(guestUserId, undefined, server.appId);
-  const guestTokenClaims = JSON.parse(atob(guestToken.split(".")[1]!)) as { iss: string };
-  const guestAuthor = JSON.stringify([guestTokenClaims.iss, guestUserId]);
+  const ownerAccount = await enrollTestAccount(server, ownerToken);
+  const guestAccount = await enrollTestAccount(server, guestToken);
+  const guestAuthor = guestAccount.id;
   const owner = await mount(
     {
       appId: server.appId,
       driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
-      jwtToken: ownerToken,
+      account: ownerAccount,
       serverUrl: server.serverUrl,
     },
     "owner",
@@ -137,19 +158,19 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
     {
       appId: server.appId,
       driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
-      jwtToken: guestToken,
+      account: guestAccount,
       serverUrl: server.serverUrl,
     },
     "guest",
   );
   await createRoom(guest, "Guest profile bootstrap");
 
-  const invitee = currentInput(owner, "input[aria-label='Invite canonical author']");
+  const invitee = currentInput(owner, "input[aria-label='Invite account ID']");
   await setInputValue(invitee, guestAuthor);
   // Creating the guest's bootstrap room can rerender the owner's membership
   // panel. Reacquire the controlled input after React commits the value so the
   // submit event reaches the currently connected form.
-  const currentInvitee = currentInput(owner, "input[aria-label='Invite canonical author']");
+  const currentInvitee = currentInput(owner, "input[aria-label='Invite account ID']");
   const observation = {
     input: currentInvitee,
     form: currentInvitee.closest("form")!,
@@ -207,6 +228,11 @@ it("negotiates persistent browser workers and renders the owner, guest-message, 
   // that a post-removal write is rejected at the serving authority.
 });
 
+async function enrollTestAccount(server: { appId: string; serverUrl: string }, token: string) {
+  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
+  return accounts.registerJWT({ getToken: async () => token });
+}
+
 async function setInputValue(input: HTMLInputElement, value: string) {
   await userEvent.fill(input, value);
 }
@@ -240,22 +266,20 @@ it("creates a local room, sends a message, and applies client-side picker valida
     "room should be visible",
   );
 
-  const invitee = element.querySelector<HTMLInputElement>(
-    "input[aria-label='Invite canonical author']",
-  )!;
-  const guestAuthor = JSON.stringify(["https://guest.example", "guest-user"]);
-  await setInputValue(invitee, guestAuthor);
+  const invitee = element.querySelector<HTMLInputElement>("input[aria-label='Invite account ID']")!;
+  const guestAccountId = crypto.randomUUID();
+  await setInputValue(invitee, guestAccountId);
   await userEvent.click(invitee.closest("form")!.querySelector("button[type='submit']")!);
   await waitFor(
-    () => element.textContent?.includes(guestAuthor) ?? false,
+    () => element.textContent?.includes(guestAccountId) ?? false,
     "invited member should be visible",
   );
   const guestMembership = [...element.querySelectorAll("li")].find((row) =>
-    row.textContent?.includes(guestAuthor),
+    row.textContent?.includes(guestAccountId),
   )!;
   await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
   await waitFor(
-    () => !element.textContent?.includes(guestAuthor),
+    () => !element.textContent?.includes(guestAccountId),
     "removed member should disappear",
   );
 

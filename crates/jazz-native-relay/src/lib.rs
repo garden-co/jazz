@@ -6,6 +6,17 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
+mod account_crypto;
+mod account_session;
+pub use account_crypto::{
+    jazz_native_relay_account_secret, jazz_native_relay_mint_local_first_token,
+};
+pub use account_session::{
+    jazz_native_relay_host_lease_attach_account_schema_json,
+    jazz_native_relay_host_lease_begin_account_session_json,
+    jazz_native_relay_host_lease_refresh_account_session,
+    jazz_native_relay_host_lease_release_account_session,
+};
 mod foreground_mutations;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -177,15 +188,16 @@ struct PrivateSessionSetupJson {
 
 #[derive(Clone)]
 struct PendingPrivateSession {
+    claims: BTreeMap<String, Value>,
     scope: RelayScopeRequest,
     sqlite_path: String,
     identity: DbIdentity,
-    socket: PrivateRelaySocketSession,
+    socket: Option<PrivateRelaySocketSession>,
 }
 
 /// Ephemeral native-only input retained only until trusted revocation. It is
 /// never part of an admitted scope, relay diagnostics, postcard, or SQLite.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
@@ -521,6 +533,10 @@ pub enum ForegroundDbCommandRequest {
     PermissionAdvice {
         action: ForegroundPermissionAdviceAction,
     },
+    /// General shutdown barrier; identity remains bound to the native capability.
+    WaitForPendingWrites {
+        tier: String,
+    },
 }
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
@@ -640,6 +656,9 @@ pub enum ForegroundDbCommandResponse {
         connected: bool,
     },
     NativeSessionMetadata {
+        node: [u8; 16],
+        registry_authority: String,
+        account_id: Option<[u8; 16]>,
         issuer: String,
         user_id: String,
     },
@@ -728,6 +747,8 @@ pub struct NativeRelayHost {
     registry: NativeRelayRegistry,
     admitted_scopes: BTreeMap<AdmissionCapability, AdmittedRelayScope>,
     pending_private_sessions: BTreeMap<AdmissionCapability, PendingPrivateSession>,
+    account_session_owners: BTreeMap<AdmissionCapability, account_session::AccountSessionOwner>,
+    invalidated_runtime_tokens: BTreeSet<u64>,
     private_socket_sessions: BTreeMap<AdmissionCapability, PrivateRelaySocketSession>,
     /// One authenticated upstream worker owns each durable relay scope.  UI
     /// foregrounds are only peer leases on that relay; opening a second root
@@ -868,6 +889,8 @@ impl Default for NativeRelayHost {
             registry: NativeRelayRegistry::default(),
             admitted_scopes: BTreeMap::new(),
             pending_private_sessions: BTreeMap::new(),
+            account_session_owners: BTreeMap::new(),
+            invalidated_runtime_tokens: BTreeSet::new(),
             private_socket_sessions: BTreeMap::new(),
             private_scope_workers: BTreeMap::new(),
             explicitly_offline_scopes: BTreeSet::new(),
@@ -976,19 +999,37 @@ impl NativeRelayHost {
             return Ok(());
         };
         if let Some(existing) = self.private_scope_workers.get(scope) {
-            // A refreshed bearer must first revoke the old trusted admission.
-            // Silently retaining the older session would make the active
-            // authorization ambiguous, while replacing a live worker would
-            // strand its foreground leases.
-            return (existing.admitted_scope == admitted_scope)
-                .then_some(())
-                .ok_or(JazzNativeRelayStatus::LifecycleFailure);
+            // Account attachment/refresh promotes one shared snapshot before
+            // opening a foreground. Legacy admissions still require exact
+            // capability ownership; mismatched snapshots cannot borrow it.
+            return (existing.admitted_scope == admitted_scope
+                || (self.account_session_owners.contains_key(&admitted_scope)
+                    && self
+                        .account_session_owners
+                        .contains_key(&existing.admitted_scope)
+                    && self.private_socket_sessions.get(&existing.admitted_scope)
+                        == Some(&session)))
+            .then_some(())
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure);
         }
+        let worker =
+            Self::prepare_private_scope_worker(admitted_scope, relay, peer_identity, session)?;
+        worker._worker.activate();
+        self.private_scope_workers.insert(scope.clone(), worker);
+        Ok(())
+    }
+
+    fn prepare_private_scope_worker(
+        admitted_scope: AdmissionCapability,
+        relay: NativeRelay,
+        peer_identity: jazz::ids::AuthorSubject,
+        session: PrivateRelaySocketSession,
+    ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
         let terminal_error = Arc::new(Mutex::new(None));
         let terminal_for_event = Arc::clone(&terminal_error);
         let connected = Arc::new(AtomicBool::new(false));
         let connected_for_event = Arc::clone(&connected);
-        let worker = NativeRelaySocketWorker::start(
+        let worker = NativeRelaySocketWorker::prepare_with_connector(
             relay,
             NativeRelaySocketConfig {
                 server_url: session.server_url,
@@ -1018,18 +1059,15 @@ impl NativeRelayHost {
                     }
                 }),
             },
+            Arc::new(NativeWebSocketConnector),
         )
         .map_err(relay_status)?;
-        self.private_scope_workers.insert(
-            scope.clone(),
-            PrivateScopeSocketWorker {
-                admitted_scope,
-                _worker: worker,
-                connected,
-                terminal_error,
-            },
-        );
-        Ok(())
+        Ok(PrivateScopeSocketWorker {
+            admitted_scope,
+            _worker: worker,
+            connected,
+            terminal_error,
+        })
     }
 
     fn foreground_connectivity(
@@ -1298,6 +1336,16 @@ impl NativeRelayHost {
         if runtime_token == 0 {
             return Err(JazzNativeRelayStatus::InvalidArgument);
         }
+        if self.invalidated_runtime_tokens.contains(&runtime_token) {
+            return Err(JazzNativeRelayStatus::InvalidHandle);
+        }
+        if self
+            .account_session_owners
+            .get(&admitted_scope)
+            .is_some_and(|owner| owner.runtime_token != runtime_token)
+        {
+            return Err(JazzNativeRelayStatus::InvalidHandle);
+        }
         let (config, author, claims) = {
             let admitted = self
                 .admitted_scopes
@@ -1563,6 +1611,7 @@ impl NativeRelayHost {
         &mut self,
         runtime_token: u64,
     ) -> Result<(), JazzNativeRelayStatus> {
+        self.invalidated_runtime_tokens.insert(runtime_token);
         let foregrounds = self
             .foregrounds
             .iter()
@@ -1576,6 +1625,18 @@ impl NativeRelayHost {
                 .teardown_foreground(handle, ForegroundTeardown::Retire)
                 .is_err()
             {
+                failed = true;
+            }
+        }
+        let sessions = self
+            .account_session_owners
+            .iter()
+            .filter_map(|(capability, owner)| {
+                (owner.runtime_token == runtime_token).then_some(*capability)
+            })
+            .collect::<Vec<_>>();
+        for session in sessions {
+            if self.revoke_scope(session).is_err() {
                 failed = true;
             }
         }
@@ -1709,17 +1770,18 @@ impl NativeRelayHost {
         self.pending_private_sessions.insert(
             capability,
             PendingPrivateSession {
+                claims: BTreeMap::new(),
                 scope,
                 sqlite_path,
                 identity: DbIdentity {
                     node: NodeUuid::from_bytes(node),
                     author,
                 },
-                socket: PrivateRelaySocketSession {
+                socket: Some(PrivateRelaySocketSession {
                     server_url: request.server_url,
                     app_id: request.app_id,
                     bearer: request.jwt,
-                },
+                }),
             },
         );
         Ok(capability)
@@ -1730,10 +1792,48 @@ impl NativeRelayHost {
         session: AdmissionCapability,
         schema_json: &str,
     ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
-        let pending = self
+        let mut pending = self
             .pending_private_sessions
             .remove(&session)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        let runtime_owner = self.account_session_owners.remove(&session);
+        let account_snapshot = runtime_owner.as_ref().map(|_| {
+            (
+                pending.claims.clone(),
+                pending
+                    .socket
+                    .as_ref()
+                    .map(|socket| socket.bearer.clone())
+                    .unwrap_or_default(),
+            )
+        });
+        if runtime_owner.is_some() {
+            // Reuse the durable relay identity, but do not publish a new
+            // credential/claims snapshot until schema/path validation succeeds.
+            let scope = RelayScope::from(pending.scope.clone());
+            if let Some((capability, existing)) = self
+                .admitted_scopes
+                .iter()
+                .find(|(_, entry)| entry.config.scope == scope)
+            {
+                if !self.account_session_owners.contains_key(capability) {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+                let old_transport = self
+                    .private_socket_sessions
+                    .get(capability)
+                    .map(|socket| (&socket.server_url, &socket.app_id));
+                let new_transport = pending
+                    .socket
+                    .as_ref()
+                    .map(|socket| (&socket.server_url, &socket.app_id));
+                if old_transport != new_transport {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+                pending.identity = existing.config.identity;
+                pending.claims = existing.claims.clone();
+            }
+        }
         // Canonicalize at this credential-free boundary before constructing a
         // JazzSchema. A malformed schema consumes the one-shot session setup;
         // callers must restart setup rather than attach a different schema.
@@ -1747,9 +1847,20 @@ impl NativeRelayHost {
             sqlite_path: pending.sqlite_path,
             schema_json,
             identity: pending.identity,
-            claims: BTreeMap::new(),
+            claims: pending.claims,
         })?;
-        self.private_socket_sessions.insert(admitted, socket);
+        if let Some(socket) = socket {
+            self.private_socket_sessions.insert(admitted, socket);
+        }
+        if let Some(owner) = runtime_owner {
+            self.account_session_owners.insert(admitted, owner);
+        }
+        if let Some((claims, token)) = account_snapshot
+            && let Err(status) = self.promote_account_scope_snapshot(admitted, &token, claims)
+        {
+            let _ = self.revoke_scope(admitted);
+            return Err(status);
+        }
         Ok(admitted)
     }
 
@@ -1757,15 +1868,46 @@ impl NativeRelayHost {
         &mut self,
         admitted_scope: AdmissionCapability,
     ) -> Result<bool, JazzNativeRelayStatus> {
+        self.account_session_owners.remove(&admitted_scope);
+        // Cancellation also consumes a setup that has not attached its schema
+        // yet. Otherwise a late attachment could resurrect a canceled session.
+        if self
+            .pending_private_sessions
+            .remove(&admitted_scope)
+            .is_some()
+        {
+            return Ok(true);
+        }
         let Some(admitted) = self.admitted_scopes.remove(&admitted_scope) else {
             return Ok(false);
         };
+        // A sibling account context retains the shared upstream owner. Its
+        // foreground and bearer outlive this context's normal shutdown.
+        let successor = self.admitted_scopes.iter().find_map(|(capability, entry)| {
+            (entry.config.scope == admitted.config.scope
+                && self.account_session_owners.contains_key(capability)
+                && self.private_socket_sessions.get(capability)
+                    == self.private_socket_sessions.get(&admitted_scope))
+            .then_some(*capability)
+        });
+        if let Some(successor) = successor
+            && let Some(worker) = self.private_scope_workers.get_mut(&admitted.config.scope)
+            && worker.admitted_scope == admitted_scope
+        {
+            worker.admitted_scope = successor;
+        }
         // Removing the native-only session ensures a later re-admission must
         // provide a fresh bearer. Any opened worker is dropped below with its
         // relay alias, which synchronously cancels its socket thread.
         self.private_socket_sessions.remove(&admitted_scope);
-        self.explicitly_offline_scopes
-            .remove(&admitted.config.scope);
+        if !self
+            .admitted_scopes
+            .values()
+            .any(|entry| entry.config.scope == admitted.config.scope)
+        {
+            self.explicitly_offline_scopes
+                .remove(&admitted.config.scope);
+        }
         // This is the scope worker's trusted lifetime boundary. Dropping it
         // synchronously cancels and joins its bearer socket before the
         // durable relay can be closed below.
@@ -1823,7 +1965,12 @@ impl NativeRelayHost {
         removed_scopes.sort();
         removed_scopes.dedup();
         for scope in removed_scopes {
-            if !self.relays.values().any(|opened| opened.scope == scope) {
+            if !self.relays.values().any(|opened| opened.scope == scope)
+                && !self
+                    .admitted_scopes
+                    .values()
+                    .any(|entry| entry.config.scope == scope)
+            {
                 let _ = self.registry.close(&scope);
             }
         }
@@ -2580,12 +2727,15 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Some(admitted) => admitted,
                 None => return JazzNativeRelayStatus::InvalidHandle,
             };
-            let [issuer, user_id]: [String; 2] =
-                match serde_json::from_str(admitted.config.identity.author.canonical()) {
-                    Ok(subject) => subject,
-                    Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-                };
-            ForegroundDbCommandResponse::NativeSessionMetadata { issuer, user_id }
+            let author = admitted.config.identity.author;
+            let (issuer, user_id) = author.principal_parts();
+            ForegroundDbCommandResponse::NativeSessionMetadata {
+                node: *opened.lease.node.0.as_bytes(),
+                registry_authority: opened.scope.app_namespace.clone(),
+                account_id: author.account_id().map(|account| *account.0.as_bytes()),
+                issuer,
+                user_id,
+            }
         }
         ForegroundDbCommandRequest::DisconnectNativeUpstream => {
             match host.foreground_connectivity(foreground, Some(true)) {
@@ -2676,6 +2826,25 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 .and_then(|opts| client.subscribe_foreground_query_with_options(query, opts))
             {
                 Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::WaitForPendingWrites { tier } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            let tier = match tier.as_str() {
+                "local" => CoreDurabilityTier::Local,
+                "edge" => CoreDurabilityTier::Edge,
+                "global" => CoreDurabilityTier::Global,
+                _ => return JazzNativeRelayStatus::InvalidArgument,
+            };
+            match client.wait_for_pending_writes(tier) {
+                Ok(poll) => foreground_operation_response(poll),
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
                     Err(status) => return status,
@@ -2939,7 +3108,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     JazzNativeRelayStatus::Ok
 }
 
-/// Release a response buffer returned by [`jazz_native_relay_execute`].
+/// Release any owned response buffer returned by this native C ABI.
 ///
 /// The struct is reset before returning, making repeated frees of the *same
 /// struct* a no-op. Copying the struct and freeing both copies is invalid.
@@ -2959,7 +3128,7 @@ pub unsafe extern "C" fn jazz_native_relay_bytes_free(bytes: *mut JazzNativeRela
         bytes.len = 0;
         return;
     }
-    // SAFETY: only `jazz_native_relay_execute` creates this allocation, with
+    // SAFETY: the native C ABI creates this allocation with
     // exactly the recorded length and capacity. Reset before dropping so a
     // second call on this struct cannot free it again.
     let allocation = unsafe { Vec::from_raw_parts(bytes.data, bytes.len, bytes.len) };
@@ -3298,6 +3467,14 @@ impl NativeRelayClient {
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
     }
 
+    fn wait_for_pending_writes(
+        &self,
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.wait_for_pending_writes(id, tier))
+    }
     fn wait_for_foreground_transaction(
         &self,
         tx_id: [u8; 16],
@@ -4034,6 +4211,7 @@ pub fn bridge_native_relay_wire_once<T: WireTransport>(
 /// supplies the bearer only to the normal Edge WebSocket prelude and always
 /// uses the authenticated, non-SYSTEM connection mode.
 pub struct NativeRelaySocketWorker {
+    activation: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     cancelled: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
@@ -4089,6 +4267,27 @@ impl NativeRelaySocketWorker {
         config: NativeRelaySocketConfig,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self, RelayError> {
+        let worker = Self::prepare_with_connector(relay, config, connector)?;
+        worker.activate();
+        Ok(worker)
+    }
+
+    fn activate(&self) {
+        if let Some(start) = self
+            .activation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = start.send(());
+        }
+    }
+
+    fn prepare_with_connector(
+        relay: NativeRelay,
+        config: NativeRelaySocketConfig,
+        connector: Arc<dyn NativeTransportConnector>,
+    ) -> Result<Self, RelayError> {
         if config.peer_identity == jazz::ids::AuthorSubject::SYSTEM
             || config.auth.jwt_token.as_deref().is_none_or(str::is_empty)
             || config.auth.backend_secret.is_some()
@@ -4103,25 +4302,31 @@ impl NativeRelaySocketWorker {
         let wake = Arc::new(tokio::sync::Notify::new());
         let thread_cancelled = Arc::clone(&cancelled);
         let thread_wake = Arc::clone(&wake);
+        // Reserve all fallible resources before a caller replaces live state.
+        // The new worker cannot attach upstream until explicitly activated.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| RelayError::OwnerThread(error.to_string()))?;
+        let (activate, activation) = std::sync::mpsc::channel();
         let join = thread::Builder::new()
             .name("jazz-native-relay-socket".to_owned())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
-                    .build();
-                if let Ok(runtime) = runtime {
-                    runtime.block_on(run_native_relay_socket_worker(
-                        relay,
-                        config,
-                        connector,
-                        thread_cancelled,
-                        thread_wake,
-                    ));
+                if activation.recv().is_err() {
+                    return;
                 }
+                runtime.block_on(run_native_relay_socket_worker(
+                    relay,
+                    config,
+                    connector,
+                    thread_cancelled,
+                    thread_wake,
+                ));
             })
             .map_err(|error| RelayError::OwnerThread(error.to_string()))?;
         Ok(Self {
+            activation: Mutex::new(Some(activate)),
             cancelled,
             wake,
             join: Mutex::new(Some(join)),
@@ -4129,6 +4334,10 @@ impl NativeRelaySocketWorker {
     }
 
     pub fn cancel(&self) {
+        self.activation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         self.cancelled.store(true, Ordering::Release);
         self.wake.notify_waiters();
     }
@@ -4456,6 +4665,8 @@ type ForegroundSubscriptionOpen =
     Pin<Box<dyn Future<Output = Result<SubscriptionStream, RelayError>>>>;
 
 struct ConnectedClient {
+    author: jazz::ids::AuthorSubject,
+    refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
     db: Rc<Db<MemoryStorage>>,
@@ -4503,7 +4714,17 @@ impl ConnectedClient {
             .map_or(Ok(()), |error| Err(RelayError::Db(error.clone())))
     }
 
+    fn poll_claim_refresh(&mut self) {
+        if let (Some(claims), Some(served)) = (&self.refreshed_claims, &self._served)
+            && let Some(mut peer) = served.try_lock()
+        {
+            peer.update_authenticated_session_claims(claims.clone());
+            self.refreshed_claims = None;
+        }
+    }
+
     fn poll_admission(&mut self, waker: &Waker) {
+        self.poll_claim_refresh();
         let Some(mut admission) = self.admission.take() else {
             return;
         };
@@ -4524,6 +4745,7 @@ impl ConnectedClient {
                     },
                 ));
                 self._served = Some(served);
+                self.poll_claim_refresh();
             }
             Poll::Ready(Err(error)) => {
                 self.cancel_pending_work();
@@ -5094,6 +5316,23 @@ impl RelayWorker {
         }
     }
 
+    fn refresh_account_claims(
+        &mut self,
+        author: jazz::ids::AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        for client in self
+            .clients
+            .values_mut()
+            .filter(|client| client.author == author)
+        {
+            client.db.set_identity_claims(author, claims.clone());
+            client.refreshed_claims = Some(claims.clone());
+            client.poll_claim_refresh();
+        }
+        self.wake.wake_by_ref();
+    }
+
     fn attach_client(
         &mut self,
         identity: DbIdentity,
@@ -5120,6 +5359,7 @@ impl RelayWorker {
         // handoff; treating this Db as durable makes sibling subscriptions wait
         // for the relay's upstream authority instead of consuming local state.
         db.set_non_durable_client();
+        db.set_identity_claims(identity.author, claims.clone());
         if let Some(high_water) = tx_time_floor {
             block_on(db.reserve_minted_tx_time_after(high_water)).map_err(RelayError::Db)?;
         }
@@ -5143,6 +5383,8 @@ impl RelayWorker {
         self.clients.insert(
             id,
             ConnectedClient {
+                author: identity.author,
+                refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
                 mutations: foreground_mutations::MutationHandles::new(&db),
@@ -5935,6 +6177,28 @@ impl RelayWorker {
         Ok(public_id)
     }
 
+    fn wait_for_pending_writes(
+        &mut self,
+        client: u64,
+        tier: CoreDurabilityTier,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let foreground = Rc::clone(&self.foreground_client(client)?.db);
+        let persistent = Rc::clone(&self.persistent);
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            foreground
+                .wait_for_pending_writes(tier)
+                .await
+                .map_err(RelayError::Db)?;
+            persistent
+                .wait_for_pending_writes(tier)
+                .await
+                .map_err(RelayError::Db)?;
+            // Empty byte completion uses the existing pollable command result.
+            Ok(ForegroundOperationResult::Rows(Vec::new()))
+        });
+        self.start_foreground_operation(client, None, future)
+    }
+
     fn wait_for_core_transaction(
         &mut self,
         client: u64,
@@ -6534,6 +6798,15 @@ impl NativeRelayRegistry {
             stale.inner.shutdown()?;
             relays.remove(&config.scope);
         }
+        // Linked identities share an account's durable root, but never its
+        // live authorization scope. Keep the old owner exclusive until close
+        // has joined it, including when that owner has become terminal.
+        if relays
+            .values()
+            .any(|relay| relay.inner.sqlite_path == config.sqlite_path)
+        {
+            return Err(RelayError::StorageAlreadyOwned);
+        }
         let relay = NativeRelay::spawn(config.clone())?;
         relays.insert(config.scope, relay.clone());
         Ok(relay)
@@ -6595,6 +6868,10 @@ pub enum RelayError {
     UnknownClient(u64),
     #[error("a native relay scope is already open with a different storage path or schema")]
     ScopeConfigurationMismatch,
+    #[error(
+        "native account storage is still owned by another live scope; close it before switching identities"
+    )]
+    StorageAlreadyOwned,
     #[error("native relay UI client id space exhausted")]
     ClientIdExhausted,
     #[error("SQLite storage failed: {0}")]
@@ -6826,6 +7103,38 @@ mod tests {
     }
 
     #[test]
+    fn canceled_private_session_cannot_attach_after_account_handoff() {
+        // This tests the private pre-context capability boundary: there is no
+        // public database yet through which cancellation could be observed.
+        use base64::Engine;
+        let root = tempfile::tempdir().unwrap();
+        let mut host = NativeRelayHost::default();
+        let setup = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "https://edge.example".into(),
+                app_id: "cancel-account-setup".into(),
+                jwt: format!(
+                    "x.{}.x",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(br#"{"iss":"https://issuer.example","sub":"alice"}"#)
+                ),
+                storage_root: root.path().display().to_string(),
+            })
+            .unwrap();
+        assert!(host.revoke_scope(setup).unwrap());
+        assert!(!host.revoke_scope(setup).unwrap(), "release is idempotent");
+        assert_eq!(
+            host.attach_canonical_schema(
+                setup,
+                &serde_json::to_string(schema().public_schema()).unwrap()
+            ),
+            Err(JazzNativeRelayStatus::InvalidHandle)
+        );
+        assert!(host.pending_private_sessions.is_empty());
+        assert!(host.admitted_scopes.is_empty());
+    }
+
+    #[test]
     fn private_session_setup_partitions_before_credential_free_schema_attachment() {
         use base64::Engine;
         let root = tempfile::tempdir().unwrap();
@@ -7016,6 +7325,7 @@ mod tests {
     /// needs to prove process close/reopen, but production bindings must not
     /// expose a generic host-reset or SQLite-teardown operation to JavaScript.
     struct NativeHostAbiFixture {
+        accounts: RefCell<BTreeMap<String, jazz::account_registry::AccountId>>,
         host: *mut JazzNativeRelayHost,
         lease: *mut JazzNativeRelayHostLease,
     }
@@ -7026,7 +7336,11 @@ mod tests {
             assert!(!host.is_null(), "native host allocation succeeds");
             let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
             assert!(!lease.is_null(), "native host lease succeeds");
-            Self { host, lease }
+            Self {
+                host,
+                lease,
+                accounts: RefCell::new(BTreeMap::new()),
+            }
         }
 
         fn admit(
@@ -7080,7 +7394,7 @@ mod tests {
         /// Exercise the private platform session handoff used by Android and
         /// iOS. Unlike `admit`, neither the endpoint nor the bearer crosses
         /// the generic relay command ABI.
-        fn begin_private_session(
+        async fn begin_account_session(
             &self,
             server_url: &str,
             app_id: &str,
@@ -7088,20 +7402,50 @@ mod tests {
             storage_root: &std::path::Path,
             schema: &JazzSchema,
         ) -> [u8; 32] {
+            let registry = format!(
+                "{}/apps/{app_id}/accounts",
+                server_url.trim_end_matches('/')
+            );
+            let (issuer, subject) = jazz::tools::unverified_jwt_scope_subject(bearer).unwrap();
+            let key = serde_json::to_string(&(&registry, &issuer, &subject)).unwrap();
+            // Retain the enrolled handle across offline reopening; authentication
+            // and registration happen before context construction, not inside it.
+            let retained = self.accounts.borrow().get(&key).copied();
+            let account = if let Some(account) = retained {
+                account
+            } else {
+                let response = reqwest::Client::new()
+                    .post(format!("{registry}/register"))
+                    .bearer_auth(bearer)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(
+                    response.status().is_success(),
+                    "account registration: {}",
+                    response.status()
+                );
+                let response: serde_json::Value = response.json().await.unwrap();
+                let account = serde_json::from_value(response["account"].clone()).unwrap();
+                self.accounts.borrow_mut().insert(key, account);
+                account
+            };
             let request = serde_json::json!({
-                "server_url": server_url,
-                "app_id": app_id,
-                "jwt": bearer,
-                "storage_root": storage_root.display().to_string(),
+                "server_url": server_url, "registry": registry,
+                "app_id": app_id, "env": "test", "account_id": account,
+                "issuer": issuer, "subject": subject, "jwt": bearer,
             });
+            let root = storage_root.to_str().unwrap().as_bytes();
             let request = serde_json::to_vec(&request).expect("private session JSON encodes");
             let mut setup = JazzNativeRelayBytes::EMPTY;
             assert_eq!(
                 unsafe {
-                    jazz_native_relay_host_begin_private_session_json(
-                        self.host,
+                    jazz_native_relay_host_lease_begin_account_session_json(
+                        self.lease,
                         request.as_ptr(),
                         request.len(),
+                        root.as_ptr(),
+                        root.len(),
                         &mut setup,
                     )
                 },
@@ -7114,8 +7458,8 @@ mod tests {
             let mut admitted = JazzNativeRelayBytes::EMPTY;
             assert_eq!(
                 unsafe {
-                    jazz_native_relay_host_attach_canonical_schema_json(
-                        self.host,
+                    jazz_native_relay_host_lease_attach_account_schema_json(
+                        self.lease,
                         setup.as_ptr(),
                         setup.len(),
                         schema.as_ptr(),
@@ -7410,13 +7754,15 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
-        let admitted = fixture.begin_private_session(
-            &server.base_url(),
-            &server.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let admitted = fixture
+            .begin_account_session(
+                &server.base_url(),
+                &server.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
         let foreground = fixture.open_foreground(&admitted);
         let client = unsafe { &*fixture.host }
             .inner
@@ -7505,13 +7851,15 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
-        let admitted = fixture.begin_private_session(
-            &server.base_url(),
-            &server.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let admitted = fixture
+            .begin_account_session(
+                &server.base_url(),
+                &server.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
         let foreground = fixture.open_foreground(&admitted);
         let client = unsafe { &*fixture.host }
             .inner
@@ -7737,7 +8085,21 @@ mod tests {
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
             .await;
+        let storage = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
         let mut bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
+        let initial = fixture
+            .begin_account_session(
+                &edge.base_url(),
+                &edge.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
+        fixture.revoke_private_session(&initial);
+        // Retain the enrolled account, then corrupt only its transport proof.
+        // The native socket must reject it even though registration succeeded.
         let signature = bearer.rfind('.').unwrap() + 1;
         let replacement = if &bearer[signature..signature + 1] == "A" {
             "B"
@@ -7745,15 +8107,15 @@ mod tests {
             "A"
         };
         bearer.replace_range(signature..signature + 1, replacement);
-        let storage = tempfile::tempdir().unwrap();
-        let fixture = NativeHostAbiFixture::new();
-        let admitted = fixture.begin_private_session(
-            &edge.base_url(),
-            &edge.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let admitted = fixture
+            .begin_account_session(
+                &edge.base_url(),
+                &edge.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
         let foreground = fixture.open_foreground(&admitted);
         jazz_testkit::wait_for(
             Duration::from_secs(5),
@@ -7808,13 +8170,15 @@ mod tests {
         let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
         let storage = tempfile::tempdir().expect("private relay storage root");
         let fixture = NativeHostAbiFixture::new();
-        let admitted = fixture.begin_private_session(
-            &edge.base_url(),
-            &core.app_id().to_string(),
-            &bearer,
-            storage.path(),
-            &schema,
-        );
+        let admitted = fixture
+            .begin_account_session(
+                &edge.base_url(),
+                &core.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
         let foreground = fixture.open_foreground(&admitted);
 
         jazz_testkit::wait_for(
@@ -7869,8 +8233,9 @@ mod tests {
             );
         }
 
-        let reopened =
-            fixture.begin_private_session(&endpoint, &app_id, &bearer, storage.path(), &schema);
+        let reopened = fixture
+            .begin_account_session(&endpoint, &app_id, &bearer, storage.path(), &schema)
+            .await;
         let reopened_foreground = fixture.open_foreground(&reopened);
         if !offline {
             jazz_testkit::wait_for(
@@ -8281,6 +8646,214 @@ mod tests {
             fixture.tick_status(b_after_a_revoke),
             JazzNativeRelayStatus::Ok,
             "B remains admissible after A revocation"
+        );
+    }
+
+    #[test]
+    fn c_abi_sibling_commit_wakes_retained_subscription_before_its_delta_drains() {
+        // This is deliberately an internal C-ABI receipt. The public Db
+        // integration suites establish subscription semantics; only the
+        // native host owns opaque foreground handles and raw callback
+        // registrations. It mirrors the installed A/B byte-command sequence
+        // and proves that B's post-commit callback arrives before B drains
+        // the committed delta.
+        let directory = tempfile::tempdir().unwrap();
+        // Raw callback contexts must outlive the host, including on assertion failure.
+        let a_wake = Arc::new(QueuedNativeWake::active());
+        let b_wake = Arc::new(QueuedNativeWake::active());
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("same-runtime-wake.sqlite"),
+            "same-runtime-wake",
+            &permissive_schema(),
+            0xc1,
+        );
+        let a = fixture.open_foreground(&capability);
+        let b = fixture.open_foreground(&capability);
+        assert_ne!(a, b, "each alias has an independent opaque C-ABI handle");
+
+        for (foreground, wake) in [(a, &a_wake), (b, &b_wake)] {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        fixture.lease,
+                        foreground,
+                        Some(queue_native_wake),
+                        Arc::as_ptr(wake) as *mut c_void,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "each installed alias registers its own native wake callback"
+            );
+        }
+
+        let ForegroundDbCommandResponse::PreparedQuery { query } = fixture.execute(
+            b,
+            ForegroundDbCommandRequest::PrepareQuery {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                kind: ForegroundQueryKind::Query,
+            },
+        ) else {
+            panic!("B prepares the retained subscription query");
+        };
+        let ForegroundDbCommandResponse::Subscribed { subscription } = fixture.execute(
+            b,
+            ForegroundDbCommandRequest::Subscribe {
+                query,
+                options_json: "{}".into(),
+            },
+        ) else {
+            panic!("B opens the retained subscription");
+        };
+
+        let mut initial_reset_seen = false;
+        for _ in 0..96 {
+            match fixture.execute(
+                b,
+                ForegroundDbCommandRequest::DrainSubscription { subscription },
+            ) {
+                ForegroundDbCommandResponse::SubscriptionEvents { events } => {
+                    initial_reset_seen |= events.iter().any(|event| {
+                        matches!(
+                            event,
+                            ForegroundSubscriptionEvent::Delta { reset: true, .. }
+                                | ForegroundSubscriptionEvent::StructuredDelta { reset: true, .. }
+                        )
+                    });
+                }
+                ForegroundDbCommandResponse::Pending { operation } => {
+                    fixture.tick(b);
+                    let response =
+                        fixture.execute(b, ForegroundDbCommandRequest::Poll { operation });
+                    if let ForegroundDbCommandResponse::SubscriptionEvents { events } = response {
+                        initial_reset_seen |= events.iter().any(|event| {
+                            matches!(
+                                event,
+                                ForegroundSubscriptionEvent::Delta { reset: true, .. }
+                                    | ForegroundSubscriptionEvent::StructuredDelta {
+                                        reset: true,
+                                        ..
+                                    }
+                            )
+                        });
+                    }
+                }
+                response => panic!("initial B subscription drain failed: {response:?}"),
+            }
+            if initial_reset_seen {
+                break;
+            }
+            fixture.tick(b);
+        }
+        assert!(
+            initial_reset_seen,
+            "B observes and drains its initial reset before A writes"
+        );
+        a_wake.queued.lock().unwrap().clear();
+        b_wake.queued.lock().unwrap().clear();
+
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+            a,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("A opens the byte-command transaction");
+        };
+        let row_id = [0xd1; 16];
+        assert_eq!(
+            fixture.execute(
+                a,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".into(),
+                    cells: encoded_title_cells("wake across opaque aliases"),
+                    row_id: Some(row_id),
+                },
+            ),
+            ForegroundDbCommandResponse::Inserted { row_id }
+        );
+        assert!(matches!(
+            fixture.execute(
+                a,
+                ForegroundDbCommandRequest::CommitTransaction { transaction },
+            ),
+            ForegroundDbCommandResponse::TransactionCommitted { .. }
+        ));
+
+        let mut b_woke = false;
+        for _ in 0..96 {
+            fixture.tick(a);
+            fixture.tick(b);
+            if b_wake.queued() != 0 {
+                b_woke = true;
+                break;
+            }
+        }
+        assert!(
+            b_woke,
+            "A's committed byte transaction schedules B's native callback before B drains"
+        );
+        assert!(
+            b_wake
+                .queued
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(foreground, _, _)| *foreground == b),
+            "the callback preserves B's exact opaque foreground handle"
+        );
+
+        let mut observed_row_delta = false;
+        for _ in 0..96 {
+            match fixture.execute(
+                b,
+                ForegroundDbCommandRequest::DrainSubscription { subscription },
+            ) {
+                ForegroundDbCommandResponse::SubscriptionEvents { events } => {
+                    observed_row_delta |= events.iter().any(|event| match event {
+                        ForegroundSubscriptionEvent::Delta { reset, delta, .. }
+                        | ForegroundSubscriptionEvent::StructuredDelta { reset, delta, .. } => {
+                            !reset
+                                && delta
+                                    .windows(row_id.len())
+                                    .any(|candidate| candidate == row_id)
+                        }
+                        ForegroundSubscriptionEvent::Rejected { .. }
+                        | ForegroundSubscriptionEvent::Closed => false,
+                    });
+                }
+                ForegroundDbCommandResponse::Pending { operation } => {
+                    fixture.tick(b);
+                    let response =
+                        fixture.execute(b, ForegroundDbCommandRequest::Poll { operation });
+                    if let ForegroundDbCommandResponse::SubscriptionEvents { events } = response {
+                        observed_row_delta |= events.iter().any(|event| match event {
+                            ForegroundSubscriptionEvent::Delta { reset, delta, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta {
+                                reset, delta, ..
+                            } => {
+                                !reset
+                                    && delta
+                                        .windows(row_id.len())
+                                        .any(|candidate| candidate == row_id)
+                            }
+                            ForegroundSubscriptionEvent::Rejected { .. }
+                            | ForegroundSubscriptionEvent::Closed => false,
+                        });
+                    }
+                }
+                response => panic!("post-commit B subscription drain failed: {response:?}"),
+            }
+            if observed_row_delta {
+                break;
+            }
+            fixture.tick(a);
+            fixture.tick(b);
+        }
+        assert!(
+            observed_row_delta,
+            "B's retained subscription materializes A's committed row through the ordinary relay"
         );
     }
 
@@ -11178,6 +11751,37 @@ mod tests {
     }
 
     #[test]
+    fn linked_identity_storage_handoff_requires_previous_owner_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("account.sqlite");
+        let registry = NativeRelayRegistry::default();
+        let mut alice = config(path.clone(), Some("alice"));
+        let mut bob = config(path, Some("bob"));
+        let account = jazz::account_registry::AccountId(
+            "07070707-0707-0707-0707-070707070707".parse().unwrap(),
+        );
+        alice.identity.author = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(account);
+        bob.identity.author = AuthorSubject::authenticated("https://issuer.example", "bob")
+            .unwrap()
+            .with_account(account);
+        let old = registry.open(alice.clone()).unwrap();
+        assert!(matches!(
+            registry.open(bob.clone()),
+            Err(RelayError::StorageAlreadyOwned)
+        ));
+        registry.close(&alice.scope).unwrap();
+        assert!(
+            old.pump().is_err(),
+            "retained old aliases cannot survive handoff"
+        );
+        let next = registry.open(bob.clone()).unwrap();
+        assert!(next.pump().is_ok());
+        registry.close(&bob.scope).unwrap();
+    }
+
+    #[test]
     fn relay_shares_one_scope_and_forwards_two_ui_client_writes_upstream() {
         let directory = tempfile::tempdir().unwrap();
         let registry = NativeRelayRegistry::default();
@@ -11407,6 +12011,108 @@ mod tests {
         assert!(
             observed,
             "the persistent relay must route a UI write to a sibling UI subscription"
+        );
+    }
+
+    #[test]
+    fn retained_foreground_subscription_wakes_after_its_initial_reset_and_sibling_commit() {
+        // This is an internal native-host receipt: public rows cannot establish
+        // that the owner scheduled B's platform callback rather than relying on
+        // the test's manual relay pumps. It covers the installed JSI sequence
+        // where B drains its initial reset, then A commits through a foreground
+        // transaction while B's stream remains retained.
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let mut relay_config = config(
+            directory.path().join("wake-after-reset.sqlite"),
+            Some("alice"),
+        );
+        relay_config.schema = permissive_schema();
+        let relay = registry.open(relay_config).unwrap();
+        let writer = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xb3; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb4; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xc3; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb4; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader_wake = Arc::new(QueuedNativeWake::active());
+        reader
+            .set_foreground_wake_callback(
+                2,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&reader_wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+
+        let prepared = reader
+            .prepare_foreground_query(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ForegroundQueryKind::Query,
+            )
+            .unwrap();
+        let subscription = reader
+            .subscribe_foreground_query_with_options(prepared, ReadOpts::default())
+            .unwrap();
+        for _ in 0..16 {
+            relay.pump().unwrap();
+        }
+        let initial = reader.drain_foreground_subscription(subscription).unwrap();
+        assert!(
+            matches!(
+                initial,
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(_))
+            ),
+            "the initial reset drains without retiring the retained subscription"
+        );
+        reader_wake.queued.lock().unwrap().clear();
+
+        let row = RowUuid::from_bytes([0xd3; 16]);
+        let transaction = writer
+            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+            .unwrap();
+        assert_eq!(
+            writer
+                .insert_foreground_transaction(
+                    transaction,
+                    "todos".into(),
+                    encoded_title_cells("wake after reset"),
+                    Some(*row.as_bytes()),
+                )
+                .unwrap(),
+            row
+        );
+        writer.commit_foreground_transaction(transaction).unwrap();
+
+        for _ in 0..32 {
+            relay.pump().unwrap();
+            if reader_wake.wait_for_queued(1) {
+                break;
+            }
+        }
+        assert!(
+            reader_wake.wait_for_queued(1),
+            "the retained reader subscription must schedule a post-commit native wake"
+        );
+        let wakes = reader_wake.queued.lock().unwrap();
+        assert!(
+            wakes.iter().any(|(foreground, _, _)| *foreground == 2),
+            "the post-commit wake targets the retained reader foreground"
         );
     }
 
@@ -12506,6 +13212,37 @@ mod tests {
     }
 
     #[test]
+    fn clean_foreground_handoff_does_not_repeat_synchronous_transaction_ids() {
+        // The binding C ABI reserves transaction identities synchronously,
+        // before taking the node lock. Exercise that actual path across the
+        // host's clean node-lease handoff, rather than only reading its HLC.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("handoff-reservation.sqlite"),
+            "handoff-reservation",
+            &permissive_schema(),
+            0xc1,
+        );
+        let first = fixture.open_foreground(&capability);
+        let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
+        assert!(matches!(
+            fixture.execute(first, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        ));
+        let second = fixture.open_foreground(&capability);
+        let second_tx = fixture.insert_todo(second, [0xd2; 16], "second lease holder");
+        assert_ne!(
+            first_tx, second_tx,
+            "a cleanly reused foreground node must reserve a fresh public transaction identity"
+        );
+        assert!(matches!(
+            fixture.execute(second, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        ));
+    }
+
+    #[test]
     fn clean_foreground_handoff_reuses_one_node_only_after_advancing_its_hlc() {
         // This is intentionally an internal host-lifecycle receipt. The
         // user-visible write protocol is exercised by the Db integration
@@ -13281,6 +14018,11 @@ mod tests {
     #[test]
     fn foreground_command_c_abi_uses_one_binary_runtime_vocabulary() {
         let directory = tempfile::tempdir().unwrap();
+        // Internal ABI test: public row APIs cannot expose native metadata
+        // framing or prove the admitted account survives the capability boundary.
+        let author = AuthorSubject::for_test_bytes([0xa2; 16]).with_account(
+            jazz::account_registry::AccountId(NodeUuid::from_bytes([7; 16]).0),
+        );
         let host = jazz_native_relay_host_new();
         let capability = unsafe {
             (*host)
@@ -13301,7 +14043,7 @@ mod tests {
                     schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
                     identity: DbIdentity {
                         node: NodeUuid::from_bytes([0xa1; 16]),
-                        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                        author,
                     },
                     claims: BTreeMap::new(),
                 })
@@ -13337,6 +14079,25 @@ mod tests {
             unsafe { jazz_native_relay_bytes_free(&mut response) };
             (status, bytes)
         };
+        let (status, response) = execute(ForegroundDbCommandRequest::NativeSessionMetadata);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        let (issuer, user_id) = author.principal_parts();
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::NativeSessionMetadata {
+                node: unsafe {
+                    (*host).inner.lock().unwrap().foregrounds[&foreground]
+                        .lease
+                        .node
+                        .0
+                        .into_bytes()
+                },
+                registry_authority: "foreground-command-abi".into(),
+                account_id: Some([7; 16]),
+                issuer,
+                user_id,
+            }
+        );
         let (status, response) = execute(ForegroundDbCommandRequest::Probe);
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         assert_eq!(
@@ -13885,6 +14646,12 @@ mod tests {
         let cases = [
             (ForegroundDbCommandRequest::NativeSessionMetadata, vec![23]),
             (
+                ForegroundDbCommandRequest::WaitForPendingWrites {
+                    tier: "core".into(),
+                },
+                vec![34, 4, 99, 111, 114, 101],
+            ),
+            (
                 ForegroundDbCommandRequest::WriteState { tx_id: [7; 16] },
                 [vec![24], vec![7; 16]].concat(),
             ),
@@ -13963,10 +14730,30 @@ mod tests {
         let responses = [
             (
                 ForegroundDbCommandResponse::NativeSessionMetadata {
+                    node: [9; 16],
+                    registry_authority: "r".into(),
+                    account_id: None,
                     issuer: "i".into(),
                     user_id: "u".into(),
                 },
-                vec![18, 1, 105, 1, 117],
+                [vec![18], vec![9; 16], vec![1, 114, 0, 1, 105, 1, 117]].concat(),
+            ),
+            (
+                ForegroundDbCommandResponse::NativeSessionMetadata {
+                    node: [9; 16],
+                    registry_authority: "r".into(),
+                    account_id: Some([7; 16]),
+                    issuer: "i".into(),
+                    user_id: "u".into(),
+                },
+                [
+                    vec![18],
+                    vec![9; 16],
+                    vec![1, 114, 1],
+                    vec![7; 16],
+                    vec![1, 105, 1, 117],
+                ]
+                .concat(),
             ),
             (
                 ForegroundDbCommandResponse::WriteState {

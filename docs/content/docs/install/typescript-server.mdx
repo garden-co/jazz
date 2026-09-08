@@ -46,7 +46,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 ### Add permissions
 
-The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
+A table with no [permission](/docs/auth/permissions) declarations is open to reads and writes. Once a table declares any policy, omitted operations are denied. For this quickstart, explicitly allow all four operations:
 
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";
@@ -79,13 +79,13 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
-- `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
+- `serverUrl` identifies the required reachable core; `initial: { backendSecret }` admits the backend account before opening its native client.
+- `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
 
-Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
-For server-owned work, use `context.asBackend()`. For embedded or local-only setups without a
-server, `context.db()` gives you an unscoped local `Db`. [Server Setup](/docs/getting-started/server-setup)
+Each route handler awaits `client.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
+For server-owned work, use the ready snapshot's `client.db`. Backend admission requires the core
+even with a memory driver; keep the secret server-side and provide it through `initial` or `session.becomeBackend(...)`. [Server Setup](/docs/getting-started/server-setup)
 covers those patterns in more detail.
 
 <Accordions type="single">

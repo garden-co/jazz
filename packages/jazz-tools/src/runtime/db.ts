@@ -1,3 +1,9 @@
+import { Utf8Decoder } from "./utf8.js";
+import { runtimeRandomBytes } from "./runtime-entropy.js";
+import type { AccountHandle } from "../accounts/state.js";
+import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
+import { accountToken, accountRegistry } from "../accounts/enrollment.js";
+import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
  * High-level database class for typed queries and mutations.
  *
@@ -84,6 +90,10 @@ type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
  * Configuration for creating a Db instance.
  */
 export type DbConfig = {
+  /** @internal Assigned by validated account-handle context creation. */
+  accountId?: string;
+  /** @internal Handle-derived enrollment authority, independent of active transport. */
+  accountRegistryAuthority?: string;
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
@@ -868,7 +878,7 @@ function applyPartialValueSelections<T>(
       ) {
         throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
       }
-      projected[column] = new TextDecoder("utf-8", { fatal: true }).decode(
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(
         bytes.slice(selection.fromUtf8, selection.toUtf8),
       );
       continue;
@@ -1483,6 +1493,11 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * });
  * ```
  */
+export interface ShutdownOptions {
+  /** Wait for pending writes to reach the core before releasing resources. */
+  waitForSync?: boolean;
+}
+
 export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
@@ -1513,6 +1528,7 @@ export class Db {
     runtimeSource: AnyRuntimeSource,
     authStateOptions?: AuthStateStoreOptions,
   ) {
+    assertAccountConfig(config);
     this.config = config;
     this.runtimeSource = runtimeSource;
     const sessionInput = {
@@ -1700,8 +1716,12 @@ export class Db {
     }
   }
 
-  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
-    this.runtimeSource.assertAuthUpdateAllowed();
+  protected applyAuthUpdate(
+    token: string | null,
+    trustedReservedSession?: Session,
+    nativeAccountRefresh = false,
+  ): boolean {
+    if (!nativeAccountRefresh) this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1714,7 +1734,11 @@ export class Db {
     // Browser persistent roots are principal-bound. Let the connection manager
     // reject a token-carried incompatible switch while config, local auth state
     // and worker claims still describe the preceding principal.
-    if (tokenChanged && this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) {
+    if (
+      !nativeAccountRefresh &&
+      tokenChanged &&
+      this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)
+    ) {
       this.connection.updateAuth({ jwtToken, trustedReservedSession });
     }
 
@@ -1731,7 +1755,8 @@ export class Db {
 
     // A same-token package-private session refresh cannot cross the public
     // principal boundary above; preserve the old no-op/refresh behavior.
-    if (!tokenChanged) this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    if (!nativeAccountRefresh && !tokenChanged)
+      this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1851,6 +1876,36 @@ export class Db {
     }
   }
 
+  /** @internal Refresh only through the immutable handle that owns this context. */
+  async refreshAccountAuth(account: AccountHandle): Promise<string> {
+    assertAccountConfig(this.config);
+    const current = getDbInternalSession(this);
+    if (
+      account.id !== this.config.accountId ||
+      accountRegistry(account) !== this.config.accountRegistryAuthority ||
+      account.identity.issuer !== current?.issuer ||
+      account.identity.subject !== current?.user_id
+    )
+      throw new Error("Account context mismatch");
+    try {
+      const token = await accountToken(account, accountRegistry(account));
+      if (this.shutdownAbort.signal.aborted) throw new Error("Account context closed");
+      const reserved =
+        account.identity.issuer === "urn:jazz:local-first"
+          ? internalSessionFromVerifiedReservedJwtPayload(
+              parseJwtPayload(token) ?? {},
+              "local-first",
+            )
+          : undefined;
+      const nativeRefresh = this.runtimeSource.refreshAccountToken(token);
+      this.applyAuthUpdate(token, reserved ?? undefined, nativeRefresh);
+      return token;
+    } catch (error) {
+      this.markUnauthenticated("invalid");
+      throw error;
+    }
+  }
+
   updateAuthToken(jwtToken: string | null): void {
     this.applyAuthUpdate(jwtToken);
   }
@@ -1936,7 +1991,9 @@ export class Db {
    * {@link disconnect}.
    */
   async reconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    // Sync recovery is safe before teardown starts; it must remain available
+    // while a graceful transition waits for previously committed writes.
+    if ((this.isShuttingDown || this.shutdownPromise) && !this.cancelSyncShutdown) {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -2461,7 +2518,10 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
-    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(
+      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
+      queryOptions,
+    ).tier;
     await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
@@ -2898,20 +2958,71 @@ export class Db {
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    this.shutdownPromise = this.runShutdown();
-    return this.shutdownPromise;
+    this.shutdownPromise = this.runShutdown(options);
+    try {
+      await this.shutdownPromise;
+    } catch (error) {
+      if (!this.isShuttingDown) this.shutdownPromise = null;
+      throw error;
+    }
   }
 
-  private assertOpen(): void {
+  private cancelSyncShutdown: (() => void) | undefined;
+
+  /** @internal Credential invalidation must interrupt a graceful sync wait. */
+  abortGracefulShutdown(): void {
+    this.cancelSyncShutdown?.();
+  }
+
+  protected assertOpen(): void {
     if (this.isShuttingDown || this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
   }
 
-  private async runShutdown(): Promise<void> {
+  private readonly shutdownListeners = new Set<() => void>();
+
+  /** @internal Dispose account refresh and invalidation observers with the context. */
+  onShutdown(listener: () => void): () => void {
+    if (this.isShuttingDown) listener();
+    else this.shutdownListeners.add(listener);
+    return () => this.shutdownListeners.delete(listener);
+  }
+
+  private async runShutdown(options: ShutdownOptions): Promise<void> {
     this.isShuttingDown = true;
+    if (options.waitForSync) {
+      const syncAbort = new AbortController();
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        this.cancelSyncShutdown = () => {
+          syncAbort.abort();
+          reject(new Error("Graceful shutdown cancelled"));
+        };
+      });
+      try {
+        await Promise.race([
+          this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
+            this.connection.waitForPendingWrites(),
+          cancelled,
+        ]);
+      } catch (error) {
+        syncAbort.abort();
+        this.isShuttingDown = false;
+        throw new GracefulShutdownSyncError(error);
+      } finally {
+        this.cancelSyncShutdown = undefined;
+      }
+    }
+    for (const listener of this.shutdownListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Context cleanup failed", error);
+      }
+    }
+    this.shutdownListeners.clear();
     this.shutdownAbort.abort();
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
@@ -2920,7 +3031,11 @@ export class Db {
     this.clearActiveQuerySubscriptionTraces();
     this.mutationErrorListeners.clear();
 
-    await this.connection.shutdown();
+    try {
+      await this.connection.shutdown();
+    } finally {
+      await this.runtimeSource.shutdown();
+    }
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {
@@ -2943,7 +3058,10 @@ export class Db {
       return null;
     }
 
-    const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
+    const resolvedOptions = resolveEffectiveQueryExecutionOptions(
+      { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
+      options,
+    );
     // Inspector-only reads must not recursively appear in the inspector's
     // own subscription list. Public local-first still propagates and is listed.
     if (resolvedOptions.propagation === "local-only") return null;
@@ -3011,12 +3129,10 @@ export class Db {
 /**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
- * Uses `globalThis.crypto.getRandomValues`, which is available in all
- * supported environments (browser, Node ≥15, React Native, edge workers).
+ * Uses Web Crypto or the installed native host's OS entropy.
  */
 function generateEphemeralSeedBase64Url(): string {
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
+  const bytes = runtimeRandomBytes(32);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -3059,6 +3175,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
+  assertAccountConfig(config);
   assertNoClientBackendSecret(config);
   if (config.secret && config.cookieSession) {
     throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
@@ -3076,6 +3193,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   const parsedLocalFirstSeed = config.secret ? authSecretSeedForMinting(config.secret) : null;
 
   let resolvedConfig: DbConfig = { ...config };
+  setTrustedReservedSession(resolvedConfig, getTrustedReservedSession(config));
   await runtimeSource.load(config);
   const {
     secret: _secret,
@@ -3116,6 +3234,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
+  copyAccountConfigAdmission(config, resolvedConfig);
   runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

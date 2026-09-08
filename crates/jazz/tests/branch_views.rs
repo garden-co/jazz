@@ -74,7 +74,11 @@ fn branch_owner_policy() -> PolicyExpr {
             PolicyExpr::Cmp {
                 column: "owner".to_owned(),
                 op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+                value: PolicyValue::SessionRef(vec![
+                    "user".to_owned(),
+                    "identity".to_owned(),
+                    "subject".to_owned(),
+                ]),
             },
         ])),
     }
@@ -1045,10 +1049,7 @@ fn branch_column_reference_policy_controls_effective_reads() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(owner.canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::String(owner.principal_parts().1)),
         ]),
         jazz::db::InsertOptions {
             row_id: Some(branch),
@@ -1086,7 +1087,10 @@ fn branch_column_reference_policy_controls_effective_reads() {
         .prepare_query(&Query::from("todos").join_via_row_id(
             "branches",
             "branch_id",
-            [eq(col("owner"), jazz::query::lit(owner.canonical()))],
+            [eq(
+                col("owner"),
+                jazz::query::lit(owner.principal_parts().1),
+            )],
         ))
         .unwrap();
     assert_eq!(
@@ -1174,7 +1178,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
                 ("name".to_owned(), Value::String("branch".to_owned())),
                 (
                     "owner".to_owned(),
-                    Value::String(before.canonical().to_owned()),
+                    Value::String(before.principal_parts().1),
                 ),
             ]),
             jazz::db::InsertOptions {
@@ -1208,10 +1212,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     db.update(
         "branches",
         head_branch,
-        BTreeMap::from([(
-            "owner".to_owned(),
-            Value::String(after.canonical().to_owned()),
-        )]),
+        BTreeMap::from([("owner".to_owned(), Value::String(after.principal_parts().1))]),
         jazz::db::UpdateOptions {
             target: jazz::db::WriteTarget::BranchView {
                 head: base.clone(),
@@ -1239,7 +1240,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .find(|table| table.name == "branches")
         .unwrap();
     assert!(branch_rows.iter().all(|row| {
-        row.cell(branch_table, "owner") == Some(Value::String(before.canonical().to_owned()))
+        row.cell(branch_table, "owner") == Some(Value::String(before.principal_parts().1))
             && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
@@ -1283,10 +1284,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(owner.canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::String(owner.principal_parts().1)),
         ]),
         jazz::db::InsertOptions {
             row_id: Some(branch),
@@ -1324,7 +1322,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
         branch,
         BTreeMap::from([(
             "owner".to_owned(),
-            Value::String(outsider.canonical().to_owned()),
+            Value::String(outsider.principal_parts().1),
         )]),
         Default::default(),
     )
@@ -1338,10 +1336,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([(
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        )]),
+        BTreeMap::from([("owner".to_owned(), Value::String(owner.principal_parts().1))]),
         Default::default(),
     )
     .unwrap();

@@ -1,3 +1,4 @@
+import type { RowAuthor } from "../magic-columns.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -76,7 +77,7 @@ type PolicyTodo = {
 };
 
 type PolicyTodoWithProvenance = PolicyTodo & {
-  $createdBy: string;
+  $createdBy: RowAuthor;
 };
 
 type PolicyTodoInit = {
@@ -763,11 +764,21 @@ describe("NAPI integration", () => {
       const aliceDb = context.forSession({
         issuer: "https://issuer.example",
         user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
         claims: { role: "editor", team: "alpha" },
         authMode: "external",
       });
-      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
-      const systemAuthor = JSON.stringify(["urn:jazz:system", "system"]);
+      const aliceAuthor = {
+        account: "00000000-0000-4000-8000-000000000001",
+        identity: { issuer: "https://issuer.example", subject: "alice" },
+      };
+      const systemAuthor = {
+        account: "00000000-0000-0000-0000-000000000000",
+        identity: {
+          issuer: "urn:jazz:system",
+          subject: expect.stringMatching(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/),
+        },
+      };
 
       const backendCreatedTodo = await withTimeout(
         backendDb
@@ -775,7 +786,7 @@ describe("NAPI integration", () => {
             title: "backend-system-provenance",
             done: false,
             description: "created via asBackend",
-            owner_id: "backend-owner",
+            owner_id: "00000000-0000-4000-8000-000000000003",
           })
           .wait({ tier: "edge" }),
         10_000,
@@ -788,7 +799,7 @@ describe("NAPI integration", () => {
             title: "session-created-item",
             done: false,
             description: "created via forSession",
-            owner_id: aliceAuthor,
+            owner_id: aliceAuthor.account,
           })
           .wait({ tier: "edge" }),
         10_000,
@@ -817,7 +828,6 @@ describe("NAPI integration", () => {
             "session provenance read timed out",
           );
           expect(sessionRow).toMatchObject({ id: createdTodo.id, $createdBy: aliceAuthor });
-          expect(sessionRow?.$createdBy).not.toBe(systemAuthor);
         },
         { timeout: 20_000 },
       );
@@ -836,7 +846,7 @@ describe("NAPI integration", () => {
             id: createdTodo.id,
             title: "session-created-item",
             done: false,
-            owner_id: aliceAuthor,
+            owner_id: aliceAuthor.account,
           });
         },
         { timeout: 20_000 },
@@ -848,7 +858,7 @@ describe("NAPI integration", () => {
             title: "session-policy-denied",
             done: false,
             description: "",
-            owner_id: JSON.stringify(["https://issuer.example", "bob"]),
+            owner_id: "00000000-0000-4000-8000-000000000002",
           })
           .wait({ tier: "edge" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -956,7 +966,7 @@ describe("NAPI integration", () => {
             title: "global-wait-item",
             done: false,
             description: "global wait repro",
-            owner_id: "backend",
+            owner_id: "00000000-0000-4000-8000-000000000003",
           })
           .wait({ tier: "global" }),
         15_000,
@@ -966,7 +976,7 @@ describe("NAPI integration", () => {
       expect(createdTodo).toMatchObject({
         title: "global-wait-item",
         done: false,
-        owner_id: "backend",
+        owner_id: "00000000-0000-4000-8000-000000000003",
       });
     } finally {
       if (context) {
@@ -1690,17 +1700,21 @@ describe("NAPI integration", () => {
       const aliceDb = context.forSession({
         issuer: "https://issuer.example",
         user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
         claims: { role: "editor", team: "alpha" },
         authMode: "external",
       });
-      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
+      const aliceAuthor = {
+        account: "00000000-0000-4000-8000-000000000001",
+        identity: { issuer: "https://issuer.example", subject: "alice" },
+      };
 
       const createdTodo = await aliceDb
         .insert(policyTodosTable, {
           title: "nullable-description-repro",
           done: false,
           description: "server-original",
-          owner_id: aliceAuthor,
+          owner_id: aliceAuthor.account,
         })
         .wait({ tier: "edge" });
 

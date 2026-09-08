@@ -1,38 +1,22 @@
-import { useEffect, useState } from "react";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, betterAuth, useJazzAuth } from "jazz-tools/react";
 import { authClient } from "../lib/auth-client";
-
 function YourApp() {
-  return null;
+  const { logout } = useJazzAuth();
+  return <button onClick={() => void logout()}>Sign out</button>;
 }
 
 // #region betterauth-jazz-react
 export function App() {
-  const { data: session, isPending } = authClient.useSession();
-  const [token, setToken] = useState<string | undefined>();
-
-  useEffect(() => {
-    if (isPending || !session?.session) {
-      setToken(undefined);
-      return;
-    }
-
-    authClient.token().then((res) => {
-      if (res.error) return;
-      setToken(res.data.token);
-    });
-  }, [isPending, session?.session?.id]);
-
   return (
     <JazzProvider
-      config={{
-        appId: "my-app",
-        serverUrl: "wss://your-jazz-server.example.com",
-        jwtToken: token,
-      }}
+      appId="my-app"
+      serverUrl="wss://your-jazz-server.example.com"
+      auth={betterAuth(authClient)}
+      signedOut={<p>Sign in to continue.</p>}
     >
       <YourApp />
     </JazzProvider>
   );
 }
+// Forms only call authClient.signUp / signIn. Jazz follows automatically.
 // #endregion betterauth-jazz-react

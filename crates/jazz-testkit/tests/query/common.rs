@@ -304,6 +304,7 @@ pub(crate) async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) 
         server_url: String::new(),
         data_dir: temp_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
+        account_id: None,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

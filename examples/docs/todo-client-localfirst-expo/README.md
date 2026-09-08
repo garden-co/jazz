@@ -1,6 +1,6 @@
 # todo-client-localfirst-expo
 
-Expo example for local-first todos using `jazz-tools/react` + `jazz-rn`.
+Expo example for local-first todos using `jazz-tools/react-native` + `jazz-rn`.
 
 > **Alpha boundary:** this is compile/build scaffolding, not a runnable persistent Jazz client.
 > React Native SQLite persistence is unavailable, and memory mode has not been validated under
@@ -19,7 +19,7 @@ Expo example for local-first todos using `jazz-tools/react` + `jazz-rn`.
   - Android emulator: `http://10.0.2.2:1625`
   - Physical device: `http://<your-lan-ip>:1625`
 - If you set `EXPO_PUBLIC_JAZZ_SERVER_URL` to `localhost`/`127.0.0.1`, the app now rewrites it in dev when needed so devices can still reach your host machine.
-- Auth uses local-first identity via `ExpoAuthSecretStore` (backed by `expo-secure-store`).
+- Account preparation uses `createAccountManager` from `jazz-tools/expo`, backed by SecureStore with native atomic updates. Contexts receive an opaque account handle. A matching native development build is required; Expo Go is unsupported.
 - Todos carry `owner_id`, and mutations are authorized against `session.user`.
 
 ## Commands

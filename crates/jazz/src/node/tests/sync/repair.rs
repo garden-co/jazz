@@ -63,6 +63,12 @@ fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
     };
     version_bundles.sort_by_key(|bundle| bundle.tx.tx_id);
     assert_eq!(version_bundles.len(), 2);
+    assert!(
+        version_bundles
+            .iter()
+            .all(|bundle| bundle.tx.permission_subject.is_none()),
+        "repair carriers retain durable provenance but never a local policy capability"
+    );
     let original = version_bundles[1].versions[0].clone();
     version_bundles[1].versions[0] = VersionRecord::encode(
         &schema.tables[0],
@@ -98,6 +104,48 @@ fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
         );
         assert!(reader.transaction_record(request.tx_id()).is_none());
     }
+}
+
+/// Repair carriers preserve durable row provenance while omitting the local
+/// policy capability retained for a locally authorized SYSTEM write.
+#[test]
+fn repair_response_omits_local_system_permission_subject() {
+    let schema = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let row_uuid = row(0xa3);
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 12).cells(title_cells("repair")),
+        )
+        .unwrap();
+    assert_eq!(
+        core.query_transaction(tx_id)
+            .unwrap()
+            .unwrap()
+            .tx
+            .permission_subject,
+        Some(AuthorSubject::SYSTEM)
+    );
+
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id);
+    let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    let messages = peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: vec![request],
+                delegated_session: None,
+            },
+        )
+        .unwrap();
+    let SyncMessage::RowVersionPayloads { version_bundles } = messages.into_iter().next().unwrap()
+    else {
+        panic!("expected a row-version repair payload");
+    };
+    assert_eq!(version_bundles.len(), 1);
+    assert_eq!(version_bundles[0].tx.tx_id, tx_id);
+    assert_eq!(version_bundles[0].tx.made_by, AuthorSubject::system_at(node(9)));
+    assert_eq!(version_bundles[0].tx.permission_subject, None);
 }
 
 #[test]
@@ -981,9 +1029,9 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         renamed.id,
         row_uuid,
         Vec::new(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
         None,
@@ -1125,7 +1173,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 1,
-        made_by: AuthorSubject::SYSTEM,
+        made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -1140,9 +1188,9 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         original.version_id(),
         task_row,
         Vec::new(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
-        AuthorSubject::SYSTEM,
+        AuthorSubject::system_at(node(1)),
         tx_id.time.physical_ms(),
         &BTreeMap::from([("name".to_owned(), v("old physical task"))]),
         None,

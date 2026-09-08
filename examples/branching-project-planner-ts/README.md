@@ -23,3 +23,5 @@ await db.all(app.tasks, {
   base: draftScenario.base_scenario_id,
 });
 ```
+
+The demo opens a memory database with a local-first account handle. Its context does not sync to a server, and rows are recreated after reload; retaining the signing account does not persist this in-memory dataset.

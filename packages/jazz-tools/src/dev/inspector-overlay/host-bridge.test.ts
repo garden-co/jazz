@@ -13,7 +13,7 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
         appId: "app1",
         serverUrl: "http://server",
         env: "dev",
-        adminSecret: "sek",
+        jwtToken: "header.eyJpc3MiOiJodHRwczovL2luc3BlY3Rvci50ZXN0Iiwic3ViIjoidXNlciJ9.signature",
       }),
       getRuntimeSchema: () => ({ todos: { columns: [] } }),
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
@@ -143,9 +143,9 @@ describe("installInspectorHost", () => {
         appId: "a",
         dbName: "a",
         serverUrl: "http://server",
-        secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        cookieSession: { user_id: "u1" },
-        adminSecret: "adm",
+        jwtToken: "header.eyJpc3MiOiJodHRwczovL2luc3BlY3Rvci50ZXN0Iiwic3ViIjoidXNlciJ9.signature",
+        accountId: "00000000-0000-4000-8000-000000000001",
+        accountRegistryAuthority: "http://server/apps/a/accounts",
       }),
     });
     installInspectorHost(fake.db, iframeWindow, "http://localhost");
@@ -153,21 +153,21 @@ describe("installInspectorHost", () => {
     expect(config).toMatchObject({
       appId: "a",
       serverUrl: "http://server",
-      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      adminSecret: "adm",
+      accountId: "00000000-0000-4000-8000-000000000001",
       driver: { type: "persistent", dbName: "a" },
     });
     expect(config.cookieSession).toBeUndefined();
+    expect(config.secret).toBeUndefined();
+    expect(config.adminSecret).toBeUndefined();
     const expectedPhysicalDbName = resolveDefaultPersistentDbName((fake.db as any).getConfig());
     expect(config.runtimeSources).toEqual({
       inspectorHostPhysicalDbName: expectedPhysicalDbName,
     });
     expect(resolveDefaultPersistentDbName(config)).toBe(expectedPhysicalDbName);
     expect(decodeURIComponent(config.runtimeSources!.inspectorHostPhysicalDbName!)).toContain(
-      '"auth":{"kind":"system"}',
+      '"auth":{"kind":"account"',
     );
-    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.secret);
-    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.adminSecret);
+    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.jwtToken);
     await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });

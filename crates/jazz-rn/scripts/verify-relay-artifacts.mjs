@@ -57,6 +57,7 @@ const nativeSourceFingerprint = createHash("sha256")
         "crates/jazz",
         "crates/jazz-compression",
         "crates/jazz-native-relay",
+        "crates/jazz-native-transport",
         "crates/jazz-storage-sqlite",
         "crates/jazz-rn/scripts/build-relay-artifacts.sh",
       ],

@@ -12,10 +12,12 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { type JazzClient, createJazzClient } from "jazz-tools/react";
+import { createAccountManager, type AccountHandle } from "jazz-tools";
 import { app } from "../../schema.js";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 const clients: JazzClient[] = [];
+const accountsByToken = new Map<string, Promise<AccountHandle>>();
 
 afterEach(async () => {
   while (clients.length > 0) {
@@ -24,11 +26,23 @@ afterEach(async () => {
 });
 
 async function makeClient(jwt?: string): Promise<JazzClient> {
+  const manager = await createAccountManager({ appId: __APP_ID__, serverUrl: __JAZZ_SERVER_URL__ });
+  let account: AccountHandle;
+  if (jwt) {
+    let registered = accountsByToken.get(jwt);
+    if (!registered) {
+      registered = manager.registerJWT({ getToken: async () => jwt });
+      accountsByToken.set(jwt, registered);
+    }
+    account = await registered;
+  } else {
+    account = manager.createLocalFirst();
+  }
   const client = await createJazzClient({
     appId: __APP_ID__,
     serverUrl: __JAZZ_SERVER_URL__,
     driver: { type: "memory" },
-    ...(jwt ? { jwtToken: jwt } : {}),
+    account,
   });
   clients.push(client);
   return client;

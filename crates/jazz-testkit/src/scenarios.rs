@@ -4,6 +4,10 @@ use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz::query::Query;
+use jazz::tools::native_transport_connector::{
+    NativeCatalogueBootstrapFuture, NativeTransportConnector, NativeTransportError,
+    NativeTransportFuture, NativeTransportRequest,
+};
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
@@ -13,6 +17,49 @@ use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+// Retry at the adapter boundary, before JazzClient renders transport errors as
+// diagnostic strings. The native adapter owns code/retry classification.
+struct RetryLaterConnector {
+    deadline: tokio::time::Instant,
+}
+
+impl NativeTransportConnector for RetryLaterConnector {
+    fn validate_catalogue_bootstrap_url(
+        &self,
+        server_url: &str,
+        app_id: jazz::tools::AppId,
+    ) -> Result<(), NativeTransportError> {
+        jazz_native_transport::NativeWebSocketConnector
+            .validate_catalogue_bootstrap_url(server_url, app_id)
+    }
+
+    fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
+        let deadline = self.deadline;
+        Box::pin(async move {
+            loop {
+                match jazz_native_transport::NativeWebSocketConnector
+                    .connect(request.clone())
+                    .await
+                {
+                    Err(error)
+                        if error.is_retryable() && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    result => return result,
+                }
+            }
+        })
+    }
+
+    fn bootstrap_catalogue(
+        &self,
+        request: NativeTransportRequest,
+    ) -> NativeCatalogueBootstrapFuture {
+        jazz_native_transport::NativeWebSocketConnector.bootstrap_catalogue(request)
+    }
+}
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[allow(dead_code)]
@@ -162,22 +209,18 @@ impl<'a> TestingClient<'a> {
     pub async fn connect_after_retry_later(self, timeout: Duration) -> JazzClient {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
-        let context = self.build_context();
+        let mut context = self.build_context();
+        enroll_test_context(&mut context)
+            .await
+            .expect("enroll public test client");
         let deadline = tokio::time::Instant::now() + timeout;
 
-        let client = loop {
-            match crate::connect(context.clone()).await {
-                Ok(client) => break client,
-                Err(error)
-                    if error.to_string().contains("bootstrapping")
-                        && error.to_string().contains("retry shortly")
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("connect test client after retry-later: {error}"),
-            }
-        };
+        let client = JazzClient::connect_with_native_transport(
+            context,
+            std::sync::Arc::new(RetryLaterConnector { deadline }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("connect test client after retry-later: {error}"));
 
         if let Some(ready_table) = ready_table {
             wait_for_edge_query_ready(
@@ -199,7 +242,10 @@ impl<'a> TestingClient<'a> {
     pub async fn connect_with_context(self) -> (AppContext, JazzClient) {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
-        let context = self.build_context();
+        let mut context = self.build_context();
+        enroll_test_context(&mut context)
+            .await
+            .expect("enroll public test client");
 
         let client = crate::connect(context.clone())
             .await
@@ -279,6 +325,86 @@ impl<'a> TestingClient<'a> {
 
         context
     }
+}
+
+/// Explicit positive-fixture enrollment, outside the client context lifecycle.
+/// Generic `connect` intentionally never registers an identity; admission-negative
+/// tests may use it to exercise an unassigned or revoked bearer directly.
+pub async fn enroll_test_context(context: &mut AppContext) -> jazz::tools::Result<()> {
+    use jazz::tools::{JazzError, unverified_jwt_scope_subject};
+    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+        return Ok(());
+    }
+    let Some(token) = context.jwt_token.as_deref() else {
+        return Ok(());
+    };
+    if context.server_url.is_empty() {
+        return Ok(());
+    }
+    let (issuer, subject) = unverified_jwt_scope_subject(token)
+        .ok_or_else(|| JazzError::Connection("invalid fixture identity token".into()))?;
+    let base = format!(
+        "{}/apps/{}/accounts",
+        context.server_url.trim_end_matches('/'),
+        context.app_id
+    );
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| JazzError::Connection(error.to_string()))?;
+    let post = |operation: &str| {
+        http.post(format!("{base}/{operation}"))
+            .bearer_auth(token)
+            .send()
+    };
+    let mut response = if issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        post("found-local-first").await
+    } else {
+        post("login").await
+    }
+    .map_err(|error| JazzError::Connection(error.to_string()))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let reason = response
+            .text()
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+        if reason != "identity_not_assigned" {
+            return Err(JazzError::Connection(
+                "fixture registry route is unavailable".into(),
+            ));
+        }
+        response = post("register")
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Concurrent positive fixtures may have enrolled this exact identity.
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            response = post("login")
+                .await
+                .map_err(|error| JazzError::Connection(error.to_string()))?;
+        }
+    }
+    if !response.status().is_success() {
+        return Err(JazzError::Connection(format!(
+            "fixture account admission failed: {}",
+            response.status()
+        )));
+    }
+    #[derive(Deserialize)]
+    struct Admission {
+        account: jazz::account_registry::AccountId,
+        identity: jazz::account_registry::Principal,
+    }
+    let admitted: Admission = response
+        .json()
+        .await
+        .map_err(|error| JazzError::Connection(error.to_string()))?;
+    if admitted.identity.issuer != issuer || admitted.identity.subject != subject {
+        return Err(JazzError::Connection(
+            "fixture account admission identity mismatch".into(),
+        ));
+    }
+    context.account_id = Some(admitted.account);
+    Ok(())
 }
 
 #[allow(dead_code)]

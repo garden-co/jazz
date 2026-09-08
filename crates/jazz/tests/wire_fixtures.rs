@@ -452,6 +452,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
+            "authorization_scope_intent_delegated_session_claim_snapshot",
+            "AuthorizationScopeIntent",
+            SyncMessage::AuthorizationScopeIntent {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x74; 16]),
+                action: jazz::protocol::PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: RowUuid::from_bytes([0x75; 16]),
+                },
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x76; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-user".to_owned()),
+                    )]),
+                }),
+            },
+        ),
+        (
             "unsubscribe_todos_binding",
             "Unsubscribe",
             SyncMessage::Unsubscribe { subscription },

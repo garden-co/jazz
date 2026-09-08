@@ -30,6 +30,20 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        // A session or relay transport may not select a durable policy
+        // capability. Its authenticated context is evaluated separately; only
+        // trusted local/backend paths retain an explicit permission subject.
+        let tx = if matches!(
+            ingest_context.map(|context| context.trust),
+            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay)
+        ) {
+            Transaction {
+                permission_subject: None,
+                ..tx
+            }
+        } else {
+            tx
+        };
         if crate::protocol::validate_version_records(&versions).is_err() {
             return self
                 .reject_malformed_commit(tx, "malformed version receipt".to_owned())
@@ -216,6 +230,7 @@ where
             .local_permission_subjects
             .get(&tx_id)
             .copied()
+            .or(stored.tx.permission_subject)
             .unwrap_or(stored.tx.made_by);
         if !self.commit_unit_satisfies_write_policies(
             &Transaction {
@@ -487,6 +502,10 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        let tx = Transaction {
+            permission_subject: None,
+            ..tx
+        };
         if crate::protocol::validate_version_records(&versions).is_err()
             || commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
@@ -499,6 +518,31 @@ where
         self.ingest_relay_commit_unit_once(tx, versions).await?;
         self.drain_parked_relay_commit_units().await?;
         Ok(())
+    }
+
+    /// Check whether an untrusted retransmit is already stored with the same
+    /// durable payload and version set. Permission subjects are transport
+    /// hints at this boundary, so the comparison redacts them without changing
+    /// the stored local capability needed for restart finalization.
+    pub(crate) async fn known_untrusted_commit_unit_matches(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<bool, Error> {
+        let Some(existing) = self.query_transaction(tx.tx_id).await? else {
+            return Ok(false);
+        };
+        let mut existing_versions = self
+            .query_versions_for_tx(tx.tx_id)
+            .await?
+            .into_iter()
+            .map(|stored| self.version_record_from_row(&stored))
+            .collect::<Result<Vec<_>, Error>>()?;
+        existing_versions.sort();
+        Ok(
+            known_transaction_payload_matches_redacted_permission_subject(&existing.tx, tx)
+                && existing_versions == canonical_versions(versions.to_vec()),
+        )
     }
 
     pub(super) async fn ingest_relay_commit_unit_once(
@@ -517,7 +561,7 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !known_transaction_payload_matches(&existing.tx, &tx)
+            if !known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
                 || existing_versions != versions
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -570,6 +614,10 @@ where
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
+        let redact_permission_subject = matches!(
+            ingest_context.map(|context| context.trust),
+            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay)
+        );
         let versions = canonical_versions(versions);
         let mut memo = IngestMemo::default();
         if !commit_unit_write_count_matches(&tx, versions.len()) {
@@ -594,7 +642,12 @@ where
         }
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             if tx.kind == TxKind::Exclusive || matches!(existing.fate, Fate::Rejected(_)) {
-                if !known_transaction_payload_matches(&existing.tx, &tx) {
+                let matches = if redact_permission_subject {
+                    known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
+                } else {
+                    known_transaction_payload_matches(&existing.tx, &tx)
+                };
+                if !matches {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
                 return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
@@ -610,9 +663,12 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !known_transaction_payload_matches(&existing.tx, &tx)
-                || existing_versions != versions
-            {
+            let matches = if redact_permission_subject {
+                known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
+            } else {
+                known_transaction_payload_matches(&existing.tx, &tx)
+            };
+            if !matches || existing_versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if tx.kind == TxKind::Mergeable && matches!(existing.fate, Fate::Pending) {
@@ -949,7 +1005,7 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
-            if !(known_transaction_payload_matches(&existing.tx, &tx)
+            if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
                 || existing.view_scoped_cardinality
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
@@ -1069,10 +1125,10 @@ where
             // cardinality. Compare the immutable transaction identity here and
             // synthesize the receiver-local authorized cardinality only after
             // exact version deduplication below.
-            let mut first_tx_identity = first.tx.clone();
+            let mut first_tx_identity = transaction_without_permission_subject(first.tx);
             first_tx_identity.n_total_writes = 0;
             if tx_bundles.iter().any(|bundle| {
-                let mut tx_identity = bundle.tx.clone();
+                let mut tx_identity = transaction_without_permission_subject(bundle.tx);
                 tx_identity.n_total_writes = 0;
                 tx_identity != first_tx_identity
                     || (bundle.scope == crate::protocol::VersionBundleScope::ViewScoped)
@@ -1140,7 +1196,7 @@ where
                 continue;
             }
             if loaded_tx_ids.insert(tx_id) {
-                let mut local_tx = first.tx.clone();
+                let mut local_tx = transaction_without_permission_subject(first.tx);
                 if view_scoped {
                     local_tx.n_total_writes = version_count
                         .try_into()
@@ -1223,7 +1279,7 @@ where
                     first.durability,
                     view_scoped,
                     contribution_merge,
-                ),
+                )?,
             );
 
             let mut unique_versions = BTreeMap::<

@@ -4,7 +4,11 @@ import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/db.js";
-import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
+import {
+  createJazzClient as createPublicJazzClient,
+  type JazzClient,
+} from "../../src/react/create-jazz-client.js";
+import { acquireBrowserTestAccount } from "./account-fixtures.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
@@ -93,6 +97,16 @@ function uniqueId(label: string): string {
   return `use-all-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Exercise the public React client boundary with a manager-issued account. */
+async function createBrowserTestJazzClient(
+  config: Omit<Parameters<typeof createPublicJazzClient>[0], "account">,
+): Promise<JazzClient> {
+  return await createPublicJazzClient({
+    ...config,
+    account: await acquireBrowserTestAccount(config),
+  });
+}
+
 function makeQuery<T>(
   table: string,
   body: {
@@ -130,6 +144,7 @@ function makeQuery<T>(
   };
 }
 
+const clients: JazzClient[] = [];
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -139,7 +154,9 @@ beforeEach(() => {
   root = createRoot(container);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Keep React unmount and client shutdown in one hook so nested teardown
+  // cannot close a Db while its consumers are still mounted.
   if (root) {
     root.unmount();
     root = null;
@@ -147,6 +164,9 @@ afterEach(() => {
   if (container) {
     container.remove();
     container = null;
+  }
+  for (const client of clients.splice(0).reverse()) {
+    await client.shutdown();
   }
 });
 
@@ -165,6 +185,7 @@ async function waitForCondition(
   check: () => boolean,
   timeoutMs: number,
   errorMessage: string,
+  diagnostic?: () => string,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -173,7 +194,7 @@ async function waitForCondition(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(errorMessage);
+  throw new Error(diagnostic ? `${errorMessage}; ${diagnostic()}` : errorMessage);
 }
 
 function UseAllProbe<T extends { id: string }>({
@@ -197,7 +218,6 @@ function UseAllProbe<T extends { id: string }>({
 }
 
 describe("useAll browser integration", () => {
-  const clients: JazzClient[] = [];
   let conditionsClient: JazzClient;
   const conditionCases: Array<{
     name: string;
@@ -365,7 +385,7 @@ describe("useAll browser integration", () => {
   }
 
   beforeAll(async () => {
-    conditionsClient = await createJazzClient({
+    conditionsClient = await createBrowserTestJazzClient({
       appId: uniqueId("operators"),
       driver: { type: "persistent", dbName: uniqueId("operators") },
     });
@@ -373,12 +393,6 @@ describe("useAll browser integration", () => {
 
   afterAll(async () => {
     await conditionsClient.shutdown();
-  });
-
-  afterEach(async () => {
-    for (const client of clients.splice(0).reverse()) {
-      await client.shutdown();
-    }
   });
 
   for (const testCase of conditionCases) {
@@ -401,9 +415,10 @@ describe("useAll browser integration", () => {
 
   it("supports orderBy + limit + offset", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("order"),
         driver: { type: "persistent", dbName: uniqueId("order") },
+        devMode: true,
       }),
     );
 
@@ -413,40 +428,79 @@ describe("useAll browser integration", () => {
       limit: 1,
     });
 
-    render(
-      <JazzProvider client={client}>
-        <UseAllProbe query={query} pick={(row) => row.title} />
-      </JazzProvider>,
-    );
-
-    await client.db.insert(todos, {
-      title: "p1",
-      done: false,
-      priority: 1,
-      owner_id: undefined,
-      tags: ["x"],
-    });
-    await client.db.insert(todos, {
-      title: "p2",
-      done: false,
-      priority: 2,
-      owner_id: undefined,
-      tags: ["x"],
-    });
-    await client.db.insert(todos, {
-      title: "p3",
-      done: false,
-      priority: 3,
-      owner_id: undefined,
-      tags: ["x"],
+    // This query has previously timed out only under the aggregate browser
+    // workload. Keep a failure receipt local to this test: it distinguishes a
+    // hook that never settled from a settled-but-wrong page, and records
+    // whether the public maintained subscription was ever registered.
+    let hookState = "not rendered";
+    const subscriptionHistory: string[] = [];
+    const stopSubscriptionTrace = client.db.onActiveQuerySubscriptionsChange((traces) => {
+      if (subscriptionHistory.length === 16) subscriptionHistory.shift();
+      subscriptionHistory.push(
+        traces
+          .map(({ id, table, tier, propagation }) => `${id}:${table}:${tier}:${propagation}`)
+          .join("|") || "none",
+      );
     });
 
-    await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
+    function PaginationProbe() {
+      const result = useAll(query);
+      hookState = result.error
+        ? `error:${result.error.message}`
+        : result.data
+          ? `fulfilled:${result.data.map((row) => row.title).join("|")}`
+          : result.isLoading
+            ? "pending"
+            : "no result";
+      return (
+        <div data-testid="rows">{result.data?.map((row) => row.title).join("|") ?? hookState}</div>
+      );
+    }
+
+    try {
+      render(
+        <JazzProvider client={client}>
+          <PaginationProbe />
+        </JazzProvider>,
+      );
+
+      await client.db.insert(todos, {
+        title: "p1",
+        done: false,
+        priority: 1,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+      await client.db.insert(todos, {
+        title: "p2",
+        done: false,
+        priority: 2,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+      await client.db.insert(todos, {
+        title: "p3",
+        done: false,
+        priority: 3,
+        owner_id: undefined,
+        tags: ["x"],
+      });
+
+      await waitForCondition(
+        () => getText("rows") === "p2",
+        5000,
+        "expected p2 in paginated useAll",
+        () =>
+          `final DOM=${container?.innerHTML ?? "missing"}; hook=${hookState}; subscriptions=${subscriptionHistory.join(" -> ")}`,
+      );
+    } finally {
+      stopSubscriptionTrace();
+    }
   });
 
   it("accepts core-supported QueryOptions for component subscriptions", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("options"),
         driver: { type: "persistent", dbName: uniqueId("options") },
       }),
@@ -479,7 +533,7 @@ describe("useAll browser integration", () => {
 
   it("supports the internal local-only read tier", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("local-only"),
         driver: { type: "persistent", dbName: uniqueId("local-only") },
       }),
@@ -500,7 +554,7 @@ describe("useAll browser integration", () => {
 
   it("does not include rows for non-matching text contains", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("contains-text-miss"),
         driver: { type: "persistent", dbName: uniqueId("contains-text-miss") },
       }),
@@ -531,7 +585,7 @@ describe("useAll browser integration", () => {
 
   it("supports include query execution path", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("include"),
         driver: { type: "persistent", dbName: uniqueId("include") },
       }),
@@ -567,7 +621,7 @@ describe("useAll browser integration", () => {
 
   it("supports hop queries", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("hops"),
         driver: { type: "persistent", dbName: uniqueId("hops") },
       }),
@@ -604,7 +658,7 @@ describe("useAll browser integration", () => {
 
   it("supports gather queries", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("gather"),
         driver: { type: "persistent", dbName: uniqueId("gather") },
       }),
@@ -655,7 +709,7 @@ describe("useAll browser integration", () => {
 
   it("reacts to query changes", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("query-change"),
         driver: { type: "persistent", dbName: uniqueId("query-change") },
       }),
@@ -717,7 +771,7 @@ describe("useAll browser integration", () => {
 
   it("returns no result when query is missing and a result when the query is provided later", async () => {
     const client = track(
-      await createJazzClient({
+      await createBrowserTestJazzClient({
         appId: uniqueId("missing-query"),
         driver: { type: "persistent", dbName: uniqueId("missing-query") },
       }),

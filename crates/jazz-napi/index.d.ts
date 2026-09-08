@@ -20,10 +20,12 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
-  requestInsertPermissionAdvice(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
-  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
-  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestInsertPermissionAdvice(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  /** Admit a verified local-first account for this backend runtime only. */
+  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
   update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
@@ -78,6 +80,12 @@ export declare class NapiDb {
    * context remain ordinary call options.
    */
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Set ambient claims for mutation and other explicitly serialized
+   * identity operations. Prepared queries capture scoped identity and
+   * claims at preparation time, so concurrent reads do not consult this
+   * shared map.
+   */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription | PendingNativeSubscription
@@ -89,6 +97,11 @@ export declare class NapiDb {
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
+  /** Return the originating node clock before a host releases its memory runtime. */
+  foregroundTxTimeHighWater(): bigint
+  /** Merge a checked host-retained node clock before opening new local writes. */
+  seedForegroundTxTimeHighWater(highWater: bigint): void
+  waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 

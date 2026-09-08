@@ -45,10 +45,10 @@ src/
     auth.ts                       ← Better Auth server config
     auth-client.ts                ← Better Auth Svelte client
   routes/
-    +layout.svelte                ← plain root layout
+    +layout.svelte                ← app-owned Jazz client lifecycle
     +page.svelte                  ← public sign-in / sign-up form (redirects signed-in users to /dashboard)
     (authenticated)/
-      +layout.svelte              ← one-shot JWT fetch + JazzSvelteProvider
+      +layout.svelte              ← route grouping only
       dashboard/
         +page.svelte              ← greeting, sign-out, <TodoWidget />
 ```
@@ -62,14 +62,17 @@ signed-in users, and `/dashboard/*` back to `/` for signed-out users.
 This uses `getSessionCookie`, a cheap cookie-presence check, not a full
 DB read.
 
-`src/routes/(authenticated)/+layout.svelte` fetches a Better Auth JWT
-once on mount and passes it to `<JazzSvelteProvider>` as part of its
-configuration. Because the hook guarantees a session on
-`/dashboard/*`, the provider is only mounted when the user is
-authenticated — there's no anonymous fallback path to reason about. The
-same layout installs a `db.onAuthChanged` listener that re-mints the JWT
-whenever Better Auth reports it as expired, so long-lived sessions won't
-silently drop to unauthenticated.
+The app owns one `JazzSession` and connects it to Better Auth with `connectBetterAuth`.
+Sign-up and sign-in forms only call Better Auth. The connection watches initial
+hydration, login, signup, restoration, and logout; it atomically logs in or
+creates the Jazz account with `loginOrRegisterJWT`. Repeated notifications for
+the same provider identity do not replace the client. Jazz requests fresh JWTs
+from `/token` when credentials expire.
+
+Sign-out goes through the connection, which flushes Jazz before Better Auth
+revokes credentials. Failures stay visible with a retry action. For a guest
+account whose existing data must survive signup, use the hybrid starter's
+explicit `linkJWT` flow without attaching the automatic connection.
 
 ## Extending the schema
 

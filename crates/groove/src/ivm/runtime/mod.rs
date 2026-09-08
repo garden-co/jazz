@@ -167,6 +167,12 @@ pub struct IvmRuntime {
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
     pending_incremental: runtime_tick::PendingIncrementalEvaluation,
+    /// `poll_incremental` temporarily owns its queue outside the shared slot.
+    /// Lifecycle reclamation must wait until that queue is visible again.
+    pending_incremental_polling: bool,
+    /// A lifecycle operation released retainers while queued work may still
+    /// reference the released graph slice.
+    ephemeral_graph_gc_pending: bool,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
@@ -253,6 +259,8 @@ impl IvmRuntime {
             multisink_subscriptions: HashMap::default(),
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
+            pending_incremental_polling: false,
+            ephemeral_graph_gc_pending: false,
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),

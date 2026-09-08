@@ -15,19 +15,19 @@ export function SignInForm() {
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-    const result =
-      mode === "signup"
-        ? await authClient.signUp.email({
+    try {
+      const result = await (mode === "signup"
+        ? authClient.signUp.email({
             name: (form.elements.namedItem("name") as HTMLInputElement).value,
             email,
             password,
           })
-        : await authClient.signIn.email({ email, password });
-
-    setIsPending(false);
-
-    if (result.error) {
-      setError(result.error.message ?? (mode === "signup" ? "Sign-up failed" : "Sign-in failed"));
+        : authClient.signIn.email({ email, password }));
+      if (result.error) throw new Error(result.error.message ?? "Authentication failed");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Account setup failed");
+    } finally {
+      setIsPending(false);
     }
   }
 

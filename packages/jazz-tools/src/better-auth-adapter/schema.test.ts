@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { BetterAuthDBSchema } from "better-auth/db";
+import { jwt } from "better-auth/plugins";
+import { getAuthTables, type BetterAuthDBSchema } from "better-auth/db";
 import {
   buildJazzSchemaSourceText,
   buildJazzSchemaSourceTextFromTables,
@@ -7,6 +8,35 @@ import {
 } from "./schema.js";
 
 describe("better-auth schema helpers", () => {
+  it("acknowledges adapter timestamps while preserving required and renamed fields", () => {
+    const tables = getAuthTables({});
+    const source = buildJazzSchemaSourceTextFromTables({ tables });
+    expect(source).toContain("createdAt: s.allowExternalProvenanceName(s.timestamp()),");
+    expect(source).toContain("updatedAt: s.allowExternalProvenanceName(s.timestamp()),");
+    expect(source).not.toContain("email: s.allowExternalProvenanceName");
+    const renamed = buildJazzSchemaSourceText({
+      tables,
+      getModelName: (model) => model,
+      getFieldName: ({ field }) => (field === "createdAt" ? "registeredAt" : field),
+    });
+    expect(renamed).toContain("registeredAt: s.timestamp(),");
+    expect(renamed).not.toContain("registeredAt: s.allowExternalProvenanceName");
+  });
+
+  it("retains the installed JWT plugin signing-key metadata", () => {
+    const tables = getAuthTables({ plugins: [jwt()] });
+    const schema = buildJazzSchemaFromTables({ tables });
+    const source = buildJazzSchemaSourceTextFromTables({ tables });
+    for (const name of ["alg", "crv"]) {
+      expect(schema.jwks?.columns).toContainEqual({
+        name,
+        column_type: { type: "Text" },
+        nullable: true,
+      });
+      expect(source).toContain(`${name}: s.string().optional()`);
+    }
+  });
+
   it("builds a Jazz schema from Better Auth tables using transformed names", () => {
     const tables = {
       user: {
@@ -182,7 +212,7 @@ describe("better-auth schema helpers", () => {
         "  }),",
         "",
         "  sessions: s.table({",
-        "    createdAt: s.timestamp(),",
+        "    createdAt: s.allowExternalProvenanceName(s.timestamp()),",
         "    retryCounts: s.array(s.int()).optional(),",
         '    userId: s.ref("accountHolders").optional(),',
         "  }),",

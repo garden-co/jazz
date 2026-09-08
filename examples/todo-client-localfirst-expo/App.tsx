@@ -1,6 +1,5 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Pressable,
@@ -10,27 +9,14 @@ import {
   Text,
   View,
 } from "react-native";
-import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
-import { createResettablePromise, loadSecret, SecretLoadError } from "./src/secret-promise-cache";
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
 // Set these in the shell that starts Metro.
 declare const process: { env: Record<string, string | undefined> };
 
-function buildConfig(secret: string): DbConfig {
-  return {
-    appId: process.env.EXPO_PUBLIC_JAZZ_APP_ID!,
-    serverUrl: process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!,
-    env: "dev",
-    secret,
-  };
-}
-
-const authSecret = createResettablePromise(() =>
-  loadSecret(() => ExpoAuthSecretStore.getOrCreateSecret()),
-);
-
+const appId = process.env.EXPO_PUBLIC_JAZZ_APP_ID!;
+const serverUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -75,66 +61,41 @@ const styles = StyleSheet.create({
   },
 });
 
-const authFallback = (
-  <SafeAreaView style={styles.container}>
-    <View style={styles.loadingContainer}>
-      <ActivityIndicator size="small" />
-      <Text style={styles.loadingText}>Loading secure credentials...</Text>
-    </View>
-  </SafeAreaView>
-);
-
-const runtimeFallback = (
-  <SafeAreaView style={styles.container}>
-    <View style={styles.loadingContainer}>
-      <ActivityIndicator size="small" />
-      <Text style={styles.loadingText}>Loading Jazz runtime...</Text>
-    </View>
-  </SafeAreaView>
-);
-
-class SecretLoadErrorBoundary extends React.Component<
-  React.PropsWithChildren,
-  { failed: boolean }
-> {
-  state = { failed: false };
-
-  static getDerivedStateFromError(error: unknown) {
-    if (!(error instanceof SecretLoadError)) {
-      throw error;
-    }
-    return { failed: true };
-  }
-
-  private retry = () => {
-    authSecret.reset();
-    this.setState({ failed: false });
-  };
-
-  render() {
-    if (this.state.failed) {
-      return (
-        <SafeAreaView style={styles.container}>
-          <View style={styles.loadingContainer}>
-            <Text style={styles.errorText}>Could not load secure credentials.</Text>
-            <Pressable accessibilityRole="button" onPress={this.retry} style={styles.retryButton}>
+function SessionFallback() {
+  const { error, retry } = useJazzSession();
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.loadingContainer}>
+        {error ? (
+          <>
+            <Text style={styles.errorText}>{error.message}</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void retry().catch(() => {})}
+              style={styles.retryButton}
+            >
               <Text style={styles.retryButtonText}>Try again</Text>
             </Pressable>
-          </View>
-        </SafeAreaView>
-      );
-    }
-
-    return this.props.children;
-  }
+          </>
+        ) : (
+          <>
+            <ActivityIndicator size="small" />
+            <Text style={styles.loadingText}>Loading secure credentials and Jazz runtime...</Text>
+          </>
+        )}
+      </View>
+    </SafeAreaView>
+  );
 }
 
 export function App() {
-  const secret = React.use(authSecret.get());
-  const config = React.useMemo(() => buildConfig(secret), [secret]);
-
+  if (!appId || !serverUrl)
+    throw new Error("Set EXPO_PUBLIC_JAZZ_APP_ID and EXPO_PUBLIC_JAZZ_SERVER_URL");
   return (
-    <JazzProvider config={config} fallback={runtimeFallback}>
+    <JazzSessionProvider
+      config={{ appId, serverUrl, env: "dev", initial: "local-first" }}
+      fallback={<SessionFallback />}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -142,16 +103,8 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 
-export default function AppRoot() {
-  return (
-    <SecretLoadErrorBoundary>
-      <React.Suspense fallback={authFallback}>
-        <App />
-      </React.Suspense>
-    </SecretLoadErrorBoundary>
-  );
-}
+export default App;

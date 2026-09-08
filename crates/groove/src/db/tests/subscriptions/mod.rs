@@ -2424,3 +2424,138 @@ async fn input_source_retirement_rejects_foreign_runtime_identity() {
 
 mod parameters;
 mod prepared;
+
+/// This is intentionally an internal runtime-lifecycle receipt. Public
+/// subscriptions expose only their terminal stream, so they cannot show the
+/// interval where a resident incremental evaluation owns graph nodes after its
+/// final subscriber has stopped.
+#[futures_test::test]
+async fn pending_incremental_checksum_survives_last_subscription_gc() {
+    use bytes::Bytes;
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone)]
+    struct DeferredResolver {
+        chunks: Rc<BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
+        ready: Rc<Cell<bool>>,
+    }
+
+    impl crate::chunks::MissingChunkResolver for DeferredResolver {
+        fn resolve(
+            &self,
+            request: crate::chunks::ChunkRequest,
+        ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+            let chunks = Rc::clone(&self.chunks);
+            let ready = Rc::clone(&self.ready);
+            Box::pin(async move {
+                std::future::poll_fn(|_| {
+                    ready.get().then_some(()).map_or(Poll::Pending, Poll::Ready)
+                })
+                .await;
+                chunks
+                    .get(&request)
+                    .cloned()
+                    .ok_or(crate::chunks::ChunkError::Unavailable)
+            })
+        }
+    }
+
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema.clone(), storage).await.unwrap();
+    database.set_auto_direct_family_enabled(false);
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES * 2],
+    )
+    .unwrap();
+    let resolver_chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                crate::chunks::ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect();
+    let ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredResolver {
+        chunks: Rc::new(resolver_chunks),
+        ready: Rc::clone(&ready),
+    }));
+    let graph = GraphBuilder::table("objects").streaming_checksum("payload", "checksum", 64, 64);
+    let old = database.subscribe_one_sink(graph.clone()).await.unwrap();
+    assert!(old.recv().unwrap().is_empty());
+
+    let objects = schema.table("objects").unwrap().record_schema();
+    database
+        .ivm_runtime
+        .tick_resident_staged(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "objects".to_owned(),
+                descriptor: objects.clone(),
+                deltas: vec![RecordDelta {
+                    record: objects
+                        .create(&[Value::U64(1), Value::Large(prepared.value_ref.clone())])
+                        .unwrap()
+                        .into(),
+                    weight: 1,
+                }],
+            }],
+            OwnedStorage::new(Rc::clone(&database.storage)),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        database.has_pending_progress(),
+        "checksum must park an incremental evaluation"
+    );
+    let checksum_nodes = database
+        .ivm_runtime
+        .graph()
+        .nodes()
+        .values()
+        .filter(|node| {
+            matches!(
+                node.descriptor.operator,
+                crate::ivm::OpType::StreamingChecksum(_)
+            )
+        })
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        checksum_nodes.len(),
+        1,
+        "one subscription owns one checksum node"
+    );
+    let checksum_node = checksum_nodes[0];
+
+    assert!(database.unsubscribe(old.id()));
+    assert!(
+        database.ivm_runtime.graph().node(checksum_node).is_some(),
+        "a parked incremental evaluation retains its checksum graph node after its final subscriber stops"
+    );
+    ready.set(true);
+    database.drive_progress().await.unwrap();
+    assert!(!database.has_pending_progress());
+    assert!(
+        database.ivm_runtime.graph().node(checksum_node).is_none(),
+        "the checksum node is reclaimed once its parked evaluation drains"
+    );
+}

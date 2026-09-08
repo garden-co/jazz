@@ -1,3 +1,4 @@
+import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { afterEach, beforeEach, describe, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
@@ -47,7 +48,7 @@ describe("deep-include reactivity", () => {
 
   beforeEach(async () => {
     db = await createDb({
-      appId: "deep-include-reactivity",
+      ...(await localAccountConfig("deep-include-reactivity")),
       driver: { type: "persistent", dbName: uniqueDbName("repro") },
     });
   });

@@ -6,7 +6,7 @@ export type AuthCardProps = {
   role?: string | null;
   onSignIn: (email: string, password: string) => Promise<void>;
   onSignUp: (email: string, password: string) => Promise<void>;
-  onSignOut: () => void;
+  onSignOut: () => Promise<void>;
 };
 
 type AuthMode = "signin" | "signup";
@@ -49,10 +49,14 @@ export function AuthCard({ loggedIn, role, onSignIn, onSignUp, onSignOut }: Auth
     }
   }
 
-  function handleSignOut() {
+  async function handleSignOut() {
     setPassword("");
     setError(null);
-    onSignOut();
+    try {
+      await onSignOut();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const isSignIn = mode === "signin";
@@ -61,7 +65,7 @@ export function AuthCard({ loggedIn, role, onSignIn, onSignUp, onSignOut }: Auth
     <aside className="auth-card">
       <div className="status-card" data-testid="auth-status">
         <div className="status-copy">
-          <span className="status-name">{loggedIn ? session?.user : "Anonymous"}</span>
+          <span className="status-name">{loggedIn ? session?.user.account : "Anonymous"}</span>
         </div>
         {role ? <span className="admin-badge">{role}</span> : null}
       </div>

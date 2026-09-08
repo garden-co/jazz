@@ -1,5 +1,6 @@
+import { createInspectorAdminClient } from "jazz-tools/_dev/inspector-client";
 import { BrowserRouter } from "react-router";
-import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
+import { JazzClientProvider } from "jazz-tools/react";
 import { fetchSchemaHashes, fetchStoredPermissions, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
@@ -60,7 +61,9 @@ export default function App() {
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<SchemaHashInfo[]>([]);
-  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
+  const [client, setClient] = useState<Awaited<
+    ReturnType<typeof createInspectorAdminClient>
+  > | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
   const [storedPermissions, setStoredPermissions] = useState<Awaited<
     ReturnType<typeof fetchStoredPermissions>
@@ -215,12 +218,11 @@ export default function App() {
     const run = async () => {
       try {
         const [resolvedClient, { schema }, schemaHashesResult, permissions] = await Promise.all([
-          createJazzClient({
+          createInspectorAdminClient({
             appId: activeConnection.appId,
             serverUrl: activeConnection.serverUrl,
             env: activeConnection.env,
             adminSecret: activeConnection.adminSecret,
-            driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(activeConnection.serverUrl, {
             appId: activeConnection.appId,

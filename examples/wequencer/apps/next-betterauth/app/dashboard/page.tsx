@@ -2,15 +2,20 @@
 
 import { authClient } from "@/lib/auth-client";
 import { SessionBrowser } from "@/components/session-browser";
+import { useGracefulSignOut } from "@/components/jazz-provider";
 
 export default function DashboardPage() {
   const { data: session } = authClient.useSession();
+  const gracefulSignOut = useGracefulSignOut();
   if (!session) return null;
-  const issuer = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
   async function handleSignOut() {
-    await authClient.signOut();
-    window.location.assign("/");
+    try {
+      await gracefulSignOut();
+      window.location.assign("/");
+    } catch {
+      // The owner-held lifecycle reopens the selected client and renders the error.
+    }
   }
 
   return (
@@ -22,13 +27,13 @@ export default function DashboardPage() {
         </div>
         <div className="auth-nav">
           <p>Hello, {session.user.name}</p>
-          <p data-testid="member-id">Your member ID: {session.user.id}</p>
+          <p data-testid="member-id">Your Jazz account loads after enrollment.</p>
           <button type="button" onClick={handleSignOut}>
             Sign out
           </button>
         </div>
       </header>
-      <SessionBrowser issuer={issuer} />
+      <SessionBrowser />
     </main>
   );
 }

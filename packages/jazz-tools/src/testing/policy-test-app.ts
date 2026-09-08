@@ -1,4 +1,7 @@
-import { createJazzContext, Db, type JazzContext } from "../backend/index.js";
+import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
+import { Db } from "../runtime/db.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
+import { ANONYMOUS_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -61,6 +64,31 @@ export type TestDb = Db & {
   expectDenied(callback: (db: Db) => PendingWrite): Promise<void>;
 };
 
+/**
+ * `forSession` is a trusted test-only backend entry point. Non-anonymous
+ * policy actors receive a stable synthetic account so rejected writes reach
+ * the policy gate instead of the durable-author precondition.
+ */
+function policyTestAccountId(session: Session): string {
+  return localFirstAccountId(
+    "jazz-runtime-test-account-fixtures",
+    JSON.stringify([session.issuer, session.user_id]),
+  );
+}
+
+function withPolicyTestAccount(session: Session): Session {
+  if (
+    session.account_id !== undefined ||
+    session.authMode === "anonymous" ||
+    session.issuer === ANONYMOUS_JWT_ISSUER
+  )
+    return session;
+  return {
+    ...session,
+    account_id: policyTestAccountId(session),
+  };
+}
+
 function asTestDb(db: Db, expect: ExpectLike): TestDb {
   const testDb = db as TestDb;
 
@@ -115,7 +143,7 @@ export class PolicyTestApp {
    * Get a database client for the given session.
    */
   as(session: Session): TestDb {
-    const db = this.jazzContext.forSession(session);
+    const db = this.jazzContext.forSession(withPolicyTestAccount(session));
     return asTestDb(db, this.expect);
   }
 

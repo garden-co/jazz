@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/vue";
-
-const { secret, isLoading } = useLocalFirstAuth();
-
-const config = computed(() =>
-  !isLoading.value && secret.value ? { appId: "my-app", secret: secret.value } : null,
-);
+import type { JazzSession, JazzClient } from "jazz-tools/vue";
+import { JazzSessionProvider } from "jazz-tools/vue";
+// Configure once with await createJazzSession({ appId, serverUrl, initial: "local-first" }).
+defineProps<{ session: JazzSession<JazzClient> }>();
 </script>
-
 <template>
-  <JazzProvider v-if="config" :config="config">
-    <slot />
-  </JazzProvider>
+  <JazzSessionProvider :session="session"><slot /></JazzSessionProvider>
 </template>

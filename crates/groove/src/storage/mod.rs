@@ -1371,6 +1371,19 @@ where
             .await
     }
 
+    /// Atomically insert an encoded record, returning the existing record if occupied.
+    /// This delegates to the backend's conditional insert; it never races a get/set pair.
+    pub async fn put_if_absent(
+        &self,
+        key: &Key,
+        record: &[u8],
+    ) -> Result<Option<Record<'_>>, Error> {
+        self.storage
+            .put_if_absent(self.column_family.to_owned(), key.to_vec(), record.to_vec())
+            .await
+            .map(|existing| existing.map(|bytes| self.descriptor.bind_owned(bytes)))
+    }
+
     pub fn set(&self, key: &Key, record: &[u8]) -> OwnedWriteOperation {
         OwnedWriteOperation::Set {
             cf: self.column_family.to_owned(),
@@ -4115,6 +4128,21 @@ mod tests {
         conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(storage.clone())
             .await;
         conformance::invalid_batch_is_proven_uncommitted(storage).await;
+    }
+
+    // Exercise the record-handle conditional boundary directly: table APIs batch
+    // serialized writes and cannot expose this occupied-record return contract.
+    #[futures_test::test]
+    async fn record_store_conditional_insert_preserves_and_decodes_winner() {
+        let storage = MemoryStorage::new(&["records"]).unwrap();
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let store = RecordStore::new(&storage, "records", &descriptor);
+        let first = descriptor.create(&[Value::U64(42)]).unwrap();
+        let second = descriptor.create(&[Value::U64(99)]).unwrap();
+        assert!(store.put_if_absent(b"key", &first).await.unwrap().is_none());
+        let winner = store.put_if_absent(b"key", &second).await.unwrap().unwrap();
+        assert_eq!(winner.get_idx(0).unwrap(), Value::U64(42));
+        assert_eq!(store.get(b"key").await.unwrap().unwrap().raw(), first);
     }
 
     #[futures_test::test]

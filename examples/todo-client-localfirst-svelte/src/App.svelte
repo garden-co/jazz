@@ -1,60 +1,49 @@
 <script lang="ts">
-	import { JazzSvelteProvider } from 'jazz-tools/svelte';
-	import type { DbConfig } from 'jazz-tools';
-	import { generateAuthSecret } from 'jazz-tools';
-	import { Toaster } from 'svelte-sonner';
-	import TodoList from './TodoList.svelte';
+  import { onMount } from 'svelte';
+  import { JazzSvelteClientProvider, createJazzClient, type JazzClient } from 'jazz-tools/svelte';
+  import type { DbConfig } from 'jazz-tools';
+  import { Toaster } from 'svelte-sonner';
+  import { prepareAccountConfig } from './account.js';
+  import TodoList from './TodoList.svelte';
 
-	interface Props {
-		config?: Partial<DbConfig>;
-	}
+  interface Props { config?: Partial<DbConfig>; }
+  let { config: configOverrides = {} }: Props = $props();
+  let client = $state<JazzClient>();
+  let error = $state<string>();
 
-	let { config: configOverrides = {} }: Props = $props();
-
-	function readEnv(name: string): string | undefined {
-		return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.[name];
-	}
-
-	function secretStorageKey(appId: string): string {
-		return `jazz-auth-secret:${encodeURIComponent(appId)}`;
-	}
-
-	function getOrCreateSecretSync(appId: string): string {
-		const stored = localStorage.getItem(secretStorageKey(appId));
-		if (stored) return stored;
-		const secret = generateAuthSecret();
-		localStorage.setItem(secretStorageKey(appId), secret);
-		return secret;
-	}
-
-	// #region context-setup-svelte
-	function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-		const appId = overrides.appId ?? readEnv('PUBLIC_JAZZ_APP_ID');
-		const serverUrl = overrides.serverUrl ?? readEnv('PUBLIC_JAZZ_SERVER_URL');
-		if (!appId)
-			throw new Error('Missing appId: add jazzSvelteKit() to vite.config.ts or set PUBLIC_JAZZ_APP_ID');
-		const secret = overrides.secret ?? getOrCreateSecretSync(appId);
-
-		return {
-			appId,
-			env: 'dev',
-			secret,
-			...(serverUrl ? { serverUrl } : {}),
-			...overrides,
-		};
-	}
-	// #endregion context-setup-svelte
-
-	const config = $derived(defaultConfig(configOverrides));
+  // #region context-setup-svelte
+  onMount(() => {
+    let cancelled = false;
+    let active: JazzClient | undefined;
+    void (async () => {
+      const config = await prepareAccountConfig(configOverrides);
+      if (cancelled) return;
+      const opened = await createJazzClient(config);
+      if (cancelled) { await opened.shutdown(); return; }
+      active = opened;
+      client = opened;
+    })().catch((reason) => {
+      if (!cancelled) error = reason instanceof Error ? reason.message : String(reason);
+    });
+    return () => {
+      cancelled = true;
+      client = undefined;
+      void active?.shutdown().catch(console.error);
+    };
+  });
+  // #endregion context-setup-svelte
 </script>
 
-<JazzSvelteProvider {config}>
-	{#snippet children({ db })}
-		<h1>Todos</h1>
-		<TodoList />
-		<Toaster />
-	{/snippet}
-	{#snippet fallback()}
-		<p>Loading...</p>
-	{/snippet}
-</JazzSvelteProvider>
+{#if error}
+  <p role="alert">{error}</p>
+{:else if client}
+  <JazzSvelteClientProvider {client}>
+    {#snippet children()}
+      <h1>Todos</h1>
+      <TodoList />
+      <Toaster />
+    {/snippet}
+  </JazzSvelteClientProvider>
+{:else}
+  <p>Loading...</p>
+{/if}

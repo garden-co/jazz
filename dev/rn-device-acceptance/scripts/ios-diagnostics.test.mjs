@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boundedDiagnostic,
+  foregroundWakeDiagnostic,
   parseLaunchProcessId,
   relevantAppLogs,
   safeDeviceDiagnostic,
@@ -13,6 +14,23 @@ test("bounded diagnostics retain the newest stage when callers request a tail", 
   const output = boundedDiagnostic(lines, { tail: true });
   assert.doesNotMatch(output, /stage-0/);
   assert.match(output, /stage-129/);
+});
+
+test("iOS foreground wake diagnostics retain only fixed stages from a narrow query", () => {
+  assert.equal(
+    foregroundWakeDiagnostic(
+      "JazzRNdeviceacceptance JazzForegroundWake armed\nJazzRNdeviceacceptance JazzForegroundWake requested\nJazzRNdeviceacceptance JazzForegroundWake delivered",
+    ),
+    "requested,delivered",
+  );
+  assert.equal(foregroundWakeDiagnostic("JazzForegroundWake armed"), "armed-no-wake");
+  assert.equal(
+    foregroundWakeDiagnostic(
+      "JazzForegroundWake armed\nJazzForegroundWake enabled\nJazzForegroundWake foreground-mismatch",
+    ),
+    "enabled,foreground-mismatch",
+  );
+  assert.equal(foregroundWakeDiagnostic("unrelated secret=never-printed"), "no-arm");
 });
 
 test("iOS diagnostics exclude unrelated logs and cap oversized app output", () => {

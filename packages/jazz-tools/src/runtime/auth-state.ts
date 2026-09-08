@@ -30,7 +30,7 @@ function authStateEquals(a: AuthState, b: AuthState): boolean {
   const bs = b.session;
   if (as === bs) return true;
   if (!as || !bs) return false;
-  if (as.user !== bs.user || as.authMode !== bs.authMode) {
+  if (JSON.stringify(as.user) !== JSON.stringify(bs.user) || as.authMode !== bs.authMode) {
     return false;
   }
   return JSON.stringify(as.claims) === JSON.stringify(bs.claims);
@@ -105,6 +105,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       if (options?.lockAuthenticatedState) return false;
       const resolved = resolveClientSessionStateSync({
         appId: input.appId,
+        accountId: input.accountId,
         jwtToken,
         cookieSession: input.cookieSession,
         trustedReservedSession,
@@ -118,6 +119,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       if (options?.lockAuthenticatedState) return false;
       const resolved = resolveClientSessionStateSync({
         appId: input.appId,
+        accountId: input.accountId,
         jwtToken: input.jwtToken,
         cookieSession,
       });
@@ -132,6 +134,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
 
       const resolved = resolveClientSessionStateSync({
         appId: input.appId,
+        accountId: input.accountId,
         jwtToken,
         cookieSession: input.cookieSession,
         trustedReservedSession,
@@ -156,6 +159,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
 
       const resolved = resolveClientSessionStateSync({
         appId: input.appId,
+        accountId: input.accountId,
         jwtToken: input.jwtToken,
         cookieSession,
       });

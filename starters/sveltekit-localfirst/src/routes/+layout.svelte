@@ -1,43 +1,23 @@
 <script lang="ts">
   import "../app.css";
-  import { JazzSvelteProvider, LocalFirstAuth } from "jazz-tools/svelte";
+  import { JazzSessionProvider } from "jazz-tools/svelte";
   import { env } from "$env/dynamic/public";
-
+  import SessionStatus from "$lib/SessionStatus.svelte";
+  import AuthBackup from "$lib/AuthBackup.svelte";
   let { children: pageChildren } = $props();
-
-  const auth = new LocalFirstAuth();
-
   const appId = env.PUBLIC_JAZZ_APP_ID;
   const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
-
-  $effect(() => {
-    if (!appId || !serverUrl) {
-      const missing = [
-        !appId && "PUBLIC_JAZZ_APP_ID",
-        !serverUrl && "PUBLIC_JAZZ_SERVER_URL",
-      ]
-        .filter((v) => !!v)
-        .join(" & ");
-      console.error(
-        `${missing} not set — the jazzSvelteKit() plugin should inject these.`,
-      );
-    }
-  });
-
-  let config = $derived(
-    !auth.isLoading && auth.secret && appId && serverUrl
-      ? { appId, serverUrl, secret: auth.secret }
-      : null,
-  );
 </script>
 
-{#if config}
-  <JazzSvelteProvider {config}>
-    {#snippet children()}
+{#if appId && serverUrl}
+<JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
+  {#snippet children()}
+    <main class="dashboard">
+      <header><img src="/jazz.svg" alt="Jazz" class="wordmark" /></header>
       {@render pageChildren?.()}
-    {/snippet}
-    {#snippet fallback()}
-      <p>Loading...</p>
-    {/snippet}
-  </JazzSvelteProvider>
-{/if}
+      <AuthBackup />
+    </main>
+  {/snippet}
+  {#snippet fallback()}<SessionStatus />{/snippet}
+</JazzSessionProvider>
+{:else}<p role="alert">PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set</p>{/if}

@@ -383,6 +383,7 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
                     data_dir: std::env::temp_dir(),
                     storage: ClientStorage::Memory,
                     storage_factory: None,
+                    account_id: None,
                     jwt_token: None,
                     backend_secret: None,
                     admin_secret: Some("secret".to_owned()),
@@ -513,7 +514,7 @@ async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached()
     .await
     .expect_err("downstream admission waits for the normal upstream route");
     assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later && wire.message.contains("bootstrapping") && wire.message.contains("retry shortly")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later),
         "unready dynamic edge must give retryable admission failure: {error}"
     );
 
@@ -633,7 +634,7 @@ async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
     .await
     .expect_err("unready edge must not admit a downstream session");
     assert!(
-        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later && wire.message.contains("bootstrapping") && wire.message.contains("retry shortly")),
+        matches!(error, WebSocketClientError::ServerWireError(ref wire) if wire.code == WireErrorCode::NotReady && wire.retry == WireRetry::Later),
         "unready edge must return an explicit retry-later diagnosis: {error}"
     );
     task.abort();

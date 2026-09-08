@@ -32,7 +32,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ describe("Send permission — private chat INSERT policy", () => {
     config: {
       dbName?: string;
       serverUrl?: string;
-      secret?: string;
+      account?: import("jazz-tools").AccountHandle;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -79,7 +79,10 @@ describe("Send permission — private chat INSERT policy", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    r.render(<App config={{ appId: APP_ID, dbName: crypto.randomUUID(), ...config }} />);
+    const appId = APP_ID;
+    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+
+    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     return el;
   }
@@ -177,7 +180,7 @@ describe("Send permission — private chat INSERT policy", () => {
 
     const aliceContainer = await mountApp({
       serverUrl,
-      secret: await testSecret(`send-perm-alice-a-${Date.now()}`),
+      account: await testAccount(`send-perm-alice-a-${Date.now()}`),
     });
 
     // Alice's app auto-creates a public chat first; navigate to a private one
@@ -226,7 +229,7 @@ describe("Send permission — private chat INSERT policy", () => {
     // --- Alice: create private chat and generate an invite link -------------
     const aliceContainer = await mountApp({
       serverUrl,
-      secret: await testSecret(`send-perm-alice-b-${Date.now()}`),
+      account: await testAccount(`send-perm-alice-b-${Date.now()}`),
     });
 
     await waitFor(
@@ -286,7 +289,7 @@ describe("Send permission — private chat INSERT policy", () => {
 
     const bobContainer = await mountApp({
       serverUrl,
-      secret: await testSecret(`send-perm-bob-b-${Date.now()}`),
+      account: await testAccount(`send-perm-bob-b-${Date.now()}`),
     });
 
     // InviteHandler should redirect Bob to the chat after inserting chatMember

@@ -205,6 +205,12 @@ export type StringColumn<
   HasDefault extends boolean = false,
   Value = string,
 > = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value>;
+/** UUID value without an application-table foreign key, e.g. an account ID. */
+export type UuidColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = string,
+> = TypedColumnBuilder<"UUID", Optional, undefined, HasDefault, Value>;
 export type BooleanColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
@@ -904,6 +910,7 @@ export const col = {
   // Schema context
 
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
+  uuid: () => new ScalarBuilder("UUID") as unknown as UuidColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
   int: () => new ScalarBuilder("INTEGER") as unknown as IntColumn,
   bigint: () => new ScalarBuilder("BIGINT") as unknown as BigIntColumn,

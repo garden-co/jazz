@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
-import { TEST_ADMIN_SECRET, TEST_APP_ID } from "./test-constants.js";
+import { TEST_ADMIN_SECRET, TEST_APP_ID, TEST_ISSUER, TEST_AUDIENCE } from "./test-constants.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -39,6 +39,8 @@ export async function setup(): Promise<void> {
     appId: TEST_APP_ID,
     port: jazzPort,
     adminSecret: TEST_ADMIN_SECRET,
+    jwtIssuer: TEST_ISSUER,
+    jwtAudience: TEST_AUDIENCE,
     jwksUrl: `http://127.0.0.1:${jwksPort}/.well-known/jwks.json`,
   });
 

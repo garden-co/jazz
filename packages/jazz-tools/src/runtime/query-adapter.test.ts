@@ -28,6 +28,55 @@ const app = s.defineApp({
 });
 
 describe("translateQuery", () => {
+  it("uses total structured author equality in both flat and relation predicates", () => {
+    const author = {
+      account: "00000000-0000-4000-8000-000000000001",
+      identity: { issuer: "issuer", subject: "subject" },
+    };
+    const eq = app.todos.where({ $createdBy: author });
+    const ne = app.todos.where({ $createdBy: { ne: author } });
+    const flatEq = JSON.parse(translateQuery(eq._build(), app.wasmSchema)).conditions[0];
+    const flatNe = JSON.parse(translateQuery(ne._build(), app.wasmSchema)).conditions[0];
+    expect(flatEq.And[0]).toEqual({
+      Cmp: {
+        left: { column: "$createdBy.account" },
+        op: "Eq",
+        right: { Literal: { type: "Uuid", value: author.account } },
+      },
+    });
+    expect(flatNe).toEqual({ Not: flatEq });
+    const relation = JSON.parse(
+      translateQuery(app.union([eq, ne])._build(), app.wasmSchema),
+    ).relation_ir;
+    const text = JSON.stringify(relation);
+    for (const path of [
+      "$createdBy.account",
+      "$createdBy.identity.issuer",
+      "$createdBy.identity.subject",
+    ])
+      expect(text).toContain(path);
+    expect(text).not.toContain('"IsNotNull"');
+    expect(text).toContain('"Not"');
+  });
+
+  it.each([
+    {},
+    { account: null },
+    { account: null, identity: { issuer: "issuer", subject: "subject" } },
+    { account: "not-a-uuid", identity: { issuer: "issuer", subject: "subject" } },
+    { account: null, identity: { issuer: "issuer", subject: " " } },
+    { account: null, identity: { issuer: "issuer", subject: "\ud800" } },
+    { account: null, identity: { issuer: "issuer", subject: "subject", extra: true } },
+    { account: null, identity: { issuer: "issuer", subject: "subject" }, extra: true },
+  ])("rejects malformed whole-author filters without dropping constraints: %j", (author) => {
+    expect(() =>
+      translateQuery(
+        app.todos.where({ $createdBy: { eq: author } } as never)._build(),
+        app.wasmSchema,
+      ),
+    ).toThrow();
+  });
+
   // https://github.com/garden-co/jazz/issues/2571
   it("preserves public union membership in the shared runtime query", () => {
     const union = app.union([

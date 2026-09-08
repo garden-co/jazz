@@ -3,8 +3,10 @@
 import Image from "next/image";
 import { TodoWidget } from "@/components/todo-widget";
 import { AuthBackup } from "@/components/auth-backup";
+import { useLocalAccount } from "@/components/jazz-provider";
 
 export default function Page() {
+  const { account, restore } = useLocalAccount();
   return (
     <main className="dashboard">
       <header>
@@ -19,7 +21,7 @@ export default function Page() {
         />
       </header>
       <TodoWidget />
-      <AuthBackup />
+      <AuthBackup account={account} onRestore={restore} />
     </main>
   );
 }

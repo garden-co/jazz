@@ -628,7 +628,7 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
 });
 
-test("the canonical Expo scaffold preserves the direct native-package contract", async () => {
+test("the canonical Expo scaffold documents the account-handle client and direct native-package contract", async () => {
   const [manifestText, appConfigText, readme] = await Promise.all([
     readFile(
       new URL("../../../examples/todo-client-localfirst-expo/package.json", import.meta.url),
@@ -653,7 +653,13 @@ test("the canonical Expo scaffold preserves the direct native-package contract",
   assert.match(readme, /jazz-rn@alpha/);
   assert.match(readme, /direct app dependency/);
   assert.match(readme, /does \*\*not\*\* run in Expo Go/);
-  assert.match(readme, /not a runnable persistent Jazz client/);
+  assert.match(
+    readme,
+    /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
+  );
+  assert.match(readme, /creates or restores a local-first `AccountHandle`/);
+  assert.match(readme, /effect-owned client/);
+  assert.match(readme, /account-scoped persistent relay admission is handled by the runtime/);
 });
 
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
@@ -733,33 +739,51 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
-test("React Native installation docs advertise only the currently proven package boundary", async () => {
-  const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] =
-    await Promise.all([
-      readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
-      readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
-      readFile(
-        new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
-        "utf8",
-      ),
-      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-    ]);
+test("React Native docs advertise the supported alpha session and account-handle clients", async () => {
+  const [
+    readme,
+    installGuide,
+    clientSetupGuide,
+    durabilityGuide,
+    examplesGuide,
+    exampleReadme,
+    previewWorkflow,
+  ] = await Promise.all([
+    readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
+    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../docs/content/docs/reference/examples.mdx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+  ]);
 
-  assert.match(readme, /pnpm add jazz-rn@alpha/);
+  assert.match(readme, /pnpm add jazz-tools@alpha jazz-rn@alpha/);
   assert.match(readme, /"plugins": \["jazz-rn"\]/);
   assert.match(readme, /npx expo prebuild --clean/);
   assert.match(readme, /newArchEnabled=true/);
   assert.match(readme, /RCT_NEW_ARCH_ENABLED=1 bundle exec pod install/);
   assert.match(readme, /Expo Go is not\s+supported/);
-  assert.match(readme, /not yet a supported high-level React Native Jazz client/);
+  assert.match(readme, /supported React Native\s+alpha/);
+  assert.match(readme, /`jazz-tools\/react-native`/);
+  assert.match(readme, /`AccountHandle`/);
+  assert.match(readme, /`createJazzClient`/);
+  assert.match(readme, /canonical Expo\s+scaffold/);
+  assert.match(readme, /two physical JSI runtimes/);
+  assert.doesNotMatch(readme, /not yet a supported high-level React Native Jazz client/);
+  assert.doesNotMatch(
+    readme,
+    /Remote tiers and structured relation terminal\s+operations remain unavailable/,
+  );
   assert.match(readme, /rn-preview-release/);
   assert.match(
     previewWorkflow,
@@ -768,22 +792,40 @@ test("React Native installation docs advertise only the currently proven package
   );
   assert.match(
     installGuide,
-    /React Native and Expo are intentionally not part of this application quickstart yet[\s\S]*not a supported React Native Jazz client/,
-    "the public install guide must put the unsupported RN boundary before its runtime quickstart",
+    /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
+    "the public install guide must direct RN users to the supported account-handle client path",
   );
-  for (const [name, guide] of [
-    ["install guide", installGuide],
-    ["client setup guide", clientSetupGuide],
-    ["durability guide", durabilityGuide],
-  ]) {
-    assert.doesNotMatch(
-      guide,
-      /<Tab value="Expo">|jazz-tools\/expo|todo-client-localfirst-expo/,
-      `${name} must not retain runnable-looking Expo tabs or RN runtime snippets`,
-    );
-  }
-  assert.match(exampleReadme, /native-relay install\/ABI boundary/);
-  assert.match(exampleReadme, /not a runnable persistent Jazz client/);
+  const expoSetup = clientSetupGuide.match(/## React Native and Expo\n([\s\S]*?)(?=\n## )/)?.[1];
+  assert.ok(expoSetup, "the client setup guide must include a React Native and Expo section");
+  assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
+  assert.match(
+    expoSetup,
+    /<JazzSessionProvider config=\{\{ appId, serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
+    "Expo setup must give the session provider one local-first configuration and mount its child",
+  );
+  assert.doesNotMatch(
+    expoSetup,
+    /createAccountManager|createJazzClient|JazzClientProvider|client\.shutdown/,
+    "the session provider must own account selection and client lifecycle in the primary Expo setup",
+  );
+  assert.match(clientSetupGuide, /canonical Expo\s+scaffold/);
+  assert.match(
+    durabilityGuide,
+    /React Native\/Expo alpha uses these same read and write durability tiers/,
+  );
+  assert.match(durabilityGuide, /account-handle client with `createJazzClient`/);
+  assert.match(
+    examplesGuide,
+    /Supported alpha app:[\s\S]*`AccountHandle`[\s\S]*`createJazzClient`/,
+  );
+  assert.match(
+    exampleReadme,
+    /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
+  );
+  assert.match(exampleReadme, /creates or restores a local-first `AccountHandle`/);
+  assert.match(exampleReadme, /Expo SecureStore/);
+  assert.match(exampleReadme, /effect-owned client/);
+  assert.doesNotMatch(exampleReadme, /not a runnable persistent Jazz client/);
 });
 
 test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", async () => {
@@ -2150,7 +2192,10 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   assert.match(runtime, /wakeFromOwner\([^)]*\) noexcept/);
   assert.match(runtime, /void schedule\([^)]*\) noexcept/);
   assert.match(runtime, /catch \(\.\.\.\)[\s\S]*scheduled_ = false;/);
-  assert.match(runtime, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+  assert.match(
+    runtime,
+    /if \(!scheduled_ && callInvoker_\) \{\s+scheduled_ = true;\s+invoker = callInvoker_;/,
+  );
   assert.match(runtime, /deactivateAndClear/);
   assert.match(runtime, /kWakeCancelled/);
   const openAttached = runtime.match(
@@ -2164,11 +2209,8 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   );
   assert.throws(
     () => {
-      const broken = runtime.replace(
-        "if (scheduled_ || !callInvoker_) return;",
-        "if (!callInvoker_) return;",
-      );
-      assert.match(broken, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+      const broken = runtime.replace("if (!scheduled_ && callInvoker_) {", "if (callInvoker_) {");
+      assert.match(broken, /if \(!scheduled_ && callInvoker_\) \{/);
     },
     /scheduled_/,
     "the receipt is sensitive to removing per-runtime wake coalescing",
@@ -2293,6 +2335,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
+      "crates/jazz-native-transport",
       "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
@@ -2481,7 +2524,11 @@ ${
       );
     }
 
-    for (const transitiveInput of ["crates/idb-tree/", "crates/jazz-compression/"]) {
+    for (const transitiveInput of [
+      "crates/idb-tree/",
+      "crates/jazz-compression/",
+      "crates/jazz-native-transport/",
+    ]) {
       const entry = nativeSourceInventory
         .split("\n")
         .find((line) => line.includes(transitiveInput));
@@ -2946,6 +2993,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
+    "crates/jazz-native-transport",
     "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);

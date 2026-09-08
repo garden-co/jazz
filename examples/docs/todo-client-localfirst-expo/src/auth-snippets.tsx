@@ -1,6 +1,6 @@
 import { Text, View } from "react-native";
-import { JazzProvider } from "jazz-tools/react-native";
-import { useLocalFirstAuth } from "jazz-tools/expo";
+import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools/react-native";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
 function TodoApp() {
@@ -9,47 +9,28 @@ function TodoApp() {
 
 // #region auth-localfirst-expo
 export function LocalFirstAuthExpoApp() {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  if (isLoading || !secret) return null;
-
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-        secret,
-      }}
+    <JazzSessionProvider
+      config={{ appId: "my-app", serverUrl: "https://your-core.example", initial: "local-first" }}
     >
       <View>
         <Text>My App</Text>
         <TodoApp />
       </View>
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion auth-localfirst-expo
 
 // #region auth-localfirst-expo-backup
-export function useRecoveryPhraseBackup(): {
-  isLoading: boolean;
-  recoveryPhrase: string | null;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  return {
-    isLoading,
-    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
-  };
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-expo-backup
 
 // #region auth-localfirst-expo-restore
-export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void> {
-  const { login } = useLocalFirstAuth();
-
-  return async (userInput: string) => {
-    const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await login(restoredSecret);
-  };
+export function useRestoreRecoveryPhrase() {
+  const { restoreLocalFirst } = useJazzSession();
+  return (userInput: string) => restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-expo-restore

@@ -1,3 +1,4 @@
+import { PlatformURL } from "./platform-url.js";
 /**
  * Build an app-scoped URL under `/apps/<appId>`.
  *
@@ -52,7 +53,7 @@ function parseServerUrl(serverUrl: string): URL {
   let parsed: URL;
 
   try {
-    parsed = new URL(serverUrl.trim());
+    parsed = new PlatformURL(serverUrl.trim());
   } catch {
     throw invalidServerUrl(serverUrl);
   }

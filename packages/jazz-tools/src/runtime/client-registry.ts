@@ -1,3 +1,5 @@
+import type { ShutdownOptions } from "./db.js";
+import { GracefulShutdownSyncError, SharedClientShutdownError } from "./graceful-shutdown-error.js";
 /**
  * Framework-agnostic, refcounted client registry. Callers resolving to the same
  * `key` share one client, so a page with several providers for one identity runs
@@ -7,7 +9,7 @@
  */
 
 export interface RegisteredClient {
-  shutdown(): Promise<void>;
+  shutdown(options?: ShutdownOptions): Promise<void>;
 }
 
 interface Entry {
@@ -24,6 +26,7 @@ interface Entry {
   closing: Promise<void> | null;
   /** True only after creation produced a client and its shutdown was invoked. */
   shutdownStarted: boolean;
+  gracefulClosing?: boolean;
   /**
    * The immediately preceding closing entry. On a rejected handoff, walk this
    * chain to retain the first shutdown that actually started. Keeping the
@@ -53,6 +56,11 @@ export function acquireClient<T extends RegisteredClient>(
 ): Promise<T> {
   let entry = registry.get(key);
   const previousClosing = entry?.closing;
+  if (entry?.gracefulClosing && previousClosing) {
+    // Keep this entry until the sync barrier decides whether it is reusable.
+    // A racing acquire must not evict an owner whose synchronization failed.
+    return previousClosing.then(() => acquireClient(key, create, holder));
+  }
   if (entry && previousClosing) {
     const previous = entry;
     let teardownSucceeded = false;
@@ -121,9 +129,51 @@ export function acquireClient<T extends RegisteredClient>(
  * tick (so a same-tick re-acquire keeps it alive); the promise resolves once
  * teardown has settled, or immediately if other holders remain.
  */
-export function releaseClient(key: string, holder: object): Promise<void> {
+export function releaseClient(
+  key: string,
+  holder: object,
+  options?: ShutdownOptions,
+): Promise<void> {
   const entry = registry.get(key);
   if (!entry) return Promise.resolve();
+
+  if (options?.waitForSync) {
+    if (entry.closing) return entry.closing;
+    if (!entry.holders.has(holder)) return Promise.resolve();
+    if (entry.holders.size > 1) {
+      return Promise.reject(new SharedClientShutdownError());
+    }
+    if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
+    entry.releaseTimer = null;
+    entry.holders.delete(holder);
+    entry.gracefulClosing = true;
+    const closing = entry.promise.then((client) => {
+      entry.shutdownStarted = true;
+      entry.shutdownBarrier = null;
+      return client.shutdown(options);
+    });
+    entry.closing = closing;
+    return closing.then(
+      () => {
+        if (registry.get(key) === entry) registry.delete(key);
+        entry.pendingRelease?.resolve();
+        entry.pendingRelease = null;
+      },
+      (error) => {
+        if (error instanceof GracefulShutdownSyncError) {
+          // Only the sync phase guarantees that the old context is still usable.
+          entry.closing = null;
+          entry.gracefulClosing = false;
+          entry.shutdownStarted = false;
+          entry.holders.add(holder);
+          entry.pendingRelease?.resolve();
+          entry.pendingRelease = null;
+        }
+        // Any later failure retains the closing barrier: storage may still be open.
+        throw error;
+      },
+    );
+  }
 
   entry.holders.delete(holder);
   if (entry.holders.size > 0) return Promise.resolve();

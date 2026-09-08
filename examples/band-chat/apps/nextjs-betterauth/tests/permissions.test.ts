@@ -16,17 +16,19 @@ describe("BandChat room admission and authorship", () => {
   it("allows owner bootstrap/invite/message and denies self-admission, forged authorship, and post-removal writes", async () => {
     const ownerId = "owner";
     const guestId = "guest";
-    const ownerAuthor = JSON.stringify(["https://bandchat.example", ownerId]);
-    const guestAuthor = JSON.stringify(["https://bandchat.example", guestId]);
+    const ownerAuthor = "00000000-0000-4000-8000-000000000001";
+    const guestAuthor = "00000000-0000-4000-8000-000000000002";
     const owner = testApp.as({
       issuer: "https://bandchat.example",
       user_id: ownerId,
+      account_id: ownerAuthor,
       claims: {},
       authMode: "external",
     });
     const guest = testApp.as({
       issuer: "https://bandchat.example",
       user_id: guestId,
+      account_id: guestAuthor,
       claims: {},
       authMode: "external",
     });
@@ -46,6 +48,7 @@ describe("BandChat room admission and authorship", () => {
     const sameSubjectFromAnotherIssuer = testApp.as({
       issuer: "https://other-provider.example",
       user_id: ownerId,
+      account_id: "00000000-0000-4000-8000-000000000003",
       claims: {},
       authMode: "external",
     });

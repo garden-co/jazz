@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
+import { getToken } from "./accounts";
+import { useJazzAuth } from "jazz-tools/react";
 
 export function SignInForm({ onToggle }: { onToggle: () => void }) {
+  const lifecycle = useJazzAuth();
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
 
@@ -16,10 +19,17 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
 
     const result = await authClient.signIn.email({ email, password });
 
-    setIsPending(false);
-
     if (result.error) {
       setError(result.error.message ?? "Sign-in failed");
+      setIsPending(false);
+      return;
+    }
+    try {
+      await lifecycle.sessionActions.loginOrRegisterJWT({ getToken });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-in failed");
+    } finally {
+      setIsPending(false);
     }
   }
 

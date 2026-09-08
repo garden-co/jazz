@@ -43,10 +43,15 @@ fn row(seed: u8) -> RowUuid {
     RowUuid::from_bytes([seed; 16])
 }
 
+// All user actors below share the synthetic test issuer. Text ownership
+// addresses its subject explicitly; session.user is the complete author record.
 fn schema() -> JazzSchema {
     let document_policy = exists(
         MEMBERSHIPS,
-        vec![outer_eq("team", "team"), session_eq("user", &["user"])],
+        vec![
+            outer_eq("team", "team"),
+            session_eq("user", &["user", "identity", "subject"]),
+        ],
     );
     compile_schema(
         &SchemaBuilder::new()
@@ -59,7 +64,10 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new(MEMBERSHIPS)
                     .fk_column("team", TEAMS)
                     .column("user", PublicColumnType::Text)
-                    .policies(read_and_allow_all_writes(session_eq("user", &["user"]))),
+                    .policies(read_and_allow_all_writes(session_eq(
+                        "user",
+                        &["user", "identity", "subject"],
+                    ))),
             )
             .table(
                 TableSchemaBuilder::new(DOCUMENTS)
@@ -121,10 +129,7 @@ fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: Aut
         MEMBERSHIPS,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            (
-                "user".to_owned(),
-                Value::String(user.canonical().to_owned()),
-            ),
+            ("user".to_owned(), Value::String(user.principal_parts().1)),
         ]),
         InsertOptions {
             row_id: Some(id),

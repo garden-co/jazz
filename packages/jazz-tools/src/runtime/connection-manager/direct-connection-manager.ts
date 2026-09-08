@@ -51,9 +51,10 @@ export class DirectConnectionManager extends ConnectionManager {
   }
 
   protected override onClientCreated({ client }: ConnectionManagerClientInput): void {
-    if (this.isDisconnected) {
+    if (this.isExplicitlyOffline()) {
       // Establish the runtime's reconnect barrier for clients created while the
       // Db is explicitly offline.
+      if (this.host.runtimeSource?.nativeConnection) return;
       void this.enqueueTransportTransition(() => client.disconnectTransport()).catch(
         () => undefined,
       );
@@ -76,12 +77,13 @@ export class DirectConnectionManager extends ConnectionManager {
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
     if (tier === "local") return;
     for (;;) {
-      while (this.isDisconnected) {
+      await this.host.runtimeSource?.nativeConnection?.waitForTransportTransition?.();
+      while (this.isExplicitlyOffline()) {
         await this.waitForReconnect(signal);
         if (signal?.aborted) return;
       }
       await this.transportTransition;
-      if (!this.isDisconnected || signal?.aborted) return;
+      if (!this.isExplicitlyOffline() || signal?.aborted) return;
     }
   }
 
@@ -89,10 +91,28 @@ export class DirectConnectionManager extends ConnectionManager {
     return false;
   }
   isExplicitlyOffline(): boolean {
-    return this.isDisconnected;
+    return (
+      this.host.runtimeSource?.nativeConnection?.isExplicitlyOffline?.() ?? this.isDisconnected
+    );
+  }
+  override onExplicitOfflineChange(
+    listener: (offline: boolean) => void,
+    signal: AbortSignal,
+  ): void {
+    const nativeConnection = this.host.runtimeSource?.nativeConnection;
+    if (nativeConnection?.onExplicitOfflineChange) {
+      nativeConnection.onExplicitOfflineChange(listener, signal);
+      return;
+    }
+    super.onExplicitOfflineChange(listener, signal);
   }
   async waitForReconnect(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return;
+    const nativeConnection = this.host.runtimeSource?.nativeConnection;
+    if (nativeConnection?.waitForReconnect) {
+      await nativeConnection.waitForReconnect(signal);
+      return;
+    }
     if (!this.isDisconnected) {
       await this.transportTransition;
       if (!this.isDisconnected) return;

@@ -594,7 +594,12 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        StackSafeFuture::new(self.0.all(prepared, opts)).await
+        match prepared.request_identity() {
+            Some(author) => {
+                StackSafeFuture::new(self.0.all_for_identity(prepared, opts, author)).await
+            }
+            None => StackSafeFuture::new(self.0.all(prepared, opts)).await,
+        }
     }
 
     async fn transaction_all_for_identity(
@@ -616,7 +621,12 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        StackSafeFuture::new(self.0.subscribe(prepared, opts)).await
+        match prepared.request_identity() {
+            Some(author) => {
+                StackSafeFuture::new(self.0.subscribe_for_identity(prepared, opts, author)).await
+            }
+            None => StackSafeFuture::new(self.0.subscribe(prepared, opts)).await,
+        }
     }
 
     fn write_state(
@@ -921,9 +931,10 @@ impl ClientDb {
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage, scope).await
     }
 
     async fn query_transaction_rows(
@@ -961,6 +972,7 @@ impl ClientDb {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         cancellation: oneshot::Receiver<()>,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
         self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(
@@ -971,6 +983,7 @@ impl ClientDb {
             table,
             tx,
             cancellation,
+            scope,
         )
         .await
     }
@@ -1849,6 +1862,7 @@ impl ClientDbInner {
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -1859,6 +1873,10 @@ impl ClientDbInner {
                     .prepare_query(&query)
                     .map_err(|error| JazzError::Query(error.to_string()))?,
             )
+        };
+        let prepared = match scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
         };
         let rows = if wait_for_coverage {
             Self::read_remote_one_shot_from_subscription(&db, &prepared, opts).await?
@@ -1978,6 +1996,7 @@ impl ClientDbInner {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
+        scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
         // Register before cloning the backend or awaiting core admission. A
         // concurrent shutdown can therefore cancel and await this path even
@@ -1990,6 +2009,10 @@ impl ClientDbInner {
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?;
             (inner.backend_clone()?, prepared)
+        };
+        let prepared = match scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
         };
         let stream = tokio::select! {
             biased;
@@ -2386,6 +2409,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         _ => crate::tools::public_api::session::AuthMode::External,
     };
     Some(Session {
+        account_id: None,
         issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
         claims: serde_json::Value::Object(
@@ -2408,6 +2432,10 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .jwt_token
         .as_deref()
         .and_then(session_from_unverified_jwt)
+        .map(|mut session| {
+            session.account_id = context.account_id;
+            session
+        })
 }
 
 fn core_identity(
@@ -2525,10 +2553,9 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
-    core_claims.insert(
-        "user".to_owned(),
-        CoreValue::String(session.author_subject()?.canonical().to_owned()),
-    );
+    core_claims.extend(crate::tools::policy_claims::author_policy_claims(
+        session.author_subject()?,
+    ));
     Ok(core_claims)
 }
 
@@ -2887,6 +2914,22 @@ fn transaction_rejected_before_tier_message(
 }
 
 impl JazzClient {
+    fn read_scope(&self) -> Result<Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>> {
+        let Some(session) = self
+            .write_context
+            .as_ref()
+            .and_then(|context| context.session())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            core_author_from_session(session)?,
+            session_claims_to_core_claims(session)?
+                .into_iter()
+                .collect(),
+        )))
+    }
+
     fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         let session = self
             .write_context
@@ -3332,7 +3375,7 @@ impl PublicQueryDecoder {
                 };
                 match value {
                     CoreValue::U64(timestamp) => Value::Timestamp(timestamp),
-                    CoreValue::String(author) => Value::Text(author),
+                    author @ CoreValue::Record(_) => core_to_public_value(author)?,
                     _ => unreachable!("provenance_value returns typed timestamps or authors"),
                 }
             }
@@ -3486,7 +3529,7 @@ impl JazzClient {
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
         let (cancellation, cancellation_rx) = oneshot::channel();
         self.db
-            .subscribe(query, opts, table, tx, cancellation_rx)
+            .subscribe(query, opts, table, tx, cancellation_rx, self.read_scope()?)
             .await?;
         Ok(SubscriptionStream::new(rx, cancellation))
     }
@@ -3593,7 +3636,13 @@ impl JazzClient {
             // local maintained graph has settled that exact coverage.
             let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
             self.db
-                .query_rows(query.clone(), opts, table, wait_for_coverage)
+                .query_rows(
+                    query.clone(),
+                    opts,
+                    table,
+                    wait_for_coverage,
+                    self.read_scope()?,
+                )
                 .await?
         };
         self.db
@@ -3824,7 +3873,10 @@ impl JazzClient {
     }
 
     pub async fn test_client(schema: Schema) -> crate::tools::JazzClient {
-        let context = crate::tools::AppContext::test(schema);
+        let mut context = crate::tools::AppContext::test(schema);
+        // This isolated fixture is a trusted backend. Ordinary accountless
+        // contexts remain anonymous readers and cannot author rows.
+        context.admin_secret = Some("test-admin".to_owned());
         crate::tools::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
@@ -4231,6 +4283,7 @@ mod tests {
             storage_factory: Some(std::sync::Arc::new(
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             )),
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -4252,6 +4305,18 @@ mod tests {
                 jazz_storage_rocksdb::RocksDbStorageFactory,
             ));
         }
+        context
+    }
+
+    // This represents a registry-resolved assignment at the native client
+    // configuration boundary. Keep ordinary offline contexts accountless so
+    // reader-only tests do not accidentally gain write authority.
+    fn with_synthetic_admitted_account(mut context: AppContext) -> AppContext {
+        context.account_id = Some(crate::account_registry::AccountId(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            context.app_id.to_string().as_bytes(),
+        )));
+        context.jwt_token = Some(make_test_jwt("offline-test-writer", json!({})));
         context
     }
 
@@ -4340,7 +4405,7 @@ mod tests {
 
     #[test]
     fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
-        let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
+        let mut session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
@@ -4348,6 +4413,8 @@ mod tests {
                 "user": "provider-user",
                 "authMode": "external",
             }));
+        session.account_id = Some(crate::account_registry::AccountId(Uuid::from_u128(0x4401)));
+        let author = session.author_subject().expect("admitted test author");
 
         let claims = session_claims_to_core_claims(&session).unwrap();
         assert_eq!(
@@ -4368,12 +4435,11 @@ mod tests {
         );
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(
-                CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
-                    .unwrap()
-                    .canonical()
-                    .to_owned()
-            ))
+            Some(
+                &crate::ids::RowAuthor::from_persisted_subject(author)
+                    .expect("admitted row author")
+                    .to_value()
+            )
         );
     }
 
@@ -4695,11 +4761,11 @@ mod tests {
     /// alice ──Remote read──► transient subscription ──wait──► authority
     #[tokio::test(flavor = "current_thread")]
     async fn strict_remote_one_shot_uses_transient_subscription_not_ambient_all() {
-        let client = JazzClient::connect(make_offline_context(
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
             AppId::from_name("strict-remote-one-shot-subscription"),
             TempDir::new().expect("tempdir").keep(),
             declared_todo_schema(),
-        ))
+        )))
         .await
         .expect("connect offline client");
         client
@@ -4790,12 +4856,12 @@ mod tests {
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-core-row-rehydrate");
-        let context = make_offline_context_with_storage(
+        let context = with_synthetic_admitted_account(make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
             ClientStorage::Persistent,
-        );
+        ));
 
         let client = JazzClient::connect(context.clone())
             .await
@@ -5488,7 +5554,7 @@ mod tests {
                     replacement,
                 ]));
                 let client = JazzClient::connect_with_native_transport(
-                    make_native_context("responsive-during-retry"),
+                    with_synthetic_admitted_account(make_native_context("responsive-during-retry")),
                     connector.clone(),
                 )
                 .await
@@ -5584,12 +5650,12 @@ mod tests {
     async fn offline_memory_client_does_not_create_core_rocksdb_dir() {
         let data_dir = TempDir::new().expect("temp client dir");
         let app_id = AppId::from_name("client-core-memory");
-        let context = make_offline_context_with_storage(
+        let context = with_synthetic_admitted_account(make_offline_context_with_storage(
             app_id,
             data_dir.path().to_path_buf(),
             declared_todo_schema(),
             ClientStorage::Memory,
-        );
+        ));
 
         let client = JazzClient::connect(context)
             .await
@@ -5617,11 +5683,11 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_wait_errors_use_transaction_vocabulary() {
-        let client = JazzClient::connect(make_offline_context(
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
             AppId::from_name("transaction-wait-error-vocabulary"),
             TempDir::new().expect("temp client dir").keep(),
             declared_todo_schema(),
-        ))
+        )))
         .await
         .expect("connect offline client");
         let unknown = TransactionId::from_committed_tx(CoreTxId::new(

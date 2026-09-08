@@ -335,7 +335,7 @@ impl SyncBench {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(ui_result, ui_expected_rows);
         assert!(ui_rows.iter().all(|row| {
-            row.cell(table, "owner") == Some(Value::String(self.ui_owner.canonical().to_owned()))
+            row.cell(table, "owner") == Some(Value::String(self.ui_owner.principal_parts().1))
         }));
         assert!(!ui_expected_rows.contains_key(&row(250)));
         assert_eq!(
@@ -517,14 +517,14 @@ fn rows_owned_by(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     rows.iter()
         .filter(|(_row_uuid, cells)| {
-            cells.get("owner") == Some(&Value::String(owner.canonical().to_owned()))
+            cells.get("owner") == Some(&Value::String(owner.principal_parts().1))
         })
         .map(|(row_uuid, cells)| (*row_uuid, cells.clone()))
         .collect()
 }
 
 fn schema() -> JazzSchema {
-    let owner = schema_fixture::session_user_id_column("owner");
+    let owner = schema_fixture::session_subject_column("owner");
     // This fixture intentionally accepts writes from the UI author for rows
     // owned by another identity, then checks that the client link does not see
     // that row. Keep those write semantics explicit now that a table with any
@@ -561,10 +561,7 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::String(owner.principal_parts().1)),
     ])
 }
 

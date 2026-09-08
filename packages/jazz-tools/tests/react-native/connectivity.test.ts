@@ -57,16 +57,18 @@ it("disconnects before any query and reconnects using only native credentials", 
         await expect
           .poll(nativeStatus)
           .toMatchObject({ type: "nativeConnectionStatus", connected: true });
-        // No schema runtime exists yet: offline must still stop the admitted socket.
+        // No schema runtime exists yet: offline must fence its first native use.
         await db.disconnect();
+        const write = db.insert(app.notes, { title: "before first query" });
+        const row = await write.wait({ tier: "local" });
+        // Account contexts defer native schema attachment until first use. The
+        // pending disconnect is applied before that foreground performs work.
         expect(nativeStatus()).toEqual({
           type: "nativeConnectionStatus",
           configured: true,
           explicitlyOffline: true,
           connected: false,
         });
-        const write = db.insert(app.notes, { title: "before first query" });
-        const row = await write.wait({ tier: "local" });
         let globallyAccepted = false;
         const global = write.wait({ tier: "global" }).then(() => {
           globallyAccepted = true;

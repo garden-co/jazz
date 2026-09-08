@@ -148,6 +148,187 @@ describe("backend request auth", () => {
     );
   });
 
+  it.each(["login", "login-or-register"] as const)(
+    "uses the once-read verified bearer for %s",
+    async (accountMode) => {
+      const identity = { issuer: "https://issuer.example", subject: "reader" };
+      const token = signHs256Jwt({
+        iss: identity.issuer,
+        sub: identity.subject,
+        account: "untrusted-jwt-account",
+      });
+      const account = "00000000-0000-4000-8000-000000000012";
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ account, identity })));
+      const header = vi
+        .fn()
+        .mockReturnValueOnce(`Bearer ${token}`)
+        .mockImplementation(() => {
+          throw new Error("request headers read twice");
+        });
+      const session = await resolveRequestSession(
+        { header },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+        { account: accountMode },
+      );
+      expect(session.account_id).toBe(account);
+      expect(header).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledWith(
+        `https://core.example/apps/app/accounts/${accountMode}`,
+        expect.objectContaining({
+          credentials: "omit",
+          redirect: "error",
+          headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+        }),
+      );
+    },
+  );
+
+  it.each(["identity_unassigned", "identity_revoked"])(
+    "rejects registry %s without registering the external identity",
+    async (code) => {
+      const token = signHs256Jwt({ iss: "https://issuer.example", sub: "reader" });
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(code, { status: 403 }));
+      await expect(
+        resolveRequestSession(
+          { headers: { authorization: `Bearer ${token}` } },
+          {
+            appId: "app",
+            accountRegistry: "https://core.example/apps/app/accounts",
+            jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+          },
+        ),
+      ).rejects.toMatchObject({ code });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0]![0]).toBe("https://core.example/apps/app/accounts/login");
+    },
+  );
+
+  it("rejects a registry response for a different authenticated identity", async () => {
+    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "reader" });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          account: "00000000-0000-4000-8000-000000000012",
+          identity: { issuer: "https://issuer.example", subject: "other" },
+        }),
+      ),
+    );
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_account_response" });
+  });
+
+  it("does not fall back after explicit enrollment rejects a revoked identity", async () => {
+    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "revoked" });
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("identity_revoked", { status: 403 }));
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+        { account: "login-or-register" },
+      ),
+    ).rejects.toMatchObject({ code: "identity_revoked" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]![0]).toBe(
+      "https://core.example/apps/app/accounts/login-or-register",
+    );
+  });
+
+  it.each(["login", "login-or-register"] as const)(
+    "rejects invalid credentials before %s",
+    async (accountMode) => {
+      const fetcher = vi.spyOn(globalThis, "fetch");
+      const config = {
+        appId: "app",
+        accountRegistry: "https://core.example/apps/app/accounts",
+        jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+      };
+      const badExternal = signHs256Jwt(
+        { iss: "https://issuer.example", sub: "reader" },
+        "wrong-key",
+      );
+      await expect(
+        resolveRequestSession({ headers: { authorization: `Bearer ${badExternal}` } }, config, {
+          account: accountMode,
+        }),
+      ).rejects.toThrow(/Invalid JWT/);
+      mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: false });
+      const badLocal = makeUnsignedJwt({ iss: "urn:jazz:local-first", sub: "local" });
+      await expect(
+        resolveRequestSession({ headers: { authorization: `Bearer ${badLocal}` } }, config, {
+          account: accountMode,
+        }),
+      ).rejects.toThrow(/Invalid local-first/);
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it("founds a verified local-first account using the exact original proof", async () => {
+    const identity = {
+      issuer: "urn:jazz:local-first",
+      subject: "11111111-1111-1111-1111-111111111111",
+    };
+    const token = makeUnsignedJwt({ iss: identity.issuer, sub: identity.subject });
+    const account = "00000000-0000-4000-8000-000000000012";
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: identity.subject });
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ account, identity })));
+    const result = await resolveRequestSession(
+      { headers: { authorization: `Bearer ${token}` } },
+      {
+        appId: "app",
+        accountRegistry: "https://core.example/apps/app/accounts",
+      },
+    );
+    expect(result.account_id).toBe(account);
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://core.example/apps/app/accounts/found-local-first",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+      }),
+    );
+  });
+
+  it("rejects malformed registry account UUIDs", async () => {
+    const identity = { issuer: "https://issuer.example", subject: "reader" };
+    const token = signHs256Jwt({ iss: identity.issuer, sub: identity.subject });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ account: "not-an-account", identity })),
+    );
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_account_response" });
+  });
+
   it("rejects external JWTs when jwksUrl is not configured", async () => {
     const token = signHs256Jwt({
       sub: "user-subject",

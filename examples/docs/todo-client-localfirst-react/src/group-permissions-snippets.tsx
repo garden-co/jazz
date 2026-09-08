@@ -8,7 +8,7 @@ const schema = {
   }),
   workspaceMembers: s.table({
     workspaceId: s.ref("workspaces"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     role: s.enum("reader", "writer", "contributor", "admin"),
   }),
   documents: s.table({
@@ -28,10 +28,10 @@ type Role = "reader" | "writer" | "contributor" | "admin";
 s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   // Re-usable helpers to improve readability.
   const isMember = (workspaceId: RowRefValue) =>
-    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user });
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user.account });
 
   const hasRole = (workspaceId: RowRefValue, role: Role) =>
-    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user, role });
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user.account, role });
 
   const isAdmin = (workspaceId: RowRefValue) => hasRole(workspaceId, "admin");
 
@@ -52,7 +52,10 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       hasRole(doc.workspaceId, "admin"),
-      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([
+        { "$createdBy.account": session.user.account },
+        hasRole(doc.workspaceId, "contributor"),
+      ]),
     ]),
   );
 
@@ -61,7 +64,10 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       isAdmin(doc.workspaceId),
-      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([
+        { "$createdBy.account": session.user.account },
+        hasRole(doc.workspaceId, "contributor"),
+      ]),
     ]),
   );
 
@@ -81,8 +87,11 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       isAdmin(member.workspaceId),
       allOf([
-        { user_id: session.user, role: "admin" },
-        policy.workspaces.exists.where({ id: member.workspaceId, $createdBy: session.user }),
+        { user_id: session.user.account, role: "admin" },
+        policy.workspaces.exists.where({
+          id: member.workspaceId,
+          "$createdBy.account": session.user.account,
+        }),
       ]),
     ]),
   );
@@ -91,7 +100,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
 
   // Admins can remove any member; members can leave on their own
   policy.workspaceMembers.allowDelete.where((member) =>
-    anyOf([isAdmin(member.workspaceId), { user_id: session.user }]),
+    anyOf([isAdmin(member.workspaceId), { user_id: session.user.account }]),
   );
 });
 // #endregion group-permissions

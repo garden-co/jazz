@@ -1,20 +1,14 @@
 import * as React from "react";
-import { JazzProvider, useAll, useDb, useLocalFirstAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { prepareAccountConfig } from "./account.js";
 import { app } from "../schema.js";
 import { fileListQuery } from "./file-list-query.js";
-
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-
-function config(secret: string): DbConfig {
-  return { appId, env: "dev", serverUrl, secret };
-}
 
 function FileBrowser() {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user;
+  const userId = session?.user.account;
   const { data: folders = [] } = useAll(app.folders);
   const [folderId, setFolderId] = React.useState<string | undefined>();
   const [isUploading, setIsUploading] = React.useState(false);
@@ -108,10 +102,26 @@ function FileBrowser() {
 }
 
 export function App() {
-  const { secret, isLoading } = useLocalFirstAuth();
-  if (isLoading || !secret) return <p>Opening EpicDrop…</p>;
+  const [config, setConfig] = React.useState<DbConfig>();
+  const [error, setError] = React.useState<Error>();
+  React.useEffect(() => {
+    let cancelled = false;
+    prepareAccountConfig().then(
+      (value) => {
+        if (!cancelled) setConfig(value);
+      },
+      (cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  if (error) throw error;
+  if (!config) return <p>Opening EpicDrop…</p>;
   return (
-    <JazzProvider config={config(secret)} fallback={<p>Opening EpicDrop…</p>}>
+    <JazzProvider config={config} fallback={<p>Opening EpicDrop…</p>}>
       <FileBrowser />
     </JazzProvider>
   );

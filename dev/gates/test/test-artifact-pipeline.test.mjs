@@ -494,6 +494,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
   assert.deepEqual(turbo.tasks["jazz-tools#build"].passThroughEnv, [
     "JAZZ_TEST_SEALED_TOOLS_DIST",
     "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+    "JAZZ_RN_TEST_BRIDGE",
     "JAZZ_CORRECTNESS_WASM_PACKAGE",
     "JAZZ_CORRECTNESS_NAPI_BINDING",
     "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",

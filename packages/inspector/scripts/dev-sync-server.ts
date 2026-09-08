@@ -7,58 +7,70 @@ import {
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
-import { createJazzContext } from "jazz-tools/backend";
+import { createJazzSession } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
 
-export default async function runServer() {
+export default async function runServer({ port = TEST_PORT }: { port?: number } = {}) {
   const serverHandle = await startLocalJazzServer({
     appId: APP_ID,
-    port: TEST_PORT,
+    port,
     adminSecret: ADMIN_SECRET,
     backendSecret: "test",
   });
 
-  await deploy({
-    serverUrl: serverHandle.url,
-    appId: serverHandle.appId,
-    adminSecret: serverHandle.adminSecret,
-    schema: app,
-    permissions,
-  });
+  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  try {
+    await deploy({
+      serverUrl: serverHandle.url,
+      appId: serverHandle.appId,
+      adminSecret: serverHandle.adminSecret,
+      schema: app,
+      permissions,
+    });
 
-  const context = createJazzContext({
-    appId: serverHandle.appId,
-    app: app,
-    permissions,
-    driver: { type: "memory" },
-    serverUrl: serverHandle.url,
-    backendSecret: serverHandle.backendSecret,
-    defaultDurabilityTier: "global",
-  });
+    session = await createJazzSession({
+      appId: serverHandle.appId,
+      app: app,
+      permissions,
+      driver: { type: "memory" },
+      serverUrl: serverHandle.url,
+      initial: { backendSecret: serverHandle.backendSecret },
+      defaultDurabilityTier: "global",
+    });
 
-  const sessionedClient = context.asBackend();
+    const snapshot = session.getSnapshot();
+    if (snapshot.status !== "ready" || !snapshot.client) {
+      throw snapshot.error ?? new Error("Backend session is not ready");
+    }
+    const sessionedClient = snapshot.client.db;
 
-  const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
-  for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
-    const batch = seedTitles.slice(offset, offset + SEED_BATCH_SIZE);
-    await Promise.all(
-      batch.map((title, indexWithinBatch) => {
-        const seedIndex = offset + indexWithinBatch;
-        return sessionedClient
-          .insert(app.todos, {
-            title: title,
-            done: seedIndex % 2 === 1,
-          })
-          .wait({ tier: "global" });
-      }),
-    );
+    const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
+    for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
+      const batch = seedTitles.slice(offset, offset + SEED_BATCH_SIZE);
+      await Promise.all(
+        batch.map((title, indexWithinBatch) => {
+          const seedIndex = offset + indexWithinBatch;
+          return sessionedClient
+            .insert(app.todos, {
+              title: title,
+              done: seedIndex % 2 === 1,
+            })
+            .wait({ tier: "global" });
+        }),
+      );
+    }
+
+    await session.close();
+    return {
+      serverHandle,
+    };
+  } catch (error) {
+    await Promise.all([session?.close(), serverHandle.stop()]).catch((cleanupError) => {
+      console.error("Inspector seed cleanup after setup failure failed", cleanupError);
+    });
+    throw error;
   }
-
-  await context.shutdown();
-  return {
-    serverHandle,
-  };
 }
 
 function buildSeedTodoTitles(count: number): string[] {

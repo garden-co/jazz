@@ -3,7 +3,7 @@ import { schema as s } from "jazz-tools";
 const schema = {
   folders: s.table({
     name: s.string(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
   }),
   files: s
     .table({
@@ -11,7 +11,7 @@ const schema = {
       name: s.string(),
       content_type: s.string(),
       size_bytes: s.int(),
-      owner_id: s.string(),
+      owner_id: s.uuid(),
       contents: s.bytes(),
     })
     // The browser always opens one folder at a time.

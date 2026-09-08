@@ -9,6 +9,17 @@ int main(void) {
     fprintf(stderr, "unexpected Jazz native relay ABI: %u\n", abi);
     return 1;
   }
+  jazz_native_relay_bytes secret = {0};
+  jazz_native_relay_bytes proof = {0};
+  const uint8_t audience[] = "native-account-c-probe";
+  if (jazz_native_relay_account_secret(&secret) != JAZZ_NATIVE_RELAY_OK || secret.len != 32 ||
+      jazz_native_relay_mint_local_first_token(secret.data, secret.len, audience,
+          sizeof(audience) - 1, 3600, 1000, &proof) != JAZZ_NATIVE_RELAY_OK || proof.len == 0) {
+    fprintf(stderr, "native account crypto ABI failed\n");
+    return 1;
+  }
+  jazz_native_relay_bytes_free(&secret);
+  jazz_native_relay_bytes_free(&proof);
   /* RelayCommandRequest::Probe's postcard discriminant. The response is
    * intentionally opaque to JNI/C; only the shared Rust/JS codec decodes it. */
   const uint8_t probe[] = {0};

@@ -59,21 +59,20 @@ export function mountSignInForm(parent: HTMLElement): void {
       const email = (form.elements.namedItem("email") as HTMLInputElement).value;
       const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-      const result =
-        mode === "signup"
-          ? await authClient.signUp.email({
+      try {
+        const result = await (mode === "signup"
+          ? authClient.signUp.email({
               name: (form.elements.namedItem("name") as HTMLInputElement).value,
               email,
               password,
             })
-          : await authClient.signIn.email({ email, password });
-
-      submit.disabled = false;
-
-      if (result.error) {
-        errorEl.textContent =
-          result.error.message ?? (mode === "signup" ? "Sign-up failed" : "Sign-in failed");
+          : authClient.signIn.email({ email, password }));
+        if (result.error) throw new Error(result.error.message ?? "Authentication failed");
+      } catch (cause) {
+        errorEl.textContent = cause instanceof Error ? cause.message : "Account setup failed";
         errorEl.hidden = false;
+      } finally {
+        submit.disabled = false;
       }
     });
   }

@@ -2,7 +2,7 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   profiles: s.table({
-    userId: s.string(),
+    userId: s.uuid(),
     name: s.string(),
     avatar: s.string().optional(),
   }),
@@ -13,7 +13,7 @@ const schema = {
   }),
   chatMembers: s.table({
     chatId: s.ref("chats"),
-    userId: s.string(),
+    userId: s.uuid(),
     joinCode: s.string().optional(),
   }),
   messages: s.table({
@@ -23,7 +23,7 @@ const schema = {
   }),
   reactions: s.table({
     messageId: s.ref("messages"),
-    userId: s.string(),
+    userId: s.uuid(),
     emoji: s.string(),
   }),
   canvases: s.table({

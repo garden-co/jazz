@@ -9,7 +9,7 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app, type Todo } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
@@ -33,7 +33,7 @@ export function TodoList() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const trimmedFilterTitle = normalizeText(filterTitle).trim();
-  let todosQuery = app.todos;
+  let todosQuery = app.todos.where({});
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
   }
@@ -44,7 +44,7 @@ export function TodoList() {
   const db = useDb();
   const { data: todos = [] } = useAll(todosQuery);
   const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const sessionUserId = session?.user.account ?? null;
 
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();

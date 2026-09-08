@@ -1,61 +1,38 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, useDb, useAuthState } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
   readStoredAuthSession,
-  type StoredAuthSession,
   writeStoredAuthSession,
 } from "./auth-storage.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { requestSignIn, requestSignUp } from "./api.js";
 
-type ChatShellProps = {
-  onStoredAuthSessionChange(session: StoredAuthSession | null): void;
-};
+type Credentials = (email: string, password: string) => Promise<void>;
 
-function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
-  const db = useDb();
-  const { authMode, claims, user: userId } = useAuthState();
+function ChatShell({
+  onSignIn,
+  onSignUp,
+  onSignOut,
+}: {
+  onSignIn: Credentials;
+  onSignUp: Credentials;
+  onSignOut: () => Promise<void>;
+}) {
+  const { authMode, claims, user } = useAuthState();
+  const userId = user?.account ?? null;
   const role = typeof claims.role === "string" ? claims.role : null;
-
-  async function handleSignIn(email: string, password: string) {
-    const session = await requestSignIn(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onStoredAuthSessionChange(session);
-  }
-
-  async function handleSignUp(email: string, password: string) {
-    const session = await requestSignUp(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onStoredAuthSessionChange(session);
-  }
-
-  function handleSignOut() {
-    clearStoredAuthSession(DEFAULT_APP_ID);
-    onStoredAuthSessionChange(null);
-  }
-
-  React.useEffect(() => {
-    return db.onAuthChanged((state) => {
-      if (state.error) {
-        clearStoredAuthSession(DEFAULT_APP_ID);
-        onStoredAuthSessionChange(null);
-      }
-    });
-  }, [db, onStoredAuthSessionChange]);
-
   return (
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={authMode !== "anonymous"}
+          loggedIn={authMode === "external"}
           role={role}
-          onSignIn={handleSignIn}
-          onSignUp={handleSignUp}
-          onSignOut={handleSignOut}
+          onSignIn={onSignIn}
+          onSignUp={onSignUp}
+          onSignOut={onSignOut}
         />
 
         <ChatPanel
@@ -78,32 +55,117 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
   );
 }
 
+const config = {
+  appId: DEFAULT_APP_ID,
+  serverUrl: SYNC_SERVER_URL,
+  driver: { type: "memory" as const },
+};
+
 export function App() {
-  const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
-    readStoredAuthSession(DEFAULT_APP_ID),
+  const [providerError, setProviderError] = React.useState<Error>();
+  // Retain manual link/retry intent while the provider detaches the data view.
+  const recovery = React.useRef<(() => Promise<void>) | undefined>(undefined);
+  const restored = React.useRef(false);
+  const screen = (
+    <SessionScreen
+      providerError={providerError}
+      reportError={setProviderError}
+      recovery={recovery}
+      restored={restored}
+    />
   );
-
-  const config = React.useMemo((): DbConfig => {
-    const sharedConfig = {
-      appId: DEFAULT_APP_ID,
-      env: "dev" as const,
-      serverUrl: SYNC_SERVER_URL,
-      driver: { type: "memory" as const },
-    };
-
-    if (storedAuthSession) {
-      return {
-        ...sharedConfig,
-        jwtToken: storedAuthSession.token,
-      };
-    }
-
-    return sharedConfig;
-  }, [storedAuthSession]);
-
   return (
-    <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
-      <ChatShell onStoredAuthSessionChange={setStoredAuthSession} />
+    <JazzProvider
+      {...config}
+      initial="local-first"
+      signedOut={screen}
+      loading={screen}
+      error={screen}
+    >
+      {screen}
     </JazzProvider>
+  );
+}
+
+async function getStoredToken() {
+  const saved = readStoredAuthSession(DEFAULT_APP_ID);
+  if (!saved) throw new Error("Sign in to the provider first");
+  return saved.token;
+}
+
+function SessionScreen({
+  providerError,
+  reportError,
+  recovery,
+  restored,
+}: {
+  restored: React.RefObject<boolean>;
+  providerError?: Error;
+  reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+  recovery: React.RefObject<(() => Promise<void>) | undefined>;
+}) {
+  const { sessionActions: actions, ...session } = useJazzAuth();
+  React.useEffect(() => {
+    if (restored.current || session.status !== "ready") return;
+    restored.current = true;
+    const saved = readStoredAuthSession(DEFAULT_APP_ID);
+    if (saved)
+      void perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken })).catch(() => {});
+  }, [session.status]);
+  // This is the manual hybrid escape hatch: no automatic enrollment connector
+  // runs while signup links the provider identity to this local-first account.
+  async function perform(action: () => Promise<void>) {
+    recovery.current = action;
+    try {
+      await action();
+      reportError(undefined);
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      throw cause;
+    }
+  }
+  async function signIn(email: string, password: string) {
+    const auth = await requestSignIn(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken }));
+  }
+  async function signUp(email: string, password: string) {
+    const auth = await requestSignUp(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await perform(() => actions.linkJWT({ getToken: getStoredToken }));
+  }
+  async function signOut() {
+    await perform(async () => {
+      await actions.logout();
+      clearStoredAuthSession(DEFAULT_APP_ID);
+      await actions.createLocalFirst();
+    });
+  }
+  const error = providerError ?? session.error;
+  return (
+    <>
+      {error && (
+        <section role="alert">
+          <p>{error.message}</p>
+          <button
+            onClick={() =>
+              void perform(
+                session.error
+                  ? session.retry
+                  : (recovery.current ??
+                      (() => actions.loginOrRegisterJWT({ getToken: getStoredToken }))),
+              ).catch(() => {})
+            }
+          >
+            Retry
+          </button>
+        </section>
+      )}
+      {session.status === "ready" ? (
+        <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
+      ) : (
+        <p>Preparing account...</p>
+      )}
+    </>
   );
 }

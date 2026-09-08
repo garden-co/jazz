@@ -121,7 +121,7 @@ where
                 stored.durability,
                 stored.view_scoped_cardinality,
                 contribution_merge,
-            ),
+            )?,
         );
         // Pending and accepted content versions both participate in local
         // merge-head state. Ingest already installed this transaction's
@@ -964,7 +964,7 @@ where
             && let Fate::Rejected(reason) = &tx.fate
         {
             let rejected_tx_values =
-                rejected_transaction_values(tx.node_alias, &tx.tx, reason.clone());
+                rejected_transaction_values(tx.node_alias, &tx.tx, reason.clone())?;
             batch.insert("jazz_rejected_transactions", rejected_tx_values.clone());
             let rejected_tx_table = self
                 .catalogue

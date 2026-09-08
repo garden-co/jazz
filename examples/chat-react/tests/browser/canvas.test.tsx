@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ describe("Canvas E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      secret?: string;
+      account?: import("jazz-tools").AccountHandle;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -63,7 +63,9 @@ describe("Canvas E2E", () => {
     const appId =
       config.appId ?? `test-canvas-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
+    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+
+    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -203,7 +205,7 @@ describe("Canvas E2E", () => {
     const aliceContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`canvas-user-a-${Date.now()}`),
+      account: await testAccount(`canvas-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -259,7 +261,7 @@ describe("Canvas E2E", () => {
     const bobContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
-      secret: await testSecret(`canvas-user-b-${Date.now()}`),
+      account: await testAccount(`canvas-user-b-${Date.now()}`),
     });
 
     // User B should see the canvas

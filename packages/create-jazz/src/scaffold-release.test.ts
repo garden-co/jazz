@@ -76,9 +76,25 @@ describe("scaffold() release source snapshots", () => {
     );
     fs.writeFileSync(
       path.join(previewPackage, "jazz-source-snapshot.json"),
-      JSON.stringify({ schema: 1, packageVersion, commit }),
+      JSON.stringify({
+        schema: 2,
+        packageVersion,
+        commit,
+        packages: {
+          "create-jazz": `https://pkg.pr.new/garden-co/jazz/create-jazz@${commit}`,
+          "jazz-tools": `https://pkg.pr.new/garden-co/jazz/jazz-tools@${commit}`,
+        },
+      }),
     );
 
+    tigedMock.mockImplementation(() => ({
+      clone: async (dir: string) => {
+        fs.writeFileSync(
+          path.join(dir, "package.json"),
+          JSON.stringify({ dependencies: { "jazz-tools": "workspace:^", react: "^19.0.0" } }),
+        );
+      },
+    }));
     await scaffold(
       {
         appName: "preview-app",
@@ -90,6 +106,12 @@ describe("scaffold() release source snapshots", () => {
       readSourceSnapshot(previewPackage),
     );
 
+    expect(
+      JSON.parse(fs.readFileSync(path.join(targetDir, "package.json"), "utf8")).dependencies,
+    ).toEqual({
+      "jazz-tools": `https://pkg.pr.new/garden-co/jazz/jazz-tools@${commit}`,
+      react: "^19.0.0",
+    });
     expect(tigedMock).toHaveBeenCalledWith(`garden-co/jazz/starters/next-betterauth#${commit}`, {
       disableCache: true,
     });

@@ -241,6 +241,7 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.query.policy_authorization_graph_replacements.clear();
         // A trusted snapshot is a complete replacement of the authority
         // catalogue. Once its registry and durable receipt have both crossed
         // the activation boundary, it also proves that a transient earlier

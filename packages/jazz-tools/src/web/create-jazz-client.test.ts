@@ -1,5 +1,5 @@
+import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
@@ -89,7 +89,10 @@ function createMockDb(
       status: session ? "authenticated" : "unauthenticated",
       session: session
         ? {
-            user: JSON.stringify([session.issuer, session.user_id]),
+            user: {
+              account: session.account_id ?? null,
+              identity: { issuer: session.issuer, subject: session.user_id },
+            },
             claims: session.claims,
             authMode: session.authMode,
           }
@@ -120,7 +123,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
   it("AGC-01: initialises orchestrator and shuts down cleanly", async () => {
     const config: JazzClientConfig = {
-      appId: "solid-unit-1",
+      ...(await enrolledAccountConfig("solid-unit-1")),
     };
     const session: Session = {
       user_id: "local:alice",
@@ -128,14 +131,14 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
       issuer: "urn:jazz:local-first",
       authMode: "local-first",
     };
-    const db = createMockDb("test-app", session);
+    const db = createMockDb(config.appId, session);
 
     mocks.createDb.mockResolvedValue(db);
 
     const client = await createJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
-    expect(mocks.createDb).toHaveBeenCalledWith({ appId: "solid-unit-1" });
+    expect(mocks.createDb).toHaveBeenCalledWith(config);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
@@ -145,7 +148,10 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     expect(client.db).toBe(db);
     expect(client.session).toEqual({
-      user: canonicalAuthorSubject(session.issuer, session.user_id),
+      user: {
+        account: session.account_id ?? null,
+        identity: { issuer: session.issuer, subject: session.user_id },
+      },
       claims: {},
       authMode: session.authMode,
     });
@@ -167,7 +173,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     db.shutdown.mockRejectedValueOnce(dbError);
     mocks.createDb.mockResolvedValue(db);
 
-    const client = await createJazzClient({ appId: "shutdown-failure" });
+    const client = await createJazzClient(await enrolledAccountConfig("shutdown-failure"));
     const manager = mocks.orchestratorInstances[0]!;
     manager.shutdown.mockRejectedValueOnce(managerError);
 
@@ -178,7 +184,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
   it("AGC-02: rejects when db creation fails", async () => {
     const config: JazzClientConfig = {
-      appId: "solid-unit-2",
+      ...(await enrolledAccountConfig("solid-unit-2")),
     };
     const dbError = new Error("createDb failed");
 
@@ -190,7 +196,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
   it("AGC-03: rejects when orchestrator init fails", async () => {
     const config: JazzClientConfig = {
-      appId: "solid-unit-3",
+      ...(await enrolledAccountConfig("solid-unit-3")),
     };
     const initError = new Error("orchestrator init failed");
     const db = createMockDb();
@@ -205,7 +211,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
   it("AGC-04: forwards runtimeSources through framework client creation", async () => {
     const config: JazzClientConfig = {
-      appId: "solid-unit-4",
+      ...(await enrolledAccountConfig("solid-unit-4")),
       runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmUrl: "/assets/jazz/custom.wasm",
@@ -217,18 +223,12 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     await createJazzClient(config);
 
-    expect(mocks.createDb).toHaveBeenCalledWith({
-      appId: "solid-unit-4",
-      runtimeSources: {
-        baseUrl: "/assets/jazz/",
-        wasmUrl: "/assets/jazz/custom.wasm",
-      },
-    });
+    expect(mocks.createDb).toHaveBeenCalledWith(config);
   });
 
   it("AGC-05: collapses same-identity clients onto one runtime", async () => {
     const config: JazzClientConfig = {
-      appId: "web-client-dedup-shared",
+      ...(await enrolledAccountConfig("web-client-dedup-shared")),
       serverUrl: "https://jazz.example.com",
     };
     mocks.createDb.mockResolvedValue(createMockDb(config.appId, null, config));
@@ -255,12 +255,10 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     );
 
     const first = await createJazzClient({
-      appId: "web-client-dedup-multi",
-      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      ...(await enrolledAccountConfig("web-client-dedup-multi", "alice")),
     } satisfies JazzClientConfig);
     const second = await createJazzClient({
-      appId: "web-client-dedup-multi",
-      secret: "jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      ...(await enrolledAccountConfig("web-client-dedup-multi", "bob")),
     } satisfies JazzClientConfig);
 
     expect(mocks.createDb).toHaveBeenCalledTimes(2);
@@ -274,7 +272,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const config: JazzClientConfig = {
-      appId: "web-client-unit-5",
+      ...(await enrolledAccountConfig("web-client-unit-5")),
       driver: { type: "persistent", dbName: "alice-cache" },
     };
     const db = createMockDb(config.appId, null, config);
@@ -305,11 +303,11 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
     const aliceConfig: JazzClientConfig = {
-      appId: "web-client-unit-6-alice",
+      ...(await enrolledAccountConfig("web-client-unit-6-alice")),
       driver: { type: "persistent", dbName: "alice-cache" },
     };
     const bobConfig: JazzClientConfig = {
-      appId: "web-client-unit-6-bob",
+      ...(await enrolledAccountConfig("web-client-unit-6-bob")),
       driver: { type: "persistent", dbName: "bob-cache" },
     };
     const aliceDb = createMockDb(aliceConfig.appId, null, aliceConfig);

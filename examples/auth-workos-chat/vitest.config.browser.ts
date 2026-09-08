@@ -1,11 +1,16 @@
 import { createServer } from "node:net";
-import { defineConfig } from "vitest/config";
+import { resolve } from "node:path";
+import { defineConfig, type ViteUserConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import { createTestKeySet } from "./tests/browser/jwt.js";
 import { TEST_APP_ID } from "./tests/browser/test-constants.js";
+
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its admitted WASM package");
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -18,7 +23,7 @@ function findFreePort(): Promise<number> {
   });
 }
 
-export default defineConfig(async () => {
+export default defineConfig(async (): Promise<ViteUserConfig> => {
   const { publicJwk, mintJwt } = await createTestKeySet();
   const adminJwt = await mintJwt("admin", "user_admin_test");
   const memberJwt = await mintJwt("member", "user_member_test");
@@ -34,6 +39,9 @@ export default defineConfig(async () => {
   process.env.JAZZ_TEST_JAZZ_PORT = String(jazzPort);
 
   return {
+    resolve: {
+      alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+    },
     plugins: [wasm(), topLevelAwait(), react()],
     worker: {
       plugins: () => [wasm(), topLevelAwait()],

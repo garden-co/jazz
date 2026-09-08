@@ -28,6 +28,7 @@ coverage/
 __screenshots__
 playwright-report/
 test-results/
+/.jazz-rn-fresh-expo-*/
 
 # Walkthrough compiled output
 **/walkthrough/*.html

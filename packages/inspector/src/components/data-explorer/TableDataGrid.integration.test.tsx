@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { schema as s, userIdentity } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 import type { Db, TransactionScope, WriteResult } from "jazz-tools";
 import { createPolicyTestApp } from "jazz-tools/testing";
 import type { PolicyTestApp } from "jazz-tools/testing";
@@ -10,18 +10,18 @@ import { TableDataGrid } from "./TableDataGrid";
 
 const issuer = "https://inspector-save.test";
 const userId = "editor";
-const permittedOwner = userIdentity(issuer, userId);
+const permittedOwner = "00000000-0000-4000-8000-000000000001";
 const inspectorSaveApp = s.defineApp({
   todos: s.table({
     title: s.string(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
   }),
 });
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
-  policy.todos.allowUpdate.where({ owner_id: session.user });
-  policy.todos.allowDelete.where({ owner_id: session.user });
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowUpdate.where({ owner_id: session.user.account });
+  policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
 let currentDb: Db | null = null;
@@ -154,6 +154,7 @@ async function createInspectorDb(): Promise<{ app: PolicyTestApp; db: Db }> {
   const db = app.as({
     issuer,
     user_id: userId,
+    account_id: permittedOwner,
     claims: {},
     authMode: "external",
   });
@@ -294,7 +295,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
     editStagedTextColumn(1, "title", "retry same row");
-    editStagedTextColumn(2, "owner_id", "not-the-session-owner");
+    editStagedTextColumn(2, "owner_id", "00000000-0000-4000-8000-000000000002");
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(

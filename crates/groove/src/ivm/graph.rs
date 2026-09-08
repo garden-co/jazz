@@ -1127,6 +1127,23 @@ pub struct ProjectField {
 }
 
 impl ProjectField {
+    /// Select a field through non-nullable nested records. The leaf retains
+    /// its declared type, including nullability.
+    pub fn record_field(
+        source: impl Into<String>,
+        path: impl IntoIterator<Item = impl Into<String>>,
+        output_name: impl Into<String>,
+    ) -> Self {
+        let output_name = output_name.into();
+        Self {
+            expression: ProjectExpr::RecordField {
+                source: FieldRef::name(source),
+                path: path.into_iter().map(Into::into).collect(),
+            },
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
+        }
+    }
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -1347,6 +1364,7 @@ impl ProjectField {
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
+            | ProjectExpr::RecordField { source, .. }
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
             | ProjectExpr::EnumTagRemap { source, .. }
@@ -1362,6 +1380,10 @@ impl ProjectField {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
     Field(FieldRef),
+    RecordField {
+        source: FieldRef,
+        path: Vec<String>,
+    },
     Literal(LiteralValue),
     TypedLiteral {
         value: LiteralValue,

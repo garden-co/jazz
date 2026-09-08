@@ -1,63 +1,62 @@
-import { createDb, BrowserAuthSecretStore } from "jazz-tools";
+import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 
-// #region auth-localfirst-ts
-export async function createLocalFirstDb() {
-  const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
+import { createJazzSession, type JazzSessionActions } from "jazz-tools/client";
 
-  return createDb({
+// #region auth-localfirst-ts
+export async function createLocalFirstSession() {
+  return createJazzSession({
     appId: "my-app",
-    secret,
+    serverUrl: "https://core.example",
+    initial: "local-first",
   });
 }
 // #endregion auth-localfirst-ts
 
 // #region auth-jwt-ts
-export async function createJwtDb() {
-  return createDb({
-    appId: "my-app",
-    serverUrl: "http://127.0.0.1:4200",
-    jwtToken: "<provider-jwt>",
-  });
+export async function createJwtSession(getToken: () => Promise<string>) {
+  const session = await createJazzSession({ appId: "my-app", serverUrl: "https://core.example" });
+  try {
+    // Existing identity: login. A signup flow explicitly calls registerJWT instead.
+    await session.loginJWT({ getToken });
+    return session;
+  } catch (error) {
+    await session.close().catch(() => {});
+    throw error;
+  }
 }
 // #endregion auth-jwt-ts
 
 // #region auth-localfirst-ts-backup
-export async function getRecoveryPhrase(): Promise<string | null> {
-  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
-  return secret ? RecoveryPhrase.fromSecret(secret) : null;
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-ts-backup
 
 // #region auth-localfirst-ts-restore
-export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
-  const restoredSecret = RecoveryPhrase.toSecret(userInput);
-  await BrowserAuthSecretStore.saveSecret(restoredSecret, { appId: "my-app" });
-  // Reload so the live Jazz client picks up the restored secret.
-  location.reload();
+export function restoreFromRecoveryPhrase(
+  session: JazzSessionActions,
+  userInput: string,
+): Promise<void> {
+  return session.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-ts-restore
 
 // #region auth-localfirst-ts-passkey-backup
 const passkeyBackup = new BrowserPasskeyBackup({
   appName: "My App",
-  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
-  // which scopes passkeys per preview-deploy URL.
+  // Pin to your canonical production hostname rather than a preview hostname.
   appHostname: "myapp.com",
 });
 
-export async function backupToPasskey(displayName: string): Promise<void> {
-  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
-  if (!secret) throw new Error("No local secret to back up yet");
-  await passkeyBackup.backup(secret, displayName);
+export async function backupToPasskey(account: AccountHandle, displayName: string): Promise<void> {
+  await passkeyBackup.backup(exportLocalFirstSecret(account), displayName);
 }
 // #endregion auth-localfirst-ts-passkey-backup
 
 // #region auth-localfirst-ts-passkey-restore
-export async function restoreFromPasskey(): Promise<void> {
-  const restoredSecret = await passkeyBackup.restore();
-  await BrowserAuthSecretStore.saveSecret(restoredSecret, { appId: "my-app" });
-  location.reload();
+export async function restoreFromPasskey(session: JazzSessionActions): Promise<void> {
+  return session.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-ts-passkey-restore

@@ -2,7 +2,7 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   warehouses: s
-    .table({ name: s.string(), region: s.string(), operator_id: s.string() })
+    .table({ name: s.string(), region: s.string(), operator_id: s.uuid() })
     .indexOnly(["operator_id"]),
   districts: s
     .table({
@@ -18,7 +18,7 @@ const schema = {
       unit_price_cents: s.int(),
       // The global catalogue remains readable to warehouse operators, but its
       // mutable source is still attributable to one operator.
-      operator_id: s.string(),
+      operator_id: s.uuid(),
     })
     .indexOnly(["operator_id"]),
   stock: s

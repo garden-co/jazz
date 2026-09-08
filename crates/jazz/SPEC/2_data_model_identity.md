@@ -13,9 +13,9 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) as exactly 16 canonical bytes, whose lexicographic byte order is their ordering; `AuthorSubject` MUST use its canonical `[iss,sub]` JSON string; node-local alias and intern types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) as exactly 16 canonical bytes, whose lexicographic byte order is their ordering; `RowAuthor` MUST use its non-null account/identity native record; node-local alias and intern types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
-- `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
+- `INV-DATA-3`: Persisted system authors MUST use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node UUID subject; this provenance MUST NOT grant the internal SYSTEM policy-bypass capability, and external admission MUST reject the reserved account and issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
@@ -32,7 +32,7 @@ Invariant digest:
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
 - `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
-- `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical author JSON and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
+- `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical native author records and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
 
 ## Details
 
@@ -90,9 +90,11 @@ retired permanently. High-waters are canonical packed-HLC `u64`s; hosts reject
 out-of-range receipts rather than allowing a persisted value to poison a later
 native open. There is no lease expiry, central transaction minting, fencing
 generation, or range allocation in this model. The
-`AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
-in-memory intern is never durable or portable. The well-known
-`AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
+`AuthorSubject` records stable account ownership and the exact acting principal.
+Its whole-structure in-memory intern is never durable or portable. Persisted
+system authors use the nil account UUID, `urn:jazz:system`, and originating node
+UUID subject. Only the separate trusted `AuthorSubject::SYSTEM` capability
+bypasses policies (ch. 7, `INV-DATA-3`); decoding provenance cannot create it.
 
 Hosts mediate this contract rather than making a relay mint transaction ids.
 The browser's durable SharedWorker owns the foreground-lease pool for its
@@ -117,7 +119,7 @@ Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
 node-local, never appear on the wire, and every value leaving stored rows for
 the wire resolves its alias back to the corresponding `NodeUuid` or
 `SchemaVersionId` (`INV-DATA-1`, `INV-DATA-2`). Aliases are rebuilt on recovery.
-The exact `TxTime` bit-packing and the `SYSTEM` literal are in §2.7. Alias
+The exact `TxTime` bit-packing and the reserved system provenance values are in §2.7. Alias
 mappings are durable prerequisites: the mapping is atomically persisted before
 any dependent row bytes, retained while any durable reference can reach it, and
 is never guessed, reassigned, hashed, compared semantically, included in public
@@ -247,9 +249,11 @@ packed position returns a typed clock-overflow (`INV-DATA-4`). Their unsigned
 packed order is the canonical storage order. `TxTime` remains
 an opaque ordering/version field: public row provenance exposes only physical
 Unix milliseconds. UUID object identities retain their newtype encodings;
-`AuthorSubject::SYSTEM` is the canonical JSON string
-`["urn:jazz:system","system"]`, and authenticated author subjects are exact
-canonical `[iss,sub]` JSON strings. Node-local aliases live in `jazz_nodes` /
+row authors use the native structured record
+`{ account: UUID, identity: { issuer: String, subject: String } }`.
+System rows use account `00000000-0000-0000-0000-000000000000`, issuer
+`urn:jazz:system`, and the originating node UUID as subject. The internal
+SYSTEM capability is not persisted as a row author. Node-local aliases live in `jazz_nodes` /
 `jazz_schema_versions` and are rebuilt from those tables on recovery.
 
 ### 2.7.1 Settled history layout and canonical receipts
@@ -433,8 +437,13 @@ second authored fact format.
 
 **Portable identity and time.** `NodeUuid`, `RowUuid`, and
 `SchemaVersionId` are raw canonical 16-byte UUIDs on the wire; local aliases
-never escape. `AuthorSubject` is its exact canonical JSON `[issuer, subject]`
-string, including `AuthorSubject::SYSTEM`'s fixed spelling. Transaction and
+never escape. Persisted row and transaction authors use the native structured
+record `{ account: UUID, identity: { issuer: String, subject: String } }`.
+The process-local whole-author intern never escapes. Where a canonical author
+text is required by an internal API, its account-bearing spelling is
+`[accountUUID, issuer, subject]`; this is not the row payload encoding.
+System provenance preserves the originating node through forwarding and reopen;
+it is not transport admission or permission authority. Transaction and
 global times are unsigned packed HLC `u64`s (46 physical-millisecond bits then
 18 logical bits); row provenance emits only physical milliseconds and restores
 the logical counter as zero. The authoritative HLC/UUID comparison is also the

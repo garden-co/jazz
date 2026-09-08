@@ -1,7 +1,7 @@
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from "jose";
 
 const KID = "auth-betterauth-chat-test-key";
-const ISSUER = "http://127.0.0.1:3000";
+import { TEST_ISSUER, TEST_AUDIENCE } from "./test-constants.js";
 
 export interface TestKeySet {
   publicJwk: JWK;
@@ -21,7 +21,8 @@ export async function createTestKeySet(): Promise<TestKeySet> {
     return new SignJWT({ role })
       .setProtectedHeader({ alg: "ES256", kid: KID })
       .setSubject(sub)
-      .setIssuer(ISSUER)
+      .setIssuer(TEST_ISSUER)
+      .setAudience(TEST_AUDIENCE)
       .setIssuedAt()
       .setExpirationTime("1h")
       .sign(privateKey);

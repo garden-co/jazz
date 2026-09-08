@@ -290,6 +290,19 @@ impl PendingIncrementalEvaluation {
             .values()
             .any(PendingEvaluation::has_resident_continuation)
     }
+
+    /// Nodes referenced by queued continuations remain graph-live until the
+    /// continuation completes or is cancelled. This is queried only while the
+    /// queue is installed in its shared slot; an active poll defers GC until
+    /// it restores that slot.
+    pub(super) fn registered_nodes(&self) -> HashSet<NodeId> {
+        self.0
+            .borrow()
+            .evaluations
+            .values()
+            .flat_map(|evaluation| evaluation.work_queue().registered_nodes())
+            .collect()
+    }
 }
 
 /// Discovers request-producing leaves for all reachable siblings without recursively
@@ -1967,10 +1980,15 @@ impl IvmRuntime {
         resident_only: bool,
         selected_evaluations: Option<&HashSet<u64>>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
+        debug_assert!(
+            !self.pending_incremental_polling,
+            "pending evaluation polling is not reentrant"
+        );
+        self.pending_incremental_polling = true;
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
-            return Poll::Ready(Ok(()));
+            return self.finish_pending_incremental_poll(&slot, state, Poll::Ready(Ok(())));
         }
         let mut retained_order = VecDeque::new();
         while let Some(evaluation_id) = state.order.pop_front() {
@@ -2068,8 +2086,11 @@ impl IvmRuntime {
                             error.clone(),
                         )));
                         state.order = retained_order;
-                        *slot.borrow_mut() = state;
-                        return Poll::Ready(Err(failure.into_error()));
+                        return self.finish_pending_incremental_poll(
+                            &slot,
+                            state,
+                            Poll::Ready(Err(failure.into_error())),
+                        );
                     }
                     self.fail_evaluation_nodes(&failure);
                     let released_nodes =
@@ -2116,19 +2137,42 @@ impl IvmRuntime {
                     // waker; cooperative in-memory yields wake it directly.
                     retained_order.append(&mut state.order);
                     state.order = retained_order;
-                    *slot.borrow_mut() = state;
-                    return Poll::Pending;
+                    return self.finish_pending_incremental_poll(&slot, state, Poll::Pending);
                 }
             }
         }
         let done = retained_order.is_empty();
         state.order = retained_order;
-        *slot.borrow_mut() = state;
-        if done {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
+        self.finish_pending_incremental_poll(
+            &slot,
+            state,
+            if done {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            },
+        )
+    }
+
+    fn finish_pending_incremental_poll(
+        &mut self,
+        slot: &Rc<RefCell<PendingIncrementalState>>,
+        state: PendingIncrementalState,
+        result: Poll<Result<(), IvmRuntimeError>>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        {
+            let mut slot = slot.borrow_mut();
+            *slot = state;
         }
+        self.pending_incremental_polling = false;
+        // A lifecycle operation may have released retainers while this owner
+        // turn held the queue locally. Retry only requested collection: queued
+        // work protects its registered nodes, and the request remains until
+        // the queue drains so completed/cancelled work is eventually freed.
+        if self.ephemeral_graph_gc_pending {
+            self.collect_unretained_ephemeral_nodes();
+        }
+        result
     }
 
     pub(crate) fn has_pending_incremental(&self) -> bool {

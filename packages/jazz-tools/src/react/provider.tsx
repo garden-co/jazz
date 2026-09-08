@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import type { PublicSession } from "../runtime/context.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { jazzDevPluginActive, startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
@@ -9,10 +9,10 @@ import {
   useSession,
   type CreateJazzClient,
 } from "../react-core/provider.js";
-import { useLocalFirstAuthWithStore } from "../react-core/use-local-first-auth.js";
-import { BrowserAuthSecretStore, type AuthSecretStore } from "../runtime/auth-secret-store.js";
+import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
+import type { JazzAuth } from "../session/app.js";
+import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { LocalFirstAuthStoreProvider } from "./use-local-first-auth.js";
 
 // In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
 // rewrites on every schema push. The bundler tracks this as a dependency of the
@@ -33,10 +33,6 @@ interface JazzClientContextValue {
 const createClient: CreateJazzClient = (config) =>
   createJazzClient(config) as Promise<CreatedJazzClient>;
 
-function getProviderAuthSecretStore(appId: string): AuthSecretStore {
-  return BrowserAuthSecretStore.getDefault({ appId });
-}
-
 // Dev-only: mount the inspector overlay + publish the host handle for this db.
 // Only rendered when shouldAutoAttach is true, so the lazy overlay chunk is
 // dropped from production bundles.
@@ -51,24 +47,18 @@ function DevToolsAutoAttach() {
 type JazzProviderCommonProps = {
   fallback?: ReactNode;
   children: ReactNode;
-  onJWTExpired?: () => Promise<string | null | undefined>;
   /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
 };
 
-type LocalFirstDbConfig = Omit<DbConfig, "secret" | "jwtToken" | "cookieSession">;
-
-export type JazzProviderProps = JazzProviderCommonProps &
-  (
-    | {
-        config: DbConfig;
-        auth?: undefined;
-      }
-    | {
-        config: LocalFirstDbConfig;
-        auth: "local-first";
-      }
-  );
+export type JazzAppProviderProps = JazzSessionConfig &
+  JazzAppViewProps<CreatedJazzClient> & {
+    auth?: JazzAuth;
+    autoAttachDevTools?: boolean;
+  };
+export type JazzProviderProps =
+  | (JazzProviderCommonProps & { config: DbConfig })
+  | JazzAppProviderProps;
 
 type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
   config: DbConfig;
@@ -78,7 +68,6 @@ function ConfiguredJazzProvider({
   config,
   fallback,
   children,
-  onJWTExpired,
   autoAttachDevTools,
 }: ConfiguredJazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
@@ -93,59 +82,16 @@ function ConfiguredJazzProvider({
       : config;
 
   return (
-    <CoreJazzProvider
-      config={effectiveConfig}
-      fallback={fallback}
-      createJazzClient={createClient}
-      onJWTExpired={onJWTExpired}
-    >
+    <CoreJazzProvider config={effectiveConfig} fallback={fallback} createJazzClient={createClient}>
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>
   );
 }
 
-function LocalFirstJazzProvider({
-  config,
-  ...props
-}: {
-  config: LocalFirstDbConfig;
-} & JazzProviderCommonProps) {
-  // Scope the provider-owned identity by appId. This is also the store selected
-  // by useLocalFirstAuth({ appId }), preserving identities created with that
-  // existing hook API.
-  const store = getProviderAuthSecretStore(config.appId);
-
-  return <LocalFirstAuthLoader key={config.appId} config={config} store={store} {...props} />;
-}
-
-function LocalFirstAuthLoader({
-  config,
-  store,
-  ...props
-}: {
-  config: LocalFirstDbConfig;
-  store: AuthSecretStore;
-} & JazzProviderCommonProps) {
-  const { secret, isLoading } = useLocalFirstAuthWithStore(store);
-
-  if (isLoading || !secret) return props.fallback ?? null;
-
-  return (
-    <LocalFirstAuthStoreProvider appId={config.appId} store={store}>
-      <ConfiguredJazzProvider {...props} config={{ ...config, secret }} />
-    </LocalFirstAuthStoreProvider>
-  );
-}
-
 export function JazzProvider(props: JazzProviderProps) {
-  if (props.auth === "local-first") {
-    const { auth: _auth, ...localFirstProps } = props;
-    return <LocalFirstJazzProvider {...localFirstProps} />;
-  }
-
-  const { auth: _auth, ...configuredProps } = props;
-  return <ConfiguredJazzProvider {...configuredProps} />;
+  if ("config" in props) return <ConfiguredJazzProvider {...props} />;
+  return <ApplicationJazzProvider {...props} />;
 }
 
 export function useJazzClient(): JazzClientContextValue {
@@ -162,3 +108,39 @@ export function useDb(): CreatedJazzClient["db"] {
 export { useSession };
 
 export type { JazzClientContextValue };
+
+function ApplicationJazzProvider({
+  auth,
+  children,
+  signedOut,
+  loading,
+  error,
+  autoAttachDevTools,
+  ...config
+}: JazzAppProviderProps) {
+  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  return (
+    <ConfiguredJazzAppProvider
+      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
+      auth={auth}
+      createJazzSession={createJazzSession}
+      signedOut={signedOut}
+      loading={loading === undefined ? <p role="status">Loading…</p> : loading}
+      error={
+        error === undefined
+          ? (state) => (
+              <section role="alert">
+                <p>We couldn’t connect to your account. Please try again.</p>
+                <button type="button" onClick={() => void state.retry()}>
+                  Try again
+                </button>
+              </section>
+            )
+          : error
+      }
+    >
+      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
+      {children}
+    </ConfiguredJazzAppProvider>
+  );
+}

@@ -32,7 +32,10 @@ import {
 // identify the Rust call site before serializing them for the owning tab.
 (Error as ErrorConstructor & { stackTraceLimit?: number }).stackTraceLimit = 50;
 import { openConfig } from "../runtime/native-runtime/native-codec.js";
-import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import {
+  NativeRuntimeAdapter,
+  type Transport,
+} from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 
@@ -49,7 +52,7 @@ type TabPeer = {
   context: RuntimeContext;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
-  subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null;
+  subscriber: Transport | null;
   pendingFrames: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
@@ -58,9 +61,29 @@ type TabPeer = {
   transportWaitAbort: AbortController;
   /** True only for a port transferred through authenticated Inspector control. */
   inspectorAttachment: boolean;
+  pendingInspectorBootstraps: Set<() => void>;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
+
+function assertInspectorBinding(
+  peer: TabPeer,
+  binding:
+    | import("../runtime/native-runtime/browser-worker-protocol.js").InspectorAttachmentBinding
+    | undefined,
+): void {
+  const options = peer.context.options;
+  if (
+    !peer.inspectorAttachment ||
+    !binding ||
+    binding.appId !== options.appId ||
+    binding.physicalDbName !== options.dbName ||
+    binding.authSessionKey !== options.authSessionKey ||
+    binding.storageOwner !== options.storageOwner
+  ) {
+    throw new Error("Inspector attachment does not match the worker account and storage scope");
+  }
+}
 
 type RuntimeContext = {
   key: string;
@@ -376,118 +399,154 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
   foregroundLeaseTestHooks = options.foregroundLeaseTestHooks ?? null;
   workerGlobal.onconnect = (event) => {
     const port = event.ports[0];
-    if (!port) return;
-    // A SharedWorker can accept this port while a previous idle close is
-    // awaiting IndexedDB/Web-Lock release. Treat delivery of the port as a
-    // new liveness claim before any message task can run; otherwise that old
-    // close can terminate this exact admission mid-flight. Do not merely
-    // cancel the old close token here: the bootstrap reservation is the
-    // durable fact that remains true until this port has either completed its
-    // first operation or failed it.
-    pendingBootstrapOperations += 1;
-    let bootstrapFinished = false;
-    let bootstrapPortClosed = false;
-    let probedLeaseAttemptId: string | null = null;
-    const finishBootstrap = () => {
-      if (bootstrapFinished) return;
-      bootstrapFinished = true;
-      pendingBootstrapOperations -= 1;
-      maybeCloseWorker();
-    };
-    const detachBootstrapListeners = () => {
-      port.removeEventListener("message", onBootstrapMessage);
-      port.removeEventListener("messageerror", onBootstrapMessageError);
-    };
-    const closeBootstrapPort = () => {
-      if (bootstrapPortClosed) return;
-      bootstrapPortClosed = true;
-      detachBootstrapListeners();
-      finishBootstrap();
-      port.close();
-    };
-    function onBootstrapMessage(
-      messageEvent: MessageEvent<
-        | BrowserSharedWorkerConnectRequest
-        | BrowserForegroundNodeLeaseProbeRequest
-        | BrowserForegroundNodeLeaseAcquireRequest
-        | BrowserForegroundNodeLeaseCancelRequest
-      >,
+    if (port) attachBootstrapPort(port);
+  };
+}
+
+// Inspector lease ports reuse the normal allocation/cancellation protocol,
+// but can only address their already authenticated worker context.
+function attachBootstrapPort(
+  port: MessagePort,
+  scope?: Pick<BrowserWorkerInitOptions, "dbName" | "storageOwner">,
+): () => void {
+  // A SharedWorker can accept this port while a previous idle close is
+  // awaiting IndexedDB/Web-Lock release. Treat delivery of the port as a
+  // new liveness claim before any message task can run; otherwise that old
+  // close can terminate this exact admission mid-flight. Do not merely
+  // cancel the old close token here: the bootstrap reservation is the
+  // durable fact that remains true until this port has either completed its
+  // first operation or failed it.
+  pendingBootstrapOperations += 1;
+  let bootstrapFinished = false;
+  let bootstrapPortClosed = false;
+  let probedLeaseAttemptId: string | null = null;
+  let operationStarted = false;
+  const parentLifetime = new AbortController();
+  // A vanished iframe may never deliver a close message. Only expire the
+  // unclaimed bootstrap; allocation has its own cancellation protocol.
+  const idleTimer = scope ? setTimeout(() => closeBootstrapPort(), 30_000) : undefined;
+  const finishBootstrap = () => {
+    if (bootstrapFinished) return;
+    bootstrapFinished = true;
+    clearTimeout(idleTimer);
+    pendingBootstrapOperations -= 1;
+    maybeCloseWorker();
+  };
+  const detachBootstrapListeners = () => {
+    port.removeEventListener("message", onBootstrapMessage);
+    port.removeEventListener("messageerror", onBootstrapMessageError);
+  };
+  const closeBootstrapPort = () => {
+    if (bootstrapPortClosed) return;
+    bootstrapPortClosed = true;
+    detachBootstrapListeners();
+    finishBootstrap();
+    port.close();
+  };
+  function onBootstrapMessage(
+    messageEvent: MessageEvent<
+      | BrowserSharedWorkerConnectRequest
+      | BrowserForegroundNodeLeaseProbeRequest
+      | BrowserForegroundNodeLeaseAcquireRequest
+      | BrowserForegroundNodeLeaseCancelRequest
+    >,
+  ) {
+    const message = messageEvent.data;
+    if (
+      scope &&
+      (message.type === "connect-runtime" ||
+        (message.type === "acquire-foreground-node-lease" &&
+          (message.dbName !== scope.dbName || message.storageOwner !== scope.storageOwner)))
     ) {
-      const message = messageEvent.data;
-      if (workerTerminationScheduled) {
-        // This is the inspector's acknowledged, intentionally one-way
-        // termination handoff. It is deliberately narrower than
-        // `pendingWorkerClose`: an ordinary idle close remains cancelable by
-        // the bootstrap reservation created in `onconnect`.
-        if (message?.type === "connect-runtime") {
-          post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
-        } else if (
-          message?.type === "probe-foreground-node-lease-worker" ||
-          message?.type === "acquire-foreground-node-lease"
-        ) {
-          post(port, {
-            type: "foreground-node-lease-worker-closing",
-            attemptId: message.attemptId ?? "",
-          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
-        }
-        closeBootstrapPort();
-        return;
-      }
-      if (message?.type === "probe-foreground-node-lease-worker") {
-        probedLeaseAttemptId = message.attemptId;
-        post(port, {
-          type: "foreground-node-lease-worker-alive",
-          attemptId: message.attemptId,
-        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
-        return;
-      }
-      if (message?.type === "cancel-foreground-node-lease") {
-        closeBootstrapPort();
-        return;
-      }
-      if (
-        message?.type !== "connect-runtime" &&
-        message?.type !== "acquire-foreground-node-lease"
-      ) {
-        return;
-      }
-      detachBootstrapListeners();
-      if (message.type === "connect-runtime") {
-        recordWorkerLifecycle(
-          "bootstrap-start",
-          message.options.dbName,
-          message.options.authSessionKey,
-        );
-        post(port, { type: "worker-alive" });
-        void connectTab(port, message, finishBootstrap);
-      } else {
-        if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
-          finishBootstrap();
-          post(port, {
-            type: "foreground-node-lease-error",
-            error: serializeBrowserRelayError(
-              new Error("Foreground node lease request did not match its worker probe"),
-            ),
-          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
-          closeBootstrapPort();
-          return;
-        }
-        recordWorkerLifecycle("lease-request", message.dbName, null);
-        void acquireForegroundNodeLease(port, message).finally(finishBootstrap);
-      }
-    }
-    function onBootstrapMessageError() {
+      post(port, {
+        type: "foreground-node-lease-error",
+        error: serializeBrowserRelayError(
+          new Error("Inspector lease cannot select another storage scope"),
+        ),
+      });
       closeBootstrapPort();
+      return;
     }
-    port.addEventListener("message", onBootstrapMessage);
-    port.addEventListener("messageerror", onBootstrapMessageError);
-    port.start();
+
+    if (workerTerminationScheduled) {
+      // This is the inspector's acknowledged, intentionally one-way
+      // termination handoff. It is deliberately narrower than
+      // `pendingWorkerClose`: an ordinary idle close remains cancelable by
+      // the bootstrap reservation created in `onconnect`.
+      if (message?.type === "connect-runtime") {
+        post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+      } else if (
+        message?.type === "probe-foreground-node-lease-worker" ||
+        message?.type === "acquire-foreground-node-lease"
+      ) {
+        post(port, {
+          type: "foreground-node-lease-worker-closing",
+          attemptId: message.attemptId ?? "",
+        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      }
+      closeBootstrapPort();
+      return;
+    }
+    if (message?.type === "probe-foreground-node-lease-worker") {
+      probedLeaseAttemptId = message.attemptId;
+      post(port, {
+        type: "foreground-node-lease-worker-alive",
+        attemptId: message.attemptId,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      return;
+    }
+    if (message?.type === "cancel-foreground-node-lease") {
+      closeBootstrapPort();
+      return;
+    }
+    if (message?.type !== "connect-runtime" && message?.type !== "acquire-foreground-node-lease") {
+      return;
+    }
+    operationStarted = true;
+    clearTimeout(idleTimer);
+    detachBootstrapListeners();
+    if (message.type === "connect-runtime") {
+      recordWorkerLifecycle(
+        "bootstrap-start",
+        message.options.dbName,
+        message.options.authSessionKey,
+      );
+      post(port, { type: "worker-alive" });
+      void connectTab(port, message, finishBootstrap);
+    } else {
+      if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
+        finishBootstrap();
+        post(port, {
+          type: "foreground-node-lease-error",
+          error: serializeBrowserRelayError(
+            new Error("Foreground node lease request did not match its worker probe"),
+          ),
+        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+        closeBootstrapPort();
+        return;
+      }
+      recordWorkerLifecycle("lease-request", message.dbName, null);
+      void acquireForegroundNodeLease(port, message, parentLifetime.signal).finally(
+        finishBootstrap,
+      );
+    }
+  }
+  function onBootstrapMessageError() {
+    closeBootstrapPort();
+  }
+  port.addEventListener("message", onBootstrapMessage);
+  port.addEventListener("messageerror", onBootstrapMessageError);
+  port.start();
+  return () => {
+    parentLifetime.abort();
+    if (!operationStarted) closeBootstrapPort();
   };
 }
 
 async function acquireForegroundNodeLease(
   port: MessagePort,
   request: BrowserForegroundNodeLeaseAcquireRequest,
+  parentLifetime?: AbortSignal,
 ): Promise<void> {
   const testHooks = foregroundLeaseTestHooks;
   let owner: ForegroundLeaseOwner | null = null;
@@ -500,6 +559,7 @@ async function acquireForegroundNodeLease(
   let settled = false;
 
   const cleanup = () => {
+    parentLifetime?.removeEventListener("abort", onParentClose);
     port.removeEventListener("message", onMessage);
     port.removeEventListener("messageerror", onMessageError);
   };
@@ -650,6 +710,11 @@ async function acquireForegroundNodeLease(
     // later, its continuation sees this flag and retires instead of publishing.
     requestCancellation();
   };
+  const onParentClose = () => {
+    requestCancellation();
+  };
+  parentLifetime?.addEventListener("abort", onParentClose, { once: true });
+  if (parentLifetime?.aborted) onParentClose();
   // Install this before any awaited durable admission. It is the cancellation
   // witness for the gap that previously existed between client timeout and
   // the worker attaching its post-lease lifecycle listener.
@@ -711,6 +776,9 @@ async function acquireForegroundNodeLease(
       await requestCancellation();
       return;
     }
+    // Once delivered, normal graceful shutdown returns the lease after
+    // closing its peer. Parent cancellation owns only pending admission.
+    parentLifetime?.removeEventListener("abort", onParentClose);
     recordWorkerLifecycle("lease-admitted", request.dbName, null);
     post(port, {
       type: "foreground-node-lease-ready",
@@ -1186,6 +1254,7 @@ function attachTab(
     flushObserved: false,
     transportWaitAbort: new AbortController(),
     inspectorAttachment,
+    pendingInspectorBootstraps: new Set(),
     onMessage,
     onMessageError,
   };
@@ -1222,13 +1291,29 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   }
   if (message.type === "close") {
     const releaseWhenIdle = peer.context.peers.size === 1 && message.releaseContext;
-    if (message.id !== undefined) result(peer, message.id);
     // The requester owns graceful port closure. Closing this endpoint in the
     // same task as the acknowledgement can discard that queued message in
     // WebKit, leaving shutdown pending forever. Detach runtime ownership now;
     // the client closes both ends after it observes the result.
     closeTab(peer.context, peer.tabId, false);
-    if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
+    try {
+      if (releaseWhenIdle) await releaseIdleContext(peer.context);
+      // The peer is already detached, so result() would intentionally ignore it.
+      // Acknowledge only after its last runtime has released the physical root:
+      // an immediately linked identity may now open that root with a new auth
+      // fingerprint without racing the former 50ms idle-release timer.
+      if (message.id !== undefined) post(peer.port, { type: "result", id: message.id });
+      if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
+    } catch (error) {
+      if (message.id !== undefined)
+        post(peer.port, {
+          type: "result",
+          id: message.id,
+          error: serializeBrowserRelayError(
+            error instanceof Error ? error : new Error(String(error)),
+          ),
+        });
+    }
     return;
   }
   if (message.type === "diagnostic-query-coverage") {
@@ -1276,46 +1361,66 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
 
   try {
     const activeRuntime = requireRuntime(peer.context);
-    if (message.type === "init") {
-      if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
-      // A different tab can be publishing a newly admitted upstream session.
-      // Join its transition before checking the shared snapshot so an init
-      // cannot attach between upstream admission and the all-tab rebind.
-      await peer.context.transportTransition;
-      // One persistent worker has one authenticated upstream session. Do not
-      // admit a tab whose policy claims could be evaluated differently from
-      // that session once the worker forwards the subscription upstream.
-      assertWorkerSessionClaims(peer.context, message.sessionClaims);
-      // Peer admission mutates the connection registry. A running evaluator
-      // may hold that registry across storage suspension, so install only at
-      // the owner-wide evaluator boundary. Storage progress is independent of
-      // this new peer and therefore continues while admission waits.
-      const subscriber = await activeRuntime.acceptPeerWhenIdle(message.sessionClaims);
-      const pump = attachPeerTransport(peer, activeRuntime, subscriber);
-      recordWorkerLifecycle(
-        "peer-attached",
-        peer.context.options.dbName,
-        peer.context.options.authSessionKey,
-      );
-      if (peer.pendingFrames.length > 0) {
-        const pending = peer.pendingFrames.splice(0);
-        pump.receive(pending);
+    if (message.type === "inspect-binding") {
+      assertInspectorBinding(peer, message.binding);
+      if (message.leasePort) {
+        peer.pendingInspectorBootstraps.add(
+          attachBootstrapPort(message.leasePort, peer.context.options),
+        );
       }
-      await enqueueTransportTransition(peer.context, () => {
-        if (peer.context.explicitlyDisconnected) {
-          post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
-        } else {
-          ensureServerConnection(peer.context);
+      post(peer.port, { type: "inspector-binding", id: message.id, binding: message.binding });
+      return;
+    }
+    if (message.type === "init") {
+      await enqueueTransportTransition(peer.context, async () => {
+        const canPublishAdmission = () =>
+          peer.context.peers.get(peer.tabId) === peer &&
+          peer.context.runtime === activeRuntime &&
+          !peer.context.storageInvalidated &&
+          !peer.context.closing;
+        if (!canPublishAdmission()) return;
+        if (peer.inspectorAttachment || message.inspectorBinding)
+          assertInspectorBinding(peer, message.inspectorBinding);
+        if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
+        // Admission and installation share the auth transition queue: a rebind
+        // must include this subscriber, rather than overtake its storage wait.
+        assertWorkerSessionClaims(peer.context, message.sessionClaims);
+        let unownedSubscriber: Transport | null = null;
+        try {
+          unownedSubscriber = await activeRuntime.acceptPeer(message.sessionClaims);
+          // Close and storage invalidation revoke publication synchronously,
+          // without waiting for recovery to finish.
+          if (!canPublishAdmission()) return;
+          const pump = attachPeerTransport(peer, activeRuntime, unownedSubscriber);
+          unownedSubscriber = null;
+          recordWorkerLifecycle(
+            "peer-attached",
+            peer.context.options.dbName,
+            peer.context.options.authSessionKey,
+          );
+          if (peer.pendingFrames.length > 0) {
+            const pending = peer.pendingFrames.splice(0);
+            pump.receive(pending);
+          }
+          if (peer.context.explicitlyDisconnected) {
+            post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+          } else {
+            ensureServerConnection(peer.context);
+          }
+          result(
+            peer,
+            message.id,
+            undefined,
+            peer.inspectorAttachment
+              ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
+              : undefined,
+          );
+        } catch (error) {
+          if (canPublishAdmission()) throw error;
+        } finally {
+          if (unownedSubscriber) await activeRuntime.retirePeerTransport(unownedSubscriber);
         }
       });
-      result(
-        peer,
-        message.id,
-        undefined,
-        peer.inspectorAttachment
-          ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
-          : undefined,
-      );
       return;
     }
     if (message.type === "update-auth") {
@@ -1366,6 +1471,16 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       result(peer, message.id);
       return;
     }
+    if (message.type === "flush-pending-writes") {
+      // Never occupy the owner queue while waiting for upstream progress.
+      // Normal transport/tick messages must continue to settle these writes.
+      void peer.context.runtime!.waitForPendingWrites("global").then(
+        () => result(peer, message.id),
+        (error) =>
+          result(peer, message.id, error instanceof Error ? error : new Error(String(error))),
+      );
+      return;
+    }
     if (message.type === "flush-local") {
       if (peer.flushRequestId !== null) {
         result(peer, message.id, new Error("Browser tab already has a local flush in progress"));
@@ -1402,6 +1517,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     if (peer.transportWaitAbort.signal.aborted) return;
     result(peer, message.id);
   } catch (error) {
+    if (
+      message.type === "init" &&
+      (!peer.context.runtime || peer.context.storageInvalidated || peer.context.closing)
+    ) {
+      return;
+    }
     if ("id" in message) result(peer, message.id, asError(error));
     else failPeer(peer, asError(error));
   }
@@ -1557,6 +1678,8 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   if (!peer) return;
   context.peers.delete(tabId);
   peer.transportWaitAbort.abort();
+  for (const dispose of peer.pendingInspectorBootstraps) dispose();
+  peer.pendingInspectorBootstraps.clear();
   acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
@@ -1780,10 +1903,9 @@ function acknowledgeReset(context: RuntimeContext, tabId: string): void {
 function attachPeerTransport(
   peer: TabPeer,
   activeRuntime: NativeRuntimeAdapter,
-  subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]>,
+  subscriber: Transport,
 ): BrowserWorkerTransportPump {
-  peer.subscriber = subscriber;
-  peer.pump = new BrowserWorkerTransportPump(
+  const pump = new BrowserWorkerTransportPump(
     activeRuntime,
     subscriber,
     (frames) => {
@@ -1803,7 +1925,9 @@ function attachPeerTransport(
         }
       : undefined,
   );
-  return peer.pump;
+  peer.subscriber = subscriber;
+  peer.pump = pump;
+  return pump;
 }
 
 function completeLocalFlush(peer: TabPeer): void {

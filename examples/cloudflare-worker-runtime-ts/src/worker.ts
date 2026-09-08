@@ -1,14 +1,8 @@
-import {
-  createDb,
-  type Db,
-  generateAuthSecret,
-} from "../../../packages/jazz-tools/src/runtime/index.js";
+import { createAccountManager, createDb, type AccountStore, type Db } from "jazz-tools";
 import jazzWasmModule from "jazz-wasm/pkg/jazz_wasm_bg.wasm";
 import { app } from "./schema.js";
 
 const APP_ID = "cloudflare-worker-runtime-ts";
-
-let dbPromise: Promise<Db> | null = null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -19,21 +13,32 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function getDb(): Promise<Db> {
-  if (dbPromise) {
-    return dbPromise;
-  }
-
-  dbPromise = createDb({
-    appId: APP_ID,
-    env: "dev",
-    auth: { localFirstSecret: generateAuthSecret() },
-    runtimeSources: {
-      wasmModule: jazzWasmModule,
+// This smoke example deliberately has one disposable account per request.
+// Production request handlers should loginJWT against their core registry.
+async function openRequestDb(origin: string): Promise<Db> {
+  let stored: string | null = null;
+  const store: AccountStore = {
+    async read() {
+      return stored;
     },
+    async update(transform) {
+      stored = transform(stored);
+    },
+  };
+  const runtimeSources = { wasmModule: jazzWasmModule };
+  const accounts = await createAccountManager({
+    appId: APP_ID,
+    serverUrl: origin,
+    store,
+    runtimeSources,
   });
-
-  return dbPromise;
+  const account = accounts.createLocalFirst();
+  return createDb({
+    appId: APP_ID,
+    account,
+    driver: { type: "memory" },
+    runtimeSources,
+  });
 }
 
 async function listTodos(db: Db) {
@@ -61,7 +66,6 @@ async function handleSmoke(db: Db): Promise<Response> {
 export default {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const db = await getDb();
 
     if (url.pathname === "/") {
       return json({
@@ -69,22 +73,17 @@ export default {
         example: "cloudflare-worker-runtime-ts",
         verify: {
           smoke: "GET /smoke",
-          todos: "GET /todos",
         },
       });
     }
 
     if (url.pathname === "/smoke") {
-      return handleSmoke(db);
-    }
-
-    if (url.pathname === "/todos") {
-      const todos = await listTodos(db);
-      return json({
-        ok: true,
-        todoCount: todos.length,
-        todos,
-      });
+      const db = await openRequestDb(url.origin);
+      try {
+        return await handleSmoke(db);
+      } finally {
+        await db.shutdown();
+      }
     }
 
     return json(

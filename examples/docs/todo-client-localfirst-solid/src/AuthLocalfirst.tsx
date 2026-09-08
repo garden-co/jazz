@@ -1,17 +1,13 @@
-import { Show, type ParentProps } from "solid-js";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/solid";
+import { type ParentProps } from "solid-js";
+import type { JazzSession } from "jazz-tools/solid";
+import type { JazzClient } from "jazz-tools/client";
+import { JazzSessionProvider } from "jazz-tools/solid";
 
-export function AuthLocalfirst(props: ParentProps) {
-  const auth = useLocalFirstAuth();
+// Configure once with await createJazzSession({ appId, serverUrl, initial: "local-first" }).
+export function AuthLocalfirst(props: ParentProps<{ session: JazzSession<JazzClient> }>) {
   return (
-    <Show when={!auth.isLoading && auth.secret}>
-      {(secret) => {
-        return (
-          <JazzProvider config={{ appId: "my-app", secret: secret() }}>
-            {props.children}
-          </JazzProvider>
-        );
-      }}
-    </Show>
+    <JazzSessionProvider session={props.session} fallback={<p>Loading...</p>}>
+      {props.children}
+    </JazzSessionProvider>
   );
 }

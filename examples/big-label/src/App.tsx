@@ -8,7 +8,7 @@ export function Operations({ onSignOut }: { onSignOut: () => void }) {
   const db = useDb();
   const { data: memberships = [] } = useAll(
     app.memberships
-      .where({ userId: session?.user ?? "__none__" })
+      .where({ userId: session?.user.account ?? "00000000-0000-0000-0000-000000000000" })
       .include({ organization: true })
       .limit(50),
   );

@@ -20,7 +20,7 @@ export function TodoList() {
 
   // #region reading-filtering-expo
   const trimmedFilterTitle = filterTitle.trim();
-  let todosQuery = app.todos;
+  let todosQuery = app.todos.where({});
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
   }
@@ -33,7 +33,7 @@ export function TodoList() {
   const db = useDb();
   const { data: todos = [] } = useAll(todosQuery);
   const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const sessionUserId = session?.user.account ?? null;
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo

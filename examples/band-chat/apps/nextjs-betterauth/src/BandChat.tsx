@@ -20,7 +20,11 @@ const allowedAttachmentTypes = new Set([
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat() {
   const session = useSession();
-  return session?.user ? <RoomWorkspace author={session.user} /> : <p>Loading identity…</p>;
+  return session?.user.account ? (
+    <RoomWorkspace author={session.user.account} />
+  ) : (
+    <p>Loading identity…</p>
+  );
 }
 
 /** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
@@ -101,7 +105,7 @@ function RoomWorkspace({ author }: { author: string }) {
         </aside>
         {selectedRoom ? (
           <Conversation
-            canEditMembership={selectedRoom.$createdBy === author}
+            canEditMembership={selectedRoom.$createdBy.account === author}
             roomId={selectedRoom.id}
             author={author}
           />
@@ -204,9 +208,9 @@ function MembershipEditor({ roomId }: { roomId: string }) {
       </ul>
       <form onSubmit={(event) => void invite(event)}>
         <label>
-          Invite canonical author
+          Invite account ID
           <input
-            aria-label="Invite canonical author"
+            aria-label="Invite account ID"
             onChange={(event) => setMemberAuthor(event.target.value)}
             value={memberAuthor}
           />

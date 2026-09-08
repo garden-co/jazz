@@ -1,18 +1,20 @@
-import { auth, jazzIssuer } from "../../../src/lib/auth";
 import { ensurePersonalOrganization } from "../../../src/lib/bootstrap";
-import { userIdentity } from "jazz-tools";
+import { accountRegistryUrl } from "jazz-tools";
+import { resolveRequestSession } from "jazz-tools/backend";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const session = await auth.api.getSession({ headers: request.headers });
-  if (!session?.user) return Response.json({ error: "sign in required" }, { status: 401 });
-  // Tenant rows use Jazz's canonical `(iss, sub)` identity, exactly as
-  // `session.user` does in policies. Better Auth's provider-local id remains
-  // private to its own tables.
-  const organization = await ensurePersonalOrganization(
-    userIdentity(jazzIssuer, session.user.id),
-    session.user.name,
-  );
+  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+  const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+  const origin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+  const session = await resolveRequestSession(request, {
+    appId,
+    accountRegistry: accountRegistryUrl(serverUrl, appId),
+    jwksUrl: `${origin}/api/auth/jwks`,
+    jwtIssuer: origin,
+  });
+  if (!session.account_id) return Response.json({ error: "account required" }, { status: 401 });
+  const organization = await ensurePersonalOrganization(session.account_id, session.user_id);
   return Response.json({ organizationId: organization.id });
 }

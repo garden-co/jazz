@@ -58,6 +58,7 @@ type ForegroundCommand =
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
   | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | { type: "waitForPendingWrites"; tier: string }
   | {
       type: "stageMutation";
       transaction: number;
@@ -118,7 +119,14 @@ type NativeConnectionStatus = {
 
 type ForegroundResponse =
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
-  | { type: "nativeSessionMetadata"; issuer: string; userId: string }
+  | {
+      type: "nativeSessionMetadata";
+      node: Uint8Array;
+      registryAuthority: string;
+      accountId: string | null;
+      issuer: string;
+      userId: string;
+    }
   | NativeConnectionStatus
   | { type: "ticked" }
   | { type: "preparedQuery"; query: number }
@@ -158,6 +166,11 @@ export type NativeForegroundModule = {
 };
 
 export type NativeForegroundFactory = {
+  accountSecret?(): Uint8Array;
+  beginAccountSession?(requestJson: string): Uint8Array;
+  attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
+  releaseAccountSession?(capability: Uint8Array): void;
+  refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
   readonly abiVersion: number;
   openAttached(capability: Uint8Array): NativeForegroundRuntime;
 };
@@ -304,7 +317,13 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
-  nativeSessionMetadata(): { issuer: string; userId: string } {
+  nativeSessionMetadata(): {
+    node: Uint8Array;
+    registryAuthority: string;
+    accountId: string | null;
+    issuer: string;
+    userId: string;
+  } {
     const response = this.execute({ type: "nativeSessionMetadata" });
     if (response.type !== "nativeSessionMetadata")
       return unexpected("nativeSessionMetadata", response.type);
@@ -413,6 +432,20 @@ export class NativeForegroundDb {
         return cancelled.cancelled;
       },
     };
+  }
+
+  async waitForPendingWrites(tier: string): Promise<Uint8Array> {
+    let response = this.execute({ type: "waitForPendingWrites", tier });
+    while (response.type === "pending") {
+      const operation = response.operation;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      this.tick();
+      response = this.execute({ type: "poll", operation });
+    }
+    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type !== "rows" || response.rows.length !== 0)
+      return unexpected("waitForPendingWrites", response.type);
+    return response.rows;
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {

@@ -3,7 +3,11 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
+
+import { mergePermissionsIntoWasmSchema } from "jazz-tools/testing";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
 
@@ -17,6 +21,18 @@ const APP_NAME = "test-app";
  * yet (e.g. during a release PR).
  */
 const PACKAGES_TO_PACK = ["jazz-tools", "jazz-napi", "jazz-wasm"] as const;
+const requireFromHarness = createRequire(import.meta.url);
+const requireFromJazzTools = createRequire(requireFromHarness.resolve("jazz-tools/dev"));
+
+export function loadedHarnessNapiFingerprint(): string {
+  const binding = requireFromJazzTools("jazz-napi") as {
+    nativeArtifactFingerprint?: () => string;
+  };
+  if (typeof binding.nativeArtifactFingerprint !== "function") {
+    throw new Error("Harness Jazz NAPI binding is missing nativeArtifactFingerprint");
+  }
+  return binding.nativeArtifactFingerprint();
+}
 
 export interface RunStarterOptions {
   starter: StarterName;
@@ -36,6 +52,11 @@ export interface RunStarterOptions {
    * them across the matrix without rebuilding the workspace each time.
    */
   tarballDir?: string;
+  /**
+   * Exercise a test-only generated-app probe that disposes a public
+   * subscription before its initial callback, then opens the real one.
+   */
+  cancelReopenSubscriptionProbe?: boolean;
 }
 
 export interface PhaseTiming {
@@ -121,20 +142,35 @@ async function runChild(
  * is honoured by every napi-rs package (including rolldown, which vite 8
  * uses), so setting it to jazz-napi's binary breaks the build.
  */
-function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
-  const napiSourceDir = path.join(repoRoot, "crates/jazz-napi");
-  if (!fs.existsSync(napiSourceDir)) return;
-  const binaries = fs
-    .readdirSync(napiSourceDir)
-    .filter((f) => f.endsWith(".node"))
-    .map((f) => path.join(napiSourceDir, f));
-  if (binaries.length === 0) return;
+function expectedNativeArtifactFingerprint(packageDir: string): string {
+  const fingerprintFile = path.join(packageDir, "native-artifact-fingerprint.cjs");
+  let source: string;
+  try {
+    source = fs.readFileSync(fingerprintFile, "utf8");
+  } catch (cause) {
+    throw new Error(`Could not read Jazz NAPI artifact fingerprint at ${fingerprintFile}`, {
+      cause,
+    });
+  }
+  const match = source.match(/expectedNativeArtifactFingerprint:\s*["']([0-9a-f]{64})["']/);
+  if (!match) throw new Error(`Invalid Jazz NAPI artifact fingerprint at ${fingerprintFile}`);
+  return match[1];
+}
 
+function installedJazzNapiDirs(appDir: string): string[] {
   const installedDirs: string[] = [];
   const visited = new Set<string>();
+  const installed = new Set<string>();
   function walk(dir: string, depth = 0): void {
-    if (depth > 8 || visited.has(dir) || !fs.existsSync(dir)) return;
-    visited.add(dir);
+    if (depth > 8 || !fs.existsSync(dir)) return;
+    let realDir: string;
+    try {
+      realDir = fs.realpathSync(dir);
+    } catch {
+      return;
+    }
+    if (visited.has(realDir)) return;
+    visited.add(realDir);
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -142,20 +178,133 @@ function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
       return;
     }
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
       const child = path.join(dir, e.name);
+      let childIsDirectory = e.isDirectory();
+      if (e.isSymbolicLink()) {
+        try {
+          childIsDirectory = fs.statSync(child).isDirectory();
+        } catch {
+          childIsDirectory = false;
+        }
+      }
+      if (!childIsDirectory) continue;
       if (e.name === "jazz-napi") {
-        installedDirs.push(child);
+        try {
+          const realChild = fs.realpathSync(child);
+          if (!installed.has(realChild)) {
+            installed.add(realChild);
+            installedDirs.push(child);
+          }
+        } catch {
+          // A broken package symlink cannot be a runnable dependency. Leave it
+          // to pnpm/the starter import to report the broken installation.
+        }
       }
       walk(child, depth + 1);
     }
   }
   walk(path.join(appDir, "node_modules"));
+  return installedDirs;
+}
 
-  for (const dir of installedDirs) {
+/** Reject a packed candidate that cannot run with this harness's native binding. */
+export function assertInstalledJazzNapiMatchesHarness(
+  appDir: string,
+  harnessFingerprint = loadedHarnessNapiFingerprint(),
+): string {
+  const installedDirs = installedJazzNapiDirs(appDir);
+  if (installedDirs.length === 0) return harnessFingerprint;
+  for (const installedDir of installedDirs) {
+    const candidateFingerprint = expectedNativeArtifactFingerprint(installedDir);
+    if (candidateFingerprint !== harnessFingerprint) {
+      throw new Error(
+        `Packed Jazz NAPI fingerprint ${candidateFingerprint} does not match this harness's native binding ${harnessFingerprint}. ` +
+          "Build or restore matching Jazz artifacts before running starter E2E; do not mix candidate tarballs with another checkout's NAPI generation.",
+      );
+    }
+  }
+  return harnessFingerprint;
+}
+
+export function assertNapiBindingMatchesHarness(
+  actualFingerprint: string,
+  candidateFingerprint: string,
+  harnessFingerprint: string,
+  bindingPath: string,
+): void {
+  if (actualFingerprint !== candidateFingerprint || actualFingerprint !== harnessFingerprint) {
+    throw new Error(
+      `Jazz NAPI binding ${bindingPath} fingerprint ${actualFingerprint} does not match candidate ${candidateFingerprint} and harness ${harnessFingerprint}. ` +
+        "Build or restore matching Jazz artifacts before running starter E2E; do not mix candidate tarballs with another checkout's NAPI generation.",
+    );
+  }
+}
+
+function nativeArtifactFingerprint(bindingPath: string): string {
+  const binding = requireFromHarness(bindingPath) as {
+    nativeArtifactFingerprint?: () => string;
+  };
+  if (typeof binding.nativeArtifactFingerprint !== "function") {
+    throw new Error(`Jazz NAPI binding is missing nativeArtifactFingerprint: ${bindingPath}`);
+  }
+  return binding.nativeArtifactFingerprint();
+}
+
+function installedNapiIsUsable(
+  dir: string,
+  harnessFingerprint: string,
+  readFingerprint = nativeArtifactFingerprint,
+): boolean {
+  const binary = fs.readdirSync(dir).find((entry) => entry.endsWith(".node"));
+  if (!binary) return false;
+  const bindingPath = path.join(dir, "index.cjs");
+  const actualFingerprint = readFingerprint(bindingPath);
+  assertNapiBindingMatchesHarness(
+    actualFingerprint,
+    expectedNativeArtifactFingerprint(dir),
+    harnessFingerprint,
+    bindingPath,
+  );
+  return true;
+}
+
+export function patchInstalledJazzNapi(
+  appDir: string,
+  repoRoot: string,
+  harnessFingerprint: string,
+  readFingerprint = nativeArtifactFingerprint,
+): void {
+  const dirsNeedingRepair = installedJazzNapiDirs(appDir).filter(
+    (dir) => !installedNapiIsUsable(dir, harnessFingerprint, readFingerprint),
+  );
+  if (dirsNeedingRepair.length === 0) return;
+
+  const napiSourceDir = path.join(repoRoot, "crates/jazz-napi");
+  const binaries = fs.existsSync(napiSourceDir)
+    ? fs
+        .readdirSync(napiSourceDir)
+        .filter((f) => f.endsWith(".node"))
+        .map((f) => path.join(napiSourceDir, f))
+    : [];
+  if (binaries.length === 0) {
+    throw new Error(
+      "No Jazz NAPI binary is available to repair the packed starter candidate. Build or restore matching Jazz artifacts before running starter E2E.",
+    );
+  }
+
+  for (const dir of dirsNeedingRepair) {
     for (const src of binaries) {
+      assertNapiBindingMatchesHarness(
+        readFingerprint(src),
+        expectedNativeArtifactFingerprint(dir),
+        harnessFingerprint,
+        src,
+      );
       fs.copyFileSync(src, path.join(dir, path.basename(src)));
     }
+    // Re-load through the candidate's own loader after repair. A stale workspace
+    // binary must never turn a metadata-only match into a runnable-looking app.
+    installedNapiIsUsable(dir, harnessFingerprint, readFingerprint);
   }
 }
 
@@ -277,6 +426,69 @@ function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, stri
   fs.writeFileSync(path.join(appDir, "pnpm-workspace.yaml"), yaml, "utf-8");
 }
 
+function replaceExactly(
+  source: string,
+  expected: string,
+  replacement: string,
+  file: string,
+): string {
+  const matches = source.split(expected).length - 1;
+  if (matches !== 1) {
+    throw new Error(
+      `Cancel/reopen probe expected exactly one ${JSON.stringify(expected)} in ${file}, found ${matches}`,
+    );
+  }
+  return source.replace(expected, replacement);
+}
+
+/**
+ * The production template intentionally remains untouched. This test-only
+ * generated-app mutation exercises the user-visible case where a public
+ * subscription is cancelled immediately before its replacement begins.
+ */
+function injectTsBetterAuthCancelReopenSubscriptionProbe(appDir: string): void {
+  const widgetFile = path.join(appDir, "src", "todo-widget.ts");
+  let source = fs.readFileSync(widgetFile, "utf-8");
+  source = replaceExactly(
+    source,
+    `    callback: (rows: T[]) => void,`,
+    `    callback:\n      | ((rows: T[]) => void)\n      | { onUpdate(rows: T[]): void; onError(error: Error): void },`,
+    widgetFile,
+  );
+  source = replaceExactly(
+    source,
+    `export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {`,
+    `export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {\n  const probeWindow = window as typeof window & {\n    __jazzCancelReopenSubscriptionProbe?: { errors: string[] };\n  };\n  const probe = (probeWindow.__jazzCancelReopenSubscriptionProbe ??= { errors: [] });\n  document.documentElement.dataset.jazzCancelReopenSubscriptionProbe = "installed";`,
+    widgetFile,
+  );
+  const expected = `  return db.subscribe(app.todos, (todos) => {\n    // The simplest possible approach: rebuild the whole list on every tick.\n    // It's fine here — the list is small and there's no DOM state to preserve\n    // (no inline editing, no focused inputs inside rows).\n    //\n    renderTodos(todos);\n  });\n}`;
+  const replacement = `  const cancelledOpening = db.subscribe(app.todos, {\n    onUpdate: () => undefined,\n    onError: (error) => {\n      probe.errors.push(error.message);\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n  cancelledOpening();\n\n  return db.subscribe(app.todos, {\n    onUpdate: (todos) => {\n      // The simplest possible approach: rebuild the whole list on every tick.\n      // It's fine here — the list is small and there's no DOM state to preserve\n      // (no inline editing, no focused inputs inside rows).\n      //\n      renderTodos(todos);\n    },\n    onError: (error) => {\n      probe.errors.push(error.message);\n      queueMicrotask(() => {\n        throw error;\n      });\n    },\n  });\n}`;
+  source = replaceExactly(source, expected, replacement, widgetFile);
+  fs.writeFileSync(widgetFile, source, "utf-8");
+
+  const testFile = path.join(appDir, "e2e", "todo-flow.spec.ts");
+  source = fs.readFileSync(testFile, "utf-8");
+  source = replaceExactly(
+    source,
+    `const TIMEOUT = 20_000;`,
+    `const TIMEOUT = 20_000;\nconst CANCEL_REOPEN_PROBE = process.env.JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE === "1";\n\nasync function assertCancelReopenProbeHealthy(page: Page) {\n  if (!CANCEL_REOPEN_PROBE) return;\n  await expect(page.locator("html")).toHaveAttribute(\n    "data-jazz-cancel-reopen-subscription-probe",\n    "installed",\n  );\n  await expect\n    .poll(() =>\n      page.evaluate(() => {\n        const probeWindow = window as typeof window & {\n          __jazzCancelReopenSubscriptionProbe?: { errors: string[] };\n        };\n        return probeWindow.__jazzCancelReopenSubscriptionProbe?.errors ?? [];\n      }),\n    )\n    .toEqual([]);\n}`,
+    testFile,
+  );
+  source = replaceExactly(
+    source,
+    `  await expect(page.getByLabel(TODO_INPUT_LABEL)).toBeVisible({ timeout: TIMEOUT });`,
+    `  await expect(page.getByLabel(TODO_INPUT_LABEL)).toBeVisible({ timeout: TIMEOUT });\n  await assertCancelReopenProbeHealthy(page);`,
+    testFile,
+  );
+  source = replaceExactly(
+    source,
+    `  await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });`,
+    `  await expect(page.getByRole("status")).toContainText("Saved locally", { timeout: TIMEOUT });\n  await assertCancelReopenProbeHealthy(page);`,
+    testFile,
+  );
+  fs.writeFileSync(testFile, source, "utf-8");
+}
+
 function writeEnvFile(
   appDir: string,
   starter: StarterName,
@@ -296,6 +508,32 @@ function writeEnvFile(
     lines.push(`BETTER_AUTH_SECRET=${randomBytes(32).toString("base64url")}`);
   }
   fs.writeFileSync(path.join(appDir, ".env"), lines.join("\n") + "\n", "utf-8");
+}
+
+export async function loadStarterSchema(
+  appDir: string,
+  config: ReturnType<typeof getStarterConfig>,
+): Promise<ReturnType<typeof mergePermissionsIntoWasmSchema>> {
+  const schemaFile = path.join(appDir, config.schemaPath);
+  const module = (await import(pathToFileURL(schemaFile).href)) as {
+    app?: {
+      wasmSchema?: Parameters<typeof mergePermissionsIntoWasmSchema>[0];
+    };
+  };
+  if (!module.app?.wasmSchema) {
+    throw new Error(`Starter schema module ${config.schemaPath} does not export app.wasmSchema`);
+  }
+
+  const permissionsFile = path.join(path.dirname(schemaFile), "permissions.ts");
+  const permissionsModule = (await import(pathToFileURL(permissionsFile).href)) as {
+    default?: Parameters<typeof mergePermissionsIntoWasmSchema>[1];
+  };
+  if (!permissionsModule.default) {
+    throw new Error(
+      `Starter permissions module ${permissionsFile} does not export default permissions`,
+    );
+  }
+  return mergePermissionsIntoWasmSchema(module.app.wasmSchema, permissionsModule.default);
 }
 
 export async function runStarter(opts: RunStarterOptions): Promise<RunStarterResult> {
@@ -351,6 +589,15 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       );
     });
 
+    if (opts.cancelReopenSubscriptionProbe) {
+      if (opts.starter !== "ts-betterauth") {
+        throw new Error("The cancel/reopen subscription probe is only defined for ts-betterauth");
+      }
+      await recordPhase("inject cancel/reopen subscription probe", async () => {
+        injectTsBetterAuthCancelReopenSubscriptionProbe(appDir);
+      });
+    }
+
     removeStaleAppLocalJazzWasm(appDir);
     assertNoAppLocalJazzWasm(appDir);
     writeScaffoldedPnpmConfig(appDir, tarballs);
@@ -380,12 +627,33 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       ),
     );
 
-    patchInstalledJazzNapi(appDir, opts.repoRoot);
+    const harnessFingerprint = assertInstalledJazzNapiMatchesHarness(appDir);
+    patchInstalledJazzNapi(appDir, opts.repoRoot, harnessFingerprint);
     assertInstalledBrokerWorkerArtifacts(appDir);
+
+    const starterSchema = await loadStarterSchema(appDir, config);
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
-    server = await startLocalJazzServer({ inMemory: true, allowLocalFirstAuth: true });
+    // Better Auth starters enroll the provider's external JWT identity at the
+    // account registry. Point the local registry at the starter's JWKS endpoint
+    // and require the exact origin as issuer and audience, matching production
+    // JWT admission. The endpoint is fetched lazily when the browser enrolls,
+    // after the starter's production server has started.
+    const usesExternalJwt =
+      opts.starter.endsWith("-betterauth") || opts.starter.endsWith("-hybrid");
+    server = await startLocalJazzServer({
+      inMemory: true,
+      allowLocalFirstAuth: true,
+      schema: starterSchema,
+      ...(usesExternalJwt
+        ? {
+            jwksUrl: `${config.appOrigin}/api/auth/jwks`,
+            jwtIssuer: config.appOrigin,
+            jwtAudience: config.appOrigin,
+          }
+        : {}),
+    });
     writeEnvFile(appDir, opts.starter, server, config);
 
     await recordPhase("build", () =>
@@ -412,7 +680,13 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       await recordPhase("e2e", () =>
         runChild("pnpm", ["exec", "playwright", "test", "--reporter=line"], {
           cwd: appDir,
-          env: { ...process.env, JAZZ_E2E_PROD: "1" },
+          env: {
+            ...process.env,
+            JAZZ_E2E_PROD: "1",
+            JAZZ_E2E_CANCEL_REOPEN_SUBSCRIPTION_PROBE: opts.cancelReopenSubscriptionProbe
+              ? "1"
+              : "",
+          },
           verbose,
           description: `playwright test ${opts.starter}`,
         }),

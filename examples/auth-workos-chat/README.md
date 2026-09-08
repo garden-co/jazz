@@ -6,8 +6,8 @@ What it demonstrates:
 
 - Using `@workos-inc/authkit-react` to handle the full OAuth / SSO sign-in flow
 - Pointing the Jazz sync server at WorkOS's hosted JWKS endpoint — no local auth server needed
-- Calling `getAccessToken()` from the AuthKit hook and passing the WorkOS access token directly to `JazzProvider`
-- Recreating `JazzProvider` on login and logout, while reserving `db.updateAuthToken(...)` for same-user JWT refresh after auth expiry
+- Resolving ordinary WorkOS access tokens into opaque Jazz account handles
+- Gracefully closing the old client before provider login/logout, with same-identity token refresh owned by the account manager
 - Falling back to local-first auth when no WorkOS session exists
 - Role-based UI gating derived from JWT claims (`admin` posts to Announcements; `member` posts to the general chat), with generic-chat message ownership enforced via `$createdBy` in `permissions.ts`
 
@@ -22,17 +22,30 @@ You need a [WorkOS account](https://workos.com/docs/authkit/client-only) with a 
 
 ### 1. Configure WorkOS
 
-1. Configure the `WORKOS_CLIENT_ID` in `constants.ts` with WorkOS client id
-2. Configure redirect URI in the WorkOS dashboard to `http://127.0.0.1:5173`.
-3. Under Authentication > Sessions > JWT Template add the following snippet to expose the Organization's role to the JWT claims
+1. Configure the `WORKOS_CLIENT_ID` in `constants.ts` with your WorkOS client ID.
+2. Set `WORKOS_JWT_ISSUER` in `.env.local` to the exact `iss` claim WorkOS places in its access tokens:
+
+   ```bash
+   WORKOS_JWT_ISSUER=https://api.workos.com/
+   ```
+
+   Include the trailing slash when the token has one, and use the exact custom AuthKit domain when you have configured one. This is the server's static expected issuer; never derive it from an incoming token.
+
+3. Configure redirect URI in the WorkOS dashboard to `http://127.0.0.1:5173`.
+4. Under Authentication > Sessions > JWT Template add the following snippet to expose the Organization's role and an audience to the JWT claims:
 
 ```
 {
-  "claims": {
-    "role": {{organization_membership.role}}
-  }
+  "role": "{{ organization_membership.role }}",
+  "aud": "client_your_authkit_client_id"
 }
 ```
+
+Replace the `aud` value with the same AuthKit Client ID configured in
+`constants.ts`. WorkOS access tokens do not include an audience claim by default,
+so this template adds one. The quotes around the role template produce a JSON
+string claim. Jazz verifies both the configured issuer and this audience before
+admitting the token.
 
 ### 2. Start the Vite app
 
@@ -43,12 +56,17 @@ pnpm dev
 The Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`) automatically spawns a local Jazz sync
 server pointed at the WorkOS JWKS URL, pushes the schema catalogue, and exposes
 `VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` to the app. The JWKS URL is assembled from
-`WORKOS_CLIENT_ID` at config time:
+`WORKOS_CLIENT_ID` at config time, while the issuer comes from the configured
+expected value:
 
 ```ts
+const { WORKOS_JWT_ISSUER } = loadEnv(mode, process.cwd(), "");
+
 jazzPlugin({
   server: {
     jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
+    jwtIssuer: WORKOS_JWT_ISSUER,
+    jwtAudience: WORKOS_CLIENT_ID,
   },
 });
 ```
@@ -77,47 +95,19 @@ export function App() {
 }
 ```
 
-### Token exchange — `src/App.tsx`
+### Account admission — `src/App.tsx`
 
-`JazzApp` reads the WorkOS session with `useAuth()` and calls `getAccessToken()` whenever the
-user object changes. The access token is a standard JWT signed by WorkOS:
+This example requires WorkOS sign-in before opening the chat. `JazzApp` owns a
+`JazzSession`; `useAuthProvider` watches WorkOS hydration and user identity.
+The first provider sign-in creates its Jazz account atomically, and returning
+identities resolve the same account. No second registration action is needed.
 
-```tsx
-const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
+`JazzSessionProvider` owns the data view across transitions. Sign-out uses the
+shared connection to flush Jazz before WorkOS revokes its token or redirects.
+Failed synchronization remains visible with a retry. Token refresh calls
+`getAccessToken({ forceRefresh: true })` without replacing the client.
+For a guest-first example that preserves local data during signup, see the
+Better Auth or custom JWT chat examples' manual linking flow.
 
-React.useEffect(() => {
-  let isCancelled = false;
-
-  if (!user) {
-    setInitialJwtToken(null);
-    return;
-  }
-
-  getAccessToken().then((accessToken) => {
-    if (!isCancelled) {
-      setInitialJwtToken(accessToken ?? null);
-    }
-  });
-
-  return () => {
-    isCancelled = true;
-  };
-}, [getAccessToken, user]);
-```
-
-Once the token is available, `JazzProvider` is mounted in JWT mode. When the user signs out,
-`signOut` ends the WorkOS session and Jazz is recreated in local-first mode.
-
-```tsx
-const config: DbConfig = initialJwtToken
-  ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
-  : { appId, auth: { localFirstSecret }, serverUrl, ... };
-
-<JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
-  <ChatShell user={user} onSignIn={signIn} onSignOut={signOut} />
-</JazzProvider>
-```
-
-If the sync server later returns `401` for an expired or invalid bearer token, the example asks
-WorkOS for a fresh access token and calls `db.updateAuthToken(freshJwt)` for that same user. Login and
-logout still recreate the Jazz client.
+Ownership policies compare `$createdBy.account` with `session.user.account`.
+The provider's issuer and subject remain available under `session.user.identity`.

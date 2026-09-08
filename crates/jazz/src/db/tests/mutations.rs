@@ -1770,27 +1770,15 @@ fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
     let anonymous =
         AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","exclusive-anonymous"]"#).unwrap();
     let core = open_core_with_claims(0x5e, anonymous, &schema, BTreeMap::new());
-    let row = row(0xe2);
+    // This authority-local path cannot use a remote session transport. Its
+    // accountless subject must fail at provisional durable authorship, before
+    // policy evaluation can stage a row or transaction.
+    let Err(error) = core.exclusive_tx() else {
+        panic!("accountless author unexpectedly opened a durable transaction")
+    };
 
-    // This authority-local path cannot use a remote session transport: it
-    // finalizes its own exclusive unit directly, which is why it separately
-    // proves the shared fate gate applies here as well.
-    let write = core.exclusive_tx().unwrap();
-    write
-        .insert_with_id(
-            "todos",
-            row,
-            cells(
-                "must be denied",
-                false,
-                AuthorSubject::for_test_bytes([0xa1; 16]),
-            ),
-        )
-        .unwrap();
-    let error = write.commit().unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
-    assert!(error.message.contains("AuthorizationDenied"));
+    assert_eq!(error.code, ErrorCode::Protocol, "{error:?}");
+    assert!(error.message.contains("admitted account author"));
     assert!(core.read(&Query::from("todos")).unwrap().is_empty());
 }
 
@@ -2490,6 +2478,96 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 }
 
 #[test]
+fn session_upload_strips_forged_system_permission_before_storage_and_publication() {
+    let schema = schema();
+    let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe2; 16]);
+    let edge = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc2, session_author, &schema);
+
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        session_author,
+        NodeUuid::from_bytes([0xc2; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            session_author,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("forged permission subject", false, session_author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let mut forged = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = &mut forged else {
+        unreachable!("commit_unit_for returns a CommitUnit");
+    };
+    tx.permission_subject = Some(AuthorSubject::SYSTEM);
+    assert!(queue_pending_upload_in(
+        &client.node.outbox,
+        tx_id,
+        Some(forged),
+    ));
+
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+
+    let SyncMessage::CommitUnit { tx, .. } =
+        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+    else {
+        unreachable!("edge retained the accepted transaction");
+    };
+    assert_eq!(
+        tx.permission_subject, None,
+        "storage drops untrusted SYSTEM"
+    );
+
+    crate::db::block_on(edge.node().borrow_mut().apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    ))
+    .unwrap();
+    assert!(matches!(
+        crate::db::block_on(edge.node().borrow_mut().transaction_state(tx_id)),
+        Some((Fate::Accepted, None, DurabilityTier::Edge))
+    ));
+    let publication = edge
+        .node()
+        .borrow_mut()
+        .edge_authority_publication_for(tx_id)
+        .unwrap();
+    let published = publication
+        .commits
+        .iter()
+        .find(|unit| unit.tx.tx_id == tx_id)
+        .expect("publication contains its anchor transaction");
+    assert_eq!(
+        published.tx.permission_subject, None,
+        "publication cannot re-emit a session-forged capability"
+    );
+}
+
+#[test]
 fn session_upload_uses_connection_identity_for_write_policy() {
     let schema = owner_write_schema();
     let session_author = AuthorSubject::for_test_bytes([0xc1; 16]);
@@ -2784,11 +2862,10 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
 fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let schema = owner_write_schema();
     let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
-    // Provenance may record an anonymous user while the trusted backend is the
-    // effective permission subject. The anonymous write gate must therefore
-    // inspect `permission_subject`, not `made_by`.
-    let attributed_user =
-        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","anonymous-user"]"#).unwrap();
+    // Provenance records a different admitted account author while policy
+    // evaluation uses the trusted backend. Attribution must not replace the
+    // effective permission subject or bypass the required account author.
+    let attributed_user = AuthorSubject::for_test_bytes([0xb1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 

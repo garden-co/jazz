@@ -14,3 +14,14 @@ export { useAuthState, type AuthStateInfo } from "./use-auth-state.js";
 export { createUseLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 
 export type { DurabilityTier, QueryBuilder, QueryOptions, TableProxy } from "../runtime/index.js";
+
+export {
+  JazzSessionProvider,
+  ConfiguredJazzSessionProvider,
+  useJazzSession,
+  type JazzSessionProviderProps,
+  type ConfiguredJazzSessionProviderProps,
+  type UseJazzSessionResult,
+} from "./session.js";
+
+export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";

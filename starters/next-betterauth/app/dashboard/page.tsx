@@ -3,15 +3,12 @@
 import Image from "next/image";
 import { authClient } from "@/lib/auth-client";
 import { TodoWidget } from "@/components/todo-widget";
+import { useJazzAuth } from "jazz-tools/react";
 
 export default function DashboardPage() {
+  const { logout } = useJazzAuth();
   const { data: session } = authClient.useSession();
   if (!session) return null;
-
-  async function handleSignOut() {
-    await authClient.signOut();
-    window.location.assign("/");
-  }
 
   return (
     <main className="dashboard">
@@ -27,7 +24,7 @@ export default function DashboardPage() {
         />
         <div className="auth-nav">
           <p>Hello, {session.user.name}</p>
-          <button type="button" onClick={handleSignOut}>
+          <button type="button" onClick={() => void logout()}>
             Sign out
           </button>
         </div>

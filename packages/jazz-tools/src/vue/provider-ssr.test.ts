@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSSRApp, h } from "vue";
 import { renderToString } from "@vue/server-renderer";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig } from "../accounts/context.js";
+import { makeFakeAccount } from "../react-core/test-utils.js";
 
 const mocks = vi.hoisted(() => ({
   createJazzClient: vi.fn(),
@@ -15,7 +16,12 @@ import { JazzProvider } from "./provider.js";
 
 describe("JazzProvider SSR", () => {
   it("renders its fallback without creating a browser client", async () => {
-    const config: DbConfig = { appId: "ssr", driver: { type: "memory" } };
+    const config: AccountDbConfig = {
+      appId: "ssr",
+      serverUrl: "https://jazz.example.com",
+      driver: { type: "memory" },
+      account: makeFakeAccount("ssr"),
+    };
     const app = createSSRApp({
       render: () =>
         h(

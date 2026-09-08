@@ -1,3 +1,5 @@
+import { createAccountManager } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the Solid todo app.
  *
@@ -29,10 +31,18 @@ describe("Solid Todo App E2E", () => {
   async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
+    const account =
+      config.account ??
+      (await prepareTestAccount(
+        createAccountManager,
+        config.appId ?? "test-app",
+        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+      ));
     const resolvedConfig: Partial<DbConfig> = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
+      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -59,7 +69,14 @@ describe("Solid Todo App E2E", () => {
     mounts.splice(idx, 1);
 
     if (storageNamespace) {
-      const storage = window.__jazz;
+      const storage = (
+        window as Window & {
+          __jazz?: {
+            shutdown(namespace?: string): Promise<void>;
+            listLiveStorageNamespaces(): string[];
+          };
+        }
+      ).__jazz;
       if (!storage) throw new Error("Jazz browser storage controls are unavailable");
       await storage.shutdown(storageNamespace);
       await waitFor(
@@ -183,8 +200,13 @@ describe("Solid Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const account = await prepareTestAccount(
+      createAccountManager,
+      "test-app",
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
 
-    const el1 = await mountApp({ driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -200,7 +222,7 @@ describe("Solid Todo App E2E", () => {
 
     await unmountApp(el1);
 
-    const el2 = await mountApp({ driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

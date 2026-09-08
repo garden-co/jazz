@@ -89,6 +89,20 @@ impl std::error::Error for WebSocketClientError {}
 /// NotReady/Later admission response accepted by the browser is retryable.
 fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
     let retryable = match &error {
+        // A proxy may accept TCP while its upstream is restarting and close
+        // before HTTP upgrade completes. No rejected response was received.
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::HandshakeIncomplete,
+        )) => true,
+        // Tungstenite represents an established TCP EOF without a Close frame
+        // as a protocol error. It is connection loss, unlike malformed frames
+        // or rejected authentication, and must not poison the local runtime.
+        WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        ))
+        | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        )) => true,
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
         | WebSocketClientError::Send(tokio_tungstenite::tungstenite::Error::Io(error))
         | WebSocketClientError::Receive(tokio_tungstenite::tungstenite::Error::Io(error)) => {
@@ -895,6 +909,115 @@ fn decode_inbound_batch(bytes: &[u8], _bootstrap_catalogue: bool) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
+    // A proxy can accept TCP while its upstream is down, then close before
+    // completing HTTP upgrade. Observe the real socket error, not its text.
+    #[tokio::test]
+    async fn incomplete_websocket_upgrade_is_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 4096, "bounded upgrade request");
+            }
+            drop(stream);
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio_tungstenite::connect_async(format!("ws://{address}")),
+        )
+        .await
+        .expect("bounded incomplete-upgrade receipt")
+        .expect_err("server never completed HTTP upgrade");
+        assert!(
+            matches!(
+                error,
+                tokio_tungstenite::tungstenite::Error::Protocol(
+                    tokio_tungstenite::tungstenite::error::ProtocolError::HandshakeIncomplete
+                )
+            ),
+            "unexpected incomplete upgrade: {error:?}"
+        );
+        let classified = native_transport_error(WebSocketClientError::Connect(error));
+        assert!(
+            classified.is_retryable(),
+            "incomplete upgrade must reconnect: {classified:?}"
+        );
+        server.await.unwrap();
+    }
+
+    // This reproduces the socket library's typed EOF result below the Db API;
+    // constructing an error alone would miss the actual abrupt-close category.
+    #[tokio::test]
+    async fn established_socket_abrupt_eof_is_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Drop TCP without sending a WebSocket Close frame, as a proxy
+            // restart or disappearing mobile connection can do.
+            drop(socket);
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("bounded EOF receipt")
+            .expect("typed EOF error")
+            .expect_err("unclean close must produce a socket error");
+        assert!(
+            matches!(
+            error,
+            tokio_tungstenite::tungstenite::Error::Protocol(
+                tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
+            )
+        ),
+            "unexpected abrupt EOF: {error:?}"
+        );
+        let classified = native_transport_error(WebSocketClientError::Receive(error));
+        assert!(
+            classified.is_retryable(),
+            "abrupt EOF must reconnect: {classified:?}"
+        );
+        server.await.unwrap();
+    }
+
+    // Keep the exception typed and narrow: other protocol failures must still
+    // retire the authenticated connection instead of retrying bad input.
+    #[test]
+    fn malformed_websocket_protocol_remains_terminal() {
+        use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+        assert!(
+            !native_transport_error(WebSocketClientError::Connect(Error::Protocol(
+                ProtocolError::WrongHttpMethod,
+            )))
+            .is_retryable()
+        );
+        for error in [
+            ProtocolError::UnmaskedFrameFromClient,
+            ProtocolError::InvalidOpcode(3),
+        ] {
+            assert!(
+                !native_transport_error(WebSocketClientError::Receive(Error::Protocol(error)))
+                    .is_retryable()
+            );
+        }
+        assert!(
+            !native_transport_error(WebSocketClientError::Connect(Error::Protocol(
+                ProtocolError::ResetWithoutClosingHandshake,
+            )))
+            .is_retryable(),
+            "the exception applies only after socket establishment"
+        );
+    }
+
     // This adapter classification has no Db-level API: assert the typed socket
     // and wire boundary, including conflicting error guidance, directly.
     #[test]

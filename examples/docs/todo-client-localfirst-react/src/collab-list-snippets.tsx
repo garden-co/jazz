@@ -9,12 +9,12 @@ const schema = {
   tasks: s.table({
     title: s.string(),
     done: s.boolean(),
-    assignee_id: s.string().optional(),
+    assignee_id: s.uuid().optional(),
     projectId: s.ref("projects"),
   }),
   projectMembers: s.table({
     projectId: s.ref("projects"),
-    user_id: s.string(),
+    user_id: s.uuid(),
   }),
 };
 
@@ -27,15 +27,15 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   // Projects: creator and members
   policy.projects.allowRead.where((project) =>
     anyOf([
-      { $createdBy: session.user },
+      { "$createdBy.account": session.user.account },
       policy.projectMembers.exists.where({
         projectId: project.id,
-        user_id: session.user,
+        user_id: session.user.account,
       }),
     ]),
   );
   policy.projects.allowInsert.always();
-  policy.projects.allowUpdate.where({ $createdBy: session.user });
+  policy.projects.allowUpdate.where({ "$createdBy.account": session.user.account });
 
   // Tasks: inherit from project
   policy.tasks.allowRead.where(allowedTo.read("projectId"));
@@ -46,16 +46,16 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   policy.projectMembers.allowInsert.where((member) =>
     policy.projects.exists.where({
       id: member.projectId,
-      $createdBy: session.user,
+      "$createdBy.account": session.user.account,
     }),
   );
   policy.projectMembers.allowRead.where((member) =>
     anyOf([
       policy.projects.exists.where({
         id: member.projectId,
-        $createdBy: session.user,
+        "$createdBy.account": session.user.account,
       }),
-      { user_id: session.user },
+      { user_id: session.user.account },
     ]),
   );
 });

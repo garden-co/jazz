@@ -130,6 +130,12 @@ where
         {
             return Err(Error::DuplicateOpenBatch(id));
         }
+        // Pending rows use the same non-null durable attribution shape as a
+        // committed row. Keep `kind`'s bound/session subject untouched for
+        // authorization; only its provisional metadata becomes SystemAt.
+        let provisional_author = RowAuthor::from_session(provisional_author, self.node_uuid)
+            .map_err(|_| Error::UnadmittedWriteAuthor)?
+            .as_author_subject();
         let local_base = self.tx_time_high_water();
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
@@ -935,7 +941,7 @@ where
         now_ms: u64,
         reserved: Option<TxId>,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let (made_by, permission_subject) = match self.open_tx(open_batch_id)?.kind {
+        let (provenance_subject, permission_subject) = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
                 made_by: bound_made_by,
                 permission_subject,
@@ -950,6 +956,9 @@ where
                 ));
             }
         };
+        let made_by = RowAuthor::from_session(provenance_subject, self.node_uuid)
+            .map_err(|_| Error::UnadmittedWriteAuthor)?
+            .as_author_subject();
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
             .await?

@@ -239,7 +239,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         tx_id: TxId::new(TxTime::from(10), node(0xee)),
         kind: TxKind::Exclusive,
         n_total_writes: 1,
-        made_by: AuthorSubject::SYSTEM,
+        made_by: AuthorSubject::system_at(node(0xee)),
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,

@@ -1,14 +1,13 @@
 // #region setup-ts
-import { BrowserAuthSecretStore, createDb } from "jazz-tools";
+import { createAccountManager, createDb } from "jazz-tools";
 import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 const appId = "<your-app-id>";
-const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId });
-const db = await createDb({
-  appId,
-  secret,
-});
+const config = { appId, serverUrl: "https://core.example" };
+const accounts = await createAccountManager(config);
+const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
+const db = await createDb({ ...config, account });
 // use db.shutdown() to clean up when finished
 // #endregion setup-ts
 

@@ -9,12 +9,15 @@ What it demonstrates:
 - A Jazz backend context using in-memory storage while syncing auth rows to the local sync server
 - Better Auth's built-in `jwt` plugin to issue ES256 JWTs and expose a JWKS endpoint
 - The `admin` plugin to assign roles (`admin` / `member`) to users
-- Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
-- Recreating `JazzProvider` on login and logout, while keeping `db.updateAuthToken(...)` only for same-user JWT refresh after auth expiry
-- Falling back to local-first auth when no session exists
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
+- Resolving ordinary provider JWTs into opaque Jazz account handles
+- Linking a fresh provider identity to an offline account after graceful context shutdown
+- Refreshing same-identity credentials through the session
+- Creating local-first accounts when no provider session exists
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
+The seeded provider identity gets its Jazz account on first login through `loginOrRegisterJWT`;
+the login error offers that action. Subsequent login resolves the existing account.
 New sign-ups receive `role = "member"` by default (configured via the `admin` plugin).
 
 ## Setup
@@ -57,7 +60,7 @@ Open `NEXT_PUBLIC_APP_ORIGIN`.
 
 ## How the Better Auth integration works
 
-### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-context.ts`, and `schema-better-auth/schema.ts`
+### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-client.ts`, and `schema-better-auth/schema.ts`
 
 `auth.ts` wires up the Better Auth instance with four plugins and points the adapter at the
 root app schema, which includes both the generated Better Auth tables and the chat table:
@@ -68,7 +71,7 @@ import { app } from "../../schema";
 
 betterAuth({
   database: jazzAdapter({
-    db: () => authJazzContext().asBackend(app),
+    db: async () => (await authJazzClient()).db,
     schema: app.wasmSchema,
   }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
@@ -85,7 +88,7 @@ betterAuth({
           claims: { role: user.role ?? "" },
           username: user.name,
         }),
-        getSubject: ({ user }) => user.id, // becomes session.user in Jazz
+        getSubject: ({ user }) => user.id, // becomes session.user.identity.subject in Jazz
       },
     }),
   ],
@@ -94,8 +97,8 @@ betterAuth({
 
 `schema-better-auth/schema.ts` is the generated Better Auth schema source file. Its deny-all
 `permissions` export is spread into the root `permissions.ts` alongside the message policies, so
-ordinary clients cannot read or mutate authentication rows. `authJazzContext()` uses
-`asBackend(app)` with the sync server's backend secret, so the adapter can still access those rows.
+ordinary clients cannot read or mutate authentication rows. `authJazzClient()` uses
+a cached session initialized with `initial: { backendSecret }` and its ready client’s `.db`, so the adapter can still access those rows.
 It caches the context on `globalThis` so route modules don't instantiate it at import time (which
 would fail during Next's build-time page data collection before env vars are available). That
 keeps Better Auth state out of Better Auth's in-process memory adapter while still avoiding local
@@ -108,7 +111,7 @@ on-disk storage in the Next app.
   into a short-lived JWT signed by Better Auth's managed ES256 key pair.
 - **`jwt` plugin** — manages JWKS key rotation and controls the JWT payload shape.
   `definePayload` injects `claims.role` and `username`; `getSubject` sets the JWT `sub` claim,
-  which Jazz surfaces as `session.user` on the client.
+  which Jazz surfaces as `session.user.identity.subject` on the client.
 
 The JWKS endpoint (`/api/auth/jwks`) is automatically provided by the `jwt` plugin and is what
 the Jazz sync server polls to verify every incoming token. The same sync server also accepts the
@@ -143,39 +146,20 @@ base URL is required; Better Auth defaults to `/api/auth` in the browser.
 
 ### Client — `app/page.tsx`
 
-`Page` subscribes to the Better Auth session and, when a session exists, exchanges it for a JWT
-before mounting `JazzProvider`:
+`Page` configures `JazzSessionProvider` once and uses `useJazzSession` commands.
+Startup restores the retained local account and uses `loginOrRegisterJWT` for an existing
+provider session. This atomically resolves or creates its Jazz account.
 
-```tsx
-const { data: authSession } = authClient.useSession();
-const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
+This is the manual hybrid scenario: no automatic Better Auth connection is
+attached. After Better Auth signup, `linkJWT({ getToken })` preserves the account that owns
+local data. The session detaches the old data view, waits for sync, performs the
+link, and opens the selected account. If sync fails, enrollment never starts and
+the prior client remains usable. If linking fails, the session reopens the
+retained account; the UI offers an explicit retry.
 
-React.useEffect(() => {
-  if (!authSession?.session) {
-    setInitialJwtToken(null);
-    return;
-  }
-  authClient.token().then(({ data }) => setInitialJwtToken(data.token));
-}, [authSession?.session?.id]);
-```
-
-While the JWT is being fetched the app renders a loading state. Once the token arrives,
-`JazzProvider` is mounted in JWT mode. On sign-out Better Auth clears the session cookie and
-the effect resets `initialJwtToken` to `null`, recreating Jazz in local-first mode.
-
-```tsx
-const config: DbConfig = initialJwtToken
-  ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
-  : { appId, auth: { localFirstSecret: secret }, serverUrl, ... };
-
-<JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
-  <ChatShell />
-</JazzProvider>
-```
-
-If the sync server later returns `401` for an expired or invalid bearer token, the example calls
-`db.updateAuthToken(freshJwt)` only after fetching a replacement JWT for the same Better Auth session.
-It does not use `db.updateAuthToken(null)` for logout.
+Sign-out calls `logout` before clearing the provider session, then explicitly
+creates a new local-first account. Token refresh remains a provider callback
+and cannot switch an existing client's identity.
 
 ## Tests
 
@@ -189,5 +173,5 @@ Vitest browser mode (chromium) generates an ES256 keypair, hosts a local
 JWKS, and starts a local Jazz server pointed at it. Tests mint a
 verified JWT and assert that authenticated callers can post to both
 chats while anonymous callers are denied for Announcements. The Better
-Auth sign-up / sign-in flow is covered by the example itself when run
-via `pnpm dev` — it isn't exercised by `pnpm test`.
+Auth server suite exercises the application handler’s sign-up, sign-in,
+session JWT and logout flow against a local Jazz server.

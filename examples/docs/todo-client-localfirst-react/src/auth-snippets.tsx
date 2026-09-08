@@ -1,101 +1,82 @@
+import { exportLocalFirstSecret, type AccountHandle } from "jazz-tools";
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSession,
+  type JazzSessionConfig,
+  type JazzSessionActions,
+} from "jazz-tools/react";
 
 function TodoApp() {
   return null;
 }
 
 // #region auth-localfirst-react
-export function LocalFirstAuthApp() {
+export function LocalFirstAuthApp({ config }: { config: JazzSessionConfig }) {
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-      }}
-      auth="local-first"
-    >
+    <JazzSessionProvider config={{ ...config, initial: "local-first" }}>
       <TodoApp />
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion auth-localfirst-react
 
 // #region auth-jwt-react
-export function JwtAuthApp() {
+export function JwtAuthApp({
+  getToken,
+  config,
+}: {
+  getToken: () => Promise<string>;
+  config: JazzSessionConfig;
+}) {
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-        serverUrl: "http://127.0.0.1:4200",
-        jwtToken: "<provider-jwt>",
-      }}
-    >
+    <JazzSessionProvider config={config} fallback={<SignIn getToken={getToken} />}>
       <TodoApp />
-    </JazzProvider>
+    </JazzSessionProvider>
+  );
+}
+
+function SignIn({ getToken }: { getToken: () => Promise<string> }) {
+  const { loginJWT, pending, error } = useJazzSession();
+  return (
+    <>
+      <button disabled={!!pending} onClick={() => void loginJWT({ getToken }).catch(() => {})}>
+        Sign in
+      </button>
+      {error && <p role="alert">{error.message}</p>}
+    </>
   );
 }
 // #endregion auth-jwt-react
 
 // #region auth-localfirst-react-backup
-export function useRecoveryPhraseBackup(): {
-  isLoading: boolean;
-  recoveryPhrase: string | null;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  return {
-    isLoading,
-    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
-  };
+export function getRecoveryPhrase(account: AccountHandle): string {
+  return RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
 }
 // #endregion auth-localfirst-react-backup
 
 // #region auth-localfirst-react-restore
-export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void> {
-  const { login } = useLocalFirstAuth();
-
-  return async (userInput: string) => {
-    const restoredSecret = RecoveryPhrase.toSecret(userInput);
-    await login(restoredSecret);
-  };
+export function restoreRecoveryPhrase(
+  session: JazzSessionActions,
+  userInput: string,
+): Promise<void> {
+  return session.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 }
 // #endregion auth-localfirst-react-restore
 
 // #region auth-localfirst-react-passkey-backup
-const passkeyBackup = new BrowserPasskeyBackup({
-  appName: "My App",
-  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
-  // which scopes passkeys per preview-deploy URL.
-  appHostname: "myapp.com",
-});
-
-export function usePasskeyBackup(): {
-  isLoading: boolean;
-  backupWithPasskey: (displayName: string) => Promise<void>;
-} {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  return {
-    isLoading,
-    backupWithPasskey: async (displayName: string) => {
-      if (!secret) {
-        throw new Error("Local-first secret is not ready yet");
-      }
-
-      await passkeyBackup.backup(secret, displayName);
-    },
-  };
+const passkeyBackup = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
+export async function backupWithPasskey(
+  account: AccountHandle,
+  displayName: string,
+): Promise<void> {
+  await passkeyBackup.backup(exportLocalFirstSecret(account), displayName);
 }
 // #endregion auth-localfirst-react-passkey-backup
 
 // #region auth-localfirst-react-passkey-restore
-export function usePasskeyRestore(): () => Promise<void> {
-  const { login } = useLocalFirstAuth();
-
-  return async () => {
-    const restoredSecret = await passkeyBackup.restore();
-    await login(restoredSecret);
-  };
+export async function restoreWithPasskey(session: JazzSessionActions): Promise<void> {
+  return session.restoreLocalFirst(await passkeyBackup.restore());
 }
 // #endregion auth-localfirst-react-passkey-restore

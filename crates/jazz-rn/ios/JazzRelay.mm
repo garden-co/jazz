@@ -139,7 +139,8 @@ static NSURL *JazzRelayStorageRoot(void) {
       foregroundRuntimeLeases.erase(previous);
     }
     auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
-        EnsureRelayHost(), runtimeToken, callInvoker);
+        EnsureRelayHost(), runtimeToken, callInvoker,
+        [[[JazzRelayStorageRoot() URLByResolvingSymlinksInPath] path] UTF8String]);
     foregroundRuntimeLeases.emplace(
         runtimeToken, ForegroundRuntimeInstallation{runtimeToken, lease});
     jazz::rn::installForegroundRuntime(runtime, lease);
