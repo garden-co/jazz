@@ -692,12 +692,6 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
-            Self::CurrentRowsRequest(_)
-            | Self::CurrentRowsReceipt(_)
-            | Self::CurrentRowsCancel { .. } => {
-                crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY
-                    | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
-            }
             Self::ChunkRequestBatch(_)
             | Self::ChunkResponseBatch(_)
             | Self::ChunkUploadStart(_)

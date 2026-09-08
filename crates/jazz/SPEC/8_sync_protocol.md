@@ -1273,6 +1273,17 @@ replacement or teardown releases them. They never select a deletion from an
 unrelated shared-cache version. This retained state is proportional to the
 selected scope's deletion witnesses and changes only with its source receipt.
 
+### Mandatory current-row availability messages
+
+`CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
+wire-protocol v1 semantic messages. They require no optional feature bit and use
+the existing named postcard control codec and native `VersionCarrier` encoding;
+the byte corpus pins all three variants. Ordinary version validation and
+authenticated link admission still apply. No compatibility with peers lacking
+these messages is promised. Unknown describes indeterminate current availability
+or unavailable authority, never missing protocol support. See SPEC 7's bounded
+current-row availability contract for authorization and receipt validation.
+
 ## Open Questions
 
 - 🔶 [#2660](https://github.com/garden-co/jazz/issues/2660) — Query-driven reconciliation pilot and deferred related/negative-input completeness.

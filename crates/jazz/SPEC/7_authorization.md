@@ -635,8 +635,8 @@ verified route/request correlation precede this internal receipt application.
 
 ### Bounded current-row availability pilot
 
-The optional `FEATURE_CURRENT_ROW_AVAILABILITY` exchange requires the existing
-admitted authorization-scope link feature. Its three appended semantic variants
+The current-row availability exchange is a mandatory part of wire protocol v1,
+subject to ordinary authenticated link admission. Its three semantic variants
 (`CurrentRowsRequest`, `CurrentRowsReceipt`, `CurrentRowsCancel`) use the existing
 named postcard semantic codec and native `VersionCarrier` record encoding. The
 wire-v1 corpus pins their bytes. Local persistence uses the native availability
@@ -645,7 +645,7 @@ RecordStore defined above; the wire receipt is not serialized as a durable blob.
 A request contains at most 64 distinct known `(current schema, logical table,
 global physical table UUID, row UUID)` coordinates. Only the default root view
 of an unbranched table is supported. Unknown schema, unsupported scope, missing
-capability, and unavailable upstream resolve Unknown, never denial. Physical
+Core policy-input capability, and unavailable upstream resolve Unknown, never denial. Physical
 row addressing bypasses the public `id` field. The host-only complete-policy-input
 capability enables Core minting; history completeness and advertised wire roles
 do not enable it.

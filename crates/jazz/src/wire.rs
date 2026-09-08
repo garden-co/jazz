@@ -62,9 +62,6 @@ pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 /// Complete edge-authority publications, reconciled as a group at core.
 pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
 
-/// Bounded Core-backed current-default-row availability exchange.
-pub const FEATURE_CURRENT_ROW_AVAILABILITY: WireFeatures = 1 << 11;
-
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
 /// Bitset of optional protocol features advertised by one peer.
@@ -800,7 +797,6 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | FEATURE_AUTHORITY_PUBLICATIONS
-        | FEATURE_CURRENT_ROW_AVAILABILITY
         | runtime_transport_compression_features()
 }
 

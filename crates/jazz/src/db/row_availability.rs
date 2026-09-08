@@ -271,12 +271,6 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
         {
             return Ok(());
         }
-        let supported = self
-            .transport
-            .connection_session_context()
-            .is_some_and(|session| {
-                session.negotiated_features & crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY != 0
-            });
         let stale = self
             .current_rows
             .borrow()
@@ -316,10 +310,6 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
                 }
                 request
             };
-            if !supported {
-                self.current_rows.borrow_mut().finish(id, None);
-                continue;
-            }
             if !self.send_current_rows(SyncMessage::CurrentRowsRequest(request))? {
                 return Ok(());
             }

@@ -3838,8 +3838,11 @@ where
                             continue;
                         }
                         SyncMessage::CurrentRowsRequest(request) => {
-                            let supported = self.transport.connection_session_context().is_some_and(|session| session.negotiated_features & crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY != 0);
-                            if !supported || !row_availability::valid_request(&request) {
+                            let Some(session) = self.transport.connection_session_context() else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            if !row_availability::valid_request(&request) {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -3855,7 +3858,7 @@ where
                                     *progress = progress.checked_add(1).expect("current row progress exhausted");
                                     *progress
                                 };
-                                let epoch = self.transport.connection_session_context().unwrap().local.epoch;
+                                let epoch = session.local.epoch;
                                 let receipt = {
                                     let mut node = self.node.lock().await;
                                     node.scoped_active_session_claims(identity, claims).evaluate_current_rows(&request, context, epoch, progress).await?

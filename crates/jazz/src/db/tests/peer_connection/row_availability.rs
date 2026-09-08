@@ -27,10 +27,7 @@ impl Transport for CurrentRowsWire {
         self.inner.try_recv()
     }
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
-        self.inner.connection_session_context().map(|mut context| {
-            context.negotiated_features |= crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY;
-            context
-        })
+        self.inner.connection_session_context()
     }
     fn permits_delegated_sessions(&self) -> bool {
         self.delegate
@@ -355,9 +352,9 @@ fn current_rows_readable_tombstone_is_not_generic_unavailable() {
 }
 
 /// Alice's known coordinate and generic result use the named postcard semantic
-/// codec. Bob cannot decode these appended variants without negotiated support.
+/// codec. All three messages are mandatory even with no optional features.
 #[test]
-fn current_rows_wire_v1_corpus_and_feature_gate() {
+fn current_rows_wire_v1_corpus_is_mandatory() {
     let request = crate::protocol::CurrentRowsRequest {
         request_id: PermissionAdviceRequestId([1; 16]),
         rows: vec![crate::protocol::CurrentRowCoordinate {
@@ -402,13 +399,16 @@ fn current_rows_wire_v1_corpus_and_feature_gate() {
             .unwrap(),
             message
         );
-        assert!(
-            crate::wire::decode_sync_message_for_features(
-                &bytes,
-                crate::wire::current_wire_features()
-                    & !crate::wire::FEATURE_CURRENT_ROW_AVAILABILITY
-            )
-            .is_err()
+        assert_eq!(message.required_wire_features(), crate::wire::FEATURE_NONE);
+        assert_eq!(
+            crate::wire::encode_sync_message_for_features(&message, crate::wire::FEATURE_NONE)
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            crate::wire::decode_sync_message_for_features(&bytes, crate::wire::FEATURE_NONE)
+                .unwrap(),
+            message
         );
     }
 }
@@ -473,36 +473,6 @@ fn current_rows_reject_wrong_context_partial_receipt_and_cancel() {
     client.tick().unwrap();
     assert!(router.borrow().cancels.is_empty());
     drop(connection);
-}
-
-/// Alice's old peer Bob has not negotiated the new feature. The pending request
-/// resolves Unknown without emitting an availability message or a denial.
-#[test]
-fn current_rows_unsupported_peer_is_unknown() {
-    let schema = owner_read_schema();
-    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
-    let client = open_db(0xe7, alice, &schema);
-    let (up, _down) = duplex_with_admitted_session_context(
-        alice,
-        NodeUuid::from_bytes([0xe7; 16]),
-        1,
-        NodeUuid::from_bytes([0xc7; 16]),
-        1,
-    );
-    let _connection = block_on(client.connect_upstream(up));
-    let coordinate = client
-        .node
-        .node()
-        .borrow()
-        .current_row_coordinate("todos", row(0xd7))
-        .unwrap();
-    let future = client.node.request_current_rows(
-        vec![coordinate],
-        PolicyBindingKey::from_canonical_parts(alice, test_provider_claims(alice)),
-    );
-    client.tick().unwrap();
-    assert!(matches!(block_on(future), CurrentRowsResult::Unknown));
-    assert!(client.node.current_rows.borrow().routes.is_empty());
 }
 
 /// Bob's trusted Edge revalidates more than 64 sequential immutable contexts at
