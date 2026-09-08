@@ -134,11 +134,12 @@ where
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        let upstream_opts = self.node.upstream_register_shape_options(
-            effective_read_tier(&opts),
-            opts.read_view.clone(),
-            opts.propagation == Propagation::Full,
-        );
+        if opts.propagation == Propagation::LocalOnly {
+            return Ok(self.local_query_attachment(prepared, &opts));
+        }
+        let upstream_opts = self
+            .node
+            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         self.attach_or_refresh_query_coverage(
             &prepared.shape,
             &prepared.binding,
@@ -179,11 +180,12 @@ where
         author: AuthorSubject,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        let upstream_opts = self.node.upstream_register_shape_options(
-            effective_read_tier(&opts),
-            opts.read_view.clone(),
-            opts.propagation == Propagation::Full,
-        );
+        if opts.propagation == Propagation::LocalOnly {
+            return Ok(self.local_query_attachment(prepared, &opts));
+        }
+        let upstream_opts = self
+            .node
+            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let mut owner = self.node.node.borrow_mut();
         let mut node = prepared.scoped_node(&mut owner, author)?;
         let (shape, binding, _) = super::block_on(node.prepare_query_binding_for_link(
@@ -224,6 +226,27 @@ where
             },
         };
         self.attach_query_with_opts_for_identity(prepared, opts, author)
+    }
+
+    /// LocalOnly owns no remote coverage, even for a memory-only foreground.
+    fn local_query_attachment(&self, prepared: &PreparedQuery, opts: &ReadOpts) -> QueryAttachment {
+        QueryAttachment {
+            subscriptions: vec![
+                self.node.next_subscription_key(
+                    &prepared.shape,
+                    RegisterShapeOptions {
+                        read_view: opts.read_view.clone(),
+                        ..RegisterShapeOptions::default()
+                    }
+                    .read_view_key(),
+                ),
+            ],
+            required_after: Vec::new(),
+            requires_delivery_receipt: false,
+            requires_current_authority_receipt: false,
+            registrations: Vec::new(),
+            refreshes: Vec::new(),
+        }
     }
 
     fn attach_or_refresh_query_coverage(
@@ -272,11 +295,12 @@ where
                 },
             };
         }
-        let upstream_opts = self.node.upstream_register_shape_options(
-            effective_read_tier(&opts),
-            opts.read_view.clone(),
-            opts.propagation == Propagation::Full,
-        );
+        if opts.propagation == Propagation::LocalOnly {
+            return Ok(self.local_query_attachment(prepared, &opts));
+        }
+        let upstream_opts = self
+            .node
+            .upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding) = if let Some(author) = author {
             let (shape, binding, _) = node
                 .prepare_query_binding_for_link(
@@ -456,9 +480,9 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Durable local reads are immediately ready. Memory-only foregrounds
-    /// first receive their owner's local query answer; remote reads additionally
-    /// require a current authority receipt. Neither local case waits on an edge.
+    /// LocalOnly attachments are immediately ready against this node's data.
+    /// With Full propagation, memory-only foregrounds first receive their
+    /// owner's local query answer; remote reads also require an authority receipt.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         // Local propagation does not gate a durable node's local knowledge.
         // A foreground's empty memory is not yet its durable owner's answer.
@@ -723,16 +747,13 @@ where
         let mut upstream_subscription_handles = Vec::new();
         let mut suppress_provisional_opening = false;
         let remote_propagate_upstream = opts.propagation == Propagation::Full;
-        // A non-durable browser client must still ask its durable worker for a
-        // local-only view. The wire flag stops that request at the worker.
-        let propagates_upstream = remote_propagate_upstream
-            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
+        // LocalOnly never sends a query to another node, including a durable
+        // browser worker. Full Local reads may still consume its cache.
+        let propagates_upstream = remote_propagate_upstream;
         if propagates_upstream {
-            let upstream_opts = self.node.upstream_register_shape_options(
-                requested_read_tier,
-                opts.read_view.clone(),
-                remote_propagate_upstream,
-            );
+            let upstream_opts = self
+                .node
+                .upstream_register_shape_options(requested_read_tier, opts.read_view.clone());
             let (shape, binding) = if upstream_opts.tier == read_tier {
                 (state_shape.clone(), state_binding.clone())
             } else {

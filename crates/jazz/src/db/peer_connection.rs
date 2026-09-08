@@ -174,7 +174,6 @@ fn relay_authority_coverage_key(coverage: &CoverageKey) -> CoverageKey {
         coverage.opts.tier,
         coverage.opts.read_view.clone(),
         DurabilityTier::Global,
-        coverage.opts.propagate_upstream,
     );
     upstream.opts.binding_source = BindingSource::RelayAuthoritySession;
     upstream
@@ -1626,6 +1625,7 @@ where
     }
 
     /// Host-only capability; does not alter write or publication trust.
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn admit_authority_query_delegate(&mut self) {
         if let ConnectionLink::Subscriber(state) = &mut self.link {
             state.peer.authority_query_delegate = state.ingest_context.trust
@@ -1636,6 +1636,7 @@ where
     }
 
     /// Set only by the serving shell's host-owned Edge role at admission.
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn set_partial_edge_query_host(&mut self) {
         if let ConnectionLink::Subscriber(state) = &mut self.link {
             state.partial_edge_query_host = true;
@@ -4430,7 +4431,6 @@ where
                                     opts.tier,
                                     opts.read_view.clone(),
                                     DurabilityTier::Global,
-                                    opts.propagate_upstream,
                                 );
                                 if self.node.borrow().client_relay_scope().is_some() {
                                     opts.binding_source = BindingSource::RelayAuthoritySession;

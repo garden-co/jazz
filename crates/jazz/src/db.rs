@@ -2498,7 +2498,7 @@ pub struct QueryAttachment {
 }
 
 impl QueryAttachment {
-    /// Wire subscription id owned by this attachment.
+    /// Unique usage id; LocalOnly attachments retain it without sending a wire subscription.
     pub fn subscription(&self) -> SubscriptionKey {
         self.subscriptions[0]
     }
@@ -2851,12 +2851,13 @@ fn upstream_register_shape_options(
     tier: DurabilityTier,
     read_view: ReadViewSpec,
     upstream_durability_floor: DurabilityTier,
-    propagate_upstream: bool,
 ) -> RegisterShapeOptions {
     RegisterShapeOptions {
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
-        propagate_upstream,
+        // LocalOnly controls whether the caller attaches a remote usage.
+        // Every usage that crosses a node boundary propagates normally.
+        propagate_upstream: true,
         ..RegisterShapeOptions::default()
     }
 }
@@ -2918,6 +2919,12 @@ fn ensure_supported_register_shape_options(
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
+    if !opts.propagate_upstream {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "remote subscriptions cannot disable upstream propagation; LocalOnly is a local read setting",
+        ));
+    }
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(

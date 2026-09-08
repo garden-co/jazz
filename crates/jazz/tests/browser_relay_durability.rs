@@ -1994,11 +1994,12 @@ fn browser_client_local_full_returns_immediately_then_reconciles_upstream() {
     )));
 }
 
-/// A browser local-only subscription crosses the private main/worker boundary
-/// so the fresh in-memory main Db can hydrate from durable worker state, but it
-/// must not cross the worker/server boundary.
+/// Alice's LocalOnly subscription creates no query coverage on her worker.
+/// Independent same-author commit traffic can still populate her foreground;
+/// LocalOnly limits query routing, not ordinary background synchronization.
+/// foreground LocalOnly ──read──► own cache; no worker/server query coverage
 #[test]
-fn browser_client_local_only_subscription_stops_at_worker() {
+fn browser_client_local_only_subscription_stays_in_foreground() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let worker = open_db(0x2a, alice, &schema);
@@ -2037,30 +2038,30 @@ fn browser_client_local_only_subscription_stops_at_worker() {
             ..ReadOpts::default()
         },
     ))
-    .expect("subscribe locally through the worker");
+    .expect("subscribe only against foreground state");
     assert_truthful_empty_local_opening(subscription.try_next_event());
 
-    main_thread.tick().expect("register worker-local coverage");
+    assert_eq!(
+        main_thread.query_coverage_attachment_counts_for_test(),
+        (0, 0)
+    );
+    main_thread.tick().expect("drive foreground local work");
     for _ in 0..4 {
-        worker.tick().expect("serve worker-local coverage");
+        worker.tick().expect("drive worker");
         core.tick().expect("process any server traffic");
         worker.tick().expect("process any server response");
-        main_thread.tick().expect("apply worker-local coverage");
+        main_thread.tick().expect("drive foreground");
     }
 
-    let rows = main_thread
-        .read(&todos)
-        .expect("read worker-hydrated local-only view");
-    assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell_at(0),
-        Some(Value::String("worker-local".to_owned()))
+        main_thread.query_coverage_attachment_counts_for_test(),
+        (0, 0)
     );
-    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SubscriptionEvent::Delta { added, .. } if added.len() == 1
-    )));
+    // The same-author worker write may arrive through ordinary write/fate
+    // synchronization; that is independent of this local query's coverage.
+    let _rows = main_thread
+        .read(&todos)
+        .expect("read foreground local cache");
 }
 
 /// An authority-tier browser subscription must not treat the worker's current

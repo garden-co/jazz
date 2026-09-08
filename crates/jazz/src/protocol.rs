@@ -2925,6 +2925,8 @@ pub struct RegisterShapeOptions {
     #[serde(default)]
     pub read_view: ReadViewSpec,
     /// Whether the serving node may register matching coverage with its own upstream.
+    /// Retained for wire compatibility; remote registrations require true.
+    /// LocalOnly is a caller-local setting and never crosses a node boundary.
     #[serde(default = "default_propagate_upstream")]
     pub propagate_upstream: bool,
     /// Internal ownership of the binding whose ViewUpdates an Edge relay may

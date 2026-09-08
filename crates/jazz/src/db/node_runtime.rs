@@ -663,14 +663,8 @@ where
         &self,
         tier: DurabilityTier,
         read_view: ReadViewSpec,
-        propagate_upstream: bool,
     ) -> RegisterShapeOptions {
-        upstream_register_shape_options(
-            tier,
-            read_view,
-            self.upstream_durability_floor.get(),
-            propagate_upstream,
-        )
+        upstream_register_shape_options(tier, read_view, self.upstream_durability_floor.get())
     }
 
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
@@ -2028,11 +2022,8 @@ where
                         continue;
                     }
                     let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
-                    let opts = self.upstream_register_shape_options(
-                        state.read_tier,
-                        state.read_view.clone(),
-                        state.remote_propagate_upstream,
-                    );
+                    let opts = self
+                        .upstream_register_shape_options(state.read_tier, state.read_view.clone());
                     let coverage = request_coverage_key(
                         shape,
                         binding,

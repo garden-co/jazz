@@ -841,7 +841,16 @@ local materialized state (`INV-API-32`):
   for a query matching only that row — until reconnect delivery reaches the
   local store.
 
-`LocalOnly` prevents upstream routing. It is **not** what chooses the local
+`LocalOnly` prevents upstream routing, including from a memory-only browser
+foreground to its durable worker. Such a read sees only the foreground's own
+materialized/pending data; worker-only cache requires `Full` propagation.
+Local-only query attachments retain a unique usage identity but create no
+remote registration and are immediately covered. The wire compatibility field
+`RegisterShapeOptions.propagate_upstream` MUST be true: every receiving node
+rejects false as an unsupported capability, regardless of trust, topology,
+SYSTEM identity, delegated scope, or local-receiver role. No sender emits false.
+
+`LocalOnly` is **not** what chooses the local
 snapshot, nor is it a request to wait until that snapshot becomes complete
 relative to an unavailable upstream. Convergence is asserted separately, after
 `reconnect`.
