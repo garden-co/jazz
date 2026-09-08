@@ -85,25 +85,11 @@ function fakeDb<T extends object>(
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
-    tx?: TxForTest;
-  };
-  const implementation = db as T & {
-    mergeableTx?(openTransactionId: string): TxForTest;
-    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+  const requireOpenBatch = (openTransactionId: string): void => {
     const batch = openBatches.get(openTransactionId);
-    if (!batch || batch.kind !== kind)
-      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
-    batch.tx ??=
-      kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
-        : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
-          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
-    return batch.tx;
+    if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
   };
   return {
     setTickScheduler: () => undefined,
@@ -115,34 +101,36 @@ function fakeDb<T extends object>(
     ) => {
       openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
-    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => ({
+      ...fakeWrite(),
+      rowId: options?.rowId ?? new Uint8Array(16),
+    }),
+    insertInTransaction: (
+      openTransactionId: string,
+      _table: string,
+      _cells: Uint8Array,
+      options?: { rowId?: Uint8Array },
+    ) => (requireOpenBatch(openTransactionId), options?.rowId ?? new Uint8Array(16)),
+    restore: () => fakeWrite(),
+    restoreInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    update: () => fakeWrite(),
+    updateInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    upsert: () => fakeWrite(),
+    upsertInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
+    delete: () => fakeWrite(),
+    deleteInTransaction: (openTransactionId: string) => requireOpenBatch(openTransactionId),
     commitTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       openBatches.delete(openTransactionId);
-      return batch.tx?.commit() ?? fakeWrite();
+      return fakeWrite();
     },
     rollbackTransaction: (openTransactionId: string) => {
       const batch = openBatches.get(openTransactionId);
       if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
-      batch.tx?.rollback();
       openBatches.delete(openTransactionId);
     },
     ...db,
-  };
-}
-
-function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
-  return {
-    commit: () => fakeWrite(),
-    rollback: () => undefined,
-    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
-    restoreEncoded: () => undefined,
-    updateEncoded: () => undefined,
-    upsertEncoded: () => undefined,
-    deleteEncoded: () => undefined,
-    ...overrides,
   };
 }
 
@@ -155,48 +143,14 @@ function fakeWrite() {
   };
 }
 
-type TxForTest = {
-  commit(): ReturnType<typeof fakeWrite>;
-  rollback(): void;
-  close?(): boolean;
-  insertEncoded(
-    table: string,
-    cells: Uint8Array,
-    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
-  ): Uint8Array;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
-  ): void;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-  deleteEncoded(
-    table: string,
-    rowId: Uint8Array,
-    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
-  ): void;
-};
-
 it("quiesces foreground mutation admission before capturing its final HLC", async () => {
-  const insertEncoded = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));
+  const insert = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
           foregroundTxTimeHighWater: () => 41n,
-          insertEncoded,
+          insert,
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -219,7 +173,7 @@ it("quiesces foreground mutation admission before capturing its final HLC", asyn
   expect(() => runtime.insert("todos", { title: { type: "Text", value: "late" } })).toThrow(
     "native runtime is closed",
   );
-  expect(insertEncoded).not.toHaveBeenCalled();
+  expect(insert).not.toHaveBeenCalled();
   await runtime.close();
 });
 
@@ -229,7 +183,7 @@ it("drains an already admitted streaming mutation before returning its foregroun
   const sourceGate = new Promise<void>((resolve) => {
     releaseSource = resolve;
   });
-  const beginStreamingMutationEncoded = vi.fn(() => ({
+  const beginStreamingMutation = vi.fn(() => ({
     push: () => undefined,
     finish: () => {
       highWater = 42n;
@@ -242,7 +196,7 @@ it("drains an already admitted streaming mutation before returning its foregroun
       openMemory: () =>
         fakeDb({
           foregroundTxTimeHighWater: () => highWater,
-          beginStreamingMutationEncoded,
+          beginStreamingMutation,
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -268,7 +222,7 @@ it("drains an already admitted streaming mutation before returning its foregroun
     })(),
   );
   await Promise.resolve();
-  expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
+  expect(beginStreamingMutation).toHaveBeenCalledOnce();
 
   let handoffResolved = false;
   const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
@@ -299,7 +253,7 @@ it("waits for a failed stream's native abort before foreground handoff", async (
       openMemory: () =>
         fakeDb({
           foregroundTxTimeHighWater: () => 7n,
-          beginStreamingMutationEncoded: () => ({
+          beginStreamingMutation: () => ({
             push: () => undefined,
             finish: () => fakeWrite(),
             abort,
@@ -361,7 +315,7 @@ it("does not let a concurrent close preempt foreground HLC capture", async () =>
             order.push("high-water");
             return 42n;
           },
-          beginStreamingMutationEncoded: () => ({
+          beginStreamingMutation: () => ({
             push: () => undefined,
             finish: () => fakeWrite(),
             abort: () => true,
@@ -454,7 +408,7 @@ it("waits for every concurrently admitted stream before foreground handoff", asy
       openMemory: () =>
         fakeDb({
           foregroundTxTimeHighWater: () => highWater,
-          beginStreamingMutationEncoded: () => ({
+          beginStreamingMutation: () => ({
             push: () => undefined,
             finish: () => {
               highWater += 1n;
@@ -528,7 +482,7 @@ it("stages authenticated client mutations through the optimistic local core path
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          insertEncoded: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
+          insert: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
             staged.push(table);
             return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
           },
@@ -576,11 +530,7 @@ it("preserves logical user columns that share names with native storage metadata
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          insertEncoded: (
-            _table: string,
-            _cells: Uint8Array,
-            options?: { rowId?: Uint8Array },
-          ) => ({
+          insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => ({
             ...fakeWrite(),
             rowId: options?.rowId ?? new Uint8Array(16),
           }),
@@ -620,14 +570,21 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          mergeableTxForIdentity: (_openTransactionId: string, author: Uint8Array) => {
-            authors.push(new TextDecoder().decode(author));
-            return fakeTx({
-              insertEncoded: (table, _cells, options) => {
-                staged.push(table);
-                return options?.rowId ?? new Uint8Array(16);
-              },
-            });
+          beginTransaction: (
+            _openTransactionId: string,
+            _kind: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) => {
+            if (author) authors.push(new TextDecoder().decode(author));
+          },
+          insertInTransaction: (
+            _openTransactionId: string,
+            table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => {
+            staged.push(table);
+            return options?.rowId ?? new Uint8Array(16);
           },
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -674,7 +631,6 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
       openMemory: () => {
         const db = fakeDb({
           all: () => encodeRows([]),
-          exclusiveTx: () => fakeTx(),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }) as unknown as {
@@ -729,7 +685,6 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
 it("uses the opening identity for trusted-serving transaction reads", async () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
   const issuer = "https://issuer.example";
-  const tx = fakeTx();
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
@@ -750,11 +705,15 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
               },
             ]);
           },
-          exclusiveTx: () => tx,
-          prepareQueryAsync: (_query: Uint8Array, identity: Uint8Array, claims: unknown) => {
+          prepareQuery: (
+            _query: Uint8Array,
+            _kind: "query" | "relation",
+            identity: Uint8Array,
+            claims: unknown,
+          ) => {
             expect(new TextDecoder().decode(identity)).toBe(`["${issuer}","${alice}"]`);
             expect(claims).toMatchObject({ team: "opening-team" });
-            return { setWake: () => undefined, poll: () => ({}), cancel: () => undefined };
+            return {};
           },
           tick: () => undefined,
         }),
@@ -798,20 +757,19 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
 });
 
 it("rejects a duplicate live OpenTransactionId without replacing its staged transaction", () => {
-  const stagedTransactions: string[][] = [];
+  const staged: string[] = [];
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          mergeableTx: () => {
-            const staged: string[] = [];
-            stagedTransactions.push(staged);
-            return fakeTx({
-              insertEncoded: (table, _cells, options) => {
-                staged.push(table);
-                return options?.rowId ?? new Uint8Array(16);
-              },
-            });
+          insertInTransaction: (
+            _openTransactionId: string,
+            table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => {
+            staged.push(table);
+            return options?.rowId ?? new Uint8Array(16);
           },
         }),
       openBrowser: async () => {
@@ -841,13 +799,13 @@ it("rejects a duplicate live OpenTransactionId without replacing its staged tran
     JSON.stringify({ transaction_id: id }),
   );
 
-  expect(stagedTransactions).toEqual([["todos", "todos"]]);
+  expect(staged).toEqual(["todos", "todos"]);
 });
 
 it("commits empty exclusive transactions, rejects empty mergeable transactions, and rejects unknown waits", async () => {
   const runtime = new NativeRuntimeAdapter(
     {
-      openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
+      openMemory: () => fakeDb({}),
       openBrowser: async () => {
         throw new Error("not used");
       },
@@ -877,7 +835,7 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
 
   const reopened = new NativeRuntimeAdapter(
     {
-      openMemory: () => fakeDb({ exclusiveTx: () => fakeTx() }),
+      openMemory: () => fakeDb({}),
       openBrowser: async () => {
         throw new Error("not used");
       },
@@ -893,14 +851,12 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   );
 });
 
-it("keeps an attached view alive through a failed commit, then releases it once on rollback", async () => {
-  const close = vi.fn(() => true);
+it("keeps a transaction open through a failed commit, then permits rollback", async () => {
   const nativeRollback = vi.fn();
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          mergeableTx: () => fakeTx({ close }),
           commitTransaction: () => {
             throw new Error("injected commit failure");
           },
@@ -924,16 +880,13 @@ it("keeps an attached view alive through a failed commit, then releases it once 
   );
 
   expect(() => runtime.commitTransaction(openBatchId)).toThrow("injected commit failure");
-  expect(close).not.toHaveBeenCalled();
 
   await expect(runtime.rollbackTransaction(openBatchId)).resolves.toBe(true);
   expect(nativeRollback).toHaveBeenCalledOnce();
-  expect(close).toHaveBeenCalledOnce();
 });
 
-it("closing a schema view releases only its attached transaction handle", () => {
-  const close = vi.fn(() => true);
-  const nativeDb = fakeDb({ mergeableTx: () => fakeTx({ close }) });
+it("closing a schema view does not close its owner's transaction", () => {
+  const nativeDb = fakeDb({});
   Object.assign(nativeDb, { registerSchema: () => nativeDb });
   const owner = new NativeRuntimeAdapter(
     {
@@ -957,9 +910,7 @@ it("closing a schema view releases only its attached transaction handle", () => 
   );
 
   void view.close();
-  expect(close).toHaveBeenCalledOnce();
   expect(() => owner.commitTransaction(openBatchId)).not.toThrow();
-  expect(close).toHaveBeenCalledOnce();
 });
 
 it("binds the trusted-serving identity when an exclusive transaction begins", () => {
@@ -978,7 +929,12 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
               phase: "begin",
               author: author && new TextDecoder().decode(author),
             }),
-          attachExclusiveTx: () => fakeTx(),
+          insertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => options?.rowId ?? new Uint8Array(16),
           commitTransaction: (
             _openTransactionId: string,
             _kind?: "mergeable" | "exclusive",
@@ -1036,7 +992,7 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     {
       openMemory: () =>
         fakeDb({
-          insertEncoded: () => write,
+          insert: () => write,
           onMutationError: (callback: (event: MutationErrorEvent) => void) => {
             mutationErrorCallback = callback;
           },
@@ -1112,7 +1068,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     {
       openMemory: () =>
         fakeDb({
-          insertEncoded: () => write,
+          insert: () => write,
           onMutationError: () => undefined,
         }),
     } as never,
@@ -1154,21 +1110,42 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          mergeableTx: () =>
-            fakeTx({
-              insertEncoded: (_table, _cells, options) => {
-                staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
-                return options?.rowId ?? new Uint8Array(16);
-              },
-              updateEncoded: (_table, _rowId, _patch, options) =>
-                staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
-              upsertEncoded: (_table, _rowId, _cells, options) =>
-                staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
-              restoreEncoded: (_table, _rowId, _cells, options) =>
-                staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
-              deleteEncoded: (_table, _rowId, options) =>
-                staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
-            }),
+          insertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array; updatedAtMs?: number },
+          ) => {
+            staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
+            return options?.rowId ?? new Uint8Array(16);
+          },
+          updateInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _patch: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
+          upsertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _cells: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
+          restoreInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _cells: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
+          deleteInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            options?: { updatedAtMs?: number },
+          ) => staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -1208,12 +1185,15 @@ it("preserves the full branch view for staged mergeable upserts", () => {
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          mergeableTx: () =>
-            fakeTx({
-              upsertEncoded: (_table, _rowId, _cells, options) => {
-                received = options;
-              },
-            }),
+          upsertInTransaction: (
+            _openTransactionId: string,
+            _table: string,
+            _rowId: Uint8Array,
+            _cells: Uint8Array,
+            options?: { head?: unknown; base?: unknown },
+          ) => {
+            received = options;
+          },
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -1248,7 +1228,6 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          mergeableTxForIdentity: () => fakeTx(),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -1292,7 +1271,6 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
 });
 
 it("keeps session-scoped transaction reads on the client-local native method", async () => {
-  const tx = fakeTx();
   let transactionReads = 0;
   const runtime = new NativeRuntimeAdapter(
     {
@@ -1315,7 +1293,6 @@ it("keeps session-scoped transaction reads on the client-local native method", a
               },
             ]);
           },
-          mergeableTx: () => tx,
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),

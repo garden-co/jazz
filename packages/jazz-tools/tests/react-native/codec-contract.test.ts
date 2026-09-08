@@ -43,16 +43,16 @@ const cases: [string, unknown, unknown][] = [
     { PermissionAdvice: { action: { Delete: { table: "t", row: [...txId] } } } },
   ],
   [
-    "relation subscription",
+    "relation prepare",
     {
-      type: "subscribeRelationQuery",
-      queryBytes: Uint8Array.of(0x4a, 0x52, 0x51, 0x01, 0x00),
-      optionsJson,
+      type: "prepareQuery",
+      query: Uint8Array.of(0x4a, 0x52, 0x51, 0x01, 0x00),
+      kind: "relation",
     },
     {
-      SubscribeRelationQuery: {
-        query_bytes: [0x4a, 0x52, 0x51, 0x01, 0x00],
-        options_json: optionsJson,
+      PrepareQuery: {
+        query: [0x4a, 0x52, 0x51, 0x01, 0x00],
+        kind: "Relation",
       },
     },
   ],
@@ -60,8 +60,8 @@ const cases: [string, unknown, unknown][] = [
   ["probe", "probe", "Probe"],
   [
     "prepare",
-    { type: "prepareQuery", query: Uint8Array.of(1, 128, 2) },
-    { PrepareQuery: { query: [1, 128, 2] } },
+    { type: "prepareQuery", query: Uint8Array.of(1, 128, 2), kind: "query" },
+    { PrepareQuery: { query: [1, 128, 2], kind: "Query" } },
   ],
   [
     "exclusive transaction",
@@ -70,18 +70,18 @@ const cases: [string, unknown, unknown][] = [
   ],
   [
     "read without transaction",
-    { type: "allWithOptions", query: 128, optionsJson },
-    { AllWithOptions: { query: 128, options_json: optionsJson, transaction: null } },
+    { type: "all", query: 128, optionsJson },
+    { All: { query: 128, options_json: optionsJson, transaction: null } },
   ],
   [
     "relation transaction",
-    { type: "allRelationSnapshotWithOptions", query: 1, optionsJson, transaction: 256 },
-    { AllRelationSnapshotWithOptions: { query: 1, options_json: optionsJson, transaction: 256 } },
+    { type: "all", query: 1, optionsJson, transaction: 256 },
+    { All: { query: 1, options_json: optionsJson, transaction: 256 } },
   ],
   [
     "subscription",
-    { type: "subscribeWithOptions", query: 128, optionsJson },
-    { SubscribeWithOptions: { query: 128, options_json: optionsJson } },
+    { type: "subscribe", query: 128, optionsJson },
+    { Subscribe: { query: 128, options_json: optionsJson } },
   ],
   [
     "settlement",
@@ -175,7 +175,7 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
   });
 
   test("noncanonical Rust request encodings fail closed", () => {
-    expect(() => decodeCommandInRust(Uint8Array.of(38, 4))).toThrow();
+    expect(() => decodeCommandInRust(Uint8Array.of(33, 4))).toThrow();
     expect(() => decodeNativeForegroundResponse(Uint8Array.of(25, 3))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(128, 0))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(255))).toThrow();
@@ -193,7 +193,7 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       .entries()) {
       expect([
         ...encodeNativeForegroundCommand(command as NativeForegroundCommand).subarray(0, 2),
-      ]).toEqual([38, index]);
+      ]).toEqual([33, index]);
     }
     expect(
       rustResponseCorpus()

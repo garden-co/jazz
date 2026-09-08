@@ -27,8 +27,8 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
             ? (command as { type?: unknown }).type
             : command;
         if (type === "prepareQuery") return Uint8Array.of(0);
-        if (type === "allWithOptions") return Uint8Array.of(1);
-        if (type === "subscribeWithOptions") return Uint8Array.of(2);
+        if (type === "all") return Uint8Array.of(1);
+        if (type === "subscribe") return Uint8Array.of(2);
         if (type === "drainSubscription") return Uint8Array.of(3);
         if (type === "poll") return Uint8Array.of(4);
         if (type === "close") return Uint8Array.of(5);
@@ -74,7 +74,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
 
   const wakes: string[] = [];
   db.setTickScheduler((urgency) => wakes.push(String(urgency)));
-  const query = db.prepareQuery(Uint8Array.of(1));
+  const query = db.prepareQuery(Uint8Array.of(1), "query");
   const pendingRows = db.all(query, { tier: "local" });
   expect(typeof pendingRows).toBe("object");
   expect("poll" in pendingRows && pendingRows.poll()).toEqual(Uint8Array.of(9));

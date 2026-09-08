@@ -435,14 +435,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       // exercises the raw native JavaScript boundary, not only the Rust parser.
       (
         db as unknown as {
-          upsertEncoded(
-            table: string,
-            rowId: Uint8Array,
-            cells: Uint8Array,
-            options: object,
-          ): unknown;
+          upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options: object): unknown;
         }
-      ).upsertEncoded("todos", new Uint8Array(16), new Uint8Array(), options);
+      ).upsert("todos", new Uint8Array(16), new Uint8Array(), options);
 
     const removed = /option `branch` is not supported; use `head`/;
     expect(() => upsert({ branch: undefined })).toThrow(removed);
@@ -1113,13 +1108,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       new Proxy(nativeDb, {
         get(target, property) {
           const value = Reflect.get(target, property, target) as unknown;
-          if (
-            (property === "subscribe" || property === "subscribeAsync") &&
-            typeof value === "function"
-          ) {
+          if (property === "subscribe" && typeof value === "function") {
             return (...args: unknown[]) => {
               const source = Reflect.apply(value, target, args) as object;
-              return property === "subscribeAsync" ? observePending(source) : observeSource(source);
+              return "setWake" in source ? observePending(source) : observeSource(source);
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
@@ -1762,9 +1754,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const { NapiDb } = await loadNapiModule();
     expect(Object.getOwnPropertyNames(NapiDb.prototype)).toEqual(
       expect.arrayContaining([
-        "requestInsertPermissionAdviceEncoded",
+        "requestInsertPermissionAdvice",
         "requestReadPermissionAdvice",
-        "requestUpdatePermissionAdviceEncoded",
+        "requestUpdatePermissionAdvice",
         "requestDeletePermissionAdvice",
       ]),
     );

@@ -15,12 +15,13 @@ export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.messages.allowInsert.where(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]));
   policy.messages.allowInsert.where(allOf([{ chat_id: CHAT_ID }, isMemberOrAdmin]));
 
-  policy.messages.allowUpdate
-    .whereOld(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]))
-    .whereNew({ chat_id: ANNOUNCEMENTS_CHAT_ID });
-  policy.messages.allowUpdate
-    .whereOld(allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]))
-    .whereNew({ chat_id: CHAT_ID });
+  // One symmetric predicate checks both the old and new row. Members may
+  // update their own generic-chat messages; announcements require an admin.
+  const canMutateMessage = anyOf([
+    allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]),
+    allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]),
+  ]);
+  policy.messages.allowUpdate.where(canMutateMessage);
 
   policy.messages.allowDelete.where(allOf([{ chat_id: ANNOUNCEMENTS_CHAT_ID }, isAdmin]));
   policy.messages.allowDelete.where(allOf([{ chat_id: CHAT_ID }, canMutateGenericChat]));

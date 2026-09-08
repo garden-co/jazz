@@ -148,13 +148,13 @@ type NativeDbConstructor = {
 
 type NativeWriteOptions = {
   author?: Uint8Array;
+  attribution?: Uint8Array;
   updatedAtMs?: number;
 };
 
 type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
-type PendingNativeWrite = { poll(): Write | null };
 type PendingNativePermissionAdvice = {
   poll(): string | null;
   cancel(): void;
@@ -164,8 +164,11 @@ function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
 }
 
-function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
-  return typeof (value as PendingNativeWrite | null)?.poll === "function";
+function requireNativeWrite(value: unknown): Write {
+  if (!value || value instanceof Uint8Array) {
+    throw new Error("Native runtime direct mutation did not return a write receipt");
+  }
+  return value as Write;
 }
 
 function isPendingNativePermissionAdvice(value: unknown): value is PendingNativePermissionAdvice {
@@ -207,30 +210,15 @@ type NativeDb = {
     connected: boolean;
   };
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
-  beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
+  beginTransaction(
+    openTransactionId: string,
+    kind: TransactionKind,
+    author?: Uint8Array,
+    attribution?: Uint8Array,
+  ): void;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
-  attachMergeableTx(openTransactionId: string): Tx;
-  attachExclusiveTx?(openTransactionId: string): Tx;
   all(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allAsync?(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationQuery?(
-    queryBytes: Uint8Array,
-    opts: unknown,
-    author?: Uint8Array,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationSnapshot?(
     query: PreparedQuery,
     opts: unknown,
     openTransactionId?: OpenTransactionId,
@@ -240,120 +228,76 @@ type NativeDb = {
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  attachQuery?(
-    query: PreparedQuery,
-    opts: unknown,
-    openTransactionId?: OpenTransactionId,
-    author?: Uint8Array,
-  ): unknown;
-  queryAttachmentIsCovered?(attachment: unknown): boolean;
-  detachQuery?(attachment: unknown): void;
-  prepareQuery(query: Uint8Array): PreparedQuery;
-  prepareQueryAsync?(
+  prepareQuery(
     query: Uint8Array,
+    kind: "query" | "relation",
     author?: Uint8Array,
     claims?: Record<string, unknown>,
-  ): PendingNativeOperation<PreparedQuery>;
-  prepareRelationQueryAsync?(
-    query: Uint8Array,
-    author?: Uint8Array,
-    claims?: Record<string, unknown>,
-  ): PendingNativeOperation<PreparedQuery>;
-  subscribeAsync?(
+  ): PreparedQuery | PendingNativeOperation<PreparedQuery>;
+  subscribe?(
     query: PreparedQuery,
     opts: unknown,
     author?: Uint8Array,
-  ): PendingNativeOperation<ReadableStream<unknown> | Subscription>;
-
-  subscribe?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeForIdentity?(
-    query: PreparedQuery,
-    author: Uint8Array,
-    opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  /** Authority-serving subscription owned by an explicit backend open. */
-  subscribeForBackend?(query: PreparedQuery, opts: unknown): ReadableStream<unknown> | Subscription;
-  subscribeRelationQuery?(
-    queryBytes: Uint8Array,
-    opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  subscribeRelationQueryForIdentity?(
-    queryBytes: Uint8Array,
-    author: Uint8Array,
-    opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  /** Authority-serving relation subscription owned by an explicit backend open. */
-  subscribeRelationQueryForBackend?(
-    queryBytes: Uint8Array,
-    opts: unknown,
-  ): ReadableStream<unknown> | Subscription;
-  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
-  insertWithIdEncodedAttributed?(
+  ):
+    | ReadableStream<unknown>
+    | Subscription
+    | PendingNativeOperation<ReadableStream<unknown> | Subscription>;
+  insert(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
+  insertInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
-    rowId: Uint8Array,
     cells: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  updateEncoded(
+    options?: NativeInsertOptions,
+  ): Uint8Array;
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: NativeUpdateOptions): Write;
+  updateInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     options?: NativeUpdateOptions,
-  ): Write;
-  updateEncodedAttributed?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  upsertEncoded(
+  ): void;
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: NativeUpsertOptions): Write;
+  upsertInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeUpsertOptions,
-  ): Write;
-  upsertEncodedAttributed?(
+  ): void;
+  delete(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  deleteInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
-  deleteAttributed?(table: string, rowId: Uint8Array, author: Uint8Array): Write;
-  restoreEncoded(
+    options?: NativeDeleteOptions,
+  ): void;
+  restore(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeRestoreOptions,
   ): Write;
-  restoreEncodedAttributed?(
+  restoreInTransaction(
+    openTransactionId: OpenTransactionId,
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  beginStreamingMutationEncoded?(
+    options?: NativeRestoreOptions,
+  ): void;
+  beginStreamingMutation?(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
     mutation?: StreamingMutationKind,
     author?: Uint8Array,
+    attribution?: Uint8Array,
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
   ): NativeStreamingMutation;
-  beginStreamingMutationAttributedEncoded?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    column: string,
-    mutation: StreamingMutationKind | undefined,
-    author: Uint8Array | undefined,
-    attribution: Uint8Array,
-    updatedAtMs?: number,
-  ): NativeStreamingMutation;
-  requestInsertPermissionAdviceEncoded?(
+  requestInsertPermissionAdvice?(
     table: string,
     cells: Uint8Array,
     author?: Uint8Array,
@@ -365,7 +309,7 @@ type NativeDb = {
     author?: Uint8Array,
     claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
-  requestUpdatePermissionAdviceEncoded?(
+  requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
@@ -378,9 +322,6 @@ type NativeDb = {
     author?: Uint8Array,
     claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
-  mergeableTx(openTransactionId: OpenTransactionId): Tx;
-  mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
-  exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -396,41 +337,7 @@ type NativeDb = {
     maxAgeMs?: number | null,
   ): void;
   evictExpiredStagedLargeValues?(): number | Promise<number>;
-  readValueRange?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    start: number,
-    end: number,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  readTextUtf16Range?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    start: number,
-    end: number,
-  ): string | PendingNativeRead | Promise<string | PendingNativeRead>;
-  readJsonPointer?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    pointer: string,
-  ): unknown | PendingNativeRead | Promise<unknown | PendingNativeRead>;
-  appendValue?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    bytes: Uint8Array,
-  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
-  spliceValue?(
-    table: string,
-    rowId: Uint8Array,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
-  updateLargeValuesEncoded?(
+  updateLargeValues?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
@@ -494,33 +401,6 @@ type Write = {
   close?(): boolean;
 };
 
-type Tx = {
-  commit(): Write;
-  rollback(): void;
-  /** Release the native transaction view after its owner batch has completed. */
-  close?(): boolean;
-  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: NativeUpdateOptions,
-  ): void;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: NativeUpsertOptions,
-  ): void;
-  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: NativeRestoreOptions,
-  ): void;
-};
-
 export type Transport = {
   close(): boolean;
   recvWireFrames(): unknown[];
@@ -542,7 +422,6 @@ export type Transport = {
 type PendingTx = {
   id: OpenTransactionId;
   kind: TransactionKind;
-  txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
   /** External provenance fixed at begin, never supplied per staged operation. */
@@ -618,6 +497,15 @@ type PendingNativeOperation<T> = {
   cancel(): void;
   setWake(callback: () => void): void;
 };
+
+function isPendingNativeOperation<T>(value: unknown): value is PendingNativeOperation<T> {
+  const candidate = value as Partial<PendingNativeOperation<T>> | null;
+  return (
+    typeof candidate?.poll === "function" &&
+    typeof candidate.cancel === "function" &&
+    typeof candidate.setWake === "function"
+  );
+}
 
 type SubscriptionState = {
   openingAbort?: AbortController;
@@ -817,36 +705,6 @@ export class NativeRuntimeAdapter implements Runtime {
   >();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
-  // A non-durable follower needs a worker response before trusting native
-  // coverage. Full-propagation one-shot reads detach their query, so a later
-  // attachment must not reuse the prior attachment's confirmation: the
-  // upstream can have changed while no transport was attached. The recorded
-  // epoch distinguishes that reattachment from its initial attachment.
-  // Local-only reattachments may reuse their own confirmation when no newer
-  // worker frame has arrived, scoped to the serving authorization context.
-  private readonly activeCoverageWaits = new Set<{
-    tier: string;
-    stage: string;
-    iterations: number;
-    lastCovered: boolean | null;
-  }>();
-
-  /** @internal Passive, redacted state: never probes native coverage or schedules work. */
-  describeQueryCoverageWaits() {
-    const owner = this.ownerRuntime;
-    return {
-      closed: this.closed,
-      nonDurableClient: this.nonDurableClient,
-      peerActivityEpoch: owner.peerTransportActivityEpoch,
-      peerProcessedActivityEpoch: owner.peerTransportProcessedActivityEpoch,
-      coreOperation: owner.coreOperation?.kind ?? null,
-      coreTickScheduled: owner.coreTickScheduled,
-      serverPumpRunning: owner.serverPumpRunning,
-      waits: Array.from(this.activeCoverageWaits, (wait) => ({ ...wait })),
-    };
-  }
-
-  private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickAgain = false;
   private coreOperation: {
@@ -1162,106 +1020,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async readValueRange(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<Uint8Array> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
-    }
-    if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
-    return this.awaitNativeRead(
-      this.db.readValueRange(table, parseUuid(objectId), column, start, end),
-    );
-  }
-
-  async readTextUtf16Range(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<string> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readTextUtf16Range(table, objectId, column, start, end);
-    }
-    if (!this.db.readTextUtf16Range) {
-      throw new Error("Native runtime does not expose UTF-16 value ranges");
-    }
-    const result = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
-    return isPendingNativeRead(result)
-      ? new Utf8Decoder().decode(await this.awaitNativeRead(result))
-      : result;
-  }
-
-  async readJsonPointer(
-    table: string,
-    objectId: string,
-    column: string,
-    pointer: string,
-  ): Promise<unknown> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
-    }
-    if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
-    let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
-    if (isPendingNativeRead(value)) {
-      value = new Utf8Decoder().decode(await this.awaitNativeRead(value));
-    }
-    return typeof value === "string" ? JSON.parse(value) : value;
-  }
-
-  async appendValue(
-    table: string,
-    objectId: string,
-    column: string,
-    bytes: Uint8Array,
-  ): Promise<MutationResult> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
-    }
-    if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
-    const write = await this.db.appendValue(table, parseUuid(objectId), column, bytes);
-    return this.finishMutation(
-      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
-    );
-  }
-
-  async spliceValue(
-    table: string,
-    objectId: string,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Promise<MutationResult> {
-    if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.spliceValue(
-        table,
-        objectId,
-        column,
-        offset,
-        deleteLength,
-        insert,
-      );
-    }
-    if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
-    const write = await this.db.spliceValue(
-      table,
-      parseUuid(objectId),
-      column,
-      offset,
-      deleteLength,
-      insert,
-    );
-    return this.finishMutation(
-      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
-    );
-  }
-
   async acceptPeer(claims: Record<string, unknown> = {}): Promise<Transport> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
     if (this.closed) throw new Error("Native runtime is closed");
@@ -1393,18 +1151,8 @@ export class NativeRuntimeAdapter implements Runtime {
     // Db wrappers cannot retain stale native graph/storage state through a
     // cache after their context has shut down.
     this.preparedQueries.clear();
-    this.peerCoveredQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
-      // A schema view can own an attached transaction handle while its parent
-      // owns the batch. Closing this view must release only that handle; the
-      // parent still needs its batch and sibling views to complete it.
-      for (const pending of this.pendingTxs.values()) {
-        const tx = pending.txByView.get(this);
-        if (!tx) continue;
-        tx.close?.();
-        pending.txByView.delete(this);
-      }
       // Query and subscription futures may still be unwinding through this
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
@@ -1415,9 +1163,6 @@ export class NativeRuntimeAdapter implements Runtime {
       write.close?.();
     }
     this.subscriptions.clear();
-    for (const pending of this.pendingTxs.values()) {
-      this.releaseTransactionViews(pending);
-    }
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
@@ -1462,18 +1207,17 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    const attributedInsert =
-      attribution && !tx
-        ? requireBackendAttributionAbi(this.db.insertWithIdEncodedAttributed, "insert")
-        : undefined;
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      const rowId = nativeTx.insertEncoded(table, cells, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const rowId = this.db.insertInTransaction(tx.id, table, cells, {
         rowId: suppliedRowId,
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
+      if (!(rowId instanceof Uint8Array)) {
+        throw new Error("Native runtime transaction insert did not return a row id");
+      }
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1483,23 +1227,17 @@ export class NativeRuntimeAdapter implements Runtime {
         openTransactionId: txIdFromContext(_writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Insert", () => {
-      if (attribution) {
-        return attributedInsert!.call(
-          this.db,
-          table,
-          suppliedRowId ?? runtimeRandomBytes(16),
-          cells,
+    const write = writeOrNormalizeRejection("Insert", () =>
+      requireNativeWrite(
+        this.db.insert(table, cells, {
+          rowId: suppliedRowId,
+          author: attribution ? undefined : writeIdentity,
           attribution,
-        );
-      }
-      return this.db.insertEncoded(table, cells, {
-        rowId: suppliedRowId,
-        author: writeIdentity,
-        branch: branchView?.head,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
-    });
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
+    );
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
@@ -1512,7 +1250,7 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
-    const begin = this.db.beginStreamingMutationEncoded;
+    const begin = this.db.beginStreamingMutation;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
@@ -1526,15 +1264,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
-    const attributedBegin = attribution
-      ? requireBackendAttributionAbi(
-          this.db.beginStreamingMutationAttributedEncoded,
-          "streaming mutations",
-        )
-      : undefined;
-    const ordinaryBegin = attribution
-      ? undefined
-      : requireBackendAttributionAbi(begin, "streaming mutations");
+    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
     const descriptor = definition.columns.find((candidate) => candidate.name === column);
@@ -1549,30 +1279,19 @@ export class NativeRuntimeAdapter implements Runtime {
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const upload = attribution
-      ? attributedBegin!.call(
-          this.db,
-          table,
-          rowId,
-          cells,
-          column,
-          mutation,
-          undefined,
-          attribution,
-          updatedAtMs ?? undefined,
-        )
-      : ordinaryBegin!.call(
-          this.db,
-          table,
-          rowId,
-          cells,
-          column,
-          mutation,
-          writeIdentity,
-          updatedAtMs ?? undefined,
-          branchView?.head,
-          branchView?.base,
-        );
+    const upload = begin.call(
+      this.db,
+      table,
+      rowId,
+      cells,
+      column,
+      mutation,
+      attribution ? undefined : writeIdentity,
+      attribution,
+      updatedAtMs ?? undefined,
+      branchView?.head,
+      branchView?.base,
+    );
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1650,14 +1369,10 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    const attributedRestore =
-      attribution && !tx
-        ? requireBackendAttributionAbi(this.db.restoreEncodedAttributed, "restore")
-        : undefined;
     const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.restoreEncoded(table, rowId, cells, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.restoreInTransaction(tx.id, table, rowId, cells, {
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
       });
@@ -1670,16 +1385,16 @@ export class NativeRuntimeAdapter implements Runtime {
         openTransactionId: txIdFromContext(writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Restore", () => {
-      if (attribution) {
-        return attributedRestore!.call(this.db, table, rowId, cells, attribution);
-      }
-      return this.db.restoreEncoded(table, rowId, cells, {
-        author: writeIdentity,
-        branch: branchView?.head,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
-    });
+    const write = writeOrNormalizeRejection("Restore", () =>
+      requireNativeWrite(
+        this.db.restore(table, rowId, cells, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
+    );
     return this.finishInsert(table, rowId, values, write);
   }
 
@@ -1700,14 +1415,10 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    const attributedUpdate =
-      attribution && !tx
-        ? requireBackendAttributionAbi(this.db.updateEncodedAttributed, "update")
-        : undefined;
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.updateEncoded(table, rowId, patch, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.updateInTransaction(tx.id, table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1719,17 +1430,17 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Update", () => {
-      if (attribution) {
-        return attributedUpdate!.call(this.db, table, rowId, patch, attribution);
-      }
-      return this.db.updateEncoded(table, rowId, patch, {
-        author: writeIdentity,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
-    });
+    const write = writeOrNormalizeRejection("Update", () =>
+      requireNativeWrite(
+        this.db.update(table, rowId, patch, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
+    );
     return this.finishMutation(write);
   }
 
@@ -1758,7 +1469,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
       throw new Error("Typed large-value updates do not yet support an attributed identity.");
     }
-    const updateLargeValues = this.db.updateLargeValuesEncoded;
+    const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {
       throw new Error("Native runtime does not support typed partial-value updates.");
     }
@@ -1787,15 +1498,11 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    const attributedUpsert =
-      attribution && !tx
-        ? requireBackendAttributionAbi(this.db.upsertEncodedAttributed, "upsert")
-        : undefined;
     const existing = branchView
       ? true
       : tx
         ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-        : this.readRow(table, rowId, writeIdentity);
+        : this.readRow(table, rowId, attribution ? undefined : writeIdentity);
     let cells: Uint8Array;
     try {
       cells = existing
@@ -1805,16 +1512,12 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsertEncoded(
-        table,
-        rowId,
-        cells,
-        {
-          head: branchView?.head,
-          base: branchView?.base,
-          updatedAtMs: updatedAtMs ?? undefined,
-        },
-      );
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.upsertInTransaction(tx.id, table, rowId, cells, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -1824,17 +1527,17 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Upsert", () => {
-      if (attribution) {
-        return attributedUpsert!.call(this.db, table, rowId, cells, attribution);
-      }
-      return this.db.upsertEncoded(table, rowId, cells, {
-        author: writeIdentity,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
-    });
+    const write = writeOrNormalizeRejection("Upsert", () =>
+      requireNativeWrite(
+        this.db.upsert(table, rowId, cells, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
+    );
     return this.finishMutation(write);
   }
 
@@ -1851,13 +1554,9 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    const attributedDelete =
-      attribution && !tx
-        ? requireBackendAttributionAbi(this.db.deleteAttributed, "delete")
-        : undefined;
     if (tx) {
-      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
-      nativeTx.deleteEncoded(table, rowId, {
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      this.db.deleteInTransaction(tx.id, table, rowId, {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1865,17 +1564,17 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Delete", () => {
-      if (attribution) {
-        return attributedDelete!.call(this.db, table, rowId, attribution);
-      }
-      return this.db.deleteEncoded(table, rowId, {
-        author: writeIdentity,
-        head: branchView?.head,
-        base: branchView?.base,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
-    });
+    const write = writeOrNormalizeRejection("Delete", () =>
+      requireNativeWrite(
+        this.db.delete(table, rowId, {
+          author: attribution ? undefined : writeIdentity,
+          attribution,
+          head: branchView?.head,
+          base: branchView?.base,
+          updatedAtMs: updatedAtMs ?? undefined,
+        }),
+      ),
+    );
     return this.finishMutation(write);
   }
 
@@ -1946,7 +1645,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return Promise.resolve("unknown");
     const delegated = this.delegatedPermissionAdviceSession(session);
     if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
-    const request = this.db.requestInsertPermissionAdviceEncoded;
+    const request = this.db.requestInsertPermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const cells = encodeCellsForRow(this.table(table), values, table);
     return this.withPermissionAdviceTimeout(() =>
@@ -1980,7 +1679,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return Promise.resolve("unknown");
     const delegated = this.delegatedPermissionAdviceSession(session);
     if (this.isScopedPermissionAdvice(session) && !delegated) return Promise.resolve("unknown");
-    const request = this.db.requestUpdatePermissionAdviceEncoded;
+    const request = this.db.requestUpdatePermissionAdvice;
     if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
     return this.withPermissionAdviceTimeout(() =>
@@ -2033,17 +1732,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const identity = this.trustedWriteIdentity(session);
     const attribution = this.backendAttribution(sessionJson);
     const admission = attribution ? undefined : identity;
-    if (attribution) {
-      if (kind !== "mergeable") {
-        throw new Error("Backend-attributed transactions require mergeable kind");
-      }
-      requireBackendAttributionAbi(
-        this.db.beginTransactionAttributed,
-        "mergeable transactions",
-      ).call(this.db, id, attribution);
-    } else {
-      this.db.beginTransaction(id, kind, admission);
-    }
+    this.db.beginTransaction(id, kind, admission, attribution);
     this.pendingTxs.set(id, {
       id,
       kind,
@@ -2051,7 +1740,6 @@ export class NativeRuntimeAdapter implements Runtime {
       requestSession: admission ? (session ?? undefined) : undefined,
       attribution,
       writes: [],
-      txByView: new Map(),
     });
     return id;
   }
@@ -2071,7 +1759,6 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     const write = this.db.commitTransaction(openTransactionId, pending.kind);
-    this.releaseTransactionViews(pending);
     this.pendingTxs.delete(openTransactionId);
     this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
@@ -2131,7 +1818,6 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       this.db.rollbackTransaction(openTransactionId);
     } finally {
-      this.releaseTransactionViews(pending);
       this.pendingTxs.delete(openTransactionId);
     }
     this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "rolled_back" });
@@ -2149,12 +1835,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
+    const usesNativeRelationApi = queryUsesNativeRelationApi(coreQueryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
     const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
-    // Relation-IR lowering still has a JSON-only binding API.  Array includes
-    // below use the transaction-aware snapshot ABI instead, so they preserve
-    // staged writes and do not fall back to the owner's ordinary view.
-    if (pendingTx && queryUsesNativeRelationApi(coreQueryJson)) {
+    // Relation IR is normalized by prepareQuery into the same native handle
+    // as ordinary queries. Transaction overlays for this syntax remain
+    // unsupported until its semantics are defined.
+    if (pendingTx && usesNativeRelationApi) {
       throw new Error("Native runtime does not support relation reads inside a transaction");
     }
     // Browser runtimes still materialize row bodies from their in-memory
@@ -2164,77 +1851,38 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
-    if (queryUsesNativeRelationApi(coreQueryJson)) {
-      if (this.db.prepareRelationQueryAsync) {
-        const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
-        const attachment = await this.attachQueryIfNeeded(
-          tier,
-          optionsJson,
-          query,
-          session,
-          pendingTx,
-        );
-        try {
-          if (this.closed) return [];
-          const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-          return rowsFromBatches(readRowBatches(rows), this.schema);
-        } finally {
-          if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
-        }
-      }
-      if (this.readAuthorizationHost === "trusted-serving" && session && !session.backendAuthority)
-        throw new Error("Native relation requests require immutable scoped preparation");
-      this.applySessionClaims(session);
-      await this.waitForStrictRemoteQueryTransport(tier);
-      if (this.closed) return [];
-      const payload = await this.readRelationQueryForContext(
-        relationQueryBytes(coreQueryJson),
-        opts,
-        readContext,
-      );
-      return rowsFromBatches(readRowBatches(payload), this.schema);
-    }
     const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
-    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session, pendingTx);
+    await this.waitForStrictRemoteQueryTransport(tier);
+    await this.processPendingPeerActivityBeforeRead();
     if (this.closed) return [];
     if (!pendingTx) {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
-    try {
-      if (queryHasArraySubqueries(coreQueryJson)) {
-        if (pendingTx) {
-          const payload = await this.readRelationSnapshotForContext(
-            query,
-            opts,
-            readContext,
-            pendingTx.id,
-          );
-          return rowsFromRelationSnapshot(
-            readRelationSnapshot(payload),
-            this.schema,
-            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-          );
-        }
-        const payload = await this.readRelationSnapshotForContext(query, opts, readContext);
+    this.emitQueryCoverageTrace("attach");
+    if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
+      if (pendingTx) {
+        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+        this.emitQueryCoverageTrace("covered");
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-      let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
-        await this.refreshRowsFromEdge(session, query, opts);
-        if (this.closed) return [];
-        rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      }
-      return rowStates;
-    } finally {
-      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      this.emitQueryCoverageTrace("covered");
+      return rowsFromRelationSnapshot(
+        readRelationSnapshot(payload),
+        this.schema,
+        usesNativeRelationApi
+          ? undefined
+          : subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+      );
     }
+    const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    this.emitQueryCoverageTrace("covered");
+    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
   }
 
   createSubscription(
@@ -2254,45 +1902,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
-    let immediateSource: ReadableStream<unknown> | Subscription | undefined;
-    let immediateQuery: PreparedQuery | null = null;
-    const canPrepareAsync = usesNativeRelationApi
-      ? !!this.db.prepareRelationQueryAsync
-      : !!this.db.prepareQueryAsync;
-    if (!canPrepareAsync) {
-      if (
-        usesNativeRelationApi &&
-        this.readAuthorizationHost === "trusted-serving" &&
-        session &&
-        !session.backendAuthority
-      )
-        throw new Error("Native relation subscriptions require immutable scoped preparation");
-      this.applySessionClaims(session);
-      try {
-        if (usesNativeRelationApi) {
-          immediateSource = this.subscribeRelationForContext(
-            relationQueryBytes(queryJson),
-            opts,
-            readContext,
-          );
-        } else {
-          immediateQuery = this.prepareQuery(queryJson);
-          immediateSource = this.subscribeForContext(immediateQuery, opts, readContext);
-        }
-      } catch (error) {
-        const nativeStack = error instanceof Error ? error.stack : undefined;
-        throw new Error(
-          `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
-        );
-      }
-    }
     this.subscriptions.set(handle, {
-      sources: immediateSource
-        ? [{ source: subscriptionSource(immediateSource), reading: false }]
-        : [],
+      sources: [],
       openingAbort: new AbortController(),
       queryJson,
-      query: immediateQuery,
+      query: null,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -2312,7 +1926,6 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredPlaceholderBytes: 0,
       cancelled: false,
     });
-    if (immediateSource) return handle;
     const subscription = this.subscriptions.get(handle)!;
     const install = (native: ReadableStream<unknown> | Subscription) => {
       subscription.sources = [{ source: subscriptionSource(native), reading: false }];
@@ -2332,12 +1945,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const open = (query: PreparedQuery) => {
       if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
       subscription.query = query;
-      return this.db.subscribeAsync
-        ? this.awaitNativeOperation(
-            this.db.subscribeAsync(query, opts, this.nativeReadAuthor(readContext)),
-            subscription.openingAbort!.signal,
-          )
-        : this.subscribeForContext(query, opts, readContext);
+      const native = this.subscribeForContext(query, opts, readContext);
+      return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
+        ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
+        : native;
     };
     try {
       const query = this.prepareQueryForRead(queryJson, session, subscription.openingAbort!.signal);
@@ -2782,7 +2393,10 @@ export class NativeRuntimeAdapter implements Runtime {
       return rows[0];
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.all(query, readOptions());
+    const rows = this.db.all(query, {
+      ...(readOptions() as Record<string, unknown>),
+      sync: true,
+    });
     if (typeof (rows as Promise<unknown>).then === "function") {
       throw new Error("write merge requires the synchronous native read boundary");
     }
@@ -2858,12 +2472,17 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
   ): Uint8Array {
-    const result = this.db.all(query, opts, undefined, this.nativeReadAuthor(context));
+    const result = this.db.all(
+      query,
+      { ...(opts as Record<string, unknown>), sync: true },
+      undefined,
+      this.nativeReadAuthor(context),
+    );
     if (typeof (result as Promise<unknown>).then === "function") {
       throw new Error("native read is asynchronous; use the asynchronous read boundary");
     }
     if (isPendingNativeRead(result)) {
-      throw new Error("large-value hydration is pending; use the asynchronous read boundary");
+      throw new Error("native read is pending; use the asynchronous read boundary");
     }
     return result as Uint8Array;
   }
@@ -2874,7 +2493,10 @@ export class NativeRuntimeAdapter implements Runtime {
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(this.startRowsForContext(query, opts, context, openTransactionId));
+    return this.awaitNativeRead(
+      this.startRowsForContext(query, opts, context, openTransactionId),
+      (opts as { tier?: string }).tier,
+    );
   }
 
   private startRowsForContext(
@@ -2884,9 +2506,7 @@ export class NativeRuntimeAdapter implements Runtime {
     openTransactionId?: OpenTransactionId,
   ): NativeReadResult | Promise<NativeReadResult> {
     const author = this.nativeReadAuthor(context);
-    return this.db.allAsync
-      ? this.db.allAsync(query, opts, openTransactionId, author)
-      : this.db.all(query, opts, openTransactionId, author);
+    return this.db.all(query, opts, openTransactionId, author);
   }
 
   private nativeReadAuthor(context: NativeReadContext): Uint8Array | undefined {
@@ -2916,121 +2536,37 @@ export class NativeRuntimeAdapter implements Runtime {
     return { kind: "client-local" };
   }
 
-  private readRelationQueryForContext(
-    queryBytes: Uint8Array,
-    opts: unknown,
-    context: NativeReadContext,
-  ): Promise<Uint8Array> {
-    if (!this.db.allRelationQuery) {
-      throw new Error("Native runtime does not support relation queries");
-    }
-    return this.awaitNativeRead(
-      this.db.allRelationQuery(queryBytes, opts, this.nativeReadAuthor(context)),
-    );
-  }
-
-  private readRelationSnapshotForContext(
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    openTransactionId?: OpenTransactionId,
-  ): Promise<Uint8Array> {
-    if (!this.db.allRelationSnapshot) {
-      throw new Error("Native runtime does not support relation snapshots");
-    }
-    return this.awaitNativeRead(
-      this.db.allRelationSnapshot(query, opts, openTransactionId, this.nativeReadAuthor(context)),
-    );
-  }
-
   private subscribeForContext(
     query: PreparedQuery,
     opts: unknown,
     context: NativeReadContext,
-  ): ReadableStream<unknown> | Subscription {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.subscribeForBackend) {
-          throw new Error("Native runtime does not support backend authority subscriptions");
-        }
-        return this.db.subscribeForBackend(query, opts);
-      case "session-authority":
-        if (!this.db.subscribeForIdentity) {
-          throw new Error("Native runtime does not support session-authority subscriptions");
-        }
-        return this.db.subscribeForIdentity(query, context.identity, opts);
-      case "client-local":
-        if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
-        return this.db.subscribe(query, opts);
-    }
-  }
-
-  private subscribeRelationForContext(
-    queryBytes: Uint8Array,
-    opts: unknown,
-    context: NativeReadContext,
-  ): ReadableStream<unknown> | Subscription {
-    switch (context.kind) {
-      case "backend-authority":
-        if (!this.db.subscribeRelationQueryForBackend) {
-          throw new Error(
-            "Native runtime does not support backend authority relation subscriptions",
-          );
-        }
-        return this.db.subscribeRelationQueryForBackend(queryBytes, opts);
-      case "session-authority":
-        if (!this.db.subscribeRelationQueryForIdentity) {
-          throw new Error(
-            "Native runtime does not support session-authority relation subscriptions",
-          );
-        }
-        return this.db.subscribeRelationQueryForIdentity(queryBytes, context.identity, opts);
-      case "client-local":
-        if (!this.db.subscribeRelationQuery) {
-          throw new Error("Native runtime does not support relation query subscriptions");
-        }
-        return this.db.subscribeRelationQuery(queryBytes, opts);
-    }
-  }
-
-  private attachQueryForContext(
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    pendingTx?: PendingTx,
-  ): unknown {
-    if (!this.db.attachQuery) {
-      throw new Error("Native runtime does not support query coverage");
-    }
+  ):
+    | ReadableStream<unknown>
+    | Subscription
+    | PendingNativeOperation<ReadableStream<unknown> | Subscription> {
+    if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
     const author = context.kind === "session-authority" ? context.identity : undefined;
-    return this.db.attachQuery(query, opts, pendingTx?.id, author);
+    return this.db.subscribe(query, opts, author);
   }
 
-  /**
-   * Native NAPI reads may suspend on a routed large-value chunk.  Keep the
-   * thread-affine Rust future in the binding and let the existing peer pump
-   * deliver the missing chunk between polls; never block the JS event loop.
-   */
+  /** Drive the binding-owned coverage and hydration operation while the
+   * existing peer pump delivers whatever remote state it is waiting for. */
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
+    tier?: string,
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
     for (;;) {
-      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
+      if (this.closed) throw new Error("native read was cancelled by runtime shutdown");
+      if (tier) this.throwServerTransportErrorForTier(tier);
       const bytes = result.poll();
       if (bytes !== null) return bytes;
-      await this.pumpServerTransport();
-      await sleep(0);
-    }
-  }
-
-  private async awaitNativeWrite(pending: PendingNativeWrite): Promise<Write> {
-    for (;;) {
-      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
-      const write = pending.poll();
-      if (write !== null) return write;
-      await this.pumpServerTransport();
+      // A core pass may itself suspend while the auxiliary transport fetches
+      // large-value chunks. Keep polling the owning read while that pass runs;
+      // awaiting the pump here would circularly wait for the read to resume it.
+      void this.pumpServerTransport();
+      if (tier) this.throwServerTransportErrorForTier(tier);
       await sleep(0);
     }
   }
@@ -3090,19 +2626,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.warnedOnce.has(key)) return;
     this.warnedOnce.add(key);
     console.warn(`[jazz native-runtime] ${message}`);
-  }
-
-  private async refreshRowsFromEdge(
-    session: RuntimeSession | null,
-    query: PreparedQuery,
-    opts: unknown,
-  ): Promise<void> {
-    if (!this.hasUpstream()) return;
-    // The outer Edge attachment owns both membership and concrete
-    // occurrences. Reusing that prepared query materializes only its
-    // delivered versions; a nested exact-id request creates a second scope
-    // and can circularly await its own authority receipt.
-    await this.readRowsForContextAsync(query, opts, this.nativeReadContext(session));
   }
 
   private awaitNativeOperation<T>(
@@ -3170,23 +2693,17 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
     signal?: AbortSignal,
   ): PreparedQuery | Promise<PreparedQuery> {
-    const relation = queryUsesNativeRelationApi(queryJson);
-    const prepare = relation ? this.db.prepareRelationQueryAsync : this.db.prepareQueryAsync;
-    if (!prepare) {
-      this.applySessionClaims(session);
-      return this.prepareQuery(queryJson);
-    }
     const contextual =
       session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
-    const queryBytes = relation
-      ? relationQueryBytes(queryJson)
-      : encodeQueryJson(queryJson, this.schema);
-    const key = `${relation ? "relation" : "query"}:${bytesKey(queryBytes)}`;
+    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
+    const queryBytes =
+      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
+    const key = `${kind}:${bytesKey(queryBytes)}`;
     const cached = contextual ? undefined : this.preparedQueries.get(key);
     if (cached) return cached;
-    const pending = prepare.call(
-      this.db,
+    const started = this.db.prepareQuery(
       queryBytes,
+      kind,
       contextual ? session.identity : undefined,
       contextual ? session.claims : undefined,
     );
@@ -3194,17 +2711,26 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!contextual) this.preparedQueries.set(key, query);
       return query;
     };
-    const query = this.awaitNativeOperation(pending, signal);
+    const query = isPendingNativeOperation<PreparedQuery>(started)
+      ? this.awaitNativeOperation(started, signal)
+      : started;
     return query instanceof Promise ? query.then(remember) : remember(query);
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
-    const queryBytes = encodeQueryJson(queryJson, this.schema);
-    const key = bytesKey(queryBytes);
+    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
+    const queryBytes =
+      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
+    const key = `${kind}:${bytesKey(queryBytes)}`;
     let query = this.preparedQueries.get(key);
     if (!query) {
       try {
-        query = this.db.prepareQuery(queryBytes);
+        const started = this.db.prepareQuery(queryBytes, kind);
+        if (isPendingNativeOperation<PreparedQuery>(started)) {
+          started.cancel();
+          throw new Error("native query preparation requires the asynchronous read boundary");
+        }
+        query = started;
       } catch (error) {
         throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
       }
@@ -3212,101 +2738,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     return query;
   }
-
-  private async attachQueryIfNeeded(
-    tier: string | null | undefined,
-    optionsJson: string | null | undefined,
-    query: PreparedQuery,
-    session: RuntimeSession | null,
-    pendingTx?: PendingTx,
-  ): Promise<unknown | undefined> {
-    if (this.closed) return;
-    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
-    if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
-    await this.waitForStrictRemoteQueryTransport(tier);
-    if (!this.db.attachQuery) return;
-    // Coverage registration and probes are synchronous node operations. A
-    // storage-backed evaluator may hold that node across suspension, so enter
-    // the same owner-wide idle boundary used for peer admission first.
-    const opts = readOptions(tier, false, optionsJson);
-    const readContext = this.nativeReadContext(session, pendingTx);
-    const attachment = await this.runWhenCoreIdle(() =>
-      this.closed ? undefined : this.attachQueryForContext(query, opts, readContext, pendingTx),
-    );
-    if (attachment === undefined) return;
-    try {
-      if (typeof (attachment as Partial<PendingNativeOperation<boolean>>).setWake === "function") {
-        await this.awaitNativeOperation(attachment as PendingNativeOperation<boolean>);
-      }
-      this.emitQueryCoverageTrace("attach");
-      // Durable Local reads returned above. A memory-only foreground must first
-      // receive its persistent owner's local answer, including an empty answer.
-      // The core attachment distinguishes that delivery from authority coverage:
-      // Local still completes while the owner is disconnected from edge/core.
-      if (!this.db.queryAttachmentIsCovered) return attachment;
-      const coverageKey = this.coverageKey(readContext, session);
-      const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
-      const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
-      const requiresFreshPeerConfirmation =
-        this.nonDurableClient &&
-        tier !== "local" &&
-        readPropagationIsFull(optionsJson) &&
-        confirmedPeerActivityEpoch != null;
-      // A prior confirmation can recover a reattachment only if no newer worker
-      // frame has arrived. Otherwise the old coverage state could be exposed to
-      // a query whose authorization (for example, an authorship-scoped policy)
-      // is about to change.
-      if (
-        mayReusePeerConfirmation &&
-        confirmedPeerActivityEpoch != null &&
-        (await this.runWhenCoreIdle(
-          () =>
-            !this.closed &&
-            this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
-            this.db.queryAttachmentIsCovered!(attachment),
-        ))
-      ) {
-        return attachment;
-      }
-      const minimumPeerActivityEpoch =
-        this.nonDurableClient && tier !== "local" ? this.peerTransportActivityEpoch : undefined;
-      const pendingPeerActivityEpoch =
-        this.nonDurableClient &&
-        tier !== "local" &&
-        !requiresFreshPeerConfirmation &&
-        this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
-          ? this.peerTransportActivityEpoch
-          : undefined;
-      await this.waitForQueryCoverage(
-        attachment,
-        query,
-        readOptions(tier, false, optionsJson),
-        readContext,
-        minimumPeerActivityEpoch,
-        pendingPeerActivityEpoch,
-        mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
-      );
-      if (this.nonDurableClient) {
-        await this.runWhenCoreIdle(() => {
-          if (this.closed || !this.db.queryAttachmentIsCovered!(attachment)) return;
-          const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-          confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
-          this.peerCoveredQueries.set(query, confirmations);
-        });
-      }
-      this.emitQueryCoverageTrace("covered");
-      return attachment;
-    } catch (error) {
-      this.db.detachQuery?.(attachment);
-      throw error;
-    }
-  }
-
   /**
    * A strict remote query cannot materialize its local snapshot before an
    * in-flight server handshake has either admitted its authority transport or
-   * failed. Relation-IR reads bypass query attachment, so they share this
-   * gate with attached reads instead of acquiring a second coverage path.
+   * failed. Relation-IR reads share this gate with other prepared reads.
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "edge" && tier !== "global") return;
@@ -3350,6 +2785,19 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /** Apply every worker frame already admitted before `all` creates its fresh
+   * coverage attachment. A queued receipt from an older usage site therefore
+   * cannot satisfy the new binding-owned read operation. */
+  private async processPendingPeerActivityBeforeRead(): Promise<void> {
+    if (!this.nonDurableClient) return;
+    while (
+      !this.closed &&
+      this.peerTransportProcessedActivityEpoch < this.peerTransportActivityEpoch
+    ) {
+      await this.progressPeerTransport();
+    }
+  }
+
   private attachLocalReadCoverageInBackground(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
@@ -3358,35 +2806,28 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
-    if (this.nonDurableClient || !this.serverTransport || !this.db.attachQuery) return;
+    if (this.nonDurableClient || !this.serverTransport) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
       if (this.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
-      const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
-      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+      await this.waitForStrictRemoteQueryTransport("edge");
+      if (this.closed) return;
+      await this.readRowsForContextAsync(
+        query,
+        readOptions("edge", false, edgeOptionsJson),
+        this.nativeReadContext(session),
+      );
     };
 
     void refresh().catch((error: unknown) => {
       if (this.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for edge query coverage") {
+      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
         return;
       }
       this.handleServerTransportError(error);
     });
-  }
-
-  /** Coverage is partitioned by the same native read context that owns it. */
-  private coverageKey(context: NativeReadContext, session: RuntimeSession | null): string {
-    switch (context.kind) {
-      case "client-local":
-        return "client-local";
-      case "backend-authority":
-        return "backend-authority";
-      case "session-authority":
-        return JSON.stringify([bytesKey(context.identity), canonicalJson(session?.claims ?? {})]);
-    }
   }
 
   admitLocalFirstSession(session: Session, token: string, appId: string): void {
@@ -3406,7 +2847,6 @@ export class NativeRuntimeAdapter implements Runtime {
       new Utf8Decoder().decode(authorBytesForSession(session)),
     );
   }
-
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
@@ -3427,71 +2867,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
-  private async waitForQueryCoverage(
-    attachment: unknown,
-    query: PreparedQuery,
-    opts: unknown,
-    context: NativeReadContext,
-    minimumPeerActivityEpoch?: number,
-    pendingPeerActivityEpoch?: number,
-    exactContextWasConfirmed = false,
-  ): Promise<void> {
-    const deadline = Date.now() + 15_000;
-    const tier = (opts as { tier?: string }).tier ?? "";
-    const state = { tier, stage: "start", iterations: 0, lastCovered: null as boolean | null };
-    this.activeCoverageWaits.add(state);
-    try {
-      while (Date.now() < deadline) {
-        state.iterations += 1;
-        // A query can still be waiting for an upstream coverage response while
-        // its owning browser runtime is being torn down. `close()` frees the
-        // WASM Db, so this background wait must not touch its attachment after
-        // that boundary.
-        if (this.closed) return;
-        this.throwServerTransportErrorForTier(tier);
-        state.stage = "pump";
-        await this.pumpServerTransport();
-        this.throwServerTransportErrorForTier(tier);
-        state.stage = "probe";
-        const covered = await this.runWhenCoreIdle(() => {
-          if (this.closed) return true;
-          if (!this.db.queryAttachmentIsCovered) return false;
-          const peerActivityWasProcessed =
-            minimumPeerActivityEpoch == null ||
-            this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
-            (exactContextWasConfirmed &&
-              minimumPeerActivityEpoch > 0 &&
-              this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
-            (pendingPeerActivityEpoch != null &&
-              this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
-          return peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment);
-        });
-        state.lastCovered = covered;
-        if (covered) return;
-        try {
-          state.stage = "read";
-          await this.readRowsForContextAsync(query, opts, context);
-          if (!this.db.queryAttachmentIsCovered) return;
-        } catch (error) {
-          if (!isPendingCoverageError(error)) throw error;
-        }
-        state.stage = "sleep";
-        const transportError = this.waitForServerTransportError(tier);
-        try {
-          await (transportError ? Promise.race([sleep(10), transportError.promise]) : sleep(10));
-        } finally {
-          transportError?.cancel();
-        }
-      }
-      this.scheduleServerPump();
-      const error = new Error("Timed out waiting for edge query coverage");
-      error.stack += `\nQuery coverage state: ${JSON.stringify(this.describeQueryCoverageWaits())}`;
-      throw error;
-    } finally {
-      this.activeCoverageWaits.delete(state);
-    }
-  }
-
   private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
     const definition = this.schema[table];
     if (!definition) throw new Error(`unknown table ${table}`);
@@ -3509,12 +2884,15 @@ export class NativeRuntimeAdapter implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
-  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
+  private assertTransactionWriteIdentity(
+    pending: PendingTx,
+    identity: Uint8Array | undefined,
+  ): void {
     if (pending.kind === "exclusive") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime exclusive transaction cannot mix write identities");
       }
-      return this.txForRead(pending);
+      return;
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
@@ -3522,7 +2900,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (identity && !pending.identity) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    return this.txForRead(pending);
   }
 
   private assertTransactionAttribution(
@@ -3538,45 +2915,6 @@ export class NativeRuntimeAdapter implements Runtime {
         "Native runtime backend-attributed transaction requires its original provenance subject",
       );
     }
-  }
-
-  private txForRead(pending: PendingTx): Tx {
-    const existing = pending.txByView.get(this);
-    if (existing) return existing;
-    const tx =
-      pending.kind === "mergeable"
-        ? this.db.attachMergeableTx(pending.id)
-        : this.db.attachExclusiveTx?.(pending.id);
-    if (!tx) throw new Error("Native runtime does not support attached exclusive transactions");
-    pending.txByView.set(this, tx);
-    return tx;
-  }
-
-  private releaseTransactionViews(pending: PendingTx): void {
-    for (const tx of pending.txByView.values()) {
-      tx.close?.();
-    }
-    pending.txByView.clear();
-  }
-
-  private exclusiveTx(id: OpenTransactionId): Tx {
-    if (!this.db.exclusiveTx) {
-      throw new Error(
-        "Native runtime cannot perform exclusive transaction writes: " +
-          "the native runtime exclusive transaction API is unavailable.",
-      );
-    }
-    return this.db.exclusiveTx(id);
-  }
-
-  private mergeableTxForIdentity(id: OpenTransactionId, identity: Uint8Array): Tx {
-    if (!this.db.mergeableTxForIdentity) {
-      throw new Error(
-        "Native runtime cannot perform session-scoped transaction writes: " +
-          "the native runtime mergeable transaction API has no identity-aware staging methods.",
-      );
-    }
-    return this.db.mergeableTxForIdentity(id, identity);
   }
 
   private pumpSubscriptions(): void {
@@ -4626,15 +3964,6 @@ function rejectAttributedBranchWrite(
   }
 }
 
-function requireBackendAttributionAbi<T>(method: T | undefined, operation: string): T {
-  if (!method) {
-    throw new Error(
-      `Native runtime does not support backend-attributed ${operation}; rebuild the matching Jazz native artifact`,
-    );
-  }
-  return method;
-}
-
 function sessionFromWriteContext(writeContext?: string | null): RuntimeSession | null {
   if (!writeContext) return null;
   try {
@@ -4832,7 +4161,8 @@ function readOptions(
   optionsJson?: string | null,
 ): unknown {
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
-  const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
+  const readOptions: Record<string, unknown> = {};
+  if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
@@ -5330,15 +4660,6 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isPendingCoverageError(error: unknown): boolean {
-  const message = errorMessage(error);
-  return (
-    message.includes("NotCovered") ||
-    message.includes("not covered") ||
-    message.includes("has not reached requested tier")
-  );
 }
 
 function rejectedWaitError(

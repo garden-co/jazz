@@ -94,21 +94,10 @@ export type NativeForegroundCommand =
   | { type: "permissionAdvice"; action: NativeForegroundPermissionAdviceAction }
   | "probe"
   | "tick"
-  | { type: "prepareQuery"; query: Uint8Array }
-  | { type: "all"; query: number }
+  | { type: "prepareQuery"; query: Uint8Array; kind: "query" | "relation" }
+  | { type: "all"; query: number; optionsJson: string; transaction?: number }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | {
-      type: "allRelationQuery" | "subscribeRelationQuery";
-      queryBytes: Uint8Array;
-      optionsJson: string;
-    }
-  | {
-      type: "allWithOptions" | "allRelationSnapshotWithOptions";
-      query: number;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "subscribe"; query: number }
+  | { type: "subscribe"; query: number; optionsJson: string }
   | { type: "drainSubscription"; subscription: number }
   | { type: "unsubscribe"; subscription: number }
   | "close"
@@ -139,7 +128,6 @@ export type NativeForegroundCommand =
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
-  | { type: "subscribeWithOptions"; query: number; optionsJson: string }
   | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
   | { type: "waitForPendingWrites"; tier: string }
   | { type: "disconnectNativeUpstream" }
@@ -184,7 +172,6 @@ export type NativeForegroundCommand =
       descriptorsJson: string;
       updatedAtMs?: number;
     };
-
 /** The existing core transaction semantics selected by the foreground codec. */
 export type NativeForegroundTransactionKind = "mergeable" | "exclusive";
 
@@ -362,10 +349,14 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command === "probe") return Uint8Array.of(0);
   if (command === "tick") return Uint8Array.of(1);
   if (command === "close") return Uint8Array.of(7);
-  if (command.type === "disconnectNativeUpstream") return Uint8Array.of(23);
-  if (command.type === "reconnectNativeUpstream") return Uint8Array.of(24);
-  if (command.type === "nativeConnectionStatus") return Uint8Array.of(25);
-  if (command.type === "nativeSessionMetadata") return Uint8Array.of(26);
+  if (command.type === "disconnectNativeUpstream") return Uint8Array.of(20);
+  if (command.type === "reconnectNativeUpstream") return Uint8Array.of(21);
+  if (command.type === "nativeConnectionStatus") return Uint8Array.of(22);
+  if (command.type === "nativeSessionMetadata") return Uint8Array.of(23);
+  if (command.type === "drainMutationErrors") return Uint8Array.of(25);
+  if (command.type === "waitForPendingWrites") {
+    return concatForegroundBytes(Uint8Array.of(34), encodeForegroundString(command.tier));
+  }
   if (command.type === "permissionAdvice") {
     const action = command.action;
     const tag = { insert: 0, read: 1, update: 2, delete: 3 }[action.type];
@@ -377,115 +368,46 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
             ...(action.type === "update" ? [encodeForegroundBytes(action.patch)] : []),
           );
     return concatForegroundBytes(
-      Uint8Array.of(38, tag),
+      Uint8Array.of(33, tag),
       encodeForegroundString(action.table),
       target,
     );
   }
   if (command.type === "prepareQuery") {
-    return concatForegroundBytes(Uint8Array.of(2), encodeForegroundBytes(command.query));
+    return concatForegroundBytes(
+      Uint8Array.of(2),
+      encodeForegroundBytes(command.query),
+      Uint8Array.of(command.kind === "query" ? 0 : 1),
+    );
   }
-  if (command.type === "subscribeWithOptions")
+  if (command.type === "all") {
     return concatForegroundBytes(
-      Uint8Array.of(20),
-      encodeForegroundU64(command.query),
-      encodeForegroundString(command.optionsJson),
-    );
-  if (command.type === "waitForPendingWrites")
-    return concatForegroundBytes(Uint8Array.of(39), encodeForegroundString(command.tier));
-  if (command.type === "waitForTransaction")
-    return concatForegroundBytes(
-      Uint8Array.of(21),
-      encodeForegroundId(command.txId, "transaction id"),
-      encodeForegroundString(command.tier),
-    );
-  if (command.type === "all")
-    return concatForegroundBytes(Uint8Array.of(3), encodeForegroundU64(command.query));
-  if (command.type === "allWithOptions" || command.type === "allRelationSnapshotWithOptions")
-    return concatForegroundBytes(
-      Uint8Array.of(command.type === "allWithOptions" ? 18 : 19),
+      Uint8Array.of(3),
       encodeForegroundU64(command.query),
       encodeForegroundString(command.optionsJson),
       command.transaction === undefined
         ? Uint8Array.of(0)
         : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.transaction)),
     );
-  if (command.type === "allRelationQuery" || command.type === "subscribeRelationQuery")
+  }
+  if (command.type === "subscribe") {
     return concatForegroundBytes(
-      Uint8Array.of(command.type === "allRelationQuery" ? 33 : 37),
-      encodeForegroundBytes(command.queryBytes),
-      encodeForegroundString(command.optionsJson),
-    );
-  if (command.type === "localCurrentRow")
-    return concatForegroundBytes(
-      Uint8Array.of(34),
-      encodeForegroundString(command.table),
-      encodeForegroundId(command.rowId, "row id"),
-    );
-  if (command.type === "subscribe")
-    return concatForegroundBytes(Uint8Array.of(4), encodeForegroundU64(command.query));
-  if (command.type === "drainSubscription")
-    return concatForegroundBytes(Uint8Array.of(5), encodeForegroundU64(command.subscription));
-  if (command.type === "unsubscribe")
-    return concatForegroundBytes(Uint8Array.of(6), encodeForegroundU64(command.subscription));
-  if (command.type === "poll")
-    return concatForegroundBytes(Uint8Array.of(8), encodeForegroundU64(command.operation));
-  if (command.type === "cancel")
-    return concatForegroundBytes(Uint8Array.of(9), encodeForegroundU64(command.operation));
-  if (command.type === "writeState")
-    return concatForegroundBytes(Uint8Array.of(27), encodeForegroundId(command.txId, "txId"));
-  if (command.type === "drainMutationErrors") return Uint8Array.of(28);
-  if (command.type === "beginStreamingMutation") {
-    const kind = ["insert", "update", "upsert"].indexOf(command.mutation);
-    if (kind < 0) throw new Error("Invalid streaming mutation kind");
-    return concatForegroundBytes(
-      Uint8Array.of(29, kind),
-      encodeForegroundString(command.table),
-      encodeForegroundId(command.rowId, "row id"),
-      encodeForegroundBytes(command.cells),
-      encodeForegroundString(command.column),
+      Uint8Array.of(4),
+      encodeForegroundU64(command.query),
       encodeForegroundString(command.optionsJson),
     );
   }
-  if (command.type === "pushStreamingMutation")
-    return concatForegroundBytes(
-      Uint8Array.of(30),
-      encodeForegroundU64(command.upload),
-      encodeForegroundBytes(command.chunk),
-    );
-  if (command.type === "finishStreamingMutation" || command.type === "abortStreamingMutation")
-    return concatForegroundBytes(
-      Uint8Array.of(command.type === "finishStreamingMutation" ? 31 : 32),
-      encodeForegroundU64(command.upload),
-    );
-  if (command.type === "updateLargeValues")
-    return concatForegroundBytes(
-      Uint8Array.of(35),
-      encodeForegroundString(command.table),
-      encodeForegroundId(command.rowId, "row id"),
-      encodeForegroundBytes(command.patch),
-      encodeForegroundString(command.descriptorsJson),
-      command.updatedAtMs === undefined
-        ? Uint8Array.of(0)
-        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)),
-    );
-  if (command.type === "stageMutation" || command.type === "directMutation") {
-    const kinds = ["insert", "update", "upsert", "delete", "restore"];
-    const kind = kinds.indexOf(command.mutation);
-    if (kind < 0) throw new Error("Invalid foreground mutation kind");
-    return concatForegroundBytes(
-      Uint8Array.of(command.type === "directMutation" ? 36 : 22),
-      command.type === "directMutation"
-        ? new Uint8Array()
-        : encodeForegroundU64(command.transaction),
-      Uint8Array.of(kind),
-      encodeForegroundString(command.table),
-      command.rowId === undefined
-        ? Uint8Array.of(0)
-        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundId(command.rowId, "row id")),
-      encodeForegroundBytes(command.cells),
-      encodeForegroundString(command.optionsJson),
-    );
+  if (command.type === "drainSubscription") {
+    return concatForegroundBytes(Uint8Array.of(5), encodeForegroundU64(command.subscription));
+  }
+  if (command.type === "unsubscribe") {
+    return concatForegroundBytes(Uint8Array.of(6), encodeForegroundU64(command.subscription));
+  }
+  if (command.type === "poll") {
+    return concatForegroundBytes(Uint8Array.of(8), encodeForegroundU64(command.operation));
+  }
+  if (command.type === "cancel") {
+    return concatForegroundBytes(Uint8Array.of(9), encodeForegroundU64(command.operation));
   }
   if (command.type === "beginTransaction") {
     if (command.kind !== "mergeable" && command.kind !== "exclusive") {
@@ -530,13 +452,86 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
       encodeForegroundId(command.rowId, "row id"),
     );
   }
-  if (command.type === "commitTransaction")
+  if (command.type === "commitTransaction") {
     return concatForegroundBytes(Uint8Array.of(15), encodeForegroundU64(command.transaction));
-  if (command.type === "rollbackTransaction")
+  }
+  if (command.type === "rollbackTransaction") {
     return concatForegroundBytes(Uint8Array.of(16), encodeForegroundU64(command.transaction));
+  }
+  if (command.type === "waitForTransaction") {
+    return concatForegroundBytes(
+      Uint8Array.of(18),
+      encodeForegroundId(command.txId, "transaction id"),
+      encodeForegroundString(command.tier),
+    );
+  }
+  if (command.type === "stageMutation" || command.type === "directMutation") {
+    const kinds = ["insert", "update", "upsert", "delete", "restore"];
+    const kind = kinds.indexOf(command.mutation);
+    if (kind < 0) throw new Error("Invalid foreground mutation kind");
+    return concatForegroundBytes(
+      Uint8Array.of(command.type === "directMutation" ? 32 : 19),
+      command.type === "directMutation"
+        ? new Uint8Array()
+        : encodeForegroundU64(command.transaction),
+      Uint8Array.of(kind),
+      encodeForegroundString(command.table),
+      command.rowId === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundId(command.rowId, "row id")),
+      encodeForegroundBytes(command.cells),
+      encodeForegroundString(command.optionsJson),
+    );
+  }
+  if (command.type === "writeState") {
+    return concatForegroundBytes(Uint8Array.of(24), encodeForegroundId(command.txId, "txId"));
+  }
+  if (command.type === "beginStreamingMutation") {
+    const kind = ["insert", "update", "upsert"].indexOf(command.mutation);
+    if (kind < 0) throw new Error("Invalid streaming mutation kind");
+    return concatForegroundBytes(
+      Uint8Array.of(26, kind),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, "row id"),
+      encodeForegroundBytes(command.cells),
+      encodeForegroundString(command.column),
+      encodeForegroundString(command.optionsJson),
+    );
+  }
+  if (command.type === "pushStreamingMutation") {
+    return concatForegroundBytes(
+      Uint8Array.of(27),
+      encodeForegroundU64(command.upload),
+      encodeForegroundBytes(command.chunk),
+    );
+  }
+  if (command.type === "finishStreamingMutation" || command.type === "abortStreamingMutation") {
+    return concatForegroundBytes(
+      Uint8Array.of(command.type === "finishStreamingMutation" ? 28 : 29),
+      encodeForegroundU64(command.upload),
+    );
+  }
+  if (command.type === "localCurrentRow") {
+    return concatForegroundBytes(
+      Uint8Array.of(30),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, "row id"),
+    );
+  }
+  if (command.type === "updateLargeValues") {
+    return concatForegroundBytes(
+      Uint8Array.of(31),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, "row id"),
+      encodeForegroundBytes(command.patch),
+      encodeForegroundString(command.descriptorsJson),
+      command.updatedAtMs === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundU64(command.updatedAtMs)),
+    );
+  }
   throw new Error("Unsupported native foreground command");
 }
-
 /** Decode the first vertical-slice foreground NativeDb response vocabulary. */
 export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegroundResponse {
   if (!(bytes instanceof Uint8Array) || bytes.length === 0) {

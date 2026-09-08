@@ -19,7 +19,14 @@ declare module "jazz-wasm" {
   ): string;
 
   export class WasmPreparedQuery {}
-  export class QueryAttachment {}
+  type PendingNativeOperation<T> = {
+    poll(): T | undefined;
+    cancel(): void;
+    setWake(callback: () => void): void;
+  };
+  export class PendingNativeRead {
+    poll(): Uint8Array | null;
+  }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
     cancel(): void;
@@ -53,6 +60,7 @@ declare module "jazz-wasm" {
 
   export type WriteOptions = {
     author?: Uint8Array;
+    attribution?: Uint8Array;
     updatedAtMs?: number;
   };
 
@@ -72,31 +80,6 @@ declare module "jazz-wasm" {
   export type RestoreOptions = WriteOptions & {
     branch?: unknown;
   };
-
-  export class WasmTx {
-    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
-    updateEncoded(
-      table: string,
-      rowId: Uint8Array,
-      patch: Uint8Array,
-      options?: UpdateOptions,
-    ): void;
-    upsertEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      options?: UpsertOptions,
-    ): void;
-    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): void;
-    restoreEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      options?: RestoreOptions,
-    ): void;
-    commit(): WasmWrite;
-    rollback(): void;
-  }
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
@@ -131,203 +114,107 @@ declare module "jazz-wasm" {
       maxAgeMs?: number | null,
     ): void;
     evictExpiredStagedLargeValues(): Promise<number>;
-    beginStreamingMutationEncoded(
+    beginStreamingMutation(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       column: string,
       mutation?: "insert" | "update" | "upsert",
       author?: Uint8Array,
+      attribution?: Uint8Array,
       updatedAtMs?: number,
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
-    /** Backend-only provenance-preserving streaming mutation. */
-    beginStreamingMutationAttributedEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      column: string,
-      mutation: "insert" | "update" | "upsert" | undefined,
-      author: Uint8Array | null | undefined,
-      attribution: Uint8Array,
-      updatedAtMs?: number,
-      head?: unknown,
-      base?: unknown,
-    ): StreamingMutation;
-    readValueRange(
-      table: string,
-      rowId: Uint8Array,
-      column: string,
-      start: number,
-      end: number,
-    ): Promise<Uint8Array>;
-    readTextUtf16Range(
-      table: string,
-      rowId: Uint8Array,
-      column: string,
-      start: number,
-      end: number,
-    ): Promise<string>;
-    readJsonPointer(
-      table: string,
-      rowId: Uint8Array,
-      column: string,
-      pointer: string,
-    ): Promise<unknown | null>;
-    appendValue(
-      table: string,
-      rowId: Uint8Array,
-      column: string,
-      bytes: Uint8Array,
-    ): Promise<WasmWrite>;
-    spliceValue(
-      table: string,
-      rowId: Uint8Array,
-      column: string,
-      offset: number,
-      deleteLength: number,
-      insert: Uint8Array,
-    ): Promise<WasmWrite>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
-    insertWithIdEncodedAttributed(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      author: Uint8Array,
-    ): WasmWrite;
-    updateEncodedAttributed(
-      table: string,
-      rowId: Uint8Array,
-      patch: Uint8Array,
-      author: Uint8Array,
-    ): WasmWrite;
-    upsertEncodedAttributed(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      author: Uint8Array,
-    ): WasmWrite;
-    deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): WasmWrite;
-    restoreEncodedAttributed(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      author: Uint8Array,
-    ): WasmWrite;
-    beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | null): void;
-    beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void;
+    beginTransaction(
+      openTransactionId: string,
+      kind: string,
+      author?: Uint8Array | null,
+      attribution?: Uint8Array | null,
+    ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
-    attachMergeableTx(openTransactionId: string): WasmTx;
-    attachExclusiveTx(openTransactionId: string): WasmTx;
 
-    prepareQuery(query: Uint8Array): WasmPreparedQuery;
-    prepareQueryAsync(
+    prepareQuery(
       query: Uint8Array,
+      kind: "query" | "relation",
       author?: Uint8Array,
       claims?: Record<string, unknown>,
-    ): {
-      poll(): WasmPreparedQuery | undefined;
-      cancel(): void;
-      setWake(callback: () => void): void;
-    };
-    subscribeAsync(
-      query: WasmPreparedQuery,
-      opts?: unknown,
-      author?: Uint8Array,
-    ): {
-      poll(): ReadableStream<unknown> | undefined;
-      cancel(): void;
-      setWake(callback: () => void): void;
-    };
+    ): WasmPreparedQuery | PendingNativeOperation<WasmPreparedQuery>;
     all(
       query: WasmPreparedQuery,
       opts: unknown,
       openTransactionId?: string,
       author?: Uint8Array,
-    ): Uint8Array | Promise<Uint8Array>;
-    allAsync(
+    ): Uint8Array | PendingNativeRead;
+    subscribe(
       query: WasmPreparedQuery,
       opts: unknown,
-      openTransactionId?: string,
       author?: Uint8Array,
-    ): Promise<Uint8Array>;
-    allRelationSnapshot(
-      query: WasmPreparedQuery,
-      opts: unknown,
-      openTransactionId?: string,
-      author?: Uint8Array,
-    ): Promise<Uint8Array>;
-    allRelationQuery(
-      queryBytes: Uint8Array,
-      opts: unknown,
-      author?: Uint8Array,
-    ): Promise<Uint8Array>;
-    subscribeForBackend(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQueryForBackend(
-      queryBytes: Uint8Array,
-      opts: unknown,
-    ): ReadableStream<unknown>;
-    one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
-    /** Attach coverage, optionally at an open transaction snapshot and/or explicit identity. */
-    attachQuery(
-      query: WasmPreparedQuery,
-      opts: unknown,
-      openTransactionId?: string,
-      author?: Uint8Array,
-    ): QueryAttachment;
-    queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
-    detachQuery(attachment: QueryAttachment): void;
-    subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQuery(queryBytes: Uint8Array, opts: unknown): ReadableStream<unknown>;
-    subscribeRelationQueryForIdentity(
-      queryBytes: Uint8Array,
-      author: Uint8Array,
-      opts: unknown,
-    ): ReadableStream<unknown>;
+    ): ReadableStream<unknown> | PendingNativeOperation<ReadableStream<unknown>>;
 
-    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
-    canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
-    requestInsertPermissionAdviceEncoded(
+    insert(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
+    insertInTransaction(
+      openTransactionId: string,
       table: string,
       cells: Uint8Array,
-    ): WasmPermissionAdviceRequest;
+      options?: InsertOptions,
+    ): Uint8Array;
+    canInsert(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
+    requestInsertPermissionAdvice(table: string, cells: Uint8Array): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    updateEncoded(
+    update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions): WasmWrite;
+    updateInTransaction(
+      openTransactionId: string,
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
       options?: UpdateOptions,
-    ): WasmWrite;
-    updateLargeValuesEncoded(
+    ): void;
+    updateLargeValues(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
       descriptors: unknown,
       updatedAtMs?: number | null,
     ): WasmWrite;
-    requestUpdatePermissionAdviceEncoded(
+    requestUpdatePermissionAdvice(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    upsertEncoded(
+    upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions): WasmWrite;
+    upsertInTransaction(
+      openTransactionId: string,
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       options?: UpsertOptions,
-    ): WasmWrite;
-    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
-    restoreEncoded(
+    ): void;
+    delete(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
+    deleteInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      options?: DeleteOptions,
+    ): void;
+    restore(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
       options?: RestoreOptions,
     ): WasmWrite;
+    restoreInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      options?: RestoreOptions,
+    ): void;
     setTickScheduler(
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;
@@ -357,8 +244,5 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): Promise<WasmTransport>;
-    mergeableTx(openTransactionId: string): WasmTx;
-    mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): WasmTx;
-    exclusiveTx(openTransactionId: string): WasmTx;
   }
 }
