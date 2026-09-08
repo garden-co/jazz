@@ -51,3 +51,16 @@ export {
 } from "./session.js";
 
 export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
+
+export {
+  connectAuthProvider,
+  type AuthProviderConnection,
+  type AuthProviderState,
+  type AuthProviderSnapshot,
+} from "../session/auth-provider.js";
+export { connectBetterAuth, type BetterAuthClient } from "../session/better-auth.js";
+export { useBetterAuth, useAuthProvider } from "./auth-provider.js";
+
+export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
+export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
+export type { JazzAppProviderProps } from "./provider.js";

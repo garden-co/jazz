@@ -1,35 +1,50 @@
-import { it, expect, vi } from "vitest";
+import { afterEach, it, expect, vi } from "vitest";
 import { mount, unmount, tick, createRawSnippet } from "svelte";
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import type { JWTAuth } from "../accounts/enrollment.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
+
+type ProviderSession = { session: { id: string }; user: { id: string } } | null;
+type ProviderRead = { data: ProviderSession; error?: { message: string } };
 const controls = vi.hoisted(() => ({
   owner: undefined as any,
   auth: undefined as any,
-  current: undefined as any,
-  actions: undefined as any,
-  read: undefined as undefined | (() => Promise<{ data: any; error?: { message: string } }>),
+  current: null as ProviderSession,
+  actions: undefined as { signOut(): Promise<void> } | undefined,
+  read: undefined as undefined | (() => Promise<ProviderRead>),
+  tokenRead: undefined as undefined | (() => Promise<{ data: { token: string } }>),
 }));
-vi.mock("jazz-tools/svelte", async () => ({
-  JazzSessionProvider: (await import("./JazzSessionProvider.svelte")).default,
+vi.mock("../session/create-jazz-session.js", () => ({
   createJazzSession: async () => controls.owner,
 }));
+vi.mock("jazz-tools/svelte", async () => ({
+  JazzProvider: (await import("./JazzProvider.svelte")).default,
+  betterAuth: (await import("../session/app.js")).betterAuth,
+}));
+vi.mock("$app/navigation", () => ({ goto: vi.fn() }));
 vi.mock("$lib/auth-client", () => ({
   authClient: {
-    useSession: () => controls.auth,
-    getSession: async () => (controls.read ? controls.read() : { data: controls.current }),
+    $store: {
+      atoms: {
+        get session() {
+          return controls.auth;
+        },
+      },
+    },
+    $fetch: async () =>
+      controls.tokenRead ? controls.tokenRead() : { data: { token: controls.current!.user.id } },
     signOut: async () => {
+      // Better Auth's atom can publish its null snapshot after signOut resolves.
       controls.current = null;
       return {};
     },
   },
-  getToken: async () => "token",
 }));
-vi.mock("$lib/accounts", () => ({ credential: async () => "token" }));
-vi.mock("$lib/auth-actions", () => ({
-  setAuthActions: (actions: unknown) => {
-    controls.actions = actions;
+vi.mock("./auth-state.js", () => ({
+  setJazzAuth: (auth: { logout(): Promise<void> }) => {
+    controls.actions = { signOut: auth.logout };
   },
 }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
@@ -40,32 +55,67 @@ const settle = async () => {
     await Promise.resolve();
   }
 };
-it("B's startup retry cannot admit A after failed B login and failed A reopen", async () => {
-  controls.current = { session: { id: "session-a" }, user: { id: "principal-a" } };
-  controls.auth = writable({ data: controls.current });
-  let failLogin = false,
-    failOpen = false;
-  const handles = {
-    "principal-a": { id: "account-a", identity: { issuer: "provider", subject: "principal-a" } },
-    "principal-b": { id: "account-b", identity: { issuer: "provider", subject: "principal-b" } },
+const identity = (letter: string): ProviderSession => ({
+  session: { id: `session-${letter}` },
+  user: { id: `principal-${letter}` },
+});
+let dispose: (() => Promise<void>) | undefined;
+afterEach(async () => {
+  await dispose?.();
+  dispose = undefined;
+});
+
+async function setupNotifications(read?: typeof controls.read) {
+  controls.read = read;
+  controls.tokenRead = undefined;
+  controls.current = identity("a");
+  const state = writable({
+    data: controls.current,
+    isPending: false,
+    error: undefined as ProviderRead["error"],
+    refetch: refresh,
+  });
+  async function refresh() {
+    const result = controls.read ? await controls.read() : { data: controls.current };
+    state.set({ ...result, isPending: false, error: result.error, refetch: refresh });
+  }
+  controls.auth = {
+    get: () => get(state),
+    subscribe: state.subscribe,
+    set: (next: ProviderRead) =>
+      state.set({ ...next, isPending: false, error: next.error, refetch: refresh }),
+  };
+  if (read) await refresh();
+  const events: string[] = [];
+  let releaseLogin: (() => void) | undefined;
+  let delayedSubject: string | undefined;
+  let rejectedSubject: string | undefined;
+  let failOpen = false;
+  const unused = async () => {
+    throw new Error("unexpected non-atomic admission");
   };
   const accounts = new AccountManager({
     createLocalFirst: () => {
-      throw new Error("unexpected");
+      throw new Error("unexpected local-first");
     },
     restoreLocalFirst: () => {
-      throw new Error("unexpected");
+      throw new Error("unexpected restore");
     },
-    logout: () => {},
-    registerJWT: async () => {
-      throw new Error("unexpected");
+    registerJWT: unused,
+    loginJWT: unused,
+    linkJWT: unused,
+    logout: () => {
+      events.push("logout");
     },
-    linkJWT: async () => {
-      throw new Error("unexpected");
-    },
-    loginJWT: async () => {
-      if (failLogin) throw new Error("B login rejected");
-      return handles[controls.current.user.id as keyof typeof handles] as never;
+    loginOrRegisterJWT: async (auth: JWTAuth) => {
+      const subject = typeof auth === "string" ? auth : await auth.getToken();
+      events.push(`login:${subject}`);
+      if (subject === rejectedSubject) throw new Error(`${subject} admission rejected`);
+      if (subject === delayedSubject)
+        await new Promise<void>((resolve) => {
+          releaseLogin = resolve;
+        });
+      return { id: `account-${subject}`, identity: { issuer: "provider", subject } } as never;
     },
   });
   const owner = await createJazzSessionOwner({
@@ -83,135 +133,104 @@ it("B's startup retry cannot admit A after failed B login and failed A reopen", 
   });
   controls.owner = owner;
   const target = document.createElement("div");
-  const component = mount(AppProvider, {
-    target,
-    props: { children: createRawSnippet(() => ({ render: () => "<p>PRIVATE DATA</p>" })) },
-  });
-  await settle();
-  expect(target.textContent).toContain("PRIVATE DATA");
-  failLogin = true;
-  failOpen = true;
-  controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
-  controls.auth.set({ data: controls.current });
-  await settle();
-  expect(owner.getSnapshot().status).toBe("error");
-  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-a");
-  expect(target.textContent).not.toContain("PRIVATE DATA");
-  target.querySelector<HTMLButtonElement>("button")!.click();
-  await settle();
-  const observed = target.textContent;
-  await unmount(component);
-  await settle();
-  expect(observed).not.toContain("PRIVATE DATA");
-});
-
-async function setupNotifications(read?: typeof controls.read) {
-  controls.read = read;
-  const events: string[] = [];
-  let releaseLogin: (() => void) | undefined;
-  let delayedSubject: string | undefined;
-  controls.current = { session: { id: "session-a" }, user: { id: "principal-a" } };
-  controls.auth = writable({ data: controls.current });
-  const accounts = new AccountManager({
-    createLocalFirst: () => {
-      throw new Error("unexpected local-first");
-    },
-    restoreLocalFirst: () => {
-      throw new Error("unexpected restore");
-    },
-    registerJWT: async () => {
-      throw new Error("unexpected registration");
-    },
-    linkJWT: async () => {
-      throw new Error("unexpected link");
-    },
-    logout: () => {
-      events.push("logout");
-    },
-    loginJWT: async () => {
-      const subject = controls.current.user.id;
-      events.push(`login:${subject}`);
-      if (subject === delayedSubject)
-        await new Promise<void>((resolve) => {
-          releaseLogin = resolve;
-        });
-      return { id: subject, identity: { issuer: "provider", subject } } as never;
-    },
-  });
-  const owner = await createJazzSessionOwner({
-    accounts,
-    openClient: async () =>
-      attachSubscriptionStore(
-        { db: { onAuthChanged: () => () => {} }, session: null, shutdown: async () => {} },
-        {} as never,
-      ),
-  });
-  controls.owner = owner;
-  const target = document.createElement("div");
+  let childRenders = 0;
   const component = mount(AppProvider, {
     target,
     props: {
-      children: createRawSnippet(() => ({ render: () => "<p>PRIVATE DATA</p>" })),
+      // A signed-out route renders a login form; private content needs a client.
+      // A stale reopened A client would still expose this marker if admitted for B.
+      children: createRawSnippet(() => ({
+        render: () => {
+          childRenders++;
+          return owner.getSnapshot().client ? "<p>PRIVATE DATA</p>" : "<p>SIGN IN</p>";
+        },
+      })),
     },
   });
+  let mounted = true;
+  const stop = async () => {
+    if (mounted) {
+      mounted = false;
+      await unmount(component);
+    }
+    await settle();
+  };
+  dispose = stop;
   await settle();
   return {
     owner,
+    childRenders: () => childRenders,
     target,
     events,
-    component,
+    stop,
+    refresh,
+    publish(letter: string | null) {
+      controls.current = letter === null ? null : identity(letter);
+      controls.auth.set({ data: controls.current });
+    },
     delay(subject: string) {
       delayedSubject = subject;
     },
     release() {
       releaseLogin!();
     },
+    reject(subject: string) {
+      rejectedSubject = subject;
+    },
+    failReopen() {
+      failOpen = true;
+    },
   };
 }
 
-it("logout then explicit login tolerates delayed provider-store notifications without extra transitions", async () => {
-  const { owner, target, events, component } = await setupNotifications();
+it("B's startup retry cannot admit A after failed B login and failed A reopen", async () => {
+  const { owner, target, publish, reject, failReopen } = await setupNotifications();
+  expect(target.textContent).toContain("PRIVATE DATA");
+  reject("principal-b");
+  failReopen();
+  publish("b");
+  await settle();
+  expect(owner.getSnapshot().status).toBe("error");
+  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-a");
+  expect(target.textContent).not.toContain("PRIVATE DATA");
+  target.querySelector<HTMLButtonElement>("button")!.click();
+  await settle();
+  expect(target.textContent).not.toContain("PRIVATE DATA");
+});
+
+it("logout then provider login tolerates delayed atom notifications without extra transitions", async () => {
+  const { owner, target, events, publish } = await setupNotifications();
   expect(events).toEqual(["login:principal-a"]);
-  const logout = controls.actions.signOut();
+  const logout = controls.actions!.signOut();
   await settle();
   await logout;
   expect(owner.getSnapshot().status).toBe("signed-out");
-  // The store still advertises A even though the authoritative provider is null.
   expect(events).toEqual(["login:principal-a", "logout"]);
   controls.auth.set({ data: null });
   await settle();
-  const login = controls.actions.authenticate(false, async () => {
-    controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
-    return {};
-  });
+  // Forms now call the provider directly. Jazz waits for the provider atom.
+  controls.current = identity("b");
   await settle();
-  await login;
-  expect(owner.getSnapshot().status).toBe("ready");
-  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-b");
-  expect(events).toEqual(["login:principal-a", "logout", "login:principal-b"]);
+  expect(owner.getSnapshot().status).toBe("signed-out");
   expect(target.textContent).not.toContain("PRIVATE DATA");
   controls.auth.set({ data: controls.current });
   await settle();
+  expect(owner.getSnapshot().account?.identity.subject).toBe("principal-b");
+  expect(events).toEqual(["login:principal-a", "logout", "login:principal-b"]);
   expect(target.textContent).toContain("PRIVATE DATA");
-  // A genuinely newer null notification still logs out the selected account.
-  controls.current = null;
-  controls.auth.set({ data: null });
+  publish(null);
   await settle();
   expect(owner.getSnapshot().status).toBe("signed-out");
   expect(events).toEqual(["login:principal-a", "logout", "login:principal-b", "logout"]);
-  await unmount(component);
-  await settle();
 });
 
 it("coalesces provider changes during reconciliation and processes the latest account after the pending login", async () => {
-  const { owner, target, events, component, delay, release } = await setupNotifications();
+  const { owner, target, events, publish, delay, release } = await setupNotifications();
   delay("principal-b");
-  controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
-  controls.auth.set({ data: controls.current });
+  publish("b");
   await settle();
   expect(events).toEqual(["login:principal-a", "login:principal-b"]);
-  controls.current = { session: { id: "session-c" }, user: { id: "principal-c" } };
-  controls.auth.set({ data: controls.current });
+  publish("c");
   await settle();
   expect(target.textContent).not.toContain("PRIVATE DATA");
   release();
@@ -220,41 +239,34 @@ it("coalesces provider changes during reconciliation and processes the latest ac
   expect(owner.getSnapshot().account?.identity.subject).toBe("principal-c");
   expect(target.textContent).toContain("PRIVATE DATA");
   expect(target.textContent).not.toContain("already pending");
-  await unmount(component);
-  await settle();
 });
 
-it("does not enroll after an authoritative provider read finishes following unmount", async () => {
-  const { owner, events, component } = await setupNotifications();
-  let resolve!: (value: { data: any }) => void;
-  controls.read = () =>
+it("does not enroll after a provider token read finishes following unmount", async () => {
+  const { owner, events, publish, stop } = await setupNotifications();
+  let resolve!: (value: { data: { token: string } }) => void;
+  controls.tokenRead = () =>
     new Promise((yes) => {
       resolve = yes;
     });
-  const next = { session: { id: "session-b" }, user: { id: "principal-b" } };
-  controls.current = next;
-  controls.auth.set({ data: next });
+  publish("b");
   await settle();
-  await unmount(component);
-  resolve({ data: next });
+  await stop();
+  resolve({ data: { token: "principal-b" } });
   await settle();
   expect(owner.getSnapshot().status).toBe("closed");
   expect(events).toEqual(["login:principal-a"]);
-  controls.read = undefined;
 });
 
 it("keeps a successful provider request with a failed session read actionable", async () => {
-  const { target, events, component } = await setupNotifications();
-  const failure = new Error("provider session read unavailable");
-  const login = controls.actions.authenticate(false, async () => {
-    controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
-    controls.auth.set({ data: controls.current });
-    controls.read = async () => ({ data: null, error: { message: failure.message } });
-    return {};
+  const { target, events, refresh } = await setupNotifications();
+  controls.current = identity("b");
+  controls.read = async () => ({
+    data: null,
+    error: { message: "provider session read unavailable" },
   });
-  await expect(login).rejects.toThrow(failure.message);
+  await refresh();
   await settle();
-  expect(target.textContent).toContain(failure.message);
+  expect(target.textContent).toContain("provider session read unavailable");
   expect(target.querySelector("button")).not.toBeNull();
   expect(events).toEqual(["login:principal-a"]);
   controls.read = undefined;
@@ -262,45 +274,34 @@ it("keeps a successful provider request with a failed session read actionable", 
   await settle();
   expect(target.textContent).toContain("PRIVATE DATA");
   expect(events).toEqual(["login:principal-a", "login:principal-b"]);
-  await unmount(component);
-  await settle();
 });
 
 it("does not let failed signup recovery suppress a genuinely newer provider account", async () => {
-  const { owner, target, events, component } = await setupNotifications();
-  const signup = controls.actions.authenticate(true, async () => {
-    controls.current = { session: { id: "session-b" }, user: { id: "principal-b" } };
-    controls.auth.set({ data: controls.current });
-    return {};
-  });
-  await expect(signup).rejects.toThrow("unexpected registration");
+  const { owner, target, events, publish, reject } = await setupNotifications();
+  reject("principal-b");
+  publish("b");
   await settle();
+  expect(target.textContent).toContain("principal-b admission rejected");
   expect(target.textContent).not.toContain("PRIVATE DATA");
-  controls.current = { session: { id: "session-c" }, user: { id: "principal-c" } };
-  controls.auth.set({ data: controls.current });
+  publish("c");
   await settle();
-  expect(events).toEqual(["login:principal-a", "login:principal-c"]);
+  expect(events).toEqual(["login:principal-a", "login:principal-b", "login:principal-c"]);
   expect(owner.getSnapshot().account?.identity.subject).toBe("principal-c");
   expect(target.textContent).toContain("PRIVATE DATA");
-  await unmount(component);
-  await settle();
 });
 
 it("does not turn a resolved provider read error into logout during reconciliation", async () => {
-  const { owner, target, events, component } = await setupNotifications();
+  const { owner, target, events, refresh } = await setupNotifications();
   controls.read = async () => ({ data: null, error: { message: "provider unavailable" } });
-  controls.auth.set({ data: null });
+  await refresh();
   await settle();
   expect(events).toEqual(["login:principal-a"]);
   expect(owner.getSnapshot().account?.identity.subject).toBe("principal-a");
   expect(target.textContent).not.toContain("PRIVATE DATA");
-  controls.read = undefined;
-  await unmount(component);
-  await settle();
 });
 
 it("retains the prepared session and retries an initial provider read failure", async () => {
-  const { owner, target, events, component } = await setupNotifications(async () => ({
+  const { owner, target, events } = await setupNotifications(async () => ({
     data: null,
     error: { message: "initial provider read unavailable" },
   }));
@@ -313,6 +314,14 @@ it("retains the prepared session and retries an initial provider read failure", 
   expect(events).toEqual(["login:principal-a"]);
   expect(owner.getSnapshot().status).toBe("ready");
   expect(target.textContent).toContain("PRIVATE DATA");
-  await unmount(component);
+});
+
+it("never mounts protected route children in the signed-out fallback", async () => {
+  const { target, publish, childRenders } = await setupNotifications();
+  const admittedRenders = childRenders();
+  publish(null);
   await settle();
+  expect(childRenders()).toBe(admittedRenders);
+  expect(target.textContent).toContain("Sign in");
+  expect(target.textContent).not.toContain("PRIVATE DATA");
 });

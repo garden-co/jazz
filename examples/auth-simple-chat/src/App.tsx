@@ -1,10 +1,5 @@
 import * as React from "react";
-import {
-  JazzSessionProvider,
-  useJazzSessionOwner,
-  useJazzSession,
-  useAuthState,
-} from "jazz-tools/react";
+import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -67,154 +62,109 @@ const config = {
 };
 
 export function App() {
-  const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
   const [providerError, setProviderError] = React.useState<Error>();
-  React.useEffect(() => {
-    if (!session) return;
-    void (async () => {
-      const saved = readStoredAuthSession(DEFAULT_APP_ID);
-      if (saved) await session.loginJWT({ getToken: async () => saved.token });
-    })().catch((cause) =>
-      setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
-    );
-  }, [session]);
-  if (!session)
-    return error ? (
-      <p role="alert">
-        {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
-      </p>
-    ) : (
-      <p>Preparing account…</p>
-    );
-  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
-  return (
-    <JazzSessionProvider session={session} fallback={screen}>
-      {screen}
-    </JazzSessionProvider>
+  // Retain manual link/retry intent while the provider detaches the data view.
+  const recovery = React.useRef<(() => Promise<void>) | undefined>(undefined);
+  const restored = React.useRef(false);
+  const screen = (
+    <SessionScreen
+      providerError={providerError}
+      reportError={setProviderError}
+      recovery={recovery}
+      restored={restored}
+    />
   );
+  return (
+    <JazzProvider
+      {...config}
+      initial="local-first"
+      signedOut={screen}
+      loading={screen}
+      error={screen}
+    >
+      {screen}
+    </JazzProvider>
+  );
+}
+
+async function getStoredToken() {
+  const saved = readStoredAuthSession(DEFAULT_APP_ID);
+  if (!saved) throw new Error("Sign in to the provider first");
+  return saved.token;
 }
 
 function SessionScreen({
   providerError,
   reportError,
+  recovery,
+  restored,
 }: {
+  restored: React.RefObject<boolean>;
   providerError?: Error;
   reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+  recovery: React.RefObject<(() => Promise<void>) | undefined>;
 }) {
-  const session = useJazzSession();
-  const {
-    account,
-    status,
-    error: sessionError,
-    loginJWT,
-    linkJWT,
-    registerJWT,
-    logout,
-    createLocalFirst,
-    retry,
-  } = session;
-  const error = sessionError ?? providerError;
-  const clearProviderError = () =>
-    reportError((current) => (current === providerError ? undefined : current));
-
-  async function signIn(email: string, password: string) {
-    const auth = await requestSignIn(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, auth);
-    await loginJWT({ getToken: async () => auth.token });
-    clearProviderError();
-  }
-  async function signUp(email: string, password: string) {
-    const auth = await requestSignUp(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, auth);
-    await linkJWT({ getToken: async () => auth.token });
-    clearProviderError();
-  }
-  async function signOut() {
-    reportError(undefined);
+  const { sessionActions: actions, ...session } = useJazzAuth();
+  React.useEffect(() => {
+    if (restored.current || session.status !== "ready") return;
+    restored.current = true;
+    const saved = readStoredAuthSession(DEFAULT_APP_ID);
+    if (saved)
+      void perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken })).catch(() => {});
+  }, [session.status]);
+  // This is the manual hybrid escape hatch: no automatic enrollment connector
+  // runs while signup links the provider identity to this local-first account.
+  async function perform(action: () => Promise<void>) {
+    recovery.current = action;
     try {
-      await logout();
-      clearStoredAuthSession(DEFAULT_APP_ID);
-      await createLocalFirst();
+      await action();
+      reportError(undefined);
     } catch (cause) {
       reportError(cause instanceof Error ? cause : new Error(String(cause)));
       throw cause;
     }
   }
-  async function registerProvider() {
-    const auth = readStoredAuthSession(DEFAULT_APP_ID);
-    if (!auth) throw new Error("Sign in to the provider first");
-    const getToken = async () => auth.token;
-    if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
-    else await registerJWT({ getToken });
+  async function signIn(email: string, password: string) {
+    const auth = await requestSignIn(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await perform(() => actions.loginOrRegisterJWT({ getToken: getStoredToken }));
   }
-
+  async function signUp(email: string, password: string) {
+    const auth = await requestSignUp(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await perform(() => actions.linkJWT({ getToken: getStoredToken }));
+  }
+  async function signOut() {
+    await perform(async () => {
+      await actions.logout();
+      clearStoredAuthSession(DEFAULT_APP_ID);
+      await actions.createLocalFirst();
+    });
+  }
+  const error = providerError ?? session.error;
   return (
     <>
       {error && (
-        <div role="alert">
+        <section role="alert">
           <p>{error.message}</p>
           <button
             onClick={() =>
-              void registerProvider()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            {account?.identity.issuer === "urn:jazz:local-first"
-              ? "Link provider identity to this account"
-              : "Create a new Jazz account for this provider identity"}
-          </button>
-          <button
-            onClick={() =>
-              void retry()
-                .then(clearProviderError)
-                .catch(() => {})
+              void perform(
+                session.error
+                  ? session.retry
+                  : (recovery.current ??
+                      (() => actions.loginOrRegisterJWT({ getToken: getStoredToken }))),
+              ).catch(() => {})
             }
           >
             Retry
           </button>
-        </div>
+        </section>
       )}
-      {status === "ready" ? (
+      {session.status === "ready" ? (
         <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
-      ) : status === "signed-out" ? (
-        <div>
-          <button
-            onClick={() =>
-              void loginJWT({
-                getToken: async () => {
-                  const saved = readStoredAuthSession(DEFAULT_APP_ID);
-                  if (!saved) throw new Error("Sign in to the provider first");
-                  return saved.token;
-                },
-              })
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Retry sign in
-          </button>
-          <button
-            onClick={() =>
-              void createLocalFirst()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Continue locally
-          </button>
-          <button
-            onClick={() =>
-              void signOut()
-                .then(clearProviderError)
-                .catch(() => {})
-            }
-          >
-            Retry sign out
-          </button>
-        </div>
       ) : (
-        <p>Preparing account…</p>
+        <p>Preparing account...</p>
       )}
     </>
   );

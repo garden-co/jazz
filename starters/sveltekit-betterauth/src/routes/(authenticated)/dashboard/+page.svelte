@@ -2,17 +2,17 @@
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
   import TodoWidget from "$lib/TodoWidget.svelte";
-  import { getAuthActions } from "$lib/auth-actions";
+  import { useJazzAuth } from "jazz-tools/svelte";
 
   const session = authClient.useSession();
-  const auth = getAuthActions();
+  const auth = useJazzAuth();
 
   async function handleSignOut() {
     try {
-      await auth.signOut();
+      await auth.logout();
       await goto("/");
     } catch (cause) {
-      auth.reportFailure(cause);
+      // Shared auth state exposes logout failures and retry.
     }
   }
 </script>

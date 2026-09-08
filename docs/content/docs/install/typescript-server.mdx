@@ -46,7 +46,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 ### Add permissions
 
-The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
+A table with no [permission](/docs/auth/permissions) declarations is open to reads and writes. Once a table declares any policy, omitted operations are denied. For this quickstart, explicitly allow all four operations:
 
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";

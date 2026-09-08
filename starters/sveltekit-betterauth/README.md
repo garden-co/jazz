@@ -62,16 +62,17 @@ signed-in users, and `/dashboard/*` back to `/` for signed-out users.
 This uses `getSessionCookie`, a cheap cookie-presence check, not a full
 DB read.
 
-`src/lib/JazzClientProvider.svelte` prepares an `AccountManager` and owns one
-Jazz client for its selected opaque account handle. Its credential callback
-re-mints Better Auth JWTs through `authClient.$fetch("/token")` whenever Jazz
-needs them, rather than treating a one-shot JWT as identity.
+The app owns one `JazzSession` and connects it to Better Auth with `connectBetterAuth`.
+Sign-up and sign-in forms only call Better Auth. The connection watches initial
+hydration, login, signup, restoration, and logout; it atomically logs in or
+creates the Jazz account with `loginOrRegisterJWT`. Repeated notifications for
+the same provider identity do not replace the client. Jazz requests fresh JWTs
+from `/token` when credentials expire.
 
-Reloads and ordinary sign-ins use `loginJWT`; `registerJWT` is reserved for an
-explicit sign-up or recovery retry. Provider session changes and form actions
-are serialized and freshness-fenced. Before logout or account replacement the
-old client shuts down with `waitForSync: true`; failed account actions reopen
-the selected handle and leave a retryable setup error visible.
+Sign-out goes through the connection, which flushes Jazz before Better Auth
+revokes credentials. Failures stay visible with a retry action. For a guest
+account whose existing data must survive signup, use the hybrid starter's
+explicit `linkJWT` flow without attaching the automatic connection.
 
 ## Extending the schema
 

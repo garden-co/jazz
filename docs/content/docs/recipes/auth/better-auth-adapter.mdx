@@ -10,15 +10,50 @@ The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For gene
 
 Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
 
-```bash
-# Generate the Better Auth schema module into schema-better-auth/
-npx @better-auth/cli@latest generate \
-  --config ./src/lib/auth.ts \
-  --output ./schema-better-auth/schema.ts
+Start with shared Better Auth options. The JWT plugin supplies the bearer tokens used in the account enrollment example below; it also adds a JWKS table to the generated schema.
 
-# Validate the generated schema source alongside your own
-pnpm dlx jazz-tools@alpha validate
+```ts title="auth-options.ts"
+import { jwt } from "better-auth/plugins";
+
+export const authOptions = {
+  baseURL: process.env.BETTER_AUTH_URL!,
+  secret: process.env.BETTER_AUTH_SECRET!,
+  emailAndPassword: { enabled: true },
+  plugins: [jwt()],
+};
 ```
+
+Set `BETTER_AUTH_URL` to your application server's origin and `BETTER_AUTH_SECRET` to a private Better Auth secret. Keep plugins, additional fields, and model customizations in these shared options so generation and runtime use the same configuration.
+
+Create a separate configuration for generation. It does not import your app schema or open a Jazz session, so it works before either the generated file or the sync server exists. The CLI only requests schema generation; the database callback is deliberately unavailable.
+
+```ts title="auth-generate.ts"
+import { betterAuth } from "better-auth";
+import { schema as s } from "jazz-tools";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { authOptions } from "./auth-options";
+
+export const auth = betterAuth({
+  ...authOptions,
+  database: jazzAdapter({
+    db: async () => {
+      throw new Error("The generation config cannot query the database");
+    },
+    schema: s.defineApp({}).wasmSchema,
+  }),
+});
+```
+
+Generate with the current [Better Auth CLI](https://www.better-auth.com/docs/concepts/cli):
+
+```bash
+npx auth@latest generate \
+  --config ./auth-generate.ts \
+  --output ./schema-better-auth/schema.ts \
+  --yes
+```
+
+`--yes` writes the output without an interactive confirmation. Review the generated diff when regenerating an existing module.
 
 Import the generated tables in your app's `schema.ts` and merge them into the app definition:
 
@@ -59,22 +94,38 @@ export default {
 };
 ```
 
+After adding both files, validate the merged schema and permissions:
+
+```bash
+pnpm dlx jazz-tools@alpha validate
+```
+
 ## Database Adapter
 
 Create a server-side [Jazz session](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
 
-```ts title="src/lib/auth.ts"
+```ts title="auth.ts"
 import { betterAuth } from "better-auth";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazzSession, type JazzSessionConfig } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app } from "../../schema";
+import { app } from "./schema";
+import permissions from "./permissions";
+import { authOptions } from "./auth-options";
 
-const session = await createJazzSession({
+export const jazzConfig = {
   app,
+  permissions,
   appId: process.env.APP_ID!,
   driver: { type: "memory" },
   serverUrl: process.env.SYNC_SERVER_URL!,
   env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+  jwksUrl: `${authOptions.baseURL}/api/auth/jwks`,
+  jwtIssuer: authOptions.baseURL,
+  jwtAudience: authOptions.baseURL,
+} satisfies JazzSessionConfig;
+
+const session = await createJazzSession({
+  ...jazzConfig,
   initial: { backendSecret: process.env.BACKEND_SECRET! },
 });
 
@@ -82,14 +133,14 @@ const snapshot = session.getSnapshot();
 if (snapshot.status !== "ready" || !snapshot.client) {
   throw snapshot.error ?? new Error("Backend session is not ready");
 }
-const client = snapshot.client;
+export const client = snapshot.client;
 
 export const auth = betterAuth({
+  ...authOptions,
   database: jazzAdapter({
-    db: () => client.db,
+    db: async () => client.db,
     schema: app.wasmSchema,
   }),
-  // ...your Better Auth config
 });
 ```
 
@@ -105,6 +156,63 @@ export const auth = betterAuth({
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
   `experimental.joins`.
 </Callout>
+
+### Connect Better Auth sessions to Jazz accounts
+
+The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, pass `auth={betterAuth(authClient)}` to the framework's `JazzProvider`; import the descriptor from `jazz-tools/client`. The provider owns the Jazz session, loading and error recovery. Vanilla apps can use `createJazzApp` with the same descriptor. Better Auth signup and login then automatically create or resolve the Jazz account; there is no second enrollment action. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
+
+Mount `auth.handler` using your framework's [Better Auth integration](https://www.better-auth.com/docs/installation). The [JWT plugin](https://www.better-auth.com/docs/plugins/jwt) exposes `/api/auth/token` for a signed-in user and `/api/auth/jwks` for verification. Configure the Jazz core with that reachable JWKS URL and the same issuer and audience as the backend's `jazzConfig`. For a self-hosted core, use `--jwks-url`, `--jwt-issuer`, and `--jwt-audience`; see [Server Setup](/docs/getting-started/server-setup). Set `BETTER_AUTH_URL` without a trailing slash in this example.
+
+For a server-only app, resolve the Better Auth cookie and opt into account creation
+on the immutable request scope. The shared backend client keeps its own identity;
+no extra Jazz session or client is created for the user:
+
+```ts title="messages.ts"
+import { auth, client } from "./auth";
+import { app } from "./schema";
+
+export async function messages(request: Request) {
+  const signedIn = await auth.api.getSession({ headers: request.headers });
+  if (!signedIn) return new Response("Sign in first", { status: 401 });
+  const { token } = await auth.api.getToken({ headers: request.headers });
+  const headers = new Headers(request.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  const bearerRequest = new Request(request, { headers });
+  const db = await client.forRequest(bearerRequest, { account: "login-or-register" });
+  return Response.json(await db.all(app.messages, { tier: "global" }));
+}
+```
+
+The core atomically resolves an active assignment or creates one for a fresh
+identity. Invalid and revoked credentials are rejected. Use the default strict
+request mode for a hybrid app where signup must link the fresh provider identity
+to an existing guest account first. See [Authentication](/docs/auth/authentication).
+
+Browser clients with an automatic connection can instead send a JWT from
+`/api/auth/token` as a bearer. Data routes then use the default strict scope:
+
+```ts title="messages.ts"
+import { auth, client } from "./auth";
+import { app } from "./schema";
+
+export async function messages(request: Request) {
+  const db = await client.forRequest(request);
+  return Response.json(await db.all(app.messages, { tier: "global" }));
+}
+
+// A cookie-based route can ask Better Auth for the JWT server-side instead.
+export async function messagesFromCookie(request: Request) {
+  const signedIn = await auth.api.getSession({ headers: request.headers });
+  if (!signedIn) return new Response("Sign in first", { status: 401 });
+  const { token } = await auth.api.getToken({ headers: request.headers });
+  const bearerRequest = new Request(request.url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return messages(bearerRequest);
+}
+```
+
+These scopes retain the verified user's policies and authorship without switching the shared backend owner. For account-owned rows, compare ownership against `session.user.account` in permissions; a Better Auth user ID or a JWT claim is not an admitted Jazz account UUID. If your application already retains an opaque admitted account handle, `await client.forAccount(account)` provides the same scope. Never accept a raw account ID from a request as authority.
 
 ### Publishing to a sync server
 

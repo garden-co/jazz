@@ -12,7 +12,7 @@ Run `pnpm install` then `pnpm dev`, with `BETTER_AUTH_SECRET` configured in `.en
 
 The browser creates the account manager on mount, selects `getLoggedIn() ?? createLocalFirst()`, and supplies the opaque account handle to `JazzSvelteProvider`. Server rendering does not use a module-global credential.
 
-After Better Auth sign-up, the active context shuts down with `shutdown({ waitForSync: true })`; `linkJWT({ getToken })` then runs outside the context and its selected handle opens the replacement. Sign-in calls `loginJWT({ getToken })`. Account credential callbacks handle refresh without rewriting a live context's JWT identity.
+After Better Auth sign-up, the active context shuts down with `shutdown({ waitForSync: true })`; `linkJWT({ getToken })` then runs outside the context and its selected handle opens the replacement. Sign-in calls `loginOrRegisterJWT({ getToken })`. Account credential callbacks handle refresh without rewriting a live context's JWT identity.
 
 The bundled Better Auth memory adapter is for local development only; replace it with persistent storage before deployment.
 
@@ -55,3 +55,7 @@ The included Better Auth adapter is in-memory.
 ## Where to go next
 
 Read the Jazz and Better Auth documentation before extending authentication.
+
+This starter uses manual hybrid authentication. Do not attach `connectBetterAuth`
+or `useBetterAuth`: signup must link the incoming identity before any automatic
+account creation. Auth-required apps can use the corresponding Better Auth starter.

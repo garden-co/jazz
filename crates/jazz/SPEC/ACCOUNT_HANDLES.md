@@ -19,7 +19,11 @@ to the shared state; they do not implement independent authentication flows.
 - Active admission and permission to manage identities are distinct from the
   permanent assignment. Founders initially have both permissions.
 - External registration is explicit and ordered. Login only resolves an
-  existing active assignment.
+  existing active assignment. The explicit login-or-register operation resolves
+  an active assignment or creates the first assignment in one serialized owner
+  request. It never reactivates or reassigns a revoked principal. Concurrent
+  requests and retries converge on the same assignment; a storage failure
+  requires authoritative recovery rather than speculative success.
 - Local-first founding is deterministic from the application namespace and
   verified founding key identity. It is usable offline; arbitrary external
   assignment cannot be accepted offline.
@@ -48,6 +52,9 @@ An application-scoped account manager provides:
   remote admission guarantee.
 - `registerJWT(auth): Promise<AccountHandle>`: explicit registration and selection.
 - `loginJWT(auth): Promise<AccountHandle>`: existing active assignment and selection.
+- `loginOrRegisterJWT(auth): Promise<AccountHandle>`: atomically resolve or create
+  an external identity's account and select it. Shared JazzSession exposes the
+  same action through its graceful shutdown and replacement lifecycle.
 - `linkJWT(auth): Promise<AccountHandle>`: link to the selected account and select
   a new handle acting as the linked principal.
 - `logout()`: clear selection and stop credential use without remote revocation
@@ -58,6 +65,17 @@ Credential inputs support refresh; plain JWT strings are a convenience.
 Concurrent operations cannot restore a login after logout or overwrite a newer
 selection. Successful remote side effects remain discoverable through login
 when the initiating UI operation was canceled.
+
+Default provider integrations use login-or-register for signup, signin and
+restoration. Linking is an explicit alternative before enrollment: a hybrid
+application must not automatically register the incoming identity before calling
+`linkJWT`. The core primitive does not infer linking or merge accounts. Existing
+strict login and registration operations retain their original semantics.
+
+The ordered owner performs login-or-register by looking up current admission and,
+only for an unassigned principal, persisting the existing Register command. No
+new durable record or wire encoding is introduced. Existing-account resolution
+does not emit a registry-change notification.
 
 Handles are opaque, immutable, application-scoped objects. They expose account
 ID and acting principal, not secrets. Existing contexts remain bound to their
@@ -268,8 +286,11 @@ handles. Logout fences late admissions and invalidates all issued handles.
 The ready backend client's `db` already carries backend authority. Public
 `forRequest` verifies the original bearer and resolves its active account
 through the core registry before creating an immutable policy scope. External
-JWT claims cannot choose an account, and request resolution never registers an
-external identity. Local-first founding remains the key-bound exception.
+JWT claims cannot choose an account. Request resolution defaults to strict login;
+`forRequest(request, { account: "login-or-register" })` explicitly opts that
+request into atomic external enrollment after bearer verification. It creates
+no separate runtime and does not change the backend's selected account.
+Local-first founding remains the key-bound exception, unaffected by this option.
 `forAccount` requires an opaque admitted user handle and re-verifies its proof.
 These operations do not switch the shared owner to serve concurrent requests.
 `withAttribution(account)` and `withAttributionForRequest(request)` retain

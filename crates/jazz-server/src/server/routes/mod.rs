@@ -110,6 +110,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/found-local-first", post(accounts::found_local_first))
         .route("/revoke", post(accounts::revoke))
         .route("/login", post(accounts::login))
+        .route("/login-or-register", post(accounts::login_or_register))
         .route("/links/request", post(accounts::request_link))
         .route("/links/accept", post(accounts::accept_link))
         .layer(middleware::from_fn_with_state(

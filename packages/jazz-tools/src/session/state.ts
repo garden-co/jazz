@@ -15,6 +15,7 @@ export type JazzSessionOperation =
   | "becomeBackend"
   | "registerJWT"
   | "loginJWT"
+  | "loginOrRegisterJWT"
   | "linkJWT"
   | "logout"
   | "retry";
@@ -24,6 +25,8 @@ export interface JazzSessionSnapshot<Client> {
   readonly client?: Client;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
+  /** Whether recovery repeats an uncommitted action or only reopens the selected account. */
+  readonly recovery?: "action" | "session";
 }
 export interface JazzSessionActions {
   createLocalFirst(): Promise<void>;
@@ -31,6 +34,7 @@ export interface JazzSessionActions {
   becomeBackend(auth: BackendAuth): Promise<void>;
   registerJWT(auth: JWTAuth): Promise<void>;
   loginJWT(auth: JWTAuth): Promise<void>;
+  loginOrRegisterJWT(auth: JWTAuth): Promise<void>;
   linkJWT(auth: JWTAuth): Promise<void>;
   logout(): Promise<void>;
   retry(): Promise<void>;
@@ -135,6 +139,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           account: selected,
           client: usable ? client : undefined,
           error: asError(cause),
+          recovery: "action",
         });
       }
       throw cause;
@@ -149,7 +154,12 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
         client = previous ? await openClient(previous) : undefined;
       } catch (startup) {
         if (token === generation)
-          publish({ status: "error", account: selected, error: asError(startup) });
+          publish({
+            status: "error",
+            account: selected,
+            error: asError(startup),
+            recovery: "action",
+          });
         throw cause;
       }
       if (token === generation)
@@ -158,6 +168,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
           account: selected,
           client,
           error: asError(cause),
+          recovery: "action",
         });
       throw cause;
     }
@@ -170,7 +181,7 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
       client = selected ? await openClient(selected) : undefined;
     } catch (cause) {
       if (token === generation)
-        publish({ status: "error", account: selected, error: asError(cause) });
+        publish({ status: "error", account: selected, error: asError(cause), recovery: "session" });
       throw cause;
     }
     if (token !== generation) throw superseded();
@@ -207,6 +218,8 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
     loginJWT: (auth) => run("loginJWT", () => accounts.loginJWT(auth)),
+    loginOrRegisterJWT: (auth) =>
+      run("loginOrRegisterJWT", () => accounts.loginOrRegisterJWT(auth)),
     linkJWT: (auth) => run("linkJWT", () => accounts.linkJWT(auth)),
     retry: () => run("retry", () => selected),
     logout: () => {

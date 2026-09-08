@@ -21,7 +21,7 @@ async function boot() {
   let providerLinkError: Error | undefined;
   try {
     const auth = await authClient.getSession();
-    if (auth.data?.session) await session.loginJWT({ getToken });
+    if (auth.data?.session) await session.loginOrRegisterJWT({ getToken });
   } catch (cause) {
     if (session.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") {
       await session.close();

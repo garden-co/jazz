@@ -35,7 +35,7 @@
       if (cancelled) { await owner.close(); return; }
       const auth = await authClient.getSession();
       if (auth.data?.session) {
-        try { await owner.loginJWT({ getToken: credential }); }
+        try { await owner.loginOrRegisterJWT({ getToken: credential }); }
         catch (cause) { if (owner.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") throw cause; }
       }
       if (cancelled) await owner.close();

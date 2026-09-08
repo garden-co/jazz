@@ -21,7 +21,7 @@
       return;
     }
     try {
-      await jazz.loginJWT({ getToken: credential });
+      await jazz.loginOrRegisterJWT({ getToken: credential });
     } catch (cause) {
       error = cause instanceof Error ? cause.message : "Sign-in failed";
       return;

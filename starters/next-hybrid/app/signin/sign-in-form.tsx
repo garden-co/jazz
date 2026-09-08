@@ -4,7 +4,7 @@ import Image from "next/image";
 import { useActionState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { getToken } from "@/lib/accounts";
-import { useJazzSession } from "jazz-tools/react";
+import { useJazzAuth } from "jazz-tools/react";
 
 async function signInAction(_prev: string | null, formData: FormData): Promise<string | null> {
   const email = formData.get("email") as string;
@@ -20,12 +20,12 @@ async function signInAction(_prev: string | null, formData: FormData): Promise<s
 }
 
 export function SignInForm() {
-  const lifecycle = useJazzSession();
+  const lifecycle = useJazzAuth();
   async function loginAction(previous: string | null, formData: FormData) {
     const result = await signInAction(previous, formData);
     if (result) return result;
     try {
-      await lifecycle.loginJWT({ getToken });
+      await lifecycle.sessionActions.loginOrRegisterJWT({ getToken });
     } catch (cause) {
       return cause instanceof Error ? cause.message : "Sign-in failed";
     }

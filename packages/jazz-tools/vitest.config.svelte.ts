@@ -14,6 +14,7 @@ export default defineConfig({
       ...(sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {}),
       $lib: resolve("../../starters/sveltekit-betterauth/src/lib"),
       "$env/dynamic/public": resolve("tests/svelte/starter-env.ts"),
+      "$app/navigation": resolve("tests/svelte/starter-navigation.ts"),
     },
   },
   test: {

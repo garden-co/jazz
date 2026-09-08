@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { authClient } from "./auth-client";
-import { useAuthActions } from "./main";
 
 export function SignInForm() {
-  const actions = useAuthActions();
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -18,15 +16,14 @@ export function SignInForm() {
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
     try {
-      await actions.authenticate(mode === "signup", () =>
-        mode === "signup"
-          ? authClient.signUp.email({
-              name: (form.elements.namedItem("name") as HTMLInputElement).value,
-              email,
-              password,
-            })
-          : authClient.signIn.email({ email, password }),
-      );
+      const result = await (mode === "signup"
+        ? authClient.signUp.email({
+            name: (form.elements.namedItem("name") as HTMLInputElement).value,
+            email,
+            password,
+          })
+        : authClient.signIn.email({ email, password }));
+      if (result.error) throw new Error(result.error.message ?? "Authentication failed");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Account setup failed");
     } finally {

@@ -23,6 +23,7 @@ async function setup() {
     logout: vi.fn(),
     registerJWT: vi.fn(async (_auth: JWTAuth) => next),
     loginJWT: vi.fn(async (_auth: JWTAuth) => next),
+    loginOrRegisterJWT: vi.fn(async (_auth: JWTAuth) => next),
     linkJWT: vi.fn(async (_account: AccountHandle, _auth: JWTAuth) => next),
   };
   const accounts = new AccountManager(enrollment, old);
@@ -39,6 +40,23 @@ const tick = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 };
 describe("Jazz session lifecycle", () => {
+  it("login-or-register waits for shutdown and uses the shared selection lifecycle", async () => {
+    const { session, clients, enrollment, next } = await setup();
+    const pending = deferred();
+    clients[0]!.shutdown.mockReturnValueOnce(pending.promise);
+    const command = session.loginOrRegisterJWT("token");
+    await tick();
+    expect(session.getSnapshot().pending).toBe("loginOrRegisterJWT");
+    expect(enrollment.loginOrRegisterJWT).not.toHaveBeenCalled();
+    pending.resolve();
+    await command;
+    expect(enrollment.loginOrRegisterJWT).toHaveBeenCalledWith("token");
+    expect(enrollment.registerJWT).not.toHaveBeenCalled();
+    expect(enrollment.loginJWT).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
+    await session.close();
+  });
+
   it("waits for committed consumer detach before sync and enrollment", async () => {
     const { session, clients, enrollment, next } = await setup();
     const lease = attachJazzSessionConsumer(session),
@@ -180,6 +198,7 @@ describe("Jazz session lifecycle", () => {
       createLocalFirst: create,
       registerJWT: async () => account,
       loginJWT: async () => account,
+      loginOrRegisterJWT: async () => account,
       linkJWT: async () => account,
     });
     const session = await createJazzSessionOwner({

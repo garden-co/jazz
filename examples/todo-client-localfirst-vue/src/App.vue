@@ -1,47 +1,30 @@
 <script setup lang="ts">
-import { shallowRef, watch } from "vue";
+import { computed } from "vue";
 import { JazzProvider } from "jazz-tools/vue";
 import type { DbConfig } from "jazz-tools";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
-import { prepareAccountConfig } from "./account.js";
 
 const props = defineProps<{ config?: Partial<DbConfig> }>();
-const config = shallowRef<DbConfig>();
-const error = shallowRef<Error>();
 // #region context-setup-vue
-watch(
-  () => props.config,
-  (overrides, _previous, onCleanup) => {
-    let cancelled = false;
-    onCleanup(() => {
-      cancelled = true;
-    });
-    config.value = undefined;
-    error.value = undefined;
-    prepareAccountConfig(overrides).then(
-      (value) => {
-        if (!cancelled) config.value = value;
-      },
-      (cause) => {
-        if (!cancelled) error.value = cause instanceof Error ? cause : new Error(String(cause));
-      },
-    );
-  },
-  { immediate: true },
+const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+const config = computed(() => ({
+  appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID,
+  serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
+  env: "dev" as const,
+  ...props.config,
+}));
+// Explicit account overrides retain the caller-owned account path used by tests.
+const providerProps = computed(() =>
+  config.value.account ? { config: config.value as DbConfig } : config.value,
 );
 // #endregion context-setup-vue
 </script>
 
 <template>
-  <p v-if="error" role="alert">{{ error.message }}</p>
-  <JazzProvider v-else-if="config" :config="config">
+  <JazzProvider v-bind="providerProps" :key="JSON.stringify([config.appId, config.serverUrl])">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />
-    <template #fallback>
-      <p>Loading...</p>
-    </template>
   </JazzProvider>
-  <p v-else>Loading...</p>
 </template>

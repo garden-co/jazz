@@ -54,16 +54,17 @@ Route protection is handled by two server components. `app/page.tsx` calls
 `app/dashboard/layout.tsx` does the same check in the other direction,
 redirecting signed-out users back to `/`.
 
-`components/jazz-provider.tsx` prepares an `AccountManager` and opens its one
-Jazz client with the selected opaque account handle. Its token callback calls
-`authClient.$fetch("/token")` whenever Jazz needs a current Better Auth JWT;
-the token is not used as a one-shot client identity.
+The app owns one `JazzSession` and connects it to Better Auth with `useBetterAuth`.
+Sign-up and sign-in forms only call Better Auth. The connection watches initial
+hydration, login, signup, restoration, and logout; it atomically logs in or
+creates the Jazz account with `loginOrRegisterJWT`. Repeated notifications for
+the same provider identity do not replace the client. Jazz requests fresh JWTs
+from `/token` when credentials expire.
 
-Reloads and ordinary sign-ins use `loginJWT`; `registerJWT` is reserved for an
-explicit sign-up or recovery retry. Provider session changes and form actions
-are serialized and freshness-fenced. The old client shuts down with
-`waitForSync: true` before logout or account replacement, while a failed
-operation reopens the selected handle and surfaces a retryable setup error.
+Sign-out goes through the connection, which flushes Jazz before Better Auth
+revokes credentials. Failures stay visible with a retry action. For a guest
+account whose existing data must survive signup, use the hybrid starter's
+explicit `linkJWT` flow without attaching the automatic connection.
 
 ## Extending the schema
 

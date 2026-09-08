@@ -1,29 +1,11 @@
 import { useSession } from "./auth-client";
-import { SignInForm } from "./sign-in-form";
 import { TodoWidget } from "./todo-widget";
-import { useAuthActions } from "./main";
+import { useJazzAuth } from "jazz-tools/react";
 
 export function App() {
-  const actions = useAuthActions();
-  const { data: session, isPending } = useSession();
-  if (isPending) return <div>Loading…</div>;
-
-  if (!session) {
-    return (
-      <main className="page-center">
-        <img src="/jazz.svg" alt="Jazz" className="wordmark" width={80} height={24} />
-        <SignInForm />
-      </main>
-    );
-  }
-
-  async function handleSignOut() {
-    try {
-      await actions.signOut();
-    } catch (cause) {
-      actions.reportFailure(cause);
-    }
-  }
+  const { logout } = useJazzAuth();
+  const { data: session } = useSession();
+  if (!session) return null;
 
   return (
     <main className="dashboard">
@@ -31,7 +13,7 @@ export function App() {
         <img src="/jazz.svg" alt="Jazz" className="wordmark" width={80} height={24} />
         <div className="auth-nav">
           <p>Hello, {session.user.name}</p>
-          <button type="button" onClick={handleSignOut}>
+          <button type="button" onClick={() => void logout()}>
             Sign out
           </button>
         </div>

@@ -7,7 +7,10 @@ import type { DbConfig } from "./create-db.js";
 
 const mocks = vi.hoisted(() => ({
   createJazzClient: vi.fn(),
+  createJazzSession: vi.fn(),
 }));
+
+vi.mock("./create-jazz-session.js", () => ({ createJazzSession: mocks.createJazzSession }));
 
 vi.mock("./create-jazz-client.js", () => ({
   createJazzClient: mocks.createJazzClient,
@@ -117,4 +120,26 @@ describe("React Native JazzProvider", () => {
       nativeRelay: { capability: replacementSource },
     });
   });
+});
+
+it("uses native defaults and the native session factory for ergonomic props", async () => {
+  mocks.createJazzSession.mockRejectedValue(new Error("native offline"));
+  const view = render(
+    <JazzProvider
+      appId="native-app"
+      serverUrl="https://sync.example.test"
+      store={{ read: async () => null, update: async () => {} }}
+    >
+      <span>data</span>
+    </JazzProvider>,
+  );
+  expect(view.container.querySelector("native-view native-text")?.textContent).toBe("Loading…");
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(mocks.createJazzSession).toHaveBeenCalledWith(
+    expect.objectContaining({ initial: "local-first" }),
+  );
+  expect(view.container.querySelector("native-pressable")?.textContent).toBe("Try again");
+  expect(view.container.querySelector("section, p, button")).toBeNull();
 });

@@ -249,6 +249,7 @@ export function createAccountManagerWithRuntime(options: {
       },
       registerJWT: (auth) => enroll("register", auth),
       loginJWT: (auth) => enroll("login", auth),
+      loginOrRegisterJWT: (auth) => enroll("login-or-register", auth),
       async linkJWT(account, auth) {
         const started = epoch;
         const approvingToken = await accountToken(account, registry);

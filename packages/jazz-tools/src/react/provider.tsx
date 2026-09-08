@@ -9,6 +9,9 @@ import {
   useSession,
   type CreateJazzClient,
 } from "../react-core/provider.js";
+import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
+import type { JazzAuth } from "../session/app.js";
+import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
 // In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
@@ -48,7 +51,14 @@ type JazzProviderCommonProps = {
   autoAttachDevTools?: boolean;
 };
 
-export type JazzProviderProps = JazzProviderCommonProps & { config: DbConfig };
+export type JazzAppProviderProps = JazzSessionConfig &
+  JazzAppViewProps<CreatedJazzClient> & {
+    auth?: JazzAuth;
+    autoAttachDevTools?: boolean;
+  };
+export type JazzProviderProps =
+  | (JazzProviderCommonProps & { config: DbConfig })
+  | JazzAppProviderProps;
 
 type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
   config: DbConfig;
@@ -80,7 +90,8 @@ function ConfiguredJazzProvider({
 }
 
 export function JazzProvider(props: JazzProviderProps) {
-  return <ConfiguredJazzProvider {...props} />;
+  if ("config" in props) return <ConfiguredJazzProvider {...props} />;
+  return <ApplicationJazzProvider {...props} />;
 }
 
 export function useJazzClient(): JazzClientContextValue {
@@ -97,3 +108,39 @@ export function useDb(): CreatedJazzClient["db"] {
 export { useSession };
 
 export type { JazzClientContextValue };
+
+function ApplicationJazzProvider({
+  auth,
+  children,
+  signedOut,
+  loading,
+  error,
+  autoAttachDevTools,
+  ...config
+}: JazzAppProviderProps) {
+  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  return (
+    <ConfiguredJazzAppProvider
+      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
+      auth={auth}
+      createJazzSession={createJazzSession}
+      signedOut={signedOut}
+      loading={loading === undefined ? <p role="status">Loading…</p> : loading}
+      error={
+        error === undefined
+          ? (state) => (
+              <section role="alert">
+                <p>We couldn’t connect to your account. Please try again.</p>
+                <button type="button" onClick={() => void state.retry()}>
+                  Try again
+                </button>
+              </section>
+            )
+          : error
+      }
+    >
+      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
+      {children}
+    </ConfiguredJazzAppProvider>
+  );
+}

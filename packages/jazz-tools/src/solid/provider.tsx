@@ -41,11 +41,11 @@ export function JazzClientProvider(props: JazzClientProviderProps) {
   );
 }
 
-export type JazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
+export type LegacyJazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
   config: DbConfig;
 };
 
-export function JazzProvider(props: JazzProviderProps) {
+export function LegacyJazzProvider(props: LegacyJazzProviderProps) {
   const client = createSolidJazzClient(() => props.config);
 
   return (
@@ -81,3 +81,5 @@ export function useAuthState() {
   const client = useJazzClient();
   return () => client.authState;
 }
+
+export { JazzProvider, type JazzProviderProps } from "./app.js";

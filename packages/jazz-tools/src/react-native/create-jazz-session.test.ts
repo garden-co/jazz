@@ -30,6 +30,7 @@ for (const [host, create, prepare] of [
           restoreLocalFirst: () => replacement,
           registerJWT: async () => replacement,
           loginJWT: async () => replacement,
+          loginOrRegisterJWT: async () => replacement,
           linkJWT: async () => replacement,
           logout: vi.fn(),
         },
@@ -66,6 +67,7 @@ for (const [host, create, prepare] of [
         restoreLocalFirst: () => makeFakeAccount(),
         registerJWT: async () => makeFakeAccount(),
         loginJWT: async () => makeFakeAccount(),
+        loginOrRegisterJWT: async () => makeFakeAccount(),
         linkJWT: async () => makeFakeAccount(),
         logout: vi.fn(),
       });

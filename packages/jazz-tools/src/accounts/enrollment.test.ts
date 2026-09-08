@@ -231,3 +231,23 @@ it("rejects SYSTEM identities through every ordinary JWT enrollment path", async
   await expect(manager.linkJWT(forged)).rejects.toThrow(/external_identity_required/);
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+it("login-or-register uses one core operation and preserves selection on denial", async () => {
+  // Accept every fetch overload while retaining a recorded input for the URL assertion.
+  const fetcher = vi.fn(
+    async (_input: unknown) => new Response(JSON.stringify({ account: id, identity })),
+  );
+  const manager = setup(fetcher);
+  const auth = { getToken: vi.fn(async () => token()) };
+  const account = await manager.loginOrRegisterJWT(auth);
+  expect(account.id).toBe(id);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(fetcher.mock.calls[0]?.[0]).toBe(`${registry}/login-or-register`);
+  fetcher.mockResolvedValueOnce(new Response("identity_not_authorized", { status: 403 }));
+  await expect(manager.loginOrRegisterJWT(auth)).rejects.toThrow("identity_not_authorized");
+  expect(manager.getLoggedIn()).toBe(account);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  const reserved = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:system", sub: "node" }))}.signature`;
+  await expect(manager.loginOrRegisterJWT(reserved)).rejects.toThrow("external_identity_required");
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});

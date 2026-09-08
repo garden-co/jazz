@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import {
@@ -58,7 +59,7 @@ export type JazzSessionConfig = Omit<
 export interface JazzClient extends SharedJazzClient {
   flush(): void;
   /** Verify a request and retain its immutable user policy context. Backend clients only. */
-  forRequest(request: RequestLike): Promise<Db>;
+  forRequest(request: RequestLike, options?: BackendRequestOptions): Promise<Db>;
   /** Use an admitted account without switching the shared session. Backend clients only. */
   forAccount(account: AccountHandle): Promise<Db>;
   /** Keep backend permissions while recording verified user provenance. */
@@ -280,9 +281,9 @@ export async function createJazzSession(
           get session(): PublicSession | null {
             return client.session;
           },
-          async forRequest(request: RequestLike) {
+          async forRequest(request: RequestLike, options?: BackendRequestOptions) {
             assertActive();
-            const scoped = await context.forRequest(request);
+            const scoped = await context.forRequest(request, undefined, options);
             assertActive();
             return scoped;
           },

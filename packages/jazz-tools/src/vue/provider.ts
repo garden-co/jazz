@@ -27,7 +27,7 @@ export interface JazzClientProviderProps {
   autoAttachDevTools?: boolean;
 }
 
-export interface JazzProviderProps {
+export interface LegacyJazzProviderProps {
   config: DbConfig;
   autoAttachDevTools?: boolean;
 }
@@ -124,11 +124,11 @@ export const JazzClientProvider = defineComponent({
  * Creates a Jazz client from a reactive config and makes it available to child components.
  * Clients created by this provider are shut down when the config changes or the provider unmounts.
  */
-export const JazzProvider = defineComponent({
+export const LegacyJazzProvider = defineComponent({
   name: "JazzProvider",
   props: {
     config: {
-      type: Object as PropType<JazzProviderProps["config"]>,
+      type: Object as PropType<LegacyJazzProviderProps["config"]>,
       required: true,
     },
     autoAttachDevTools: {
@@ -251,3 +251,5 @@ export function useSession(): ComputedRef<PublicSession | null> {
   }
   return computed(() => ctx.value?.session ?? null);
 }
+
+export { JazzProvider, type JazzProviderProps } from "./app.js";
