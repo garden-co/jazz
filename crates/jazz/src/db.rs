@@ -1664,7 +1664,7 @@ const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 struct AuthorityViewReceipts {
     connection_epoch: u64,
     confirmation_floor: GlobalTime,
-    /// Exact query-coverage subscriptions confirmed on this authority link.
+    /// Exact live usage subscriptions confirmed on this authority link.
     ///
     /// Binding-view generations are shared by equal query shapes, so they
     /// cannot distinguish a late update for a detached predecessor.
@@ -2210,6 +2210,9 @@ enum CoveragePolicyBindingOrigin {
 /// identifies this connection's local evaluator. Only releasing the final pin
 /// retires the upstream handle; local evaluator cleanup remains per connection.
 struct RelayUpstreamSubscriptionOwner {
+    request: PendingUpstreamSubscription,
+    scalar_authority_revision: u64,
+    scalar_reconciliation: ScalarReconciliation,
     downstream_connection_epoch: u64,
     coverage: CoverageKey,
     policy_binding: (AuthorSubject, BTreeMap<String, Value>),
@@ -4223,12 +4226,41 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
     Ok(ResultTree { roots })
 }
 
+struct ScalarProbe {
+    subscription: SubscriptionKey,
+    upstream: PendingUpstreamCommands,
+    scheduler: SharedTickScheduler,
+}
+
+impl Drop for ScalarProbe {
+    fn drop(&mut self) {
+        let mut pending = self.upstream.borrow_mut();
+        pending.retain(|command| {
+            !matches!(command, PendingUpstreamCommand::Subscribe(open)
+            if open.subscription == self.subscription)
+        });
+        pending.push(PendingUpstreamCommand::Unsubscribe(self.subscription));
+        drop(pending);
+        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+    }
+}
+
+#[derive(Default)]
+struct ScalarReconciliation {
+    generation: Option<(u64, SubscriptionKey, u64)>,
+    pending: VecDeque<RowUuid>,
+    active: Option<ScalarProbe>,
+}
+
 struct SubscriptionState {
     /// Set synchronously by stream finalization, before its async cleanup is
     /// drained. Refresh observes this independently owned cell before it can
     /// install a replacement maintained subscription.
     closed: Rc<Cell<bool>>,
     terminal_rows: bool,
+    scalar_reconciliation_enabled: bool,
+    scalar_authority_revision: u64,
+    scalar_reconciliation: ScalarReconciliation,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     /// The maintained subscription currently owned by this public stream.

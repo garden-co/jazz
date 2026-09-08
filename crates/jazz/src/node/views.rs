@@ -273,7 +273,7 @@ fn covered_input_version_rows_for_bundle(
         .collect()
 }
 
-fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
+pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
     use crate::query::{Operand, Predicate};
     fn scalar(operand: &Operand) -> bool {
         !matches!(operand, Operand::Column(name) if name.contains('.') || name.starts_with('$'))

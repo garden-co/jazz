@@ -903,9 +903,25 @@ where
         snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
+        let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
+            && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
+            && remote_propagate_upstream
+            && opts.read_view.is_default()
+            && !self
+                .node
+                .node
+                .borrow()
+                .table(&state_shape.query().table)?
+                .columns
+                .iter()
+                .any(|column| column.name == "id")
+            && crate::node::simple_scalar_exit_query(state_shape.query());
         let state = Rc::new(RefCell::new(SubscriptionState {
             closed: Rc::clone(&closed),
             terminal_rows,
+            scalar_reconciliation_enabled,
+            scalar_authority_revision: 0,
+            scalar_reconciliation: ScalarReconciliation::default(),
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,

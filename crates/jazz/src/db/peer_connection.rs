@@ -1382,6 +1382,16 @@ where
                     coverage.opts.read_view_key(),
                 ),
                 RelayUpstreamSubscriptionOwner {
+                    request: PendingUpstreamSubscription {
+                        subscription: fresh_upstream_subscription,
+                        shape: shape.clone(),
+                        binding: binding.clone(),
+                        opts: opts.clone(),
+                        identity: refreshed_direct_binding.0,
+                        policy_binding: Some(refreshed_direct_binding.clone()),
+                    },
+                    scalar_authority_revision: 0,
+                    scalar_reconciliation: ScalarReconciliation::default(),
                     downstream_connection_epoch: connection_epoch,
                     coverage,
                     policy_binding: refreshed_direct_binding.clone(),
@@ -2087,6 +2097,9 @@ where
                                     }
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
+                                        receipts.subscriptions.remove(subscription);
+                                    }
                                     announced_shapes.remove(&(
                                         subscription.shape_id,
                                         subscription.read_view,
@@ -4565,6 +4578,14 @@ where
                             }
                             if group.upstream_opts.propagate_upstream {
                                 let owner = RelayUpstreamSubscriptionOwner {
+                                    request: PendingUpstreamSubscription {
+                                        subscription: group.upstream_subscription,
+                                        shape: shape.clone(), binding: binding.clone(), opts: upstream_opts.clone(),
+                                        identity: group.policy_binding.0,
+                                        policy_binding: Some(group.policy_binding.clone()),
+                                    },
+                                    scalar_authority_revision: 0,
+                                    scalar_reconciliation: ScalarReconciliation::default(),
                                     downstream_connection_epoch: connection_epoch,
                                     coverage: coverage.clone(),
                                     policy_binding: group.policy_binding.clone(),
@@ -5830,6 +5851,18 @@ where
         .filter(|update| frame_is_selected(update) && !update.parts.opening_pending)
         .map(|update| (update.parts.subscription, update.parts.settled_through))
         .collect::<Vec<_>>();
+    let source_confirmations = pending
+        .iter()
+        .filter(|update| {
+            frame_is_selected(update)
+                && !update.parts.opening_pending
+                && !update.parts.defer_settlement
+                && (update.parts.reset_result_set
+                    || !update.parts.program_fact_adds.is_empty()
+                    || !update.parts.program_fact_removes.is_empty())
+        })
+        .map(|update| update.parts.subscription)
+        .collect::<BTreeSet<_>>();
     let batch_cut = pending
         .iter()
         .map(|update| update.parts.settled_through)
@@ -5971,6 +6004,25 @@ where
             Err(error) => return Err(error.into()),
         }
     }
+    // Per-owner receipt revisions survive replacement of a shared binding slot.
+    // Only successfully applied selected source receipts advance reconciliation.
+    for weak in subscriptions.borrow().iter() {
+        if let Some(state) = weak.upgrade() {
+            let mut state = state.borrow_mut();
+            if state
+                .upstream_subscription_handles
+                .iter()
+                .any(|handle| source_confirmations.contains(&handle.subscription))
+            {
+                state.scalar_authority_revision = state.scalar_authority_revision.wrapping_add(1);
+            }
+        }
+    }
+    for owner in relay_owners.borrow_mut().values_mut() {
+        if source_confirmations.contains(&owner.request.subscription) {
+            owner.scalar_authority_revision = owner.scalar_authority_revision.wrapping_add(1);
+        }
+    }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
         // Edge child. Advance the shared generation only after the validated
@@ -5983,19 +6035,15 @@ where
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
-        let registrations = query_coverage_registrations.borrow();
         for (subscription, binding_view, settled_through) in confirmed_binding_views {
             if settled_through < receipts.confirmation_floor {
                 continue;
             }
-            // Public streams are not query-coverage attachments, but their
-            // binding view is still the exact receipt required to settle the
-            // receiver-local graph. Coverage registrations retain only their
-            // own ownership accounting below.
+            // Public streams, relay scopes, and auxiliary queries all require
+            // their own accepted usage receipt; equal binding views cannot
+            // substitute for a detached predecessor.
             receipts.binding_views.insert(binding_view);
-            if registrations.contains_key(&subscription) {
-                receipts.subscriptions.insert(subscription);
-            }
+            receipts.subscriptions.insert(subscription);
         }
     }
     if !clears.is_empty() {

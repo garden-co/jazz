@@ -1138,6 +1138,36 @@ path also remains primarily client-to-core; the client-to-edge-to-core topology
 is being exercised incrementally. Worker bridges have not yet converged on the
 network wire-frame batches.
 
+### Bounded readable scalar input reconciliation
+
+A local-first query and an edge's propagated query scope may retain a readable
+row whose new scalar value no longer matches the authority query after reconnect.
+The current pilot compares the original scalar query's locally matching root
+identities against its completed selected-authority root input scope. Each
+accepted source reset/change advances a process-local revision of that exact
+upstream usage, independent of reusable binding-view generation numbers.
+
+Extra local roots are requested in batches of at most 64 using ordinary
+unfiltered-by-original-predicate row-ID queries, with the original request's
+identity, immutable claims, and upstream routing tier. The ordinary authorized
+source/version delivery refreshes the local cache at each hop. A partial edge
+cannot authorize new exit bytes from its cached grants. Auxiliary handles are
+owned by the original query scope and retire on completion, unsubscribe, claim
+replacement, or authority connection replacement. Remaining batches continue;
+source changes do not cancel an in-flight batch on the same connection.
+
+The pilot retains O(extra matching scalar roots) transient row IDs, evaluates
+only the original query when a meaningful source receipt changes, and does not
+scan unrelated cached tables. Pending local versions are skipped. Empty complete
+point results remain unresolved: they do not assert deletion or access loss.
+Ordinary tombstone delivery remains the deletion mechanism.
+
+Eligible shapes are current-view scalar filters without joins, includes,
+projection, aggregate, recursion, relation composition, limit, or offset. Tables
+with a declared user `id` column are excluded because that spelling does not
+identify the physical row. There is no new wire or durable encoding. This pilot
+does not implement related-input or unknown negative-dependency completeness.
+
 ## Open Questions
 
 - 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.

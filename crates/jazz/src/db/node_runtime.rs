@@ -1278,6 +1278,7 @@ where
             let (local, upstream, owner) = if let Some(state) = command.state.take() {
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
+                state.scalar_reconciliation = ScalarReconciliation::default();
                 (
                     state.local_subscription_cleanup.take(),
                     std::mem::take(&mut state.upstream_subscription_handles),
@@ -3140,6 +3141,7 @@ where
                 }
             }
         }
+        self.reconcile_scalar_query_inputs().await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
             for connection in &connections {
@@ -3155,6 +3157,235 @@ where
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
         Ok(stats)
+    }
+
+    /// Both public local-first queries and relay-owned upstream scopes use
+    /// ordinary policy-bound point queries to refresh extra scalar inputs.
+    async fn reconcile_scalar_query_inputs(&self) -> Result<(), Error> {
+        let live = self.subscriptions.borrow().clone();
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let (request, revision, mut reconciliation) = {
+                let mut state = owner.borrow_mut();
+                if state.closed.get() || !state.scalar_reconciliation_enabled {
+                    continue;
+                }
+                let Some(handle) = state.upstream_subscription_handles.first() else {
+                    continue;
+                };
+                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
+                let request = PendingUpstreamSubscription {
+                    subscription: handle.subscription,
+                    shape: shape.clone(),
+                    binding: binding.clone(),
+                    opts: handle.coverage.opts.clone(),
+                    identity: state.author,
+                    policy_binding: state.request_identity_claims.clone(),
+                };
+                (
+                    request,
+                    state.scalar_authority_revision,
+                    std::mem::take(&mut state.scalar_reconciliation),
+                )
+            };
+            self.advance_scalar_reconciliation(&request, revision, &mut reconciliation)
+                .await?;
+            let mut state = owner.borrow_mut();
+            if !state.closed.get() {
+                state.scalar_reconciliation = reconciliation;
+            }
+        }
+        let owners = self
+            .relay_upstream_subscription_owners
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in owners {
+            let Some((request, revision, mut reconciliation)) = self
+                .relay_upstream_subscription_owners
+                .borrow_mut()
+                .get_mut(&key)
+                .map(|owner| {
+                    (
+                        owner.request.clone(),
+                        owner.scalar_authority_revision,
+                        std::mem::take(&mut owner.scalar_reconciliation),
+                    )
+                })
+            else {
+                continue;
+            };
+            self.advance_scalar_reconciliation(&request, revision, &mut reconciliation)
+                .await?;
+            if let Some(owner) = self
+                .relay_upstream_subscription_owners
+                .borrow_mut()
+                .get_mut(&key)
+            {
+                owner.scalar_reconciliation = reconciliation;
+            }
+        }
+        Ok(())
+    }
+
+    async fn advance_scalar_reconciliation(
+        &self,
+        request: &PendingUpstreamSubscription,
+        revision: u64,
+        state: &mut ScalarReconciliation,
+    ) -> Result<(), Error> {
+        if !request.opts.propagate_upstream
+            || !request.opts.read_view.is_default()
+            || !crate::node::simple_scalar_exit_query(request.shape.query())
+        {
+            return Ok(());
+        }
+        let generation = self
+            .active_authority_view_receipts
+            .borrow()
+            .as_ref()
+            .filter(|receipt| receipt.subscriptions.contains(&request.subscription))
+            .map(|receipt| (receipt.connection_epoch, request.subscription, revision));
+        let Some(generation) = generation else {
+            *state = ScalarReconciliation::default();
+            return Ok(());
+        };
+        // A new source receipt cannot starve the current bounded batch. It
+        // invalidates queued candidates only after the active ordinary probe
+        // completes. An authority connection replacement cancels immediately.
+        if state
+            .generation
+            .as_ref()
+            .is_some_and(|old| old.0 != generation.0)
+        {
+            *state = ScalarReconciliation::default();
+        }
+        if let Some(active) = &state.active {
+            if !self
+                .active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .is_some_and(|receipt| receipt.subscriptions.contains(&active.subscription))
+            {
+                return Ok(());
+            }
+            let node = self.node.borrow();
+            let Ok(key) = node.authority_result_key_for_subscription(active.subscription) else {
+                return Ok(());
+            };
+            if !node.has_settled_authority_result(&key)
+                || node.opening_pending_for_authority_result(&key)
+                || node.publication_deferred_for_authority_result(&key)
+            {
+                return Ok(());
+            }
+            drop(node);
+            state.active = None;
+        }
+        if state.generation.as_ref() != Some(&generation) {
+            let mut owner = self.node.lock().await;
+            let table = &request.shape.query().table;
+            if owner.current_write_schema()?.schema != request.shape.schema_version() {
+                return Ok(());
+            }
+            if owner
+                .table(table)?
+                .columns
+                .iter()
+                .any(|column| column.name == "id")
+            {
+                // The public `id` spelling names a declared user column first.
+                // Such tables need a future physical-ID wire access path.
+                return Ok(());
+            }
+            let key = owner.authority_result_key_for_subscription(request.subscription)?;
+            if !owner.has_settled_authority_result(&key)
+                || owner.opening_pending_for_authority_result(&key)
+                || owner.publication_deferred_for_authority_result(&key)
+                || owner.authority_source_closure_generation(&key).is_none()
+            {
+                return Ok(());
+            }
+            let authoritative = owner.scalar_authority_input_rows(&key, table);
+            let claims = request
+                .policy_binding
+                .as_ref()
+                .map(|(_, claims)| claims.clone());
+            let mut node = owner.scoped_optional_session_claims(request.identity, claims);
+            // This reads only the original scalar query's local input scope.
+            // Cached policy decisions choose candidates, never authorize bytes.
+            let local = node
+                .query_rows_for_link(
+                    &request.shape,
+                    &request.binding,
+                    DurabilityTier::Local,
+                    request.identity,
+                )
+                .await?;
+            state.pending = local
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .filter(|row| !authoritative.contains(row))
+                .collect();
+            state.generation = Some(generation);
+        }
+        let count = state.pending.len().min(64);
+        let batch = state.pending.drain(..count).collect::<Vec<_>>();
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut node = self.node.lock().await;
+        let table = &request.shape.query().table;
+        let mut candidates = Vec::new();
+        for row in batch {
+            let Some(tx) = node.local_content_winner_tx_id(table, row).await? else {
+                continue;
+            };
+            if node.transaction_record(tx).await.is_some_and(|record| {
+                matches!(record.fate, crate::tx::Fate::Accepted)
+                    && record.durability >= DurabilityTier::Edge
+            }) {
+                candidates.push(crate::query::lit(Value::Uuid(row.0)));
+            }
+        }
+        if !candidates.is_empty() {
+            let query = Query::from(table.clone())
+                .filter(crate::query::in_list(crate::query::col("id"), candidates));
+            // A schema replacement ends this pilot attempt; it cannot turn an
+            // auxiliary query into a fatal error for the original subscriber.
+            let Ok(shape) = query.validate_with_schema_version(
+                node.try_current_schema()?,
+                request.shape.schema_version(),
+            ) else {
+                return Ok(());
+            };
+            let binding = shape.bind(BTreeMap::new())?;
+            let subscription = self.next_subscription_key(&shape, request.opts.read_view_key());
+            self.upstream_subscriptions
+                .borrow_mut()
+                .push(PendingUpstreamCommand::Subscribe(
+                    PendingUpstreamSubscription {
+                        subscription,
+                        shape,
+                        binding,
+                        opts: request.opts.clone(),
+                        identity: request.identity,
+                        policy_binding: request.policy_binding.clone(),
+                    },
+                ));
+            state.active = Some(ScalarProbe {
+                subscription,
+                upstream: Rc::clone(&self.upstream_subscriptions),
+                scheduler: Rc::clone(&self.scheduler),
+            });
+            self.schedule_tick(TickUrgency::Immediate);
+        } else if !state.pending.is_empty() {
+            self.schedule_tick(TickUrgency::AfterCurrentTurn);
+        }
+        Ok(())
     }
 
     fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {

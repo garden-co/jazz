@@ -337,6 +337,7 @@ pub(crate) use query_eval::{
     LocalMaintainedViewSubscriptionUpdate,
 };
 pub(crate) use views::MaintainedViewBundleInputs;
+pub(crate) use views::simple_scalar_exit_query;
 
 use codec::*;
 use database_slot::DatabaseSlot;

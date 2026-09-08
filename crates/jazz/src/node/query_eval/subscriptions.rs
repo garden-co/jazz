@@ -879,6 +879,26 @@ where
                 .contains_key(authority_result_key)
     }
 
+    /// Root identities are sufficient only for the unprojected scalar pilot.
+    /// Policy proof sources must never become reconciliation candidates.
+    pub(crate) fn scalar_authority_input_rows(
+        &self,
+        key: &AuthorityResultKey,
+        table: &str,
+    ) -> BTreeSet<RowUuid> {
+        self.query
+            .authority_results
+            .get(key)
+            .into_iter()
+            .flat_map(|state| state.covered_input_versions.values())
+            .filter(|input| {
+                input.source.table.as_str() == table
+                    && input.source.path == [crate::protocol::ProgramSourceRole::Root]
+            })
+            .map(|input| input.source_row)
+            .collect()
+    }
+
     pub(crate) fn applied_authority_result_generation(
         &self,
         authority_result_key: &AuthorityResultKey,

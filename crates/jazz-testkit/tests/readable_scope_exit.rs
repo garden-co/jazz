@@ -164,24 +164,6 @@ async fn run_readable_exit(relayed: bool) {
         |log| has_removed(log, task),
     )
     .await;
-    if relayed {
-        // A partial edge has no capability to freshly authorize exit bytes.
-        // It still retracts remote membership, but the old local cache remains
-        // until another authorized delivery refreshes it (deferred work).
-        let cached = local_rows(&alice, Query::from("tasks")).await;
-        assert!(cached.iter().any(|(id, values)| *id == task
-            && values
-                == &vec![
-                    Value::Text("alice".into()),
-                    Value::Boolean(false),
-                    Value::Text("before".into()),
-                ]));
-        alice.shutdown().await.unwrap();
-        bob.shutdown().await.unwrap();
-        relay.unwrap().shutdown().await;
-        authority.shutdown().await;
-        return;
-    }
     wait_for_subscription_update(
         &mut local,
         &mut local_log,
@@ -269,11 +251,11 @@ async fn readable_scalar_exit_refreshes_local_cache_without_expanding_membership
         .await;
 }
 
-/// A partial edge retracts membership without authorizing cache-exit content.
-/// Bob's successor reaches the edge, but alice retains her prior cached value.
-/// bob -> authority -> edge -> alice: remote removal, no fresh exit payload
+/// A partial edge repairs readable scalar exits with an ordinary Core query.
+/// Bob's successor reaches alice under her current query authorization.
+/// bob -> authority -> edge -> alice: ordinary point query refreshes exit
 #[tokio::test]
-async fn partial_edge_does_not_authorize_scalar_exit_content_from_cache() {
+async fn partial_edge_revalidates_scalar_exit_with_authorized_point_query() {
     tokio::task::LocalSet::new()
         .run_until(run_readable_exit(true))
         .await;
