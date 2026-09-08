@@ -64,6 +64,39 @@ fn jazz_server_command() -> Command {
     command
 }
 
+fn server_command_report(command: &mut Command) -> String {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn jazz-server server");
+
+    // EOF requests clean shutdown after startup; reap before checking the report.
+    drop(child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("server did not exit cleanly before the deadline: {result:?}");
+            }
+        }
+    }
+    let output = child.wait_with_output().expect("collect server report");
+    assert!(
+        output.status.success(),
+        "server failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("server stdout is utf-8")
+}
+
 fn jazz_tools_command() -> Command {
     let mut command = Command::new(cargo_binary("jazz-tools"));
     command
@@ -687,6 +720,154 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
 }
 
 #[test]
+fn server_command_honours_environment_storage_and_websocket_route() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let stdout = server_command_report(
+        jazz_server_command()
+            .args([
+                "server",
+                "environment-app",
+                "--listen",
+                "127.0.0.1:0",
+                "--auth-static-bearer",
+                "secret",
+            ])
+            .env("JAZZ_SERVER_IN_MEMORY", "true")
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-environment-data")
+            .env("JAZZ_SERVER_WEBSOCKET_PATH", "/environment-route")
+            .current_dir(temp_dir.path()),
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&"storage=in-memory"),
+        "environment must select memory storage:\n{stdout}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("data_dir=")),
+        "memory storage must not report a data directory:\n{stdout}"
+    );
+    assert!(
+        lines.contains(&"websocket_path=/environment-route"),
+        "environment must select the websocket route:\n{stdout}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/environment-route")
+        }),
+        "server URL must use the selected websocket route:\n{stdout}"
+    );
+}
+
+#[test]
+fn server_command_honours_environment_data_directory_when_memory_is_false() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let stdout = server_command_report(
+        jazz_server_command()
+            .args([
+                "server",
+                "durable-environment-app",
+                "--listen",
+                "127.0.0.1:0",
+                "--auth-static-bearer",
+                "secret",
+            ])
+            .env("JAZZ_SERVER_IN_MEMORY", "false")
+            .env("JAZZ_SERVER_DATA_DIR", "./environment-data")
+            .env("JAZZ_SERVER_WEBSOCKET_PATH", "/durable-environment")
+            .current_dir(temp_dir.path()),
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.contains(&"storage=rocksdb"), "{stdout}");
+    assert!(lines.contains(&"data_dir=./environment-data"), "{stdout}");
+    assert!(
+        lines.contains(&"websocket_path=/durable-environment"),
+        "{stdout}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/durable-environment")
+        }),
+        "{stdout}"
+    );
+    assert!(temp_dir.path().join("environment-data").is_dir());
+    assert!(!temp_dir.path().join("data").exists());
+}
+
+#[test]
+fn server_command_explicit_data_directory_overrides_environment_and_earlier_memory_flag() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let stdout = server_command_report(
+        jazz_server_command()
+            .args([
+                "server",
+                "explicit-durable-app",
+                "--bind=127.0.0.1:0",
+                "--memory",
+                "--dataDir=./cli-data",
+                "--ws-path=/cli-durable",
+                "--auth-static-bearer",
+                "secret",
+            ])
+            .env("JAZZ_SERVER_IN_MEMORY", "true")
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-environment-data")
+            .env("JAZZ_SERVER_WEBSOCKET_PATH", "/unused-environment-route")
+            .current_dir(temp_dir.path()),
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.contains(&"storage=rocksdb"), "{stdout}");
+    assert!(lines.contains(&"data_dir=./cli-data"), "{stdout}");
+    assert!(lines.contains(&"websocket_path=/cli-durable"), "{stdout}");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/cli-durable")
+        }),
+        "{stdout}"
+    );
+    assert!(temp_dir.path().join("cli-data").is_dir());
+    assert!(!temp_dir.path().join("unused-environment-data").exists());
+    assert!(!temp_dir.path().join("data").exists());
+}
+
+#[test]
+fn server_command_explicit_memory_overrides_environment_and_earlier_data_directory_flag() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let stdout = server_command_report(
+        jazz_server_command()
+            .args([
+                "server",
+                "explicit-memory-app",
+                "--listen",
+                "127.0.0.1:0",
+                "--data-dir",
+                "./unused-cli-data",
+                "--in-memory",
+                "--websocket-path",
+                "/cli-memory",
+                "--auth-static-bearer",
+                "secret",
+            ])
+            .env("JAZZ_SERVER_DATA_DIR", "./unused-environment-data")
+            .env("JAZZ_SERVER_WEBSOCKET_PATH", "/unused-environment-route")
+            .current_dir(temp_dir.path()),
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.contains(&"storage=in-memory"), "{stdout}");
+    assert!(
+        !lines.iter().any(|line| line.starts_with("data_dir=")),
+        "{stdout}"
+    );
+    assert!(lines.contains(&"websocket_path=/cli-memory"), "{stdout}");
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/cli-memory")
+        }),
+        "{stdout}"
+    );
+    assert!(!temp_dir.path().join("unused-cli-data").exists());
+    assert!(!temp_dir.path().join("unused-environment-data").exists());
+    assert!(!temp_dir.path().join("data").exists());
+}
+
 fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     let schema = structured_schema();
     let server = RunningServer::start_schema(&schema);

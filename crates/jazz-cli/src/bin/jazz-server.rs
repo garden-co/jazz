@@ -529,7 +529,8 @@ struct CliOptions {
 
 impl CliOptions {
     fn parse(args: Vec<String>, program: &str) -> Result<Self, String> {
-        let mut options = Self::from_env()?;
+        let mut options = Self::defaults(StorageConfig::InMemory, "/sync".to_owned());
+        Self::apply_env(&mut options)?;
         Self::parse_into(&mut options, args, program)?;
         options.reject_unsupported_upstream_url()?;
         Ok(options)
@@ -543,9 +544,11 @@ impl CliOptions {
         if app_id.trim().is_empty() {
             return Err("empty_app_id".to_owned());
         }
-        let mut options = Self::from_env()?;
-        options.storage = StorageConfig::data_dir("./data");
-        options.websocket_path = format!("/apps/{app_id}/ws");
+        let mut options = Self::defaults(
+            StorageConfig::data_dir("./data"),
+            format!("/apps/{app_id}/ws"),
+        );
+        Self::apply_env(&mut options)?;
         Self::parse_into(&mut options, args, program)?;
         options.auth_admission.expected_audience = Some(app_id.to_owned());
         options.reject_unsupported_upstream_url()?;
@@ -677,15 +680,19 @@ impl CliOptions {
         Ok(())
     }
 
-    fn from_env() -> Result<Self, String> {
-        let mut options = Self {
+    fn defaults(storage: StorageConfig, websocket_path: String) -> Self {
+        Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 0)),
-            websocket_path: "/sync".to_owned(),
-            storage: StorageConfig::InMemory,
+            websocket_path,
+            storage,
             auth_admission: AuthAdmissionConfig::default(),
             admitted_account: None,
-            upstream_url: env::var("JAZZ_UPSTREAM_URL").ok(),
-        };
+            upstream_url: None,
+        }
+    }
+
+    fn apply_env(options: &mut Self) -> Result<(), String> {
+        options.upstream_url = env::var("JAZZ_UPSTREAM_URL").ok();
         if let Ok(value) = env::var("JAZZ_SERVER_LISTEN") {
             options.listen = parse_socket_addr(&value)?;
         }
@@ -733,7 +740,7 @@ impl CliOptions {
         if let Ok(value) = env::var("JAZZ_SERVER_ANONYMOUS_SUBJECT") {
             options.auth_admission.anonymous_subject = value;
         }
-        Ok(options)
+        Ok(())
     }
 
     fn reject_unsupported_upstream_url(&self) -> Result<(), String> {
