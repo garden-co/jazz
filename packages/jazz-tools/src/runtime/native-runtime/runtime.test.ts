@@ -2,7 +2,6 @@ import { schema as s } from "../../schema-namespace.js";
 import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
-import { schema as s } from "../../schema-namespace.js";
 import type {
   ColumnDescriptor,
   RuntimeSubscriptionDelta,
