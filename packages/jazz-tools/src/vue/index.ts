@@ -1,13 +1,11 @@
 export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzClientProvider,
-  JazzProvider,
   useDb,
   useJazzClient,
   useSession,
   type JazzClientContextValue,
   type JazzClientProviderProps,
-  type JazzProviderProps,
 } from "./provider.js";
 export { useAll } from "./use-all.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
@@ -47,3 +45,6 @@ export {
   type JazzSessionProviderProps,
   type UseJazzSession,
 } from "./session.js";
+
+export { JazzProvider, useJazzAuth, type JazzProviderProps, type UseJazzAuth } from "./app.js";
+export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
