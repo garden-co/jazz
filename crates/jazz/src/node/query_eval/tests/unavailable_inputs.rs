@@ -471,3 +471,297 @@ fn local_unavailable_inputs_keep_include_deleted_limit_after_exclusion() {
         );
     }
 }
+
+fn reopen_availability_node(
+    dir: &tempfile::TempDir,
+    schema: &JazzSchema,
+) -> NodeState<RocksDbStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    NodeState::new(NodeUuid::from_bytes([91; 16]), schema.clone(), storage).unwrap()
+}
+
+fn availability_watermark(seq: u64) -> LocalAvailabilityWatermark {
+    LocalAvailabilityWatermark {
+        core: NodeUuid::from_bytes([92; 16]),
+        core_epoch: 3,
+        claims_revision: 4,
+        policy_epoch: 5,
+        settled_through: GlobalTime(6),
+        authorization_progress: seq,
+    }
+}
+
+/// Internal receipt injection is necessary until the separate network router
+/// is integrated. Ordinary queries verify persisted exclusion and readmission.
+/// unavailable -> reopen -> hidden; readable -> reopen -> stale reply ignored.
+#[test]
+fn local_availability_receipts_survive_reopen_and_retain_readmission_watermarks() {
+    let (dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    let unavailable = [(table, row(1), LocalRowAvailability::CurrentUnavailable)];
+    let readable = [(table, row(1), LocalRowAvailability::Readable)];
+    let watermark = availability_watermark(1);
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    assert!(
+        node.apply_verified_local_row_availability(&scope, watermark, &unavailable)
+            .unwrap()
+    );
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    drop(node);
+    let mut node = reopen_availability_node(&dir, &schema);
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    assert_eq!(parent_ids(&mut node, &schema, author(2)).len(), 2);
+    assert_eq!(
+        parent_ids(&mut node, &schema, AuthorSubject::SYSTEM).len(),
+        2
+    );
+    assert!(
+        !node
+            .apply_verified_local_row_availability(&scope, availability_watermark(2), &readable)
+            .unwrap()
+    );
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    assert!(
+        node.apply_verified_local_row_availability(&scope, availability_watermark(2), &readable)
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+    drop(node);
+    let mut node = reopen_availability_node(&dir, &schema);
+    node.activate_local_availability_authority(scope.clone(), watermark.core, watermark.core_epoch)
+        .unwrap();
+    assert!(
+        !node
+            .apply_verified_local_row_availability(&scope, watermark, &unavailable)
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+}
+
+/// Only the route owner admits a new epoch. Its sequence/claims revision may
+/// reset, while a same-Core durable catalogue position and settled cut may not.
+#[test]
+fn local_availability_receipts_require_admitted_epoch_and_monotone_cut() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    let table = node
+        .local_availability_table_id(schema.version_id(), "parents")
+        .unwrap();
+    let old = availability_watermark(20);
+    node.activate_local_availability_authority(scope.clone(), old.core, old.core_epoch)
+        .unwrap();
+    assert!(
+        node.apply_verified_local_row_availability(
+            &scope,
+            old,
+            &[(table, row(1), LocalRowAvailability::CurrentUnavailable)]
+        )
+        .unwrap()
+    );
+    let fresh = LocalAvailabilityWatermark {
+        core_epoch: 4,
+        claims_revision: 1,
+        authorization_progress: 1,
+        ..old
+    };
+    let readable = [(table, row(1), LocalRowAvailability::Readable)];
+    assert!(
+        !node
+            .apply_verified_local_row_availability(&scope, fresh, &readable)
+            .unwrap()
+    );
+    node.activate_local_availability_authority(scope.clone(), fresh.core, fresh.core_epoch)
+        .unwrap();
+    assert!(
+        !node
+            .apply_verified_local_row_availability(
+                &scope,
+                LocalAvailabilityWatermark {
+                    settled_through: GlobalTime(5),
+                    ..fresh
+                },
+                &readable
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+    assert!(
+        node.apply_verified_local_row_availability(&scope, fresh, &readable)
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+    assert!(
+        !node
+            .apply_verified_local_row_availability(
+                &scope,
+                old,
+                &[(table, row(1), LocalRowAvailability::CurrentUnavailable)]
+            )
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+    let failover = LocalAvailabilityWatermark {
+        core: NodeUuid::from_bytes([93; 16]),
+        settled_through: GlobalTime(5),
+        ..fresh
+    };
+    node.activate_local_availability_authority(scope.clone(), failover.core, failover.core_epoch)
+        .unwrap();
+    assert!(
+        !node
+            .apply_verified_local_row_availability(
+                &scope,
+                failover,
+                &[(table, row(1), LocalRowAvailability::CurrentUnavailable)]
+            )
+            .unwrap()
+    );
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+}
+
+/// Internal lifecycle invocation requires all scope graphs to have stopped.
+/// A subsequent ordinary read must lazily restore retained unavailable rows.
+#[test]
+fn local_availability_input_retirement_retains_exclusion() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
+    node.set_local_row_unavailable(&scope, "parents", row(1), true)
+        .unwrap();
+    node.retire_local_availability_scope_inputs(&scope).unwrap();
+    assert_eq!(
+        parent_ids(&mut node, &schema, alice),
+        BTreeSet::from([row(2)])
+    );
+}
+
+/// Public schema/lens builders preserve physical table identity across a rename;
+/// changing the projection must not resurrect the unavailable cached input.
+#[test]
+fn local_availability_receipts_follow_global_table_through_schema_rename() {
+    let (_dir, mut node, schema) = fixture();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    node.set_local_row_unavailable(&scope, "parents", row(1), true)
+        .unwrap();
+    let evolved = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("renamed")
+                    .column("label", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("children")
+                    .fk_column("parent", "renamed")
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let payload = SchemaVersion::new(evolved.clone());
+    let lens = MigrationLens::new(
+        schema.version_id(),
+        payload.id,
+        vec![
+            TableLens {
+                source_table: "parents".to_owned(),
+                target_table: "renamed".to_owned(),
+                ops: vec![LensOp::RenameTable {
+                    from: "parents".to_owned(),
+                    to: "renamed".to_owned(),
+                }],
+            },
+            TableLens {
+                source_table: "children".to_owned(),
+                target_table: "children".to_owned(),
+                ops: vec![],
+            },
+        ],
+    )
+    .unwrap();
+    let publication = node
+        .author_schema_lineage_publication(
+            payload.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    })
+    .unwrap();
+    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: payload.id,
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        node.local_availability_table_id(schema.version_id(), "parents")
+            .unwrap(),
+        node.local_availability_table_id(payload.id, "renamed")
+            .unwrap()
+    );
+    assert_eq!(
+        read(&mut node, &evolved, Query::from("renamed"), alice)
+            .into_iter()
+            .map(|r| r.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row(2)]
+    );
+}
+
+/// Internal route admission is necessary to cover contexts which have not yet
+/// opened an app graph. Their capacity must still bound ordinary source opens.
+#[test]
+fn local_availability_context_capacity_includes_request_only_admissions() {
+    let (_dir, mut node, schema) = fixture();
+    let first = node.local_read_policy_binding(author(1)).unwrap();
+    for i in 0..crate::authorization_scope::MAX_AUTHORIZATION_SCOPES {
+        let scope = node.local_read_policy_binding(author(i as u8)).unwrap();
+        node.activate_local_availability_authority(scope, NodeUuid::from_bytes([92; 16]), 1)
+            .unwrap();
+    }
+    let extra = AuthorSubject::for_test_bytes([99, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let scope = node.local_read_policy_binding(extra).unwrap();
+    assert!(
+        node.activate_local_availability_authority(
+            scope.clone(),
+            NodeUuid::from_bytes([92; 16]),
+            1
+        )
+        .is_err()
+    );
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert!(
+        node.query_rows_for_client(&shape, &binding, DurabilityTier::Local, extra)
+            .is_err()
+    );
+    node.retire_local_availability_scope_inputs(&first).unwrap();
+    assert_eq!(parent_ids(&mut node, &schema, extra).len(), 2);
+}

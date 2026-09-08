@@ -2018,12 +2018,17 @@ where
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
             if let Some(scope) = exclusion_scope {
-                self.node.exclude_local_unavailable_rows(
-                    &scope,
-                    self.read_view.read_schema,
-                    request,
-                    &mut resolved,
-                );
+                self.node
+                    .exclude_local_unavailable_rows(
+                        &scope,
+                        self.read_view.read_schema,
+                        request,
+                        &mut resolved,
+                    )
+                    .await
+                    .map_err(|_| {
+                        source_resolution_error(request, SourceGap::LocalAvailabilityInput)
+                    })?;
             }
             Ok(resolved)
         })

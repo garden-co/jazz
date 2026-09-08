@@ -585,6 +585,8 @@ where
             },
             parking: Parking::default(),
             query: QueryServing {
+                local_availability_records: BTreeMap::new(),
+                local_availability_authorities: BTreeMap::new(),
                 local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
@@ -673,6 +675,7 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts().await?;
+        node.recover_local_availability_records().await?;
         if !node.history_complete {
             let recovered_authority_cut = node
                 .query

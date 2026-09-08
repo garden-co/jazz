@@ -491,6 +491,47 @@ distinguish anonymous/local/authenticated/backend/system admission modes through
 trusted session claims or first-class admission facts. Client-supplied values
 must not widen those facts.
 
+### Local current-row availability record v1
+
+A verified complete current-row evaluation may mark a known cached row
+`CurrentUnavailable` without distinguishing absence, deletion, or denied access.
+Only `ClientLocal` current/default application sources apply this exclusion,
+before joins, aggregates, windows, and logical limits, including `includeDeleted`.
+SYSTEM, trusted serving sources, authorization proof evaluation, historical
+snapshots, and non-default branch views do not consume the marker. Stored row
+content remains intact. A fresh verified `Readable` evaluation readmits the row;
+query predicate exclusion and unknown or partial answers do not change it.
+
+`jazz_local_row_availability_v1` is a local native Groove typed record store.
+Its key is `(policy_digest: Bytes[32], global_table: UUID, row: UUID)`. The
+existing collision-checked authority policy directory binds that digest to the
+exact subject and canonical named claims. Its value fields, in order, are
+`format_v1: U8 = 1`, `unavailable: Bool`, `core: UUID`, `core_epoch: U64`,
+`claims_revision: U64`, `policy_epoch: U64`, `settled_through: U64`, and
+`evaluation_seq: U64`. Groove's typed-record v1 codec defines the bytes; there is
+no additional opaque serializer. Unknown versions, malformed directory keys,
+and zero evaluation sequences fail recovery. Global physical table identity
+preserves exclusion across schema projections; changing schema does not clear it.
+
+Both unavailable and readable records persist, retaining ordering after clear
+and reopen. Within the same admitted Core epoch, evaluation sequence, claims
+revision, durable catalogue sequence, and settled cut cannot decrease. Equal
+sequences must identify identical records. A different epoch must be admitted
+explicitly by the current route owner; a receipt cannot activate itself. Across
+Core identities or epochs only durable catalogue sequence and cut are compared. Neither
+claims revisions nor evaluation sequences are comparable across epochs. Recovery
+restores no live route admission. A newly admitted different Core is a route
+owner decision and still cannot regress the app catalogue sequence or settled cut.
+
+Live authority and mutable-input contexts use the existing authorization-scope
+capacity. Admission fails when full and never evicts unavailable records. A
+caller may retire input sources only after stopping every graph using that exact
+context; this releases its route admission and retains durable receipts for lazy
+reinstallation. One verified apply batch is bounded by the existing exact-known
+row limit. Callers must stop or park reconciliation on an apply/admission error;
+they must not report that exclusion succeeded. Native payload ingestion and
+verified route/request correlation precede this internal receipt application.
+
 ## Open Questions
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical session subject/authorship and provenance.

@@ -69,11 +69,16 @@ use crate::query::{
 use crate::schema::{ColumnSchema, RuntimeSchema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
+mod local_availability_receipts;
 mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
 mod unavailable_inputs;
+pub(crate) use local_availability_receipts::{
+    LocalAvailabilityRecord, LocalAvailabilityWatermark, LocalRowAvailability,
+    local_availability_record_descriptor,
+};
 
 pub(crate) use unavailable_inputs::LocalUnavailableInput;
 

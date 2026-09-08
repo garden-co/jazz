@@ -30,6 +30,11 @@ use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, S
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
+#[allow(unused_imports)] // Typed receipt integration is implemented in a separate change.
+pub(crate) use query_eval::{
+    LocalAvailabilityWatermark, LocalRowAvailability, local_availability_record_descriptor,
+};
+
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
@@ -832,10 +837,17 @@ struct ScopedPolicyAuthorizationGraphReplacement {
 
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
+    local_availability_records: BTreeMap<
+        (PolicyBindingKey, crate::ids::GlobalPhysicalTableId, RowUuid),
+        query_eval::LocalAvailabilityRecord,
+    >,
+    local_availability_authorities: BTreeMap<PolicyBindingKey, (NodeUuid, u64)>,
     /// Runtime-only, exact-context app-read exclusions. These do not change
     /// stored payloads or serving-side permission proofs.
-    local_unavailable_inputs:
-        BTreeMap<(PolicyBindingKey, SchemaVersionId, String), query_eval::LocalUnavailableInput>,
+    local_unavailable_inputs: BTreeMap<
+        (PolicyBindingKey, crate::ids::GlobalPhysicalTableId),
+        query_eval::LocalUnavailableInput,
+    >,
     /// Prepared query plans keyed by shape, durability tier, and parameter
     /// descriptor signature.
     query_shape_cache:

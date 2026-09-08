@@ -261,6 +261,8 @@ pub(crate) struct SourceResolutionError {
 /// Source-resolution gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceGap {
+    /// A scoped local-availability input could not be installed (including capacity).
+    LocalAvailabilityInput,
     /// Recursive policy proof compilation revisited a table already on the
     /// proof stack. This must surface as a diagnostic rather than consuming
     /// the process stack.

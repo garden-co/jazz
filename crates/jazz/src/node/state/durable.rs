@@ -727,6 +727,13 @@ where
         let Some(policy) = &authority_result_key.policy_binding else {
             return Ok(());
         };
+        self.persist_policy_binding_directory(policy).await
+    }
+
+    async fn persist_policy_binding_directory(
+        &self,
+        policy: &PolicyBindingKey,
+    ) -> Result<(), Error> {
         let digest = policy.directory_digest();
         let claims = policy.directory_value()
             .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;

@@ -592,6 +592,28 @@
           "anchor": "fails closed for present empty or malformed values without generating over them"
         }
       ]
+    },
+    {
+      "id": "jazz.local-row-availability.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/7_authorization.md",
+        "anchor": "### Local current-row availability record v1"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/src/node/query_eval/local_availability_receipts.rs",
+        "anchor": "fn local_availability_v1_native_bytes_and_rejection_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/src/node/query_eval/local_availability_receipts.rs",
+        "anchor": "fn local_availability_v1_native_bytes_and_rejection_are_pinned"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/src/node/query_eval/tests/unavailable_inputs.rs",
+          "anchor": "fn local_availability_receipts_survive_reopen_and_retain_readmission_watermarks"
+        }
+      ]
     }
   ]
 }
