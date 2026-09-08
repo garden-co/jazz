@@ -533,7 +533,6 @@ impl PeerState {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
             let state = self.publication_states.entry(view.subscription).or_default();
-            state.supporting_rows = view.supporting_rows.clone();
             if let Some(maintained) = &state.maintained_subscription_view {
                 state.program_fact_set = maintained.maintained.active_peer_source_closure_facts();
             }
