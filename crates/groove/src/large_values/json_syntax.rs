@@ -26,12 +26,14 @@ enum Token {
         key: bool,
         escaped: bool,
         unicode_digits: u8,
+        unicode_value: u16,
+        high_surrogate: bool,
     },
     Literal {
         expected: &'static [u8],
         offset: usize,
     },
-    Number(NumberState),
+    Number(Number),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,8 +48,13 @@ enum NumberState {
     ExponentDigits,
 }
 
-/// Syntax-only JSON validation that retains nesting state but never token
-/// contents, so one huge JSON string remains bounded by tree chunking.
+// The default serde_json::Value parser starts with a recursion budget of 128
+// and rejects the container that decrements it to zero. Keep its accepted
+// domain separate from our validator's normative memory ceiling.
+const SERDE_JSON_MAX_CONTAINERS: usize = 127;
+
+/// JSON validation retaining only bounded numeric, escape and nesting state,
+/// never token contents. UTF-8 validation belongs to the surrounding reader.
 pub(super) struct StreamingJsonValidator {
     stack: Vec<Frame>,
     token: Token,
@@ -86,25 +93,47 @@ impl StreamingJsonValidator {
                 key,
                 escaped,
                 unicode_digits,
+                unicode_value,
+                high_surrogate,
             } => {
                 if *unicode_digits > 0 {
-                    if !byte.is_ascii_hexdigit() {
-                        return Err(());
-                    }
+                    let digit = match byte {
+                        b'0'..=b'9' => byte - b'0',
+                        b'a'..=b'f' => byte - b'a' + 10,
+                        b'A'..=b'F' => byte - b'A' + 10,
+                        _ => return Err(()),
+                    };
+                    *unicode_value = (*unicode_value << 4) | u16::from(digit);
                     *unicode_digits -= 1;
+                    if *unicode_digits == 0 {
+                        if *high_surrogate {
+                            if !(0xdc00..=0xdfff).contains(unicode_value) {
+                                return Err(());
+                            }
+                            *high_surrogate = false;
+                        } else {
+                            if (0xdc00..=0xdfff).contains(unicode_value) {
+                                return Err(());
+                            }
+                            *high_surrogate = (0xd800..=0xdbff).contains(unicode_value);
+                        }
+                    }
                     return Ok(());
                 }
                 if *escaped {
                     *escaped = false;
                     if byte == b'u' {
                         *unicode_digits = 4;
-                    } else if !matches!(
-                        byte,
-                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't'
-                    ) {
+                        *unicode_value = 0;
+                    } else if *high_surrogate
+                        || !matches!(byte, b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't')
+                    {
                         return Err(());
                     }
                     return Ok(());
+                }
+                if *high_surrogate && byte != b'\\' {
+                    return Err(());
                 }
                 match byte {
                     b'\\' => *escaped = true,
@@ -140,8 +169,8 @@ impl StreamingJsonValidator {
                 }
                 Ok(())
             }
-            Token::Number(state) => {
-                if advance_number(state, byte)? {
+            Token::Number(number) => {
+                if number.advance(byte)? {
                     Ok(())
                 } else {
                     self.finish_number()?;
@@ -153,7 +182,7 @@ impl StreamingJsonValidator {
     }
 
     fn consume_idle(&mut self, byte: u8) -> Result<(), ()> {
-        if byte.is_ascii_whitespace() {
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
             return Ok(());
         }
         match self.stack.last().copied() {
@@ -186,6 +215,8 @@ impl StreamingJsonValidator {
                         key: true,
                         escaped: false,
                         unicode_digits: 0,
+                        unicode_value: 0,
+                        high_surrogate: false,
                     };
                     Ok(())
                 } else {
@@ -207,14 +238,16 @@ impl StreamingJsonValidator {
     fn start_value(&mut self, byte: u8) -> Result<(), ()> {
         match byte {
             b'{' => {
-                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH {
+                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH.min(SERDE_JSON_MAX_CONTAINERS)
+                {
                     return Err(());
                 }
                 self.stack.push(Frame::Object(ObjectState::FirstKeyOrEnd));
                 Ok(())
             }
             b'[' => {
-                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH {
+                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH.min(SERDE_JSON_MAX_CONTAINERS)
+                {
                     return Err(());
                 }
                 self.stack.push(Frame::Array(ArrayState::FirstValueOrEnd));
@@ -225,22 +258,16 @@ impl StreamingJsonValidator {
                     key: false,
                     escaped: false,
                     unicode_digits: 0,
+                    unicode_value: 0,
+                    high_surrogate: false,
                 };
                 Ok(())
             }
             b't' => self.start_literal(b"rue"),
             b'f' => self.start_literal(b"alse"),
             b'n' => self.start_literal(b"ull"),
-            b'-' => {
-                self.token = Token::Number(NumberState::Minus);
-                Ok(())
-            }
-            b'0' => {
-                self.token = Token::Number(NumberState::Zero);
-                Ok(())
-            }
-            b'1'..=b'9' => {
-                self.token = Token::Number(NumberState::Integer);
+            b'-' | b'0'..=b'9' => {
+                self.token = Token::Number(Number::new(byte));
                 Ok(())
             }
             _ => Err(()),
@@ -256,13 +283,9 @@ impl StreamingJsonValidator {
     }
 
     fn finish_number(&mut self) -> Result<(), ()> {
-        match self.token {
-            Token::Number(
-                NumberState::Zero
-                | NumberState::Integer
-                | NumberState::Fraction
-                | NumberState::ExponentDigits,
-            ) => {
+        match &self.token {
+            Token::Number(number) => {
+                number.finish()?;
                 self.token = Token::None;
                 self.value_complete()
             }
@@ -334,10 +357,160 @@ fn advance_number(state: &mut NumberState, byte: u8) -> Result<bool, ()> {
     Ok(true)
 }
 
+/// The default serde_json parser accumulates a u64, then discards overflowing
+/// integer digits (counting their decimal places) and overflowing fraction
+/// digits (without counting them). It does not use roundtrip parsing's sticky
+/// digits. Keep that reduction here, but let serde_json perform the final
+/// binary rounding so its power-of-ten table is not duplicated.
+struct Number {
+    state: NumberState,
+    significand: u64,
+    decimal_exponent: i32,
+    integer_overflow: bool,
+    fraction_overflow: bool,
+    exponent: i32,
+    exponent_negative: bool,
+    exponent_overflow: bool,
+}
+
+impl Number {
+    fn new(byte: u8) -> Self {
+        Self {
+            state: match byte {
+                b'-' => NumberState::Minus,
+                b'0' => NumberState::Zero,
+                _ => NumberState::Integer,
+            },
+            significand: if byte == b'-' {
+                0
+            } else {
+                u64::from(byte - b'0')
+            },
+            decimal_exponent: 0,
+            integer_overflow: false,
+            fraction_overflow: false,
+            exponent: 0,
+            exponent_negative: false,
+            exponent_overflow: false,
+        }
+    }
+
+    fn advance(&mut self, byte: u8) -> Result<bool, ()> {
+        if !advance_number(&mut self.state, byte)? {
+            return Ok(false);
+        }
+        match self.state {
+            NumberState::Zero | NumberState::Integer => {
+                if !self.integer_overflow {
+                    if let Some(next) = self.append_digit(byte) {
+                        self.significand = next;
+                    } else {
+                        self.integer_overflow = true;
+                    }
+                }
+                if self.integer_overflow {
+                    // Reject before serde_json's unchecked long-mantissa
+                    // counter would overflow (panic or wrap on later reads).
+                    self.decimal_exponent = self.decimal_exponent.checked_add(1).ok_or(())?;
+                }
+            }
+            NumberState::Fraction => {
+                if !self.fraction_overflow {
+                    if let Some(next) = self.append_digit(byte) {
+                        self.significand = next;
+                        self.decimal_exponent = self.decimal_exponent.checked_sub(1).ok_or(())?;
+                    } else {
+                        self.fraction_overflow = true;
+                    }
+                }
+            }
+            NumberState::ExponentSign => self.exponent_negative = byte == b'-',
+            NumberState::ExponentDigits => {
+                if !self.exponent_overflow {
+                    if let Some(next) = self
+                        .exponent
+                        .checked_mul(10)
+                        .and_then(|value| value.checked_add(i32::from(byte - b'0')))
+                    {
+                        self.exponent = next;
+                    } else {
+                        self.exponent_overflow = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn append_digit(&self, byte: u8) -> Option<u64> {
+        self.significand
+            .checked_mul(10)?
+            .checked_add(u64::from(byte - b'0'))
+    }
+
+    fn finish(&self) -> Result<(), ()> {
+        if !matches!(
+            self.state,
+            NumberState::Zero
+                | NumberState::Integer
+                | NumberState::Fraction
+                | NumberState::ExponentDigits
+        ) {
+            return Err(());
+        }
+        if self.exponent_overflow {
+            // serde_json handles exponent overflow before combining it with
+            // the mantissa's decimal places.
+            return if self.exponent_negative || self.significand == 0 {
+                Ok(())
+            } else {
+                Err(())
+            };
+        }
+        let exponent = if self.exponent_negative {
+            self.decimal_exponent.saturating_sub(self.exponent)
+        } else {
+            self.decimal_exponent.saturating_add(self.exponent)
+        };
+        if exponent <= 0 || self.significand == 0 {
+            // A u64 divided by a positive power of ten is always finite.
+            return Ok(());
+        }
+
+        // At most 20 significand digits, 'e', and 10 positive exponent digits.
+        // This is reduced parser metadata, not retained source-token scratch.
+        use std::io::Write;
+        let mut bytes = [0_u8; 31];
+        let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+        write!(output, "{}e{}", self.significand, exponent).map_err(|_| ())?;
+        let length = output.position() as usize;
+        serde_json::from_slice::<f64>(&bytes[..length])
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::StreamingJsonValidator;
-    use crate::large_values::MAX_JSON_NESTING_DEPTH;
+
+    // The public equivalent needs over 2 GiB of one numeric token. Seed only
+    // its counter here to defend the fail-closed arithmetic transition.
+    #[test]
+    fn numeric_mantissa_counter_limit_fails_closed() {
+        let mut integer = super::Number::new(b'1');
+        integer.integer_overflow = true;
+        integer.decimal_exponent = i32::MAX - 1;
+        assert_eq!(integer.advance(b'0'), Ok(true));
+        assert_eq!(integer.advance(b'0'), Err(()));
+
+        let mut fraction = super::Number::new(b'0');
+        fraction.advance(b'.').unwrap();
+        fraction.decimal_exponent = i32::MIN + 1;
+        assert_eq!(fraction.advance(b'0'), Ok(true));
+        assert_eq!(fraction.advance(b'0'), Err(()));
+    }
 
     fn validate_one_byte_at_a_time(json: &[u8]) -> Result<(), ()> {
         let mut validator = StreamingJsonValidator::new();
@@ -384,17 +557,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_json_at_the_explicit_nesting_bound() {
-        let mut json = vec![b'['; MAX_JSON_NESTING_DEPTH];
+    fn accepts_json_at_serde_nesting_bound() {
+        let mut json = vec![b'['; 127];
         json.push(b'0');
-        json.extend(std::iter::repeat_n(b']', MAX_JSON_NESTING_DEPTH));
+        json.extend(std::iter::repeat_n(b']', 127));
         assert!(validate_one_byte_at_a_time(&json).is_ok());
     }
 
     #[test]
-    fn rejects_json_over_the_explicit_nesting_bound_without_retaining_frames() {
+    fn rejects_json_over_serde_nesting_bound() {
         let mut validator = StreamingJsonValidator::new();
-        validator.push(&vec![b'['; MAX_JSON_NESTING_DEPTH]).unwrap();
+        validator.push(&vec![b'['; 127]).unwrap();
         assert!(validator.push(b"[").is_err());
     }
 }

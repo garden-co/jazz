@@ -133,6 +133,8 @@ pub const MAX_PHYSICAL_TRAVERSAL_NODES: usize = MAX_LOGICAL_TRAVERSAL_STEPS;
 /// JSON syntax validation retains one frame per open array/object. Keep this
 /// separate from the immutable-tree bound: a small logical value can otherwise
 /// use arbitrarily deep JSON nesting to grow validator memory.
+/// This is a safe memory ceiling, not a promise to admit every depth below it:
+/// the default serde_json::Value parser admits only 127 simultaneous containers.
 pub const MAX_JSON_NESTING_DEPTH: usize = 128;
 pub const MAX_EDIT_COUNT: usize = 64;
 pub const MAX_EDIT_TAIL_BYTES: usize = 256 * 1024;
@@ -497,7 +499,7 @@ impl LargeValueCursor {
 
 /// Incremental write-admission validation for an already-chunked logical
 /// value. The caller feeds consecutive final-logical windows, so this retains
-/// only an incomplete UTF-8 sequence and JSON syntax state, never the value.
+/// only an incomplete UTF-8 sequence and bounded JSON semantic state, never the value.
 pub(crate) struct LogicalValueValidator {
     kind: LargeValueKind,
     utf8_tail: Vec<u8>,
@@ -5058,6 +5060,177 @@ fn stage_unvalidated_fixture_node(
     }
 }
 
+/// Authenticated JSON bytes without preparation-time JSON validation. Remote
+/// admission tests must not depend on the validator they are trying to bypass.
+#[cfg(test)]
+pub(crate) fn unvalidated_json_leaf_fixture(bytes: &[u8]) -> PreparedLargeValue {
+    assert!(bytes.len() <= LEAF_MAX_BYTES);
+    let mut staged_chunks = Vec::new();
+    let leaf = stage_unvalidated_fixture_node(
+        ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Json,
+            bytes: bytes.to_vec(),
+        },
+        &mut random_locator,
+        &mut staged_chunks,
+    );
+    PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: LargeValueKind::Json,
+            format_version: FORMAT_VERSION,
+            logical_hash: leaf.structural_hash,
+            root: leaf.node_ref,
+            byte_length: leaf.metrics.byte_length,
+            utf16_length: leaf.metrics.utf16_length,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn json_admission_corpus() -> Vec<(&'static str, String)> {
+    let mut cases = vec![
+        ("overflow", "1e400".to_owned()),
+        ("negative overflow", "-1e400".to_owned()),
+        ("finite maximum", "1.7976931348623157e308".to_owned()),
+        (
+            "maximum adjacent decimal lower",
+            "1.7976931348623158e308".to_owned(),
+        ),
+        (
+            "maximum adjacent decimal upper",
+            "1.7976931348623159e308".to_owned(),
+        ),
+        (
+            "negative maximum rounding",
+            "-1.7976931348623158e308".to_owned(),
+        ),
+        (
+            "integer fallback finite",
+            "179769313486231570000e288".to_owned(),
+        ),
+        (
+            "integer fallback overflow",
+            "179769313486231590000e288".to_owned(),
+        ),
+        (
+            "fraction truncation finite",
+            "1.797693134862315700009999e308".to_owned(),
+        ),
+        (
+            "fraction truncation overflow",
+            "1.797693134862315900000001e308".to_owned(),
+        ),
+        ("u64 maximum", "18446744073709551615".to_owned()),
+        ("above u64 maximum", "18446744073709551616".to_owned()),
+        (
+            "negative integer fallback",
+            "-18446744073709551616".to_owned(),
+        ),
+        ("negative zero", "-0".to_owned()),
+        ("signed fractional zero", "-0.000e+308".to_owned()),
+        ("underflow", "1e-400".to_owned()),
+        ("signed underflow", "-1e-400".to_owned()),
+        ("subnormal", "4.9406564584124654e-324".to_owned()),
+        ("positive exponent limit", "1e2147483647".to_owned()),
+        ("positive exponent overflow", "1e2147483648".to_owned()),
+        ("negative exponent limit", "1e-2147483648".to_owned()),
+        ("zero exponent overflow", "0e2147483648".to_owned()),
+        (
+            "integer overflow then fitting fraction",
+            "184467440737095516160.0e288".to_owned(),
+        ),
+        (
+            "integer overflow then overflowing fraction",
+            "184467440737095516150.9e288".to_owned(),
+        ),
+    ];
+    let length = LEAF_MIN_BYTES + 17;
+    cases.extend([
+        (
+            "long integer compensated",
+            format!("1{}e-{length}", "0".repeat(length)),
+        ),
+        ("long integer overflow", format!("1{}", "0".repeat(length))),
+        (
+            "long compensated maximum",
+            format!(
+                "1797693134862315700{}e-{}",
+                "0".repeat(length),
+                length - 290
+            ),
+        ),
+        (
+            "long compensated overflow",
+            format!(
+                "1797693134862315900{}e-{}",
+                "0".repeat(length),
+                length - 290
+            ),
+        ),
+        (
+            "long leading fractional zeros",
+            format!("0.{}1e{}", "0".repeat(length), length + 1),
+        ),
+        (
+            "long leading fractional zeros overflow",
+            format!("0.{}17976931348623159e{}", "0".repeat(length), length + 309),
+        ),
+        (
+            "long fraction truncation",
+            format!("1.7976931348623157{}e308", "9".repeat(length)),
+        ),
+        (
+            "long exponent overflow",
+            format!("1e{}", "9".repeat(length)),
+        ),
+        ("long exponent zero", format!("-0e{}", "9".repeat(length))),
+        (
+            "long exponent underflow",
+            format!("1e-{}", "9".repeat(length)),
+        ),
+        (
+            "long exponent leading zeros",
+            format!("1e{}308", "0".repeat(length)),
+        ),
+    ]);
+    for (name, escaped) in [
+        ("lone high surrogate", r"\uD800"),
+        ("lone low surrogate", r"\uDC00"),
+        ("high high surrogate", r"\uD800\uDBFF"),
+        ("ordinary successor", r"\uD800x"),
+        ("non unicode successor", r"\uD800\n"),
+        ("non surrogate unicode successor", r"\uD800\u0041"),
+        ("truncated surrogate successor", r"\uD800\uDC0"),
+        ("paired surrogate", r"\uD83D\uDE42"),
+        ("paired surrogate extremes", r"\uDBFF\uDFFF"),
+        ("ordinary unicode escape", r"\uD7FF\uE000"),
+        ("raw non BMP", "🙂"),
+    ] {
+        cases.push((name, format!("\"{escaped}\"")));
+        cases.push((name, format!("{{\"{escaped}\":0}}")));
+        cases.push((name, format!("{{\"value\":\"{escaped}\"}}")));
+    }
+    // Place the escape pair and numeric overflow across completion-reader
+    // windows as well as across public push boundaries.
+    for (name, suffix) in [
+        ("window split pair", r#"\uD83D\uDE42"}"#),
+        ("window split unpaired surrogate", r#"\uD83D\u0041"}"#),
+    ] {
+        cases.push((
+            name,
+            format!("{{\"value\":\"{}{suffix}", "x".repeat(LEAF_MIN_BYTES - 12)),
+        ));
+    }
+    cases.push((
+        "window split exponent",
+        format!("[{}1e400]", " ".repeat(LEAF_MIN_BYTES - 3)),
+    ));
+    cases
+}
+
 /// Build an explicitly malformed bottom-up DAG whose every branch repeats one
 /// zero-metric child. This fixture deliberately bypasses canonical staging so
 /// authenticated historical/wire nodes can exercise fail-closed admission.
@@ -6466,6 +6639,187 @@ mod tests {
                 );
                 assert!(stats.peak_leaf_buffer_bytes <= LEAF_MAX_BYTES + LEAF_MIN_BYTES);
                 assert!(stats.peak_frontier_nodes <= BRANCH_MAX_CHILDREN * MAX_TREE_DEPTH);
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_and_buffered_json_admission_reject_numeric_overflow() {
+        let bytes = b"1e400";
+        assert_eq!(
+            prepare(LargeValueKind::Json, bytes).unwrap_err(),
+            Error::InvalidJson
+        );
+
+        let mut streamed_chunks = Vec::new();
+        let streamed =
+            prepare_streaming(LargeValueKind::Json, std::io::Cursor::new(bytes), |chunk| {
+                streamed_chunks.push(chunk);
+                Ok(())
+            });
+
+        let mut pushed_chunks = Vec::new();
+        let mut preparation = PushStreamingPreparation::new(LargeValueKind::Json, |chunk| {
+            pushed_chunks.push(chunk);
+            Ok(())
+        });
+        let pushed = bytes
+            .iter()
+            .try_for_each(|byte| preparation.push(std::slice::from_ref(byte)))
+            .and_then(|()| preparation.finish());
+
+        assert_eq!(
+            (streamed.map(|_| ()), pushed.map(|_| ())),
+            (Err(Error::InvalidJson), Err(Error::InvalidJson)),
+            "neither streaming entry point may publish a descriptor for buffered-invalid JSON"
+        );
+    }
+
+    fn assert_json_admission_matches_serde(bytes: &[u8]) {
+        let expected = serde_json::from_slice::<serde_json::Value>(bytes)
+            .map(|_| ())
+            .map_err(|_| Error::InvalidJson);
+        assert_eq!(prepare(LargeValueKind::Json, bytes).map(|_| ()), expected);
+        let streamed =
+            prepare_streaming(
+                LargeValueKind::Json,
+                std::io::Cursor::new(bytes),
+                |_| Ok(()),
+            )
+            .map(|_| ());
+        let mut preparation = PushStreamingPreparation::new(LargeValueKind::Json, |_| Ok(()));
+        let pushed = bytes
+            .iter()
+            .try_for_each(|byte| preparation.push(std::slice::from_ref(byte)))
+            .and_then(|()| preparation.finish())
+            .map(|_| ());
+        assert_eq!(
+            (streamed, pushed),
+            (expected.clone(), expected),
+            "streamed and pushed admission must match serde_json for {bytes:?}"
+        );
+    }
+
+    #[test]
+    fn json_admission_matches_serde_for_ascii_whitespace() {
+        for whitespace in [b' ', b'\t', b'\n', b'\r', b'\x0b', b'\x0c'] {
+            for (prefix, suffix) in [("", "0"), ("0", ""), ("[0,", "1]"), ("{\"key\":", "0}")] {
+                let bytes = [prefix.as_bytes(), &[whitespace], suffix.as_bytes()].concat();
+                assert_json_admission_matches_serde(&bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn json_admission_matches_serde_at_recursion_boundary() {
+        for depth in [126, 127, 128, 129] {
+            let arrays = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            assert_json_admission_matches_serde(arrays.as_bytes());
+            let objects = format!("{}0{}", "{\"key\":".repeat(depth), "}".repeat(depth));
+            assert_json_admission_matches_serde(objects.as_bytes());
+            let mixed = format!(
+                "{}0{}",
+                "[{\"key\":".repeat(depth / 2),
+                "}]".repeat(depth / 2)
+            );
+            let mixed = if depth % 2 == 1 {
+                format!("[{mixed}]")
+            } else {
+                mixed
+            };
+            assert_json_admission_matches_serde(mixed.as_bytes());
+        }
+    }
+
+    #[test]
+    fn json_admission_matches_serde_value_across_numeric_and_surrogate_splits() {
+        for (name, json) in json_admission_corpus() {
+            let bytes = json.as_bytes();
+            let expected = serde_json::from_slice::<serde_json::Value>(bytes)
+                .map(|_| ())
+                .map_err(|_| Error::InvalidJson);
+            let buffered = prepare(LargeValueKind::Json, bytes);
+            assert_eq!(
+                buffered.as_ref().map(|_| ()).map_err(Clone::clone),
+                expected,
+                "buffered {name}"
+            );
+            let check = |result: Result<(LargeValueRef, StreamingPrepareStats), Error>| {
+                assert_eq!(
+                    result.as_ref().map(|_| ()).map_err(Clone::clone),
+                    expected,
+                    "{name}"
+                );
+                if let Ok((value, _)) = result {
+                    let buffered = &buffered.as_ref().unwrap().value_ref;
+                    assert_eq!(
+                        value.logical_hash, buffered.logical_hash,
+                        "{name}: literal identity"
+                    );
+                    assert_eq!(
+                        value.byte_length, buffered.byte_length,
+                        "{name}: byte length"
+                    );
+                    assert_eq!(
+                        value.utf16_length, buffered.utf16_length,
+                        "{name}: UTF-16 length"
+                    );
+                }
+            };
+            check(prepare_streaming(
+                LargeValueKind::Json,
+                std::io::Cursor::new(bytes),
+                |_| Ok(()),
+            ));
+            check(prepare_streaming(
+                LargeValueKind::Json,
+                WindowReader {
+                    bytes,
+                    offset: 0,
+                    state: 7,
+                },
+                |_| Ok(()),
+            ));
+
+            let mut pushed = PushStreamingPreparation::new(LargeValueKind::Json, |_| Ok(()));
+            check(
+                bytes
+                    .iter()
+                    .try_for_each(|byte| pushed.push(std::slice::from_ref(byte)))
+                    .and_then(|()| pushed.finish()),
+            );
+
+            let splits = if bytes.len() < 128 {
+                (0..=bytes.len()).collect::<Vec<_>>()
+            } else {
+                vec![
+                    0,
+                    1,
+                    bytes.len() / 2,
+                    bytes.len() - 1,
+                    bytes.len(),
+                    LEAF_MIN_BYTES - 1,
+                    LEAF_MIN_BYTES,
+                    LEAF_MIN_BYTES + 1,
+                ]
+            };
+            for split in splits {
+                let mut pushed = PushStreamingPreparation::new(LargeValueKind::Json, |_| Ok(()));
+                check(
+                    pushed
+                        .push(&bytes[..split])
+                        .and_then(|()| pushed.push(&bytes[split..]))
+                        .and_then(|()| pushed.finish()),
+                );
+                // A chained reader forces the same two windows at its public
+                // Read seam, including every escape byte in the short corpus.
+                use std::io::Read;
+                check(prepare_streaming(
+                    LargeValueKind::Json,
+                    std::io::Cursor::new(&bytes[..split])
+                        .chain(std::io::Cursor::new(&bytes[split..])),
+                    |_| Ok(()),
+                ));
             }
         }
     }

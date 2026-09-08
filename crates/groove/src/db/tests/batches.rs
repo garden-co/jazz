@@ -3798,6 +3798,121 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
     assert_eq!(chunks.len(), 0);
 }
 
+// Only the remote upload seam can receive authenticated JSON that bypassed
+// preparation. Construct the physical leaf independently for both controls and
+// failures, rather than using the streaming validator to make its own fixture.
+#[futures_test::test]
+async fn completed_json_upload_matches_serde_and_queues_rejected_chunks_for_reclamation() {
+    use crate::large_values::{
+        LargeValueUploadProgress, json_admission_corpus, unvalidated_json_leaf_fixture,
+    };
+    for (name, json) in json_admission_corpus() {
+        let schema = DatabaseSchema::new([TableSchema::new(
+            "objects",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+        let storage =
+            MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+        let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+        let mut database = Database::new(schema, storage).await.unwrap();
+        database.set_chunk_storage(chunks.clone());
+        let prepared = unvalidated_json_leaf_fixture(json.as_bytes());
+        let root = prepared.value_ref.root.clone();
+        assert!(
+            matches!(
+                database
+                    .begin_large_value_upload(prepared.value_ref.clone())
+                    .await
+                    .unwrap(),
+                LargeValueUploadProgress::Missing(_)
+            ),
+            "{name}"
+        );
+        let result = database
+            .continue_large_value_upload(prepared.value_ref, prepared.staged_chunks)
+            .await;
+        if serde_json::from_str::<serde_json::Value>(&json).is_ok() {
+            assert!(
+                matches!(result, Ok(LargeValueUploadProgress::Staged(_))),
+                "{name}: {result:?}"
+            );
+            assert_eq!(
+                database.staged_large_values().await.unwrap().len(),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                database
+                    .reclaim_orphaned_large_value_chunks(usize::MAX)
+                    .await
+                    .unwrap(),
+                0,
+                "{name}"
+            );
+            assert_eq!(
+                chunks.len(),
+                1,
+                "{name}: accepted receipt protects its leaf"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::IvmRuntime(
+                        crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                            crate::large_values::Error::InvalidJson
+                        )
+                    ))
+                ),
+                "{name}: {result:?}"
+            );
+            assert!(
+                database.staged_large_values().await.unwrap().is_empty(),
+                "{name}"
+            );
+            // Rejection ends publication protection, not physical residency.
+            assert_eq!(chunks.len(), 1, "{name}: deletion waits for reclamation");
+            assert!(
+                database
+                    .storage
+                    .get(
+                        LARGE_VALUE_METADATA_CF.to_owned(),
+                        large_value_reclaim_key(&root).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{name}: rejected leaf is queued"
+            );
+            assert_eq!(
+                database
+                    .reclaim_orphaned_large_value_chunks(usize::MAX)
+                    .await
+                    .unwrap(),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                chunks.len(),
+                0,
+                "{name}: explicit reclamation removes the leaf"
+            );
+        }
+        assert!(
+            database
+                .pending_large_value_uploads()
+                .await
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
 // This facade-level test uses a deliberately malformed physical child because
 // only the peer upload path receives untrusted pre-chunked bytes. The root
 // remains authenticated while one requested child is a hash-valid invalid
