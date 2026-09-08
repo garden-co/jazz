@@ -14,23 +14,27 @@ use jazz_testkit::{TestingClient, has_added_id, has_removed, wait_for_subscripti
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 fn schema() -> Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("tasks")
-                .column("owner", ColumnType::Text)
-                .column("done", ColumnType::Boolean)
-                .column("title", ColumnType::Text)
-                .policies(permissions(|p| {
-                    p.allow_insert().always();
-                    p.allow_update().always();
-                    p.allow_delete().always();
-                    p.allow_read().where_(pe::eq(
-                        "owner",
-                        pe::session(vec!["user", "identity", "subject"]),
-                    ));
-                })),
-        )
-        .build()
+    scalar_schema(false)
+}
+
+fn scalar_schema(declared_id: bool) -> Schema {
+    let mut table = TableSchema::builder("tasks")
+        .column("owner", ColumnType::Text)
+        .column("done", ColumnType::Boolean)
+        .column("title", ColumnType::Text)
+        .policies(permissions(|p| {
+            p.allow_insert().always();
+            p.allow_update().always();
+            p.allow_delete().always();
+            p.allow_read().where_(pe::eq(
+                "owner",
+                pe::session(vec!["user", "identity", "subject"]),
+            ));
+        }));
+    if declared_id {
+        table = table.column("id", ColumnType::Text);
+    }
+    SchemaBuilder::new().table(table).build()
 }
 
 fn filtered() -> Query {
@@ -447,10 +451,10 @@ async fn relayed_scalar_exit_with_simultaneous_dependency_revocation_withholds_s
 /// No upstream predecessor survives the detached subscription. The ordinary
 /// query must revalidate the extra local input through a partial relay.
 /// alice caches -> disconnect/drop -> bob updates -> alice subscribes/reconnects
-async fn run_reconnect_scalar_query(count: usize) {
+async fn run_reconnect_scalar_query(count: usize, declared_id: bool) {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let schema = schema();
+            let schema = scalar_schema(declared_id);
             let authority = JazzServer::start_with_schema(schema.clone()).await;
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
@@ -471,12 +475,12 @@ async fn run_reconnect_scalar_query(count: usize) {
             let mut tasks = Vec::new();
             let mut txs = Vec::new();
             for _ in 0..count {
-                let (task, _, tx) = bob
-                    .insert(
-                        "tasks",
-                        row_input!("owner" => "alice", "done" => false, "title" => "before"),
-                    )
-                    .unwrap();
+                let mut input =
+                    row_input!("owner" => "alice", "done" => false, "title" => "before");
+                if declared_id {
+                    input.insert("id".into(), Value::Text("application-key".into()));
+                }
+                let (task, _, tx) = bob.insert("tasks", input).unwrap();
                 tasks.push(task);
                 txs.push(tx.unwrap());
             }
@@ -563,7 +567,7 @@ async fn run_reconnect_scalar_query(count: usize) {
 /// offline update. alice caches -> disconnect/drop -> bob updates -> reconnect
 #[tokio::test]
 async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
-    run_reconnect_scalar_query(1).await;
+    run_reconnect_scalar_query(1, false).await;
 }
 
 /// Alice's 65 retained roots require more than one bounded 64-ID probe batch.
@@ -571,7 +575,12 @@ async fn reconnect_scalar_query_revalidates_extra_local_input_through_relay() {
 /// alice caches 65 -> offline -> bob changes 65 -> reconnect -> two batches
 #[tokio::test]
 async fn reconnect_scalar_reconciliation_continues_past_first_batch() {
-    run_reconnect_scalar_query(65).await;
+    run_reconnect_scalar_query(65, false).await;
+}
+
+#[tokio::test]
+async fn scalar_reconciliation_uses_physical_identity_with_declared_id_column() {
+    run_reconnect_scalar_query(1, true).await;
 }
 
 async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
@@ -863,4 +872,121 @@ async fn reconnect_scalar_probe_withholds_related_grant_revoked_successor() {
 #[tokio::test]
 async fn unavailable_scalar_input_survives_reopen_and_readmits() {
     run_reconnect_revoked_input(false, true).await;
+}
+
+/// Changing only the permissions catalogue must retract a retained local input;
+/// restoring the rule must re-admit the unchanged native row through the Edge.
+#[tokio::test]
+async fn scalar_input_policy_rule_change_revokes_and_readmits() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = schema();
+            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let relay = JazzServer::builder()
+                .with_schema(schema.clone())
+                .with_app_id(authority.app_id())
+                .with_backend_secret(authority.backend_secret())
+                .with_upstream_url(authority.base_url())
+                .with_native_transport_connector(jazz_testkit::native_connector())
+                .start()
+                .await;
+            let writer = TestingClient::builder()
+                .with_server(&authority)
+                .with_schema(schema.clone())
+                .with_user_id("writer")
+                .as_admin()
+                .ready_on("tasks", TIMEOUT)
+                .connect()
+                .await;
+            let (task, _, tx) = writer
+                .insert(
+                    "tasks",
+                    row_input!("owner" => "alice", "done" => false, "title" => "unchanged"),
+                )
+                .unwrap();
+            jazz_testkit::wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+            let alice = TestingClient::builder()
+                .with_server(&relay)
+                .with_schema(schema.clone())
+                .with_user_id("alice")
+                .as_user()
+                .connect()
+                .await;
+            let mut stream = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let mut log = Vec::new();
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                TIMEOUT,
+                "initial policy permits input",
+                |log| has_added_id(log, task),
+            )
+            .await;
+            let denied = permissions(|p| {
+                p.allow_insert().always();
+                p.allow_update().always();
+                p.allow_delete().always();
+                p.allow_read().where_(pe::eq("owner", "nobody"));
+            });
+            jazz_testkit::publish_permissions(
+                &authority.base_url(),
+                authority.app_id(),
+                authority.admin_secret(),
+                &schema,
+                [("tasks".into(), denied)],
+                None,
+            )
+            .await;
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                TIMEOUT,
+                "new policy excludes unchanged local input",
+                |log| has_removed(log, task),
+            )
+            .await;
+            assert!(
+                !local_rows(&alice, Query::from("tasks"))
+                    .await
+                    .iter()
+                    .any(|(id, _)| *id == task)
+            );
+            log.clear();
+            let restored = schema
+                .iter()
+                .map(|(name, table)| (*name, table.policies.clone()))
+                .collect::<Vec<_>>();
+            jazz_testkit::publish_permissions(
+                &authority.base_url(),
+                authority.app_id(),
+                authority.admin_secret(),
+                &schema,
+                restored,
+                None,
+            )
+            .await;
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                TIMEOUT,
+                "restored policy re-admits unchanged input",
+                |log| has_added_id(log, task),
+            )
+            .await;
+            assert!(
+                local_rows(&alice, Query::from("tasks"))
+                    .await
+                    .iter()
+                    .any(|(id, values)| *id == task
+                        && values.contains(&Value::Text("unchanged".into())))
+            );
+            alice.shutdown().await.unwrap();
+            writer.shutdown().await.unwrap();
+            relay.shutdown().await;
+            authority.shutdown().await;
+        })
+        .await;
 }

@@ -816,3 +816,222 @@ fn partial_edge_pending_repair_cancels_on_link_loss_without_cache_fallback() {
     };
     assert!(state.pending_authority_repairs.is_empty());
 }
+
+/// The Edge's own SYSTEM local-first query repairs its retained cache after
+/// reconnect. No downstream client or client-context exclusion participates.
+/// This uses admitted links and the native codec, not a WebSocket server.
+#[test]
+fn edge_own_system_scalar_query_reconciles_after_reconnect() {
+    let schema = owner_read_schema();
+    let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let edge = open_db(0xe4, AuthorSubject::SYSTEM, &schema);
+    let target = row(0xd4);
+    core.insert_with_id(
+        "todos",
+        target,
+        cells("before", false, AuthorSubject::for_test_bytes([0xa4; 16])),
+    )
+    .unwrap();
+    let (up, down) = link(AuthorSubject::SYSTEM, 0xe4, 0xc4, true);
+    let upstream = block_on(edge.connect_upstream(up));
+    let _downstream = core.accept_subscriber_with_trust(
+        down,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let mut stream = prepared_subscribe(&edge, &query, ReadOpts::default()).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..32 {
+        core.tick().unwrap();
+        edge.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.root_count, 1);
+    assert!(block_on(edge.detach_connection_async(&upstream)).unwrap());
+    core.update(
+        "todos",
+        target,
+        cells(
+            "after reconnect",
+            true,
+            AuthorSubject::for_test_bytes([0xa4; 16]),
+        ),
+    )
+    .unwrap();
+    assert_eq!(snapshot.root_count, 1);
+    let (up, down) = link(AuthorSubject::SYSTEM, 0xe4, 0xc4, true);
+    let _upstream = block_on(edge.connect_upstream(up));
+    let _downstream = core.accept_subscriber_with_trust(
+        down,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    for _ in 0..64 {
+        core.tick().unwrap();
+        edge.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        snapshot.root_count, 0,
+        "Edge own query removes stale scalar match"
+    );
+    let cached = prepared_all(
+        &edge,
+        &Query::from("todos"),
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    );
+    assert_eq!(
+        cached.len(),
+        1,
+        "SYSTEM cache remains readable, not revoked"
+    );
+    assert_eq!(cached[0].row_uuid(), target);
+    assert_eq!(
+        cached[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("after reconnect".into()))
+    );
+}
+
+struct HoldCurrentRowsReceipts {
+    inner: Box<dyn Transport>,
+    hold: Rc<Cell<bool>>,
+    withheld: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+impl Transport for HoldCurrentRowsReceipts {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if !self.hold.get() {
+            if let Some(message) = self.withheld.borrow_mut().pop_front() {
+                return Some(message);
+            }
+        }
+        let message = self.inner.try_recv()?;
+        if self.hold.get() && matches!(message, SyncMessage::CurrentRowsReceipt(_)) {
+            self.withheld.borrow_mut().push_back(message);
+            None
+        } else {
+            Some(message)
+        }
+    }
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+    fn permits_delegated_sessions(&self) -> bool {
+        self.inner.permits_delegated_sessions()
+    }
+}
+
+/// Internal transport scheduling is needed to pause precisely after Core has
+/// evaluated the settled row but before its receipt reaches a new local edit.
+#[test]
+fn scalar_unavailability_receipt_preserves_inflight_local_edit() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let core = open_core(0xc5, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let client = open_db(0xe5, alice, &schema);
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
+    let target = row(0xd5);
+    core.insert_with_id("todos", target, cells("before", false, alice))
+        .unwrap();
+    let (up, down) = link(alice, 0xe5, 0xc5, false);
+    let hold = Rc::new(Cell::new(true));
+    let withheld = Rc::new(RefCell::new(VecDeque::new()));
+    let _up = block_on(client.connect_upstream(Box::new(HoldCurrentRowsReceipts {
+        inner: up,
+        hold: Rc::clone(&hold),
+        withheld: Rc::clone(&withheld),
+    })));
+    let _down = core.accept_subscriber(down, alice);
+    let mut stream = prepared_subscribe(
+        &client,
+        &Query::from("todos").filter(eq(col("done"), lit(false))),
+        ReadOpts::default(),
+    )
+    .unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..32 {
+        core.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.root_count, 1);
+    core.update("todos", target, cells("not readable", false, bob))
+        .unwrap();
+    for _ in 0..32 {
+        core.tick().unwrap();
+        client.tick().unwrap();
+        if !withheld.borrow().is_empty() {
+            break;
+        }
+    }
+    assert!(withheld.borrow().iter().any(|message| matches!(message,
+        SyncMessage::CurrentRowsReceipt(receipt) if receipt.outcomes == [CurrentRowOutcome::CurrentUnavailable])));
+    let write = block_on(client.update(
+        "todos",
+        target,
+        BTreeMap::from([("title".into(), Value::String("local edit".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    hold.set(false);
+    // Core remains paused: the new optimistic write has no remote fate yet.
+    for _ in 0..8 {
+        client.tick().unwrap();
+    }
+    assert!(
+        !client.node.current_rows.borrow().floors.is_empty(),
+        "held receipt passed exact context and local-cut validation"
+    );
+    let rows = prepared_all(
+        &client,
+        &Query::from("todos"),
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "settled-row denial must not hide the pending edit"
+    );
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("local edit".into()))
+    );
+    assert!(matches!(
+        block_on(write.write_state()).unwrap().fate,
+        Fate::Pending
+    ));
+}

@@ -3282,7 +3282,7 @@ where
         if state
             .generation
             .as_ref()
-            .is_some_and(|old| old.0 != generation.0)
+            .is_some_and(|old| old.0 != generation.0 || old.1 != generation.1)
         {
             *state = ScalarReconciliation::default();
         }
@@ -3331,14 +3331,23 @@ where
                             .upstream_subscription_handles
                             .iter()
                             .any(|handle| handle.subscription == request.subscription)
-                }) || !self
-                    .active_authority_view_receipts
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|active| {
-                        active.connection_epoch == generation.0
-                            && active.subscriptions.contains(&request.subscription)
-                    })
+                }) || (local_owner.is_none()
+                    && !self
+                        .relay_upstream_subscription_owners
+                        .borrow()
+                        .values()
+                        .any(|owner| {
+                            owner.request.subscription == request.subscription
+                                && owner.request.policy_binding == request.policy_binding
+                        }))
+                    || !self
+                        .active_authority_view_receipts
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|active| {
+                            active.connection_epoch == generation.0
+                                && active.subscriptions.contains(&request.subscription)
+                        })
                 {
                     *state = ScalarReconciliation::default();
                     return Ok(());
@@ -3348,23 +3357,40 @@ where
                     receipt.context.claims().clone(),
                 );
                 if let Some(scope) = node.local_read_policy_binding(receipt.context.identity) {
-                    let outcomes = receipt
-                        .rows
-                        .iter()
-                        .zip(&receipt.outcomes)
-                        .filter_map(|(row, outcome)| {
-                            let status = match outcome {
-                                crate::protocol::CurrentRowOutcome::Readable => {
-                                    crate::node::LocalRowAvailability::Readable
+                    let mut outcomes = Vec::new();
+                    for (row, outcome) in receipt.rows.iter().zip(&receipt.outcomes) {
+                        let status = match outcome {
+                            crate::protocol::CurrentRowOutcome::Readable => {
+                                crate::node::LocalRowAvailability::Readable
+                            }
+                            crate::protocol::CurrentRowOutcome::CurrentUnavailable => {
+                                // A local edit may have started after this batch
+                                // was sent. Do not hide that pending overlay with
+                                // a decision about the authority's settled row.
+                                let settled = if let Some(tx) = node
+                                    .local_content_winner_tx_id(
+                                        &request.shape.query().table,
+                                        row.row,
+                                    )
+                                    .await?
+                                {
+                                    node.transaction_record(tx).await.is_some_and(|record| {
+                                        matches!(record.fate, crate::tx::Fate::Accepted)
+                                            && record.durability >= DurabilityTier::Edge
+                                    })
+                                } else {
+                                    true
+                                };
+                                if !settled {
+                                    retry_rows.push(row.row);
+                                    continue;
                                 }
-                                crate::protocol::CurrentRowOutcome::CurrentUnavailable => {
-                                    crate::node::LocalRowAvailability::CurrentUnavailable
-                                }
-                                crate::protocol::CurrentRowOutcome::Unknown => return None,
-                            };
-                            Some((row.physical_table, row.row, status))
-                        })
-                        .collect::<Vec<_>>();
+                                crate::node::LocalRowAvailability::CurrentUnavailable
+                            }
+                            crate::protocol::CurrentRowOutcome::Unknown => continue,
+                        };
+                        outcomes.push((row.physical_table, row.row, status));
+                    }
                     if !outcomes.is_empty() {
                         node.activate_local_availability_authority(
                             scope.clone(),
@@ -3397,7 +3423,9 @@ where
                 }
             }
             if retry_rows.is_empty() {
-                state.retry_delay_ms = 0;
+                if state.pending.is_empty() {
+                    state.retry_delay_ms = 0;
+                }
             } else {
                 state.pending.extend(retry_rows.drain(..));
                 state.retry_delay_ms = if state.retry_delay_ms == 0 {
@@ -3499,6 +3527,10 @@ where
                 if let Ok(coordinate) = node.current_row_coordinate(table, row) {
                     candidates.push(coordinate);
                 }
+            } else if state.retry_delay_ms != 0 {
+                // A receipt deferred for an in-flight local edit must remain
+                // eligible once that edit settles, even without another scope delta.
+                state.pending.push_back(row);
             }
         }
         drop(node);
@@ -3521,7 +3553,18 @@ where
             }
             self.schedule_tick(TickUrgency::Immediate);
         } else if !state.pending.is_empty() {
-            self.schedule_tick(TickUrgency::AfterCurrentTurn);
+            if state.retry_delay_ms != 0 {
+                state.retry_delay_ms = (state.retry_delay_ms * 2).min(2_000);
+                state.retry_at = Some(
+                    web_time::Instant::now()
+                        + std::time::Duration::from_millis(state.retry_delay_ms),
+                );
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(state.retry_delay_ms);
+                }
+            } else {
+                self.schedule_tick(TickUrgency::AfterCurrentTurn);
+            }
         }
         Ok(())
     }
