@@ -427,6 +427,7 @@ mod tests {
 
     #[test]
     fn server_app_id_explains_uuid_requirement() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
         let error = Cli::try_parse_from(["jazz-tools", "server", "my-app"])
             .err()
             .expect("invalid app name must fail");
@@ -497,7 +498,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--allow-local-first-auth",
         ])
         .expect("server command should parse");
@@ -517,7 +518,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--jwt-public-key",
             r#"{"kty":"oct","kid":"test-kid","alg":"HS256","k":"c2VjcmV0"}"#,
             "--jwt-issuer",
@@ -553,7 +554,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--jwks-url",
             "https://issuer.example/.well-known/jwks.json",
         ])
@@ -566,7 +567,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--jwks-url",
             "https://issuer.example/.well-known/jwks.json",
             "--jwt-issuer",
@@ -582,8 +583,12 @@ mod tests {
     fn server_command_defaults_shutdown_timeout_secs() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let _env_guard = EnvVarGuard::remove("JAZZ_SHUTDOWN_TIMEOUT_SECS");
-        let cli = Cli::try_parse_from(["jazz-tools", "server", "test-app"])
-            .expect("server command should parse");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
 
         match cli.command {
             Commands::Server {
@@ -600,7 +605,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--shutdown-timeout-secs",
             "7",
         ])
@@ -619,8 +624,12 @@ mod tests {
     fn server_command_reads_shutdown_timeout_secs_from_env() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let _env_guard = EnvVarGuard::set("JAZZ_SHUTDOWN_TIMEOUT_SECS", "11");
-        let cli = Cli::try_parse_from(["jazz-tools", "server", "test-app"])
-            .expect("server command should parse");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
 
         match cli.command {
             Commands::Server {
@@ -637,7 +646,7 @@ mod tests {
         let error = match Cli::try_parse_from([
             "jazz-tools",
             "server",
-            "test-app",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
             "--shutdown-timeout-secs",
             "18446744073709551615",
         ]) {
