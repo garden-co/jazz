@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { jwtAuth } from "../session/app.js";
+import { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
 import { ConfiguredJazzAppProvider, useJazzAuth, type JazzAuthState } from "./app.js";
 import { useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
@@ -177,4 +177,167 @@ it("retains its mounted owner while Suspense hides and restores the data tree", 
   expect(factory).toHaveBeenCalledOnce();
   view.unmount();
   await waitFor(() => expect(client.shutdown).toHaveBeenCalledOnce());
+});
+
+it("new pending auth never commits ready children", async () => {
+  const { factory } = fixture();
+  const commits: string[] = [];
+  function Data({ pending }: { pending: boolean }) {
+    const state = useJazzAuth();
+    React.useLayoutEffect(() => {
+      commits.push(`${pending}:${state.status}`);
+    });
+    return <Status />;
+  }
+  const tree = (pending: boolean) => (
+    <ConfiguredJazzAppProvider
+      config={{}}
+      createJazzSession={factory}
+      auth={jwtAuth({
+        key: "a",
+        isPending: pending,
+        getToken: async () => "a",
+        logout: async () => {},
+      })}
+      loading={<Status />}
+    >
+      <Data pending={pending} />
+    </ConfiguredJazzAppProvider>
+  );
+  const view = render(tree(false));
+  await waitFor(() => expect(view.container.textContent).toBe("ready"));
+  commits.length = 0;
+  view.rerender(tree(true));
+  expect(commits).not.toContain("true:ready");
+});
+
+it("waits for passive queries while outer Suspense cannot commit", async () => {
+  const { factory, client } = fixture();
+  let active = 0;
+  const pending = new Promise<void>(() => {});
+  function Query() {
+    useJazzClient();
+    useEffect(() => {
+      active++;
+      return () => {
+        active--;
+      };
+    }, []);
+    return <Status />;
+  }
+  function Block({ blocked }: { blocked: boolean }): null {
+    if (blocked) throw pending;
+    return null;
+  }
+  const tree = (blocked: boolean) => (
+    <Suspense fallback="suspended">
+      <ConfiguredJazzAppProvider config={{}} createJazzSession={factory} loading={<Status />}>
+        <Query />
+      </ConfiguredJazzAppProvider>
+      <Block blocked={blocked} />
+    </Suspense>
+  );
+  const view = render(tree(false));
+  await waitFor(() => expect(view.getByText("ready")).toBeDefined());
+  view.rerender(tree(true));
+  expect(active).toBe(1);
+  let logout!: Promise<void>;
+  act(() => {
+    logout = current.logout();
+  });
+  await act(async () => {
+    for (let i = 0; i < 60; i++) await Promise.resolve();
+  });
+  expect(active).toBe(1);
+  expect(client.shutdown).not.toHaveBeenCalled();
+  view.unmount();
+  await logout;
+  expect(active).toBe(0);
+});
+
+it.each([
+  ["session key", { key: "b" }],
+  ["signed out", { key: null }],
+  ["provider error", { key: "a", error: new Error("provider unavailable") }],
+] as const)(
+  "masks old hook identity and data before committing a changed %s",
+  async (_name, next) => {
+    const { factory } = fixture();
+    const commits: string[] = [];
+    const fallbackCommits: string[] = [];
+    function Data({ revision }: { revision: number }) {
+      const state = useJazzAuth();
+      React.useLayoutEffect(() => {
+        commits.push(`${revision}:${state.status}`);
+      });
+      return <Status />;
+    }
+    function Fallback({ revision }: { revision: number }) {
+      const state = useJazzAuth();
+      React.useLayoutEffect(() => {
+        fallbackCommits.push(`${revision}:${state.status}:${!!state.client}:${!!state.account}`);
+      });
+      return <Status />;
+    }
+    const auth = (options: typeof next | { key: string }) =>
+      jwtAuth({ ...options, getToken: async () => "token", logout: async () => {} });
+    const tree = (revision: number, descriptor: JazzAuth) => (
+      <ConfiguredJazzAppProvider
+        config={{}}
+        createJazzSession={factory}
+        auth={descriptor}
+        loading={<Fallback revision={revision} />}
+        error={<Fallback revision={revision} />}
+        signedOut={<Fallback revision={revision} />}
+      >
+        <Data revision={revision} />
+      </ConfiguredJazzAppProvider>
+    );
+    const view = render(tree(0, auth({ key: "a" })));
+    await waitFor(() => expect(view.container.textContent).toBe("ready"));
+    commits.length = 0;
+    fallbackCommits.length = 0;
+    view.rerender(tree(1, auth(next)));
+    expect(commits).not.toContain("1:ready");
+    expect(fallbackCommits[0]).toBe(`1:${"error" in next ? "error" : "transitioning"}:false:false`);
+  },
+);
+it("masks ready children when replacing a BetterAuth client", async () => {
+  const { factory } = fixture();
+  const commits: string[] = [];
+  const makeClient = (isPending: boolean) => ({
+    $store: {
+      atoms: {
+        session: {
+          get: () => ({ data: { session: { id: "session" }, user: { id: "user" } }, isPending }),
+          subscribe: () => () => {},
+        },
+      },
+    },
+    $fetch: async () => ({ data: { token: "token" } }),
+    signOut: async () => ({}),
+  });
+  function Data({ revision }: { revision: number }) {
+    const state = useJazzAuth();
+    React.useLayoutEffect(() => {
+      commits.push(`${revision}:${state.status}`);
+    });
+    return <Status />;
+  }
+  const tree = (revision: number, auth: JazzAuth) => (
+    <ConfiguredJazzAppProvider
+      config={{}}
+      createJazzSession={factory}
+      auth={auth}
+      loading={<Status />}
+    >
+      <Data revision={revision} />
+    </ConfiguredJazzAppProvider>
+  );
+  const view = render(tree(0, betterAuth(makeClient(false))));
+  await waitFor(() => expect(view.container.textContent).toBe("ready"));
+  commits.length = 0;
+  view.rerender(tree(1, betterAuth(makeClient(true))));
+  expect(commits).not.toContain("1:ready");
+  expect(view.container.textContent).toBe("transitioning");
 });
