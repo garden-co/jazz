@@ -588,6 +588,7 @@ where
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = JazzSourceGraphPreparer {
+            local_unavailable_scope: unavailable_inputs::local_unavailable_policy_binding(&request),
             node: self,
             read_view: &read_view,
             inline_sources,
@@ -639,6 +640,7 @@ where
         let read_view = request.reads.primary.clone();
         let dependencies = {
             let mut preparer = JazzSourceGraphPreparer {
+                local_unavailable_scope: None,
                 node: self,
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),

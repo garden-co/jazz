@@ -701,6 +701,7 @@ where
             .contains(&tx_id)
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
             .borrow_mut()

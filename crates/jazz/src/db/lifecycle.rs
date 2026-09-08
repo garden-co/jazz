@@ -86,6 +86,7 @@ where
     }
 
     /// Core-shell capability; partial caches and relays must leave it disabled.
+    #[cfg(feature = "runtime")]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node.enable_authoritative_scalar_exit_refresh();
     }

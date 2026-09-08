@@ -831,6 +831,10 @@ struct ScopedPolicyAuthorizationGraphReplacement {
 
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
+    /// Runtime-only, exact-context app-read exclusions. These do not change
+    /// stored payloads or serving-side permission proofs.
+    local_unavailable_inputs:
+        BTreeMap<(PolicyBindingKey, SchemaVersionId, String), query_eval::LocalUnavailableInput>,
     /// Prepared query plans keyed by shape, durability tier, and parameter
     /// descriptor signature.
     query_shape_cache:

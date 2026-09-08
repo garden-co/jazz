@@ -17,6 +17,8 @@ fn current_row_column_field(
         .with_identity(records::FieldIdentity::Name(column.name.clone()))
 }
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
+    /// Exact app context survives ClientLocal's policy-free source lowering.
+    pub(super) local_unavailable_scope: Option<crate::protocol::PolicyBindingKey>,
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
@@ -1989,6 +1991,41 @@ where
     S: OrderedKvStorage,
 {
     fn prepare_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+        Box::pin(async move {
+            let mut resolved = self
+                .prepare_source_graph_without_local_exclusions(request)
+                .await?;
+            if request.visibility == RowVisibility::Visible
+                && !matches!(
+                    request.authorization,
+                    SourceAuthorizationRequest::PolicyProof { .. }
+                )
+                && self
+                    .read_view
+                    .sources
+                    .get(&request.source)
+                    .is_some_and(|source| {
+                        unavailable_inputs::is_current_app_source(self.node, source)
+                    })
+                && let Some(scope) = self.local_unavailable_scope.clone()
+            {
+                self.node.exclude_local_unavailable_rows(
+                    &scope,
+                    self.read_view.read_schema,
+                    request,
+                    &mut resolved,
+                );
+            }
+            Ok(resolved)
+        })
+    }
+}
+
+impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    fn prepare_source_graph_without_local_exclusions<'a>(
         &'a mut self,
         request: &'a SourceRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {

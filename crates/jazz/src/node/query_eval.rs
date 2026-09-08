@@ -73,6 +73,9 @@ mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
+mod unavailable_inputs;
+
+pub(crate) use unavailable_inputs::LocalUnavailableInput;
 
 pub(crate) use prepared_bindings::coerce_prepared_binding_value;
 use prepared_bindings::*;

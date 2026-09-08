@@ -12,6 +12,7 @@ mod materialization;
 mod normalization;
 mod read_sources;
 mod subscriptions;
+mod unavailable_inputs;
 
 use std::collections::{BTreeMap, BTreeSet};
 
