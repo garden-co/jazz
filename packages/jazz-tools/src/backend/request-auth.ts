@@ -37,6 +37,11 @@ export interface BackendRequestAuthConfig {
   allowLocalFirstAuth?: boolean;
 }
 
+export interface BackendRequestOptions {
+  /** Explicitly provision fresh external identities. Strict login is the default. */
+  account?: "login" | "login-or-register";
+}
+
 type LocalJwksDocument = {
   keys: Array<Record<string, unknown>>;
 };
@@ -446,7 +451,15 @@ async function verifyExternalJwt(
 export async function resolveRequestSession(
   request: RequestLike,
   config: BackendRequestAuthConfig,
+  options: BackendRequestOptions = {},
 ): Promise<Session> {
+  if (
+    options.account !== undefined &&
+    options.account !== "login" &&
+    options.account !== "login-or-register"
+  ) {
+    throw new Error("Invalid account admission mode");
+  }
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
@@ -454,7 +467,9 @@ export async function resolveRequestSession(
     if (!config.accountRegistry) return session; // standalone signature-verification helper
     const assignment = await requestAccountRegistry(
       config.accountRegistry,
-      session.issuer === LOCAL_FIRST_JWT_ISSUER ? "found-local-first" : "login",
+      session.issuer === LOCAL_FIRST_JWT_ISSUER
+        ? "found-local-first"
+        : (options.account ?? "login"),
       token,
     );
     session.account_id = readAccountAssignment(assignment, {

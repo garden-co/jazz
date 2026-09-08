@@ -20,7 +20,11 @@ import {
   type SchemaSourceInput,
   type WasmSchemaSource,
 } from "../schema-source.js";
-import { resolveRequestSession, verifiedLocalFirstRequestProof } from "./request-auth.js";
+import {
+  resolveRequestSession,
+  verifiedLocalFirstRequestProof,
+  type BackendRequestOptions,
+} from "./request-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -611,27 +615,38 @@ export class JazzContext {
     this.coreSource.enableBackendSync(client);
   }
 
-  private async resolveRequestSession(request: RequestLike): Promise<Session> {
+  private async resolveRequestSession(
+    request: RequestLike,
+    options?: BackendRequestOptions,
+  ): Promise<Session> {
     if (!this.config.serverUrl) {
       throw new Error("forRequest requires a configured core serverUrl for account admission");
     }
-    return await resolveRequestSession(request, {
-      appId: this.config.appId,
-      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
-      jwksUrl: this.config.jwksUrl,
-      jwtPublicKey: this.config.jwtPublicKey,
-      jwtIssuer: this.config.jwtIssuer,
-      jwtAudience: this.config.jwtAudience,
-      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
-    });
+    return await resolveRequestSession(
+      request,
+      {
+        appId: this.config.appId,
+        accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+        jwksUrl: this.config.jwksUrl,
+        jwtPublicKey: this.config.jwtPublicKey,
+        jwtIssuer: this.config.jwtIssuer,
+        jwtAudience: this.config.jwtAudience,
+        allowLocalFirstAuth: this.config.allowLocalFirstAuth,
+      },
+      options,
+    );
   }
 
   /**
    * Verify the original bearer and resolve its active core account before
-   * building a requester-scoped `Db`. External login never registers an identity.
+   * building a requester-scoped `Db`. Registration requires an explicit request option.
    */
-  async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const session = await this.resolveRequestSession(request);
+  async forRequest(
+    request: RequestLike,
+    source?: BackendSchemaInput,
+    options?: BackendRequestOptions,
+  ): Promise<Db> {
+    const session = await this.resolveRequestSession(request, options);
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, schema, session, undefined, true);

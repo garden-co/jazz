@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createJazzSession } from "./index.js";
@@ -22,6 +22,70 @@ const permissions = s.definePermissions(app, ({ policy }) => {
 });
 
 describe("Node shared backend session", () => {
+  it("explicitly enrolls concurrent request identities without changing backend authority", async () => {
+    const issuer = await startTestJwtIssuer();
+    const appId = randomUUID();
+    const auth = {
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: issuer.issuer,
+      jwtAudience: issuer.audience,
+    };
+    const server = await startLocalJazzServer({ appId, ...auth });
+    const owner = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      ...auth,
+      driver: { type: "memory" },
+      initial: { backendSecret: server.backendSecret },
+    });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const original = owner.getSnapshot();
+      const backend = original.client!;
+      const tokens = await Promise.all([
+        issuer.jwtForUser("reader-a"),
+        issuer.jwtForUser("reader-b"),
+      ]);
+      const requests = tokens.map((token) => ({ headers: { authorization: `Bearer ${token}` } }));
+      await expect(backend.forRequest(requests[0]!)).rejects.toMatchObject({
+        code: "identity_unassigned",
+      });
+      const scopes = await Promise.all(
+        requests.map((request) => backend.forRequest(request, { account: "login-or-register" })),
+      );
+      const rows = await Promise.all(
+        scopes.map((db, index) =>
+          db.insert(app.posts, { text: `request-${index}` }).wait({ tier: "edge" }),
+        ),
+      );
+      const authors = await Promise.all(
+        rows.map((row) => backend.db.one(app.posts.select("$createdBy").where({ id: row.id }))),
+      );
+      expect(authors[0]).toMatchObject({
+        $createdBy: { identity: { issuer: issuer.issuer, subject: "reader-a" } },
+      });
+      expect(authors[1]).toMatchObject({
+        $createdBy: { identity: { issuer: issuer.issuer, subject: "reader-b" } },
+      });
+      expect(authors[0]!.$createdBy.account).not.toBe(authors[1]!.$createdBy.account);
+      await expect(backend.forRequest(requests[0]!)).resolves.toBeDefined();
+      expect(owner.getSnapshot()).toBe(original);
+      expect(backend.session?.user?.account).toBe("00000000-0000-0000-0000-000000000000");
+    } finally {
+      await owner.close();
+      await server.stop();
+      await issuer.stop();
+    }
+  }, 30_000);
+
   it("rejects invalid service admission before publishing a client", async () => {
     const appId = randomUUID();
     const server = await startLocalJazzServer({ appId, backendSecret: "expected-service-secret" });
