@@ -397,18 +397,34 @@ describe("backend/create-jazz-context", () => {
       },
     });
     expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
-      appId: "server-app",
-      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-      jwksUrl: undefined,
-      allowLocalFirstAuth: true,
-    });
-    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(2, req, {
-      appId: "server-app",
-      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-      jwksUrl: undefined,
-      allowLocalFirstAuth: true,
-    });
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
+      1,
+      req,
+      {
+        appId: "server-app",
+        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        jwksUrl: undefined,
+        allowLocalFirstAuth: true,
+        jwtPublicKey: undefined,
+        jwtIssuer: undefined,
+        jwtAudience: undefined,
+      },
+      undefined,
+    );
+    expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(
+      2,
+      req,
+      {
+        appId: "server-app",
+        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        jwksUrl: undefined,
+        allowLocalFirstAuth: true,
+        jwtPublicKey: undefined,
+        jwtIssuer: undefined,
+        jwtAudience: undefined,
+      },
+      undefined,
+    );
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
@@ -462,12 +478,19 @@ describe("backend/create-jazz-context", () => {
 
     await context.forRequest(req);
 
-    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
-      appId: "server-app",
-      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-      jwksUrl: "https://issuer.example/.well-known/jwks.json",
-      allowLocalFirstAuth: false,
-    });
+    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(
+      req,
+      {
+        appId: "server-app",
+        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        jwksUrl: "https://issuer.example/.well-known/jwks.json",
+        allowLocalFirstAuth: false,
+        jwtPublicKey: undefined,
+        jwtIssuer: undefined,
+        jwtAudience: undefined,
+      },
+      undefined,
+    );
   });
 
   it("BC-U03c: forwards jwtPublicKey into request session resolution", async () => {
@@ -494,18 +517,24 @@ describe("backend/create-jazz-context", () => {
 
     await context.forRequest(req);
 
-    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(req, {
-      appId: "server-app",
-      accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
-      jwksUrl: undefined,
-      jwtPublicKey: {
-        kty: "oct",
-        kid: "static-kid",
-        alg: "HS256",
-        k: "c3RhdGljLXNlY3JldA",
+    expect(mocks.resolveRequestSession).toHaveBeenCalledWith(
+      req,
+      {
+        appId: "server-app",
+        accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        jwksUrl: undefined,
+        jwtPublicKey: {
+          kty: "oct",
+          kid: "static-kid",
+          alg: "HS256",
+          k: "c3RhdGljLXNlY3JldA",
+        },
+        allowLocalFirstAuth: false,
+        jwtIssuer: undefined,
+        jwtAudience: undefined,
       },
-      allowLocalFirstAuth: false,
-    });
+      undefined,
+    );
   });
 
   it("BC-U04: merges compiled permissions into the runtime schema", () => {
