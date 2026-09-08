@@ -17,6 +17,11 @@
     "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js"
   },
   "types": "dist/index.d.ts",
+  "react-native": {
+    "./dist/runtime/platform-url.js": "./dist/runtime/platform-url.native.js",
+    "./dist/runtime/telemetry-env.js": "./dist/runtime/telemetry-env.native.js",
+    "./dist/runtime/browser-worker-assets.js": "./dist/runtime/browser-worker-assets.native.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -180,8 +185,9 @@
     "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
-    "react-native-url-polyfill": "^3.0.0",
-    "web-streams-polyfill": "^4.2.0"
+    "tr46": "5.1.1",
+    "web-streams-polyfill": "^4.2.0",
+    "whatwg-url-without-unicode": "8.0.0-3"
   },
   "devDependencies": {
     "@better-auth/test-utils": "^1.7.1",

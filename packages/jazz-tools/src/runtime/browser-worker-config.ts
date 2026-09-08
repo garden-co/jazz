@@ -1,3 +1,4 @@
+import { browserRuntimeModuleUrl, bundledBrowserWorkerUrl } from "./browser-worker-assets.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
 import { resolveClientInternalSessionSync } from "./client-session.js";
@@ -20,13 +21,13 @@ const inMemoryWasmAssetIds = new WeakMap<object, string>();
 export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
   if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl) {
     return resolveRuntimeConfigBrokerWorkerUrl(
-      import.meta.url,
+      browserRuntimeModuleUrl(),
       typeof location !== "undefined" ? location.href : undefined,
       runtimeSources,
     );
   }
   // Keep this literal statically analyzable so bundlers emit the worker asset.
-  const bundledUrl = new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
+  const bundledUrl = bundledBrowserWorkerUrl();
   return versionRuntimeAssetUrl(
     resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
     runtimeSources,
@@ -62,7 +63,7 @@ export function resolveBrowserWorkerRuntimeSources(
   }
 
   const wasmUrl = resolveRuntimeConfigWasmUrl(
-    import.meta.url,
+    browserRuntimeModuleUrl(),
     typeof location !== "undefined" ? location.href : undefined,
     runtimeSources,
   );
