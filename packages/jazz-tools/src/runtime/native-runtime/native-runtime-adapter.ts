@@ -2562,7 +2562,10 @@ export class NativeRuntimeAdapter implements Runtime {
       if (tier) this.throwServerTransportErrorForTier(tier);
       const bytes = result.poll();
       if (bytes !== null) return bytes;
-      await this.pumpServerTransport();
+      // A core pass may itself suspend while the auxiliary transport fetches
+      // large-value chunks. Keep polling the owning read while that pass runs;
+      // awaiting the pump here would circularly wait for the read to resume it.
+      void this.pumpServerTransport();
       if (tier) this.throwServerTransportErrorForTier(tier);
       await sleep(0);
     }
@@ -4158,7 +4161,8 @@ function readOptions(
   optionsJson?: string | null,
 ): unknown {
   const options = optionsJson == null ? ({} as Record<string, unknown>) : JSON.parse(optionsJson);
-  const readOptions: Record<string, unknown> = { tier: tier ?? "local" };
+  const readOptions: Record<string, unknown> = {};
+  if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
   if (options.propagation === "local-only") readOptions.propagation = "local_only";

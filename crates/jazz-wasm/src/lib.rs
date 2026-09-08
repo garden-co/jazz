@@ -243,6 +243,7 @@ pub struct WasmWriteResult {
 #[wasm_bindgen]
 pub struct WasmPreparedQuery {
     inner: PreparedQuery,
+    is_relation: bool,
 }
 
 type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 'static>>;
@@ -1922,6 +1923,7 @@ impl WasmDb {
                 ));
             }
         };
+        let is_relation = kind == "relation";
         let db = self.open_inner()?;
         let pending = WasmPendingPreparation {
             wake: RefCell::new(None),
@@ -1935,7 +1937,7 @@ impl WasmDb {
                     Some((author, claims)) => inner.with_identity_claims(author, claims),
                     None => inner,
                 };
-                Ok(WasmPreparedQuery { inner })
+                Ok(WasmPreparedQuery { inner, is_relation })
             }))),
         };
         match pending.poll_once()? {
@@ -1953,6 +1955,11 @@ impl WasmDb {
         author: Option<Vec<u8>>,
     ) -> Result<JsValue, JsValue> {
         let inner = self.open_inner()?;
+        let tier_is_explicit = if opts.is_null() || opts.is_undefined() {
+            false
+        } else {
+            optional_string_prop(&opts, "tier")?.is_some()
+        };
         let synchronous = optional_bool_prop(&opts, "sync")?.unwrap_or(false);
         let opts = read_opts_from_js(opts)?;
         let author = self.read_author(author)?;
@@ -1960,9 +1967,14 @@ impl WasmDb {
             .map(|id| id.parse::<OpenTransactionId>())
             .transpose()
             .map_err(|error| JsValue::from_str(&error))?;
+        let is_relation = query.is_relation;
         let query = query.inner.clone();
         let non_durable_client = self.non_durable_client.get();
-        if synchronous && open_tx.is_none() && query.shape().query().array_subqueries.is_empty() {
+        if synchronous
+            && open_tx.is_none()
+            && !is_relation
+            && query.shape().query().array_subqueries.is_empty()
+        {
             let rows = match author {
                 Some(author) => inner.all_for_identity(&query, opts, author),
                 None => inner.all(&query, opts),
@@ -1971,9 +1983,57 @@ impl WasmDb {
             return bytes_to_js(encode_synchronous_rows(&rows)?);
         }
         let future = Box::pin(async move {
-            let coverage = if non_durable_client
-                || (opts.tier >= DurabilityTier::Edge && opts.propagation == Propagation::Full)
-            {
+            let requires_coverage = tier_is_explicit
+                && (non_durable_client
+                    || (opts.tier >= DurabilityTier::Edge
+                        && opts.propagation == Propagation::Full));
+
+            // Output-changing relation plans are maintained through the
+            // subscription compiler. Consume its first settled reset for a
+            // one-shot read so the worker-owned coverage and the returned
+            // relation use the same binding. This remains an implementation
+            // detail of the single public `all` operation.
+            let mut relation_subscription_covered = false;
+            if is_relation && open_tx.is_none() && requires_coverage {
+                let mut stream = with_wasm_db!(&inner, |db| match author {
+                    Some(author) =>
+                        db.subscribe_for_identity(&query, opts.clone(), author)
+                            .await,
+                    None => db.subscribe(&query, opts.clone()).await,
+                })
+                .map_err(to_js_error)?;
+                while let Some(event) = stream.next().await {
+                    match event {
+                        SubscriptionEvent::Delta {
+                            reset: true,
+                            publishable: true,
+                            settled: true,
+                            ..
+                        } => {
+                            relation_subscription_covered = true;
+                            break;
+                        }
+                        SubscriptionEvent::Rejected { reason } => {
+                            return Err(JsValue::from_str(&format!(
+                                "query subscription rejected: {reason:?}"
+                            )));
+                        }
+                        SubscriptionEvent::Closed => {
+                            return Err(JsValue::from_str(
+                                "query subscription closed before its settled result",
+                            ));
+                        }
+                        SubscriptionEvent::Delta { .. } => {}
+                    }
+                }
+                if !relation_subscription_covered {
+                    return Err(JsValue::from_str(
+                        "query subscription ended before its settled result",
+                    ));
+                }
+            }
+
+            let coverage = if requires_coverage && !relation_subscription_covered {
                 let attachment = inner
                     .attach_query(&query, opts.clone(), open_tx, author)
                     .await
@@ -2021,7 +2081,7 @@ impl WasmDb {
                 return encode_relation_snapshot(&snapshot).map_err(to_js_error);
             }
 
-            if !query.shape().query().array_subqueries.is_empty() {
+            if is_relation || !query.shape().query().array_subqueries.is_empty() {
                 let mut snapshot = match author {
                     Some(author) => {
                         inner
@@ -3866,7 +3926,7 @@ mod dynamic_schema_view_tests {
                 MemoryStorage::new(&families).expect("valid memory storage families"),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x55; 16]),
-                    author: author.clone(),
+                    author,
                 },
             )))
             .expect("WASM no-op write fixture opens"),
@@ -4106,7 +4166,7 @@ mod dynamic_schema_view_tests {
         let (abort, registration) = AbortHandle::new_pair();
         let wait = Abortable::new(futures_util::future::pending::<()>(), registration);
         abort.abort();
-        assert!(matches!(block_on(wait), Err(_)));
+        assert!(block_on(wait).is_err());
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -4862,6 +4922,7 @@ mod dynamic_schema_view_tests {
         };
         let view_query = WasmPreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
+            is_relation: false,
         };
 
         // The consolidated transaction read owns its pending operation. The
@@ -4890,6 +4951,7 @@ mod dynamic_schema_view_tests {
         let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
         let owner_query = WasmPreparedQuery {
             inner: owner.prepare_query(&owner.table("items")).unwrap(),
+            is_relation: false,
         };
         let mismatched_all = binding
             .all(
