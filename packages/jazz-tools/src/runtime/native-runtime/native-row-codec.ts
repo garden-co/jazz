@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "../utf8.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -9,8 +10,8 @@ import { isProvenanceMagicColumn } from "../../magic-columns.js";
 import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 
-const textDecoder = new TextDecoder("utf-8", { fatal: true });
-const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const textDecoder = new Utf8Decoder({ fatal: true });
+const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -431,7 +432,7 @@ export function decodeRecordString(
   raw: Uint8Array,
   logicalIndex: number,
 ): string {
-  return new TextDecoder().decode(decodeRecordBytes(descriptor, raw, logicalIndex));
+  return new Utf8Decoder().decode(decodeRecordBytes(descriptor, raw, logicalIndex));
 }
 
 export function decodeRecordBytes(

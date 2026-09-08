@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
@@ -877,7 +878,7 @@ function applyPartialValueSelections<T>(
       ) {
         throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
       }
-      projected[column] = new TextDecoder("utf-8", { fatal: true }).decode(
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(
         bytes.slice(selection.fromUtf8, selection.toUtf8),
       );
       continue;

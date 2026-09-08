@@ -1,3 +1,4 @@
+import { Utf8Decoder } from "./utf8.js";
 /**
  * Manage subscription state and compute deltas.
  *
@@ -12,7 +13,7 @@ import type {
   WasmRow,
 } from "../drivers/types.js";
 
-const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export const RowChangeKind = {
   Added: 0 as const,
