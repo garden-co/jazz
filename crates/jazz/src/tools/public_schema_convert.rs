@@ -499,6 +499,7 @@ fn convert_table(
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
+    let mut column_names = BTreeSet::new();
     for column in &table.columns.columns {
         if column
             .name
@@ -511,17 +512,24 @@ fn convert_table(
             ));
         }
         let converted = convert_column(name, column)?;
+        let strategy = column
+            .merge_strategy
+            .map(|strategy| convert_merge_strategy(name, column, strategy))
+            .transpose()?;
+        if !column_names.insert(column.name.as_str()) {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "duplicate column name",
+            ));
+        }
         if let Some(reference) = &column.references {
             references.insert(
                 column.name.as_str().to_owned(),
                 reference.as_str().to_owned(),
             );
         }
-        if let Some(strategy) = column.merge_strategy {
-            merge_strategies.insert(
-                column.name.as_str().to_owned(),
-                convert_merge_strategy(name, column, strategy)?,
-            );
+        if let Some(strategy) = strategy {
+            merge_strategies.insert(column.name.as_str().to_owned(), strategy);
         }
         columns.push(converted);
     }
@@ -2801,6 +2809,76 @@ mod tests {
     };
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn rejects_duplicate_top_level_column_names_at_public_compilation() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("value", ColumnType::Text)
+                    .column("value", ColumnType::Integer),
+            )
+            .build();
+
+        let error = JazzSchema::new(&schema)
+            .expect_err("duplicate top-level column names must fail public compilation");
+        assert!(
+            error.to_string().starts_with("$.items.columns.value: "),
+            "expected the duplicate column declaration path, got {error}"
+        );
+    }
+
+    #[test]
+    fn accepts_same_column_name_in_different_tables_at_public_compilation() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("items").column("value", ColumnType::Text))
+            .table(TableSchemaBuilder::new("counts").column("value", ColumnType::Integer))
+            .build();
+
+        let compiled =
+            JazzSchema::new(&schema).expect("column names may be reused in different tables");
+        for (name, column_type) in [
+            ("items", GrooveColumnType::String),
+            ("counts", GrooveColumnType::I32),
+        ] {
+            let table = compiled
+                .tables()
+                .iter()
+                .find(|table| table.name == name)
+                .expect("each declared table must compile");
+            assert_eq!(table.columns[0].name, "value");
+            assert_eq!(table.columns[0].column_type, column_type);
+        }
+    }
+
+    #[test]
+    fn preserves_invalid_counter_error_before_duplicate_column_error_at_public_compilation() {
+        for first_column_name in ["other", "value"] {
+            let mut schema = SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column(first_column_name, ColumnType::Integer)
+                        .column("value", ColumnType::Text),
+                )
+                .build();
+            schema
+                .get_mut(&TableName::new("items"))
+                .expect("items table is declared")
+                .columns
+                .columns[1]
+                .merge_strategy = Some(ColumnMergeStrategy::Counter);
+
+            let error = JazzSchema::new(&schema)
+                .expect_err("a Text column cannot use the Counter merge strategy");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("$.items.value: Counter merge strategy "),
+                "expected the existing column path and Counter error with first column \
+                 {first_column_name:?}, got {error}"
+            );
+        }
+    }
 
     fn schema_with_counter_column(column: ColumnDescriptor) -> Schema {
         Schema::from([(
