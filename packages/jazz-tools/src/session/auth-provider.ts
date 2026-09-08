@@ -156,6 +156,11 @@ export function connectAuthProvider<Client>(
       }
       const pending = running;
       await pending;
+      // Another retry can start while this caller yields, even without prior work.
+      if (running) {
+        await running;
+        return;
+      }
       // Refetching a provider error may already have started (or completed) admission.
       if (pending || snapshot.ready) return;
       attempted = undefined;

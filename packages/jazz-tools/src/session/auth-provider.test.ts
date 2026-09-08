@@ -288,3 +288,22 @@ it("rejects a stale initial JWT across an A to B to A provider transition", asyn
   auth.dispose();
   await session.close();
 });
+
+it("concurrent retries retain the active attempt across unchanged provider notifications", async () => {
+  const { session, events, failAdmission } = await setup();
+  const auth = connectAuthProvider(session, { getToken: async () => "one" });
+  failAdmission(true);
+  auth.update({ key: "one" });
+  await tick();
+  expect(auth.getSnapshot().error?.message).toBe("registry offline");
+  failAdmission(false);
+  await Promise.all([auth.retry(), auth.retry()]);
+  await tick();
+  expect(auth.getSnapshot().ready).toBe(true);
+  expect(events).toEqual(["admit:one", "admit:one", "open:one"]);
+  auth.update({ key: "one" });
+  await tick();
+  expect(events).toEqual(["admit:one", "admit:one", "open:one"]);
+  auth.dispose();
+  await session.close();
+});
