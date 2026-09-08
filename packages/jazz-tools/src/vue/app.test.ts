@@ -98,7 +98,7 @@ describe("Vue ergonomic app", () => {
         h(JazzProvider, {
           appId: `test-${version.value}`,
           autoAttachDevTools: false,
-          auth: { kind: "jwt", key: null, pending: true, getToken, logout },
+          auth: { kind: "jwt", key: null, isPending: true, getToken, logout },
         }),
     });
     app.mount(node);
