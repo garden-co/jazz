@@ -701,6 +701,12 @@ where
             .contains(&tx_id)
     }
 
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+        self.node
+            .borrow_mut()
+            .enable_authoritative_scalar_exit_refresh();
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
     /// values. Groove persists timestamps and performs eviction, but does not
     /// choose these product limits.

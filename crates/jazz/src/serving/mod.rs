@@ -482,6 +482,13 @@ impl ShellDb {
         Ok(())
     }
 
+    fn enable_authoritative_scalar_exit_refresh(&self) {
+        match self {
+            Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
+            Self::Durable(db) => db.enable_authoritative_scalar_exit_refresh(),
+        }
+    }
+
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
         match self {
             Self::Memory(db) => db.set_edge_cache_budget(budget),
@@ -837,6 +844,9 @@ impl InMemoryServerShell {
                 });
             }
         };
+        if role == NodeRole::Core {
+            db.enable_authoritative_scalar_exit_refresh();
+        }
         db.set_edge_cache_budget(edge_cache_budget);
         db.set_large_value_staging_policy(large_value_staging_policy);
 

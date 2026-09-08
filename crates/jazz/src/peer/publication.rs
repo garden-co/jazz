@@ -1282,6 +1282,8 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     shape,
                     has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(subscription),
                     subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -1903,6 +1905,8 @@ impl PeerState {
             crate::node::MaintainedViewBundleInputs {
                     shape,
                     has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(subscription),
                 subscription,
                 settled_through: watermark,
                 peer_complete_tx_payloads,
@@ -2468,6 +2472,8 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     shape,
                     has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(maintained_subscription),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -2695,6 +2701,8 @@ impl PeerState {
                 crate::node::MaintainedViewBundleInputs {
                     shape,
                     has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(maintained_subscription),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,

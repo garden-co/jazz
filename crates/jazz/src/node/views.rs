@@ -313,6 +313,9 @@ fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) shape: &'a ValidatedQuery,
     pub(crate) has_default_read_view: bool,
+    /// Selected-authority relays must forward their exact authority receipt;
+    /// local storage cannot authorize additional cache refresh payloads.
+    pub(crate) allow_authoritative_scalar_exit_refresh: bool,
     pub(crate) subscription: SubscriptionKey,
     /// Cut of the exact source receipt used by the publication owner. A relay's
     /// own committed clock is not the authority cut of the inputs it forwards.
@@ -737,6 +740,7 @@ where
             .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
                 shape,
                 has_default_read_view: true,
+                allow_authoritative_scalar_exit_refresh: true,
                 subscription,
                 settled_through: self.clock.committed_global_time,
                 result_member_adds,
@@ -764,6 +768,7 @@ where
         let MaintainedViewBundleInputs {
             shape,
             has_default_read_view,
+            allow_authoritative_scalar_exit_refresh,
             subscription,
             settled_through,
             peer_complete_tx_payloads,
@@ -882,7 +887,10 @@ where
         // do not reopen the query's input relation or infer permission from its
         // previous membership. Keep non-default views and complex scopes on
         // their existing witness path until their replacement contract exists.
-        if !exit_candidates.is_empty()
+        if self.authoritative_scalar_exit_refresh
+            && self.client_relay_scope().is_none()
+            && allow_authoritative_scalar_exit_refresh
+            && !exit_candidates.is_empty()
             && has_default_read_view
             && shape.schema_version() == self.catalogue.current_schema_version_id
             && simple_scalar_exit_query(shape.query())

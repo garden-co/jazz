@@ -587,6 +587,7 @@ impl MaintainedSubscriptionViewSubscription {
             crate::node::MaintainedViewBundleInputs {
                 shape: _shape,
                 has_default_read_view: true,
+                allow_authoritative_scalar_exit_refresh: true,
                 subscription: subscription_key,
                 settled_through: core.committed_global_time(),
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),

@@ -85,6 +85,11 @@ where
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
     }
 
+    /// Core-shell capability; partial caches and relays must leave it disabled.
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+        self.node.enable_authoritative_scalar_exit_refresh();
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
     pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         self.node.set_large_value_staging_policy(policy);

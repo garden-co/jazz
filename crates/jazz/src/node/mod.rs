@@ -519,6 +519,10 @@ pub struct NodeState<S> {
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
     history_complete: bool,
+    /// Host-declared completeness for eager scalar-exit authorization probes.
+    /// Disabled unless a core serving shell owns the complete policy inputs.
+    /// This is runtime capability, never wire or durable authorization evidence.
+    authoritative_scalar_exit_refresh: bool,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread

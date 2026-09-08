@@ -347,6 +347,7 @@ where
             database,
             chunk_resolver,
             history_complete,
+            authoritative_scalar_exit_refresh,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
@@ -370,6 +371,7 @@ where
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
+        reopened.authoritative_scalar_exit_refresh = authoritative_scalar_exit_refresh;
         Ok(reopened)
     }
 
@@ -620,6 +622,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            authoritative_scalar_exit_refresh: false,
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
@@ -772,6 +775,14 @@ where
         self.authored_commit_durability = DurabilityTier::None;
     }
 
+    /// Enable only for a host that owns complete current policy inputs. The
+    /// historical-read flag is insufficient: server edge shells also use it.
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
+        if self.client_relay_scope().is_none() {
+            self.authoritative_scalar_exit_refresh = true;
+        }
+    }
+
     /// Mark this process as the durable half of a browser client/worker relay.
     /// The marker only selects an internal upstream binding identity for Edge
     /// coverage; it is neither persisted nor an authorization policy input.
@@ -786,6 +797,7 @@ where
                 "a relay cannot be rebound to a different storage ownership scope".into(),
             ));
         }
+        self.authoritative_scalar_exit_refresh = false;
         self.relay_authority_session_owner = Some(scope);
         Ok(())
     }
