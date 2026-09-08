@@ -168,33 +168,50 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
         rows: Vec<crate::protocol::CurrentRowCoordinate>,
         context: PolicyBindingKey,
     ) -> impl Future<Output = CurrentRowsResult> + use<S> {
-        let id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
-        let (sender, receiver) = oneshot::channel();
-        let request = CurrentRowsRequest {
-            request_id: id,
+        request_current_rows_for_owner(
+            Rc::clone(&self.current_rows),
+            Rc::clone(&self.scheduler),
+            self.admitted_upstream_authority.borrow().is_some(),
             rows,
-            delegated_session: None,
-        };
-        if valid_request(&request) && self.admitted_upstream_authority.borrow().is_some() {
-            self.current_rows.borrow_mut().admit(CurrentRowsRoute {
-                request,
-                context,
-                upstream: None,
-                downstream: None,
-                sender: Some(sender),
-            });
-        }
-        self.schedule_tick(TickUrgency::Immediate);
-        let guard = CurrentRowsGuard {
-            id,
-            router: Rc::clone(&self.current_rows),
-            scheduler: Rc::clone(&self.scheduler),
-        };
-        async move {
-            let result = receiver.await.unwrap_or(CurrentRowsResult::Unknown);
-            drop(guard);
-            result
-        }
+            context,
+        )
+    }
+}
+
+/// Owned requester shared by local operations and partial-Edge repair owners.
+pub(super) fn request_current_rows_for_owner(
+    router: SharedCurrentRows,
+    scheduler: SharedTickScheduler,
+    has_upstream: bool,
+    rows: Vec<crate::protocol::CurrentRowCoordinate>,
+    context: PolicyBindingKey,
+) -> impl Future<Output = CurrentRowsResult> + use<> {
+    let id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+    let (sender, receiver) = oneshot::channel();
+    let request = CurrentRowsRequest {
+        request_id: id,
+        rows,
+        delegated_session: None,
+    };
+    if valid_request(&request) && has_upstream {
+        router.borrow_mut().admit(CurrentRowsRoute {
+            request,
+            context,
+            upstream: None,
+            downstream: None,
+            sender: Some(sender),
+        });
+    }
+    schedule_tick_in(&scheduler, TickUrgency::Immediate);
+    let guard = CurrentRowsGuard {
+        id,
+        router: Rc::clone(&router),
+        scheduler: Rc::clone(&scheduler),
+    };
+    async move {
+        let result = receiver.await.unwrap_or(CurrentRowsResult::Unknown);
+        drop(guard);
+        result
     }
 }
 

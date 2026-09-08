@@ -2,9 +2,11 @@
 /// may disclose only exact row versions in their durable authority ledger;
 /// they never re-evaluate a foreground's read policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RowVersionRepairAuthorization {
+pub(crate) enum RowVersionRepairAuthorization<'a> {
     EnforceReadPolicy(AuthorSubject),
     RetainedScopeLedger,
+    /// Exact references whose current physical rows a selected Core authorized.
+    VerifiedCurrentRows(&'a [(RowVersionRef, crate::protocol::CurrentRowCoordinate)]),
 }
 
 impl<S> NodeState<S>
@@ -251,10 +253,39 @@ where
         VersionRecord::from_stored(version, &table, schema_version, authored_columns)
     }
 
+    /// Resolve a projected repair name to the current name of its exact body
+    /// lineage. Reusing a logical name never grants its older physical table.
+    pub(crate) async fn current_row_coordinate_for_repair(
+        &mut self,
+        request: &RowVersionRef,
+    ) -> Result<crate::protocol::CurrentRowCoordinate, Error> {
+        if let Ok(coordinate) = self.current_row_coordinate(&request.table, request.row_uuid) {
+            return Ok(coordinate);
+        }
+        let candidates = self.catalogue.physical_mappings.values()
+            .filter_map(|mapping| mapping.tables.get(request.table.as_str()).map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        let versions = self.query_versions_for_tx(request.tx_id()).await?;
+        let mut tables = BTreeSet::new();
+        for version in versions {
+            if version.row_uuid() == request.row_uuid {
+                let table = self.physical_table_id_for_version(&version)?;
+                if candidates.contains(&table) { tables.insert(table); }
+            }
+        }
+        let [table] = tables.into_iter().collect::<Vec<_>>()[..] else {
+            return Err(Error::InvalidStoredValue("repair coordinate has no unique current lineage"));
+        };
+        let name = self.catalogue.physical_mappings[&self.catalogue.current_schema_version_id]
+            .tables.iter().find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
+            .ok_or(Error::InvalidStoredValue("repair lineage is not in the current schema"))?;
+        self.current_row_coordinate(&name, request.row_uuid)
+    }
+
     pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
-        authorization: RowVersionRepairAuthorization,
+        authorization: RowVersionRepairAuthorization<'_>,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for request in requests {
@@ -342,6 +373,19 @@ where
                     {
                         continue;
                     }
+                }
+                RowVersionRepairAuthorization::VerifiedCurrentRows(proofs) => {
+                    let allowed = proofs.iter().any(|(exact_ref, coordinate)| {
+                        exact_ref == request && coordinate.row == request.row_uuid
+                            && self.catalogue.physical_mappings.get(&coordinate.schema)
+                                .is_some_and(|mapping| {
+                                    mapping.identities.tables.get(&coordinate.table)
+                                        .is_some_and(|identity| identity.id == coordinate.physical_table)
+                                    && mapping.tables.get(&coordinate.table)
+                                        .is_some_and(|table| table.table_id == requested_table_id)
+                                })
+                    });
+                    if !allowed { continue; }
                 }
                 RowVersionRepairAuthorization::RetainedScopeLedger => {
                     if !self

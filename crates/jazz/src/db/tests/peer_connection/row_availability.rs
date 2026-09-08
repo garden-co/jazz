@@ -609,3 +609,210 @@ fn current_rows_reject_deletion_only_readable_receipt() {
         "Readable must carry a content witness, not only deletion"
     );
 }
+
+/// Alice repairs an exact older body through a partial Edge. Core authorizes
+/// the row first; a later Core-only owner change blocks Edge's stale grant.
+/// Alice -> Edge cached body -> Core current-read receipt -> exact repair.
+#[test]
+fn partial_edge_repairs_require_current_core_readability_and_keep_fifo() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0x81; 16]);
+    let bob = AuthorSubject::for_test_bytes([0x82; 16]);
+    let core = open_core(0x83, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let target = row(0x84);
+    let write = core
+        .insert_with_id(
+            "todos",
+            target,
+            cells("original authorized body", false, alice),
+        )
+        .unwrap();
+    let request = crate::protocol::RowVersionRef::new("todos", target, write.mergeable_tx_id());
+    let edge = open_core(0x85, AuthorSubject::SYSTEM, &schema);
+    let bundles = core
+        .server
+        .node()
+        .borrow_mut()
+        .row_version_payloads_for_refs(
+            &[request.clone()],
+            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM),
+        )
+        .unwrap();
+    edge.server
+        .node()
+        .borrow_mut()
+        .apply_row_version_payloads_for_requests(&[request.clone()], bundles)
+        .unwrap();
+    let (up, down) = link(AuthorSubject::SYSTEM, 0x85, 0x83, true);
+    let _upstream = block_on(edge.server.connect_upstream(up));
+    let _core_down = core.accept_subscriber_with_trust(
+        down,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (mut client, down) = duplex();
+    let subscriber = edge.accept_subscriber(down, alice);
+    subscriber.borrow_mut().set_partial_edge_query_host();
+    for _ in 0..4 {
+        edge.tick().unwrap();
+        core.tick().unwrap();
+    }
+    client
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()],
+            delegated_session: None,
+        })
+        .unwrap();
+    for _ in 0..8 {
+        edge.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let mut responses = Vec::new();
+    while let Some(message) = client.try_recv() {
+        if let SyncMessage::RowVersionPayloads { version_bundles } = message {
+            responses.push(version_bundles);
+        }
+    }
+    assert_eq!(responses.len(), 1);
+    assert_eq!(
+        responses[0].iter().map(|b| b.versions.len()).sum::<usize>(),
+        1
+    );
+    assert_eq!(responses[0][0].tx.tx_id, request.tx_id());
+    core.update("todos", target, cells("hidden newer body", false, bob))
+        .unwrap();
+    client
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()],
+            delegated_session: None,
+        })
+        .unwrap();
+    for _ in 0..8 {
+        edge.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let mut denied = Vec::new();
+    while let Some(message) = client.try_recv() {
+        if let SyncMessage::RowVersionPayloads { version_bundles } = message {
+            denied.push(version_bundles);
+        }
+    }
+    assert_eq!(denied.len(), 1);
+    assert!(denied[0].is_empty());
+    assert_eq!(
+        edge.server
+            .node()
+            .borrow_mut()
+            .row_version_payloads_for_refs(
+                &[request.clone()],
+                crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(alice)
+            )
+            .unwrap()
+            .len(),
+        1,
+        "Edge still has the stale local grant"
+    );
+
+    let (mut delegated, down) = duplex();
+    let privileged = edge.accept_subscriber_with_trust(
+        down,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedAuthority,
+    );
+    privileged.borrow_mut().admit_authority_query_delegate();
+    privileged.borrow_mut().set_partial_edge_query_host();
+    delegated
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()],
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: alice,
+                claims: test_provider_claims(alice),
+            }),
+        })
+        .unwrap();
+    delegated
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request],
+            delegated_session: None,
+        })
+        .unwrap();
+    for _ in 0..12 {
+        edge.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let mut ordered = Vec::new();
+    while let Some(message) = delegated.try_recv() {
+        if let SyncMessage::RowVersionPayloads { version_bundles } = message {
+            ordered.push(version_bundles);
+        }
+    }
+    assert_eq!(ordered.len(), 2);
+    assert!(
+        ordered[0].is_empty(),
+        "delegated denial must precede SYSTEM repair"
+    );
+    assert!(!ordered[1].is_empty(), "trusted SYSTEM keeps cache access");
+}
+
+/// Unknown Core evidence stays pending. Removing either physical link cancels
+/// its active nonce; cached bytes never become a fallback authorization source.
+#[test]
+fn partial_edge_pending_repair_cancels_on_link_loss_without_cache_fallback() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0x86; 16]);
+    let edge = open_core(0x87, AuthorSubject::SYSTEM, &schema);
+    let target = row(0x88);
+    let write = edge
+        .insert_with_id(
+            "todos",
+            target,
+            cells("unverified repair cache", false, alice),
+        )
+        .unwrap();
+    let request = crate::protocol::RowVersionRef::new("todos", target, write.mergeable_tx_id());
+    let (up, _undriven_core) = link(AuthorSubject::SYSTEM, 0x87, 0x89, true);
+    let upstream = block_on(edge.server.connect_upstream(up));
+    let (mut client, down) = duplex();
+    let subscriber = edge.accept_subscriber(down, alice);
+    subscriber.borrow_mut().set_partial_edge_query_host();
+    client
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()],
+            delegated_session: None,
+        })
+        .unwrap();
+    for _ in 0..4 {
+        edge.tick().unwrap();
+    }
+    assert_eq!(edge.server.current_rows.borrow().routes.len(), 1);
+    assert!(edge.server.detach_connection(&subscriber));
+    assert!(edge.server.current_rows.borrow().routes.is_empty());
+    let (mut client, down) = duplex();
+    let subscriber = edge.accept_subscriber(down, alice);
+    subscriber.borrow_mut().set_partial_edge_query_host();
+    client
+        .send(SyncMessage::FetchRowVersions {
+            requests: vec![request],
+            delegated_session: None,
+        })
+        .unwrap();
+    for _ in 0..4 {
+        edge.tick().unwrap();
+    }
+    assert_eq!(edge.server.current_rows.borrow().routes.len(), 1);
+    assert!(edge.server.detach_connection(&upstream));
+    for _ in 0..4 {
+        edge.tick().unwrap();
+    }
+    assert!(edge.server.current_rows.borrow().routes.is_empty());
+    while let Some(message) = client.try_recv() {
+        assert!(!matches!(message, SyncMessage::RowVersionPayloads { .. }));
+    }
+    assert!(edge.server.detach_connection(&subscriber));
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    assert!(state.pending_authority_repairs.is_empty());
+}

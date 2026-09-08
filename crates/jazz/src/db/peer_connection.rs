@@ -921,6 +921,8 @@ fn commit_unit_large_value_refs(unit: &SyncMessage) -> Vec<groove::large_values:
 }
 
 pub(super) struct SubscriberConnectionState {
+    pub(super) pending_authority_repairs:
+        VecDeque<super::row_version_repairs::PendingAuthorityRepair>,
     pub(super) peer: PeerState,
     pub(super) ingest_context: CommitUnitIngestContext,
     pub(super) session_claims: BTreeMap<String, Value>,
@@ -1682,11 +1684,13 @@ where
             ingest_context,
             session_claims,
             session_claim_revision,
+            pending_authority_repairs,
             ..
         }) = &mut self.link
         else {
             return None;
         };
+        pending_authority_repairs.clear();
         let replacement = match peer.role() {
             PeerRole::Relay => PeerState::relay(),
             PeerRole::ClientLink { identity } => PeerState::client_link(identity),
@@ -1929,6 +1933,8 @@ where
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
         self.pump_current_rows()?;
+        self.drive_pending_authority_repairs(progress_waker.as_ref())
+            .await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -3589,9 +3595,10 @@ where
                 peer,
                 ingest_context,
                 session_claims: _,
-                session_claim_revision: _,
+                session_claim_revision,
                 local_receiver,
                 partial_edge_query_host,
+                pending_authority_repairs,
                 outbox,
                 upstream_subscriptions,
                 served,
@@ -4919,6 +4926,20 @@ where
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
                                 drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if *partial_edge_query_host {
+                                let Some(binding) = admitted_request_policy_binding(
+                                    *ingest_context, peer, session_claim_binding.clone(), delegated_session,
+                                ) else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let requires_core = selects_authority_query_source(false, true, ingest_context.trust, binding.0);
+                                super::row_version_repairs::enqueue_authority_repair(
+                                    pending_authority_repairs, requests, binding, *session_claim_revision, requires_core,
+                                )?;
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 continue;
                             }
                             let repair_context = if *local_receiver {

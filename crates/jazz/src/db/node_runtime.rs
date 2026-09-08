@@ -2581,6 +2581,7 @@ where
             pending_chunk_response: None,
             pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
+                pending_authority_repairs: VecDeque::new(),
                 peer,
                 ingest_context,
                 session_claims,
@@ -2739,6 +2740,9 @@ where
             return false;
         }
         let connection_epoch = connection_ref.connection_epoch;
+        if let ConnectionLink::Subscriber(state) = &mut connection_ref.link {
+            state.pending_authority_repairs.clear();
+        }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
