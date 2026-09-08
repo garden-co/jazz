@@ -260,7 +260,7 @@ async fn readable_scalar_exit_through_relay_refreshes_local_cache() {
         .await;
 }
 
-async fn run_revoked_exit(dependency: bool) {
+async fn run_revoked_exit(dependency: bool, relayed: bool) {
     let schema = if dependency {
         SchemaBuilder::new()
             .table(
@@ -291,9 +291,24 @@ async fn run_revoked_exit(dependency: bool) {
     } else {
         schema()
     };
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let authority = JazzServer::start_with_schema(schema.clone()).await;
+    let relay = if relayed {
+        Some(
+            JazzServer::builder()
+                .with_schema(schema.clone())
+                .with_app_id(authority.app_id())
+                .with_backend_secret(authority.backend_secret())
+                .with_upstream_url(authority.base_url())
+                .with_native_transport_connector(jazz_testkit::native_connector())
+                .start()
+                .await,
+        )
+    } else {
+        None
+    };
+    let server = relay.as_ref().unwrap_or(&authority);
     let bob = TestingClient::builder()
-        .with_server(&server)
+        .with_server(&authority)
         .with_schema(schema.clone())
         .with_user_id("bob")
         .as_admin()
@@ -379,7 +394,10 @@ async fn run_revoked_exit(dependency: bool) {
     }
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
-    server.shutdown().await;
+    if let Some(relay) = relay {
+        relay.shutdown().await;
+    }
+    authority.shutdown().await;
 }
 
 /// Bob changes the scalar filter and revokes alice's read grant atomically.
@@ -388,7 +406,7 @@ async fn run_revoked_exit(dependency: bool) {
 #[tokio::test]
 async fn scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(false))
+        .run_until(run_revoked_exit(false, false))
         .await;
 }
 
@@ -398,6 +416,24 @@ async fn scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
 #[tokio::test]
 async fn scalar_exit_with_simultaneous_dependency_revocation_withholds_successor() {
     tokio::task::LocalSet::new()
-        .run_until(run_revoked_exit(true))
+        .run_until(run_revoked_exit(true, false))
+        .await;
+}
+
+/// Alice must not receive a revoked successor through the relay.
+/// bob -> authority -> relay -> alice: done=true + owner=bob
+#[tokio::test]
+async fn relayed_scalar_exit_with_simultaneous_read_revocation_withholds_successor() {
+    tokio::task::LocalSet::new()
+        .run_until(run_revoked_exit(false, true))
+        .await;
+}
+
+/// Alice's relay must not use a stale parent grant to authorize exit content.
+/// bob -> authority: grant.owner=bob + task.done=true -> relay -> alice
+#[tokio::test]
+async fn relayed_scalar_exit_with_simultaneous_dependency_revocation_withholds_successor() {
+    tokio::task::LocalSet::new()
+        .run_until(run_revoked_exit(true, true))
         .await;
 }
