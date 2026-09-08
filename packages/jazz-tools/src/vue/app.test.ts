@@ -156,3 +156,43 @@ describe("Vue ergonomic app", () => {
     },
   );
 });
+
+it("hides private render before pending prop commits", async () => {
+  const { session } = await fixture();
+  mocks.factory.mockReset().mockResolvedValue(session);
+  const pending = shallowRef(false);
+  const seen: boolean[] = [];
+  const node = document.createElement("div");
+  const app = createApp({
+    render: () =>
+      h(
+        JazzProvider,
+        {
+          appId: "test",
+          autoAttachDevTools: false,
+          auth: {
+            kind: "jwt",
+            key: "a",
+            isPending: pending.value,
+            getToken: async () => "token",
+            logout: () => {},
+          },
+        },
+        {
+          default: () => {
+            seen.push(pending.value);
+            return h("p", "PRIVATE");
+          },
+        },
+      ),
+  });
+  app.mount(node);
+  await flush();
+  expect(node.textContent).toBe("PRIVATE");
+  pending.value = true;
+  await flush();
+  expect(node.textContent).toContain("Loading");
+  expect(seen).not.toContain(true);
+  app.unmount();
+  await flush();
+});

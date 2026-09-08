@@ -34,7 +34,7 @@
       void app.dispose().catch(console.error);
     };
   });
-  $effect(() => { app.updateAuth(auth); });
+  $effect.pre(() => { app.updateAuth(auth); });
 </script>
 
 {#snippet pending()}

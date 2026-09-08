@@ -1,6 +1,7 @@
 import {
   createContext,
   createEffect,
+  createRenderEffect,
   createSignal,
   onCleanup,
   onMount,
@@ -76,7 +77,7 @@ function AppProvider(props: JazzAppProviderProps) {
       void app.dispose().catch(console.error);
     });
   });
-  createEffect(() => {
+  createRenderEffect(() => {
     app.updateAuth(props.auth);
   });
   createEffect(() => {

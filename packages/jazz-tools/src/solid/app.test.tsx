@@ -1,4 +1,4 @@
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal, createRenderEffect, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
@@ -107,9 +107,11 @@ it("reacts to JWT getters, conceals children during provider pending, and releas
   const { owner, events } = await setup();
   const [key, setKey] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal(false);
+  const seen: boolean[] = [];
   let mounts = 0;
   const Child = () => {
     mounts++;
+    createRenderEffect(() => seen.push(pending()));
     onCleanup(() => events.push("detached"));
     return <p>PRIVATE</p>;
   };
@@ -146,6 +148,7 @@ it("reacts to JWT getters, conceals children during provider pending, and releas
   setPending(true);
   await flush();
   expect(node.textContent).toBe("WAIT");
+  expect(seen).not.toContain(true);
   setKey("b");
   setPending(false);
   await flush();

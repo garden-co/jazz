@@ -6,7 +6,7 @@ import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import JazzProvider from "./JazzProvider.svelte";
 import type { JazzAuthState } from "./auth-state.js";
 import { writable } from "svelte/store";
-import { jwtAuth } from "../session/app.js";
+import { jwtAuth, type JazzAuth } from "../session/app.js";
 import JwtApp from "../../tests/svelte/JwtApp.svelte";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 const factory = vi.hoisted(() => vi.fn());
@@ -169,12 +169,17 @@ it("updates JWT descriptors reactively and never mounts private children while p
   const descriptor = (key: string | null, isPending = false) =>
     jwtAuth({ key, isPending, getToken: async () => key!, logout: async () => {} });
   const auth = writable(descriptor(null));
+  const seen: boolean[] = [];
   let mounts = 0;
   const target = document.createElement("div");
   component = mount(JwtApp, {
     target,
     props: {
       auth,
+      observe: (value: JazzAuth) => {
+        seen.push(value.kind === "jwt" && value.isPending === true);
+        return "";
+      },
       children: createRawSnippet(() => ({
         render: () => {
           mounts++;
@@ -195,6 +200,7 @@ it("updates JWT descriptors reactively and never mounts private children while p
   auth.set(descriptor("a", true));
   await settle();
   expect(target.textContent).toBe("WAIT");
+  expect(seen).not.toContain(true);
   auth.set(descriptor("b"));
   await settle();
   expect(target.textContent).toBe("PRIVATE");
