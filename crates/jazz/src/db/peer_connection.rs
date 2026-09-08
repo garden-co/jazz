@@ -5363,14 +5363,14 @@ where
                                             .1
                                             .clone(),
                                     );
-                                    peer.reconcile_maintained_subscription_for_clone(
+                                    Box::pin(peer.reconcile_maintained_subscription_for_clone(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
                                         &coverage.opts,
                                         progress_waker.as_ref(),
-                                    )
+                                    ))
                                     .await
                                 };
                                 let reconciled = match result {
@@ -5500,14 +5500,14 @@ where
                                         .1
                                         .clone(),
                                 );
-                                peer
+                                Box::pin(peer
                                     .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &group.shape,
                                         reconciled,
-                                    )
+                                    ))
                                 .await
                                 .map(Some)
                             } else {
@@ -5520,14 +5520,14 @@ where
                                             .1
                                             .clone(),
                                 );
-                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                                 .map(|update| {
                                     update.map(|update| retarget_view_update(update, subscription))
@@ -5662,34 +5662,34 @@ where
                                 // terminal tick as `reset_result_set`, because
                                 // a receiver would correctly reject its absent
                                 // ProgramSourceCoverage manifest.
-                                peer.query_update_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                             } else if settled_handoff {
-                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                             } else {
-                                peer.query_update_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                             }
                         };
