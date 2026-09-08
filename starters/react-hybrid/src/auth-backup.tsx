@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { exportLocalFirstSecret } from "jazz-tools";
-import { useJazzSession } from "jazz-tools/react";
+import { useJazzAuth } from "jazz-tools/react";
 
 type Status =
   | { kind: "idle" }
@@ -19,7 +19,7 @@ export function AuthBackup({
   redirectAfterRestore?: string;
   mode?: "full" | "restore-only";
 } = {}) {
-  const lifecycle = useJazzSession();
+  const lifecycle = useJazzAuth();
 
   function navigate() {
     if (redirectAfterRestore) location.assign(redirectAfterRestore);
@@ -67,7 +67,7 @@ export function AuthBackup({
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await lifecycle.restoreLocalFirst(secret);
+      await lifecycle.sessionActions.restoreLocalFirst(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });
@@ -109,7 +109,7 @@ export function AuthBackup({
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await lifecycle.restoreLocalFirst(secret);
+      await lifecycle.sessionActions.restoreLocalFirst(secret);
       navigate();
     } catch (err) {
       setStatus({ kind: "error", message: describeError(err) });

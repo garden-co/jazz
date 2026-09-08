@@ -4,10 +4,10 @@ import Image from "next/image";
 import { useActionState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { getToken } from "@/lib/accounts";
-import { useJazzSession } from "jazz-tools/react";
+import { useJazzAuth } from "jazz-tools/react";
 
 export function SignUpForm() {
-  const lifecycle = useJazzSession();
+  const lifecycle = useJazzAuth();
 
   async function signUpAction(_prev: string | null, formData: FormData): Promise<string | null> {
     const name = formData.get("name") as string;
@@ -24,7 +24,7 @@ export function SignUpForm() {
       return error.message ?? "Sign-up failed";
     }
     try {
-      await lifecycle.linkJWT({ getToken });
+      await lifecycle.sessionActions.linkJWT({ getToken });
     } catch (cause) {
       return cause instanceof Error ? cause.message : "Sign-up failed";
     }

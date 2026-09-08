@@ -15,11 +15,12 @@ import {
   type JazzAppSnapshot,
   type JazzAuth,
 } from "../session/app.js";
-import type { JazzSession } from "../session/state.js";
+import type { JazzSessionActions, JazzSession } from "../session/state.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
 
 export type JazzAuthState<Client = CoreJazzClient> = JazzAppSnapshot<Client> & {
   /** Failures are represented in state, so event handlers may safely ignore the promise. */
+  sessionActions: JazzSessionActions;
   logout(): Promise<void>;
   retry(): Promise<void>;
 };
@@ -105,6 +106,7 @@ function JazzAppView<Client extends CoreJazzClient>({
   }, [consumer, snapshot]);
   const actions = useMemo(
     () => ({
+      sessionActions: app.sessionActions,
       logout: () => app.logout().catch(() => {}),
       retry: () => app.retry().catch(() => {}),
     }),

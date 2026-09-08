@@ -67,7 +67,7 @@ function ApplicationJazzProvider({
 }: JazzAppProviderProps) {
   return (
     <ConfiguredJazzAppProvider
-      config={config}
+      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
       auth={auth}
       createJazzSession={createJazzSession}
       signedOut={signedOut}

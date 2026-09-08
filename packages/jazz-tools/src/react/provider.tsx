@@ -121,7 +121,7 @@ function ApplicationJazzProvider({
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
     <ConfiguredJazzAppProvider
-      config={config}
+      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
       auth={auth}
       createJazzSession={createJazzSession}
       signedOut={signedOut}

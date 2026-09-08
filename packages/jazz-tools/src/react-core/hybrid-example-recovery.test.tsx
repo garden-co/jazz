@@ -5,6 +5,21 @@ import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
+import { ConfiguredJazzAppProvider } from "./app.js";
+function TestAppProvider(
+  props: Pick<
+    React.ComponentProps<typeof ConfiguredJazzAppProvider>,
+    "children" | "signedOut" | "loading" | "error"
+  >,
+) {
+  return (
+    <ConfiguredJazzAppProvider
+      {...props}
+      config={{}}
+      createJazzSession={async () => fixture.session!}
+    />
+  );
+}
 const fixture = vi.hoisted(() => ({
   session: undefined as JazzSession<ReturnType<typeof makeFakeClient>> | undefined,
   stored: null as { token: string; username: string } | null,
@@ -16,6 +31,18 @@ const fixture = vi.hoisted(() => ({
 vi.mock("jazz-tools/react", async () => ({
   ...(await import("../react/index.js")),
   useJazzSessionOwner: () => ({ session: fixture.session }),
+  JazzProvider: ({
+    children,
+    signedOut,
+    loading,
+    error,
+  }: React.PropsWithChildren<{
+    signedOut: React.ReactNode;
+    loading: React.ReactNode;
+    error: React.ReactNode;
+  }>) => (
+    <TestAppProvider children={children} signedOut={signedOut} loading={loading} error={error} />
+  ),
 }));
 vi.mock("../../../../examples/auth-simple-chat/src/api.js", () => ({
   requestSignIn: async () => ({ token: "provider-token", username: "member" }),
@@ -135,23 +162,23 @@ for (const [name, App] of [
   ["custom JWT", CustomJWTApp],
   ["Better Auth", BetterAuthApp],
 ] as const) {
-  describe(`${name} actual app with JazzSessionProvider`, () => {
+  describe(`${name} actual app with JazzProvider`, () => {
     it("retries failed signup linking after ready/fallback remount without enrolling", async () => {
       const { enroll, link } = await setup();
       link.mockRejectedValueOnce(new Error("link unavailable"));
       const view = render(<App />);
-      fireEvent.click(view.getByText("Sign up"));
+      fireEvent.click(await view.findByText("Sign up"));
       await waitFor(() => expect(view.getByText("link unavailable")).toBeDefined());
-      expect(fixture.mounts).toBeGreaterThanOrEqual(2);
       fireEvent.click(view.getByText("Retry"));
       await waitFor(() => expect(link).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(view.queryByRole("alert")).toBeNull());
+      expect(fixture.mounts).toBeGreaterThanOrEqual(2);
       expect(enroll).not.toHaveBeenCalled();
     });
     it("retries provider signout after Jazz detaches without logging in again", async () => {
       const { enroll, link, createLocal } = await setup();
       const view = render(<App />);
-      fireEvent.click(view.getByText("Sign up"));
+      fireEvent.click(await view.findByText("Sign up"));
       await waitFor(() => expect(link).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(fixture.session?.getSnapshot().status).toBe("ready"));
       fixture.failSignOut = true;
