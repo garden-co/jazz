@@ -8,6 +8,21 @@ import {
 } from "./schema.js";
 
 describe("better-auth schema helpers", () => {
+  it("acknowledges adapter timestamps while preserving required and renamed fields", () => {
+    const tables = getAuthTables({});
+    const source = buildJazzSchemaSourceTextFromTables({ tables });
+    expect(source).toContain("createdAt: s.allowExternalProvenanceName(s.timestamp()),");
+    expect(source).toContain("updatedAt: s.allowExternalProvenanceName(s.timestamp()),");
+    expect(source).not.toContain("email: s.allowExternalProvenanceName");
+    const renamed = buildJazzSchemaSourceText({
+      tables,
+      getModelName: (model) => model,
+      getFieldName: ({ field }) => (field === "createdAt" ? "registeredAt" : field),
+    });
+    expect(renamed).toContain("registeredAt: s.timestamp(),");
+    expect(renamed).not.toContain("registeredAt: s.allowExternalProvenanceName");
+  });
+
   it("retains the installed JWT plugin signing-key metadata", () => {
     const tables = getAuthTables({ plugins: [jwt()] });
     const schema = buildJazzSchemaFromTables({ tables });
@@ -197,7 +212,7 @@ describe("better-auth schema helpers", () => {
         "  }),",
         "",
         "  sessions: s.table({",
-        "    createdAt: s.timestamp(),",
+        "    createdAt: s.allowExternalProvenanceName(s.timestamp()),",
         "    retryCounts: s.array(s.int()).optional(),",
         '    userId: s.ref("accountHolders").optional(),',
         "  }),",

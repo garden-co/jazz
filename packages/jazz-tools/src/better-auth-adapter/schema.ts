@@ -361,7 +361,15 @@ export function buildJazzSchemaSourceText(args: {
         getModelName,
       });
 
-      lines.push(`    ${formatObjectKey(storedFieldName)}: ${expression},`);
+      // Better Auth owns these fields, including its required timestamps.
+      // Keep their domain meaning instead of recommending Jazz provenance columns.
+      lines.push(
+        `    ${formatObjectKey(storedFieldName)}: ${
+          ["createdAt", "createdBy", "updatedAt", "updatedBy"].includes(storedFieldName)
+            ? `s.allowExternalProvenanceName(${expression})`
+            : expression
+        },`,
+      );
     }
 
     lines.push("  }),");
