@@ -1182,6 +1182,36 @@ make exclusion permanent. Readable native payloads are ingested before clearing
 an exclusion. Core evaluation sequence is comparable only in its connection
 epoch; durable per-row cut/catalogue floors survive epoch and Core changes.
 
+### Readable negative evidence and the pilot boundary
+
+Consider a query for projects without tasks. A client knows project P and no
+related task, so P matches locally. Another node creates task T under P. Core
+excludes P, but P's own row version is unchanged. Revalidating only P cannot
+correct the client: T is the missing evidence preventing P from matching.
+
+The intended readable-evidence design includes T among the query's synchronized
+inputs when the reader may access it, even though T is not a final result row.
+Local IVM can then derive the exclusion. A result-derived source closure is not
+a complete inventory of such evidence: it may omit both a rejected root and the
+rows which caused its rejection. Supporting this requires query-operator input
+tracking beyond surviving result contributors; a matching final result count
+is not proof of dependency completeness.
+
+If T is unreadable, neither its bytes nor a fact revealing its existence may be
+sent without a separate disclosure contract. P MUST NOT be marked inaccessible
+merely because unreadable evidence changes membership while P itself remains
+readable. This differs from a hidden grant change which actually removes read
+access to P: Core can then issue the generic current-unavailable decision for P
+without exposing the grant.
+
+This example specifies the design boundary, not implemented negative-query
+support. The public query facade currently rejects the needed negative relation
+form, and scalar extra-row revalidation does not solve it. Supported positive
+related queries also require their relevant child inputs to be reconciled: a
+changed tag can remove a task without changing that task. Related-input coverage
+and general readable negative evidence remain tracked in #2660; opaque evidence
+is deferred.
+
 ### Local propagation is not a remote capability
 
 `Propagation::LocalOnly` is a setting on the calling node. It MUST NOT send a
