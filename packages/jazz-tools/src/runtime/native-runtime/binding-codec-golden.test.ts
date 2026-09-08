@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { NativeTerminalOperation } from "../../drivers/types.js";
-import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import { openConfig, PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
@@ -28,6 +28,27 @@ type BindingCodecGoldenFixture = {
 // encoder. This keeps byte-level representations and the actual TS reducer in
 // one fast contract, rather than waiting for a browser integration failure.
 describe("binding codec golden contract", () => {
+  it("preserves complete account authors at the native open ABI", () => {
+    // This ABI assertion pins attribution before a native runtime can consume it.
+    const author = '["00000000-0000-0000-0000-000000000001","https://issuer.example","subject"]';
+    for (const canonical of [author, '["https://issuer.example","subject"]']) {
+      const reader = new PostcardReader(
+        openConfig(new Uint8Array(16), new TextEncoder().encode(canonical)),
+      );
+      expect(reader.bytes()).toEqual(new Uint8Array(16));
+      expect(reader.string()).toBe(canonical);
+    }
+    for (const invalid of [
+      '["not-a-uuid","https://issuer.example","subject"]',
+      '["00000000-0000-0000-0000-000000000001","","subject"]',
+      '["https://issuer.example", "subject"]',
+    ]) {
+      expect(() => openConfig(new Uint8Array(16), new TextEncoder().encode(invalid))).toThrow(
+        "canonical UTF-8 author identity",
+      );
+    }
+  });
+
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
     "executes the Rust-owned corpus through both generated native artifacts",
     async () => {

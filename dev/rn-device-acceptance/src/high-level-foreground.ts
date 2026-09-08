@@ -9,23 +9,15 @@ const app = s.defineApp({
   todos: s.table({ title: s.string() }),
 });
 
-/**
- * Exercise the installed foreground through the public RN API, not the
- * byte-level fixture helpers. The native fixture chose the admitted schema,
- * identity, claims, and SQLite path; JavaScript only receives its opaque
- * capability. This is deliberately one small consumer-shaped scenario:
- * schema-backed insert, local query, subscription publication, and shutdown.
- */
-function clientConfig(capability: Uint8Array): JazzClientConfig {
+/** Public foregrounds borrow the fixture lease using the genuine account. */
+function clientConfig(admitted: {
+  capability: Uint8Array;
+  account: JazzClientConfig["account"];
+}): JazzClientConfig {
   return {
     appId: "jazz-device-acceptance",
-    nativeRelay: { capability },
-    cookieSession: {
-      issuer: "https://jazz.device.test",
-      user_id: "fixture-user-a",
-      claims: {},
-      authMode: "external",
-    },
+    account: admitted.account,
+    nativeRelay: { capability: admitted.capability },
   };
 }
 
@@ -35,14 +27,14 @@ function clientConfig(capability: Uint8Array): JazzClientConfig {
  * same row after the native relay and its SQLite owner have been recreated.
  */
 export async function seedHighLevelForegroundRuntime(
-  capability: Uint8Array,
+  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
   runNonce: string,
   markFailure: (code: DeviceDiagnosticCode) => void,
   waitForCoreObservation: () => Promise<void>,
   boundary?: (code: SeedBoundary) => void,
 ): Promise<void> {
   markFailure("public-client-open-failed");
-  const client = await createJazzClient(clientConfig(capability));
+  const client = await createJazzClient(clientConfig(admitted));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
   let recoveredObserved = false;
@@ -106,10 +98,10 @@ export async function seedHighLevelForegroundRuntime(
  * the durable SQLite half of the end-to-end claim.
  */
 export async function proveHighLevelForegroundRelayReadback(
-  capability: Uint8Array,
+  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
   runNonce: string,
 ): Promise<void> {
-  const client = await createJazzClient(clientConfig(capability));
+  const client = await createJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
   try {
@@ -141,10 +133,10 @@ export async function proveHighLevelForegroundRelayReadback(
  * upstream before this launch; the marker must arrive from local relay storage.
  */
 export async function proveHighLevelForegroundRestart(
-  capability: Uint8Array,
+  admitted: { capability: Uint8Array; account: JazzClientConfig["account"] },
   runNonce: string,
 ): Promise<void> {
-  const client = await createJazzClient(clientConfig(capability));
+  const client = await createJazzClient(clientConfig(admitted));
   let unsubscribe = () => {},
     failed = false;
   try {

@@ -1,11 +1,8 @@
 # todo-client-localfirst-expo
 
-Expo example scaffolding for local-first todos using `jazz-tools/react` + `jazz-rn`.
-It demonstrates the native-relay install/ABI boundary, not a finished runtime.
+Expo local-first todos using `jazz-tools/react-native` and the installed `jazz-rn` runtime.
 
-> **Alpha boundary:** this is compile/build scaffolding, not a runnable persistent Jazz client.
-> The SQLite and native-relay Rust foundations exist, but are not connected to
-> `jazz-rn`; memory mode has not been validated under Metro/Hermes on a device.
+Account preparation happens outside the database context. The app creates or restores a local-first `AccountHandle`, keeps its recovery material in Expo SecureStore, and passes the handle to an effect-owned client. The shared `jazz-tools/expo` adapter uses the native account-store lock to preserve recovery roots across overlapping JavaScript runtimes.
 
 ## Notes
 
@@ -16,16 +13,15 @@ It demonstrates the native-relay install/ABI boundary, not a finished runtime.
 - The example keeps `jazz-rn: "workspace:*"` because it is developed inside this
   repository. An adopter copies the same `app.json` shape but installs
   `jazz-rn@alpha` directly, as described in the package README.
-- RN storage is not wired up yet; do not rely on persistence or a `dataPath`
-  option until the native relay binding is implemented.
+- Install a matching `jazz-rn` native build; account-scoped persistent relay admission is handled by the runtime.
 - Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`).
 - Server URL defaults:
   - iOS simulator: `http://127.0.0.1:1625`
   - Android emulator: `http://10.0.2.2:1625`
   - Physical device: `http://<your-lan-ip>:1625`
-- If you set `EXPO_PUBLIC_JAZZ_SERVER_URL` to `localhost`/`127.0.0.1`, the app now rewrites it in dev when needed so devices can still reach your host machine.
-- Auth uses local-first identity via `ExpoAuthSecretStore` (backed by `expo-secure-store`).
-- Todos carry `owner_id`, and mutations are authorized against `session.user`.
+- Set both `EXPO_PUBLIC_JAZZ_APP_ID` and a device-reachable `EXPO_PUBLIC_JAZZ_SERVER_URL` before starting Metro.
+- `JazzSessionProvider` from `jazz-tools/expo` owns secure account preparation and the native client, with app/server-scoped Expo SecureStore persistence.
+- Todos carry `owner_id`, and mutations are authorized against `session.user.account`; ownership columns use UUIDs.
 
 ## Commands
 
@@ -38,7 +34,6 @@ pnpm --filter todo-client-localfirst-expo start
 ```
 
 `verify:expo` checks clean Android and iOS prebuild/autolink configuration; it
-does not run on Expo Go or claim that the unfinished foreground Jazz client is
-available. After a matching native artifact package is installed, use
+does not execute device acceptance tests. After a matching native artifact package is installed, use
 `pnpm --filter todo-client-localfirst-expo android` or `ios` to rebuild the
 development app.

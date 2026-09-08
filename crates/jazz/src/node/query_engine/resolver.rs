@@ -93,6 +93,8 @@ pub(crate) enum SourceMetadataRequirement {
     PolicyWitnesses,
     /// Include one public provenance field.
     Provenance(ProvenanceField),
+    /// Project one nested structured-author field only when requested.
+    AuthorPath(String),
 }
 
 /// Public field requirement for a source.

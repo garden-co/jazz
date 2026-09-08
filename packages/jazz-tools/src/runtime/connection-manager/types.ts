@@ -1,3 +1,5 @@
+import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
@@ -95,6 +97,7 @@ export abstract class ConnectionManager {
 
     this.installRuntimeTelemetry();
     const runtimeConfig = { ...config };
+    copyAccountConfigAdmission(config, runtimeConfig);
     // Reserved local-first/anonymous sessions are carried by a package-private
     // capability sidecar, not an enumerable config property. Preserve that
     // capability when isolating the runtime's config object so native opens
@@ -226,6 +229,14 @@ export abstract class ConnectionManager {
         collectorUrl,
         runtimeThread: "main",
       }) ?? null;
+  }
+
+  async waitForPendingWrites(): Promise<void> {
+    const runtime = this.getCurrentClient()?.getRuntime();
+    if (!runtime) return;
+    if (!(runtime instanceof NativeRuntimeAdapter))
+      throw new Error("Runtime does not support graceful sync shutdown");
+    await runtime.waitForPendingWrites("global");
   }
 
   async shutdown(): Promise<void> {

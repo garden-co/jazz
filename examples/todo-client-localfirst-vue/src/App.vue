@@ -1,57 +1,41 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { shallowRef, watch } from "vue";
 import { JazzProvider } from "jazz-tools/vue";
-import { generateAuthSecret, type DbConfig } from "jazz-tools";
+import type { DbConfig } from "jazz-tools";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
+import { prepareAccountConfig } from "./account.js";
 
-interface Props {
-  config?: Partial<DbConfig>;
-}
-
-const props = withDefaults(defineProps<Props>(), {
-  config: () => ({}),
-});
-
-function readEnv(name: string): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.[name];
-}
-
-function secretStorageKey(appId: string): string {
-  return `jazz-auth-secret:${encodeURIComponent(appId)}`;
-}
-
-function getOrCreateSecretSync(appId: string): string {
-  const stored = localStorage.getItem(secretStorageKey(appId));
-  if (stored) return stored;
-  const secret = generateAuthSecret();
-  localStorage.setItem(secretStorageKey(appId), secret);
-  return secret;
-}
-
+const props = defineProps<{ config?: Partial<DbConfig> }>();
+const config = shallowRef<DbConfig>();
+const error = shallowRef<Error>();
 // #region context-setup-vue
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnv("VITE_JAZZ_APP_ID");
-  const serverUrl = overrides.serverUrl ?? readEnv("VITE_JAZZ_SERVER_URL");
-  if (!appId)
-    throw new Error("Missing appId: add jazzPlugin() to vite.config.ts or set VITE_JAZZ_APP_ID");
-  const secret = overrides.secret ?? getOrCreateSecretSync(appId);
-
-  return {
-    appId,
-    env: "dev",
-    secret,
-    ...(serverUrl ? { serverUrl } : {}),
-    ...overrides,
-  };
-}
+watch(
+  () => props.config,
+  (overrides, _previous, onCleanup) => {
+    let cancelled = false;
+    onCleanup(() => {
+      cancelled = true;
+    });
+    config.value = undefined;
+    error.value = undefined;
+    prepareAccountConfig(overrides).then(
+      (value) => {
+        if (!cancelled) config.value = value;
+      },
+      (cause) => {
+        if (!cancelled) error.value = cause instanceof Error ? cause : new Error(String(cause));
+      },
+    );
+  },
+  { immediate: true },
+);
 // #endregion context-setup-vue
-
-const config = computed(() => defaultConfig(props.config));
 </script>
 
 <template>
-  <JazzProvider :config="config">
+  <p v-if="error" role="alert">{{ error.message }}</p>
+  <JazzProvider v-else-if="config" :config="config">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />
@@ -59,4 +43,5 @@ const config = computed(() => defaultConfig(props.config));
       <p>Loading...</p>
     </template>
   </JazzProvider>
+  <p v-else>Loading...</p>
 </template>

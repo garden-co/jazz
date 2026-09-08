@@ -1,3 +1,5 @@
+import { createAccountManager } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the React todo app.
  *
@@ -56,6 +58,7 @@ describe("React Todo App E2E", () => {
   /** Mount the real App. Returns the container element. */
   async function mountApp(
     config: {
+      account?: DbConfig["account"];
       appId?: string;
       serverUrl?: string;
       auth?: { localFirstSecret: string };
@@ -66,10 +69,20 @@ describe("React Todo App E2E", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
+    const { auth, adminSecret: _adminSecret, ...dbConfig } = config;
+    const account =
+      config.account ??
+      (await prepareTestAccount(
+        createAccountManager,
+        config.appId ?? "test-app",
+        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        auth?.localFirstSecret,
+      ));
     const resolvedConfig = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent" as const, dbName: crypto.randomUUID() },
-      ...config,
+      ...dbConfig,
+      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -114,6 +127,43 @@ describe("React Todo App E2E", () => {
     while (mounts.length > 0) {
       await unmountApp(mounts[0].container);
     }
+  });
+
+  it("keeps the mounted context when an equivalent inline config is rerendered", async () => {
+    const account = await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
+    const el = await mountApp({
+      appId: APP_ID,
+      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+      account,
+    });
+    const mounted = mounts.find((item) => item.container === el)!;
+    const input = el.querySelector<HTMLInputElement>(
+      'input[placeholder="What needs to be done?"]',
+    )!;
+    await act(async () => typeInto(input, "unsubmitted draft"));
+    await act(async () => {
+      mounted.root.render(
+        <App
+          config={{
+            appId: APP_ID,
+            serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+            driver: { type: "persistent", dbName: mounted.storageNamespace! },
+            account,
+          }}
+        />,
+      );
+    });
+    await waitFor(
+      () => el.querySelector("#todo-list") !== null,
+      5000,
+      "rerendered app remains ready",
+    );
+    expect(el.querySelector('input[placeholder="What needs to be done?"]')).toBe(input);
+    expect(input.value).toBe("unsubmitted draft");
   });
 
   // -------------------------------------------------------------------------
@@ -255,9 +305,14 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const account = await prepareTestAccount(
+      createAccountManager,
+      "test-app",
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -275,8 +330,8 @@ describe("React Todo App E2E", () => {
     // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
 
-    // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mountApp({ driver: { type: "persistent", dbName } });
+    // Second session: remount with same account and dbName — IndexedDB data should load
+    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

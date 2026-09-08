@@ -1,210 +1,120 @@
 ---
 title: Sessions
-description: Reading the current session and scoping queries and inserts to the logged-in user.
-reviewedAt: "b29b48d1a"
+description: "Read account ownership, exact authorship, and provider claims from the current session."
+reviewedAt: "20017a2694"
 ---
 
-After [setting up authentication](/docs/auth/authentication), you can read the current session to scope queries and inserts to the logged-in user.
+A context's session describes its account and the exact identity currently acting for it. Linking selects a new handle for a new context; it never mutates the identity of an existing context.
 
 ## Get the session and canonical user identity
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-hook
-    </include>
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-hook
-    </include>
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-hook
-    </include>
-    <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-hook
-    </include>
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user
-    </include>
-  </Tab>
-</Tabs>
+Public sessions expose a structured author:
+
+```ts
+const author = {
+  account: "00000000-0000-4000-8000-000000000001",
+  identity: { issuer: "https://issuer.example", subject: "alice" },
+};
+```
+
+This illustrates `session.user`; session objects are read-only. Account ownership compares `session.user.account`. Exact authorship compares the entire structure, including issuer and subject.
+
+## System-authored rows
+
+System writes use the same author structure, with a reserved account and issuer:
+
+```ts
+const systemAuthor = {
+  account: "00000000-0000-0000-0000-000000000000",
+  identity: {
+    issuer: "urn:jazz:system",
+    subject: "00000000-0000-4000-8000-000000000042", // originating node UUID
+  },
+};
+```
+
+`SYSTEM_ACCOUNT_ID` and `SYSTEM_ISSUER` are also exported from `jazz-tools`.
+
+The subject records where the write originated and survives replication and
+reload. Comparing accounts groups all system authors; comparing the complete
+structure distinguishes their originating nodes. Neither the reserved account
+nor issuer can be registered or linked to an external identity. This metadata
+does not grant permission to bypass policies.
+
+Row authors always have a non-null UUID account. Anonymous readers have a null
+session account. Their account-ownership policy bindings are absent, so ownership
+checks fail closed.
+Use an explicit anonymous-access policy when that access is intended.
+
+## Observe the current session
+
+| Binding              | Read the current session                                            |
+| -------------------- | ------------------------------------------------------------------- |
+| React / React Native | `const session = useSession()`                                      |
+| Vue                  | `const session = useSession()`; read `session.value`                |
+| Solid                | `const session = useSession()`; read `session()`                    |
+| Svelte               | `const session = getSession()`; read `session.current`              |
+| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+
+Framework hooks must run inside the corresponding Jazz provider or context. These session APIs observe the open context. `useJazzSession()` observes the owning lifecycle: selected account, transition state, errors, and commands. The lower-level `useAccountState(accounts)` observes only an account manager.
 
 ## Read rows for the current user
 
-Use the session's canonical user identity with [`.where()`](/docs/reading/filters-and-sorting) to scope [queries](/docs/reading/queries) to the current user.
+Declare a UUID column for account ownership:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-query
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-query
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-query
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-query
-    </include>
-  </Tab>
-</Tabs>
+```ts
+import { schema as s } from "jazz-tools";
+
+const app = s.defineApp({
+  todos: s.table({ title: s.string(), owner_id: s.uuid() }),
+});
+```
+
+Filter with the account ID:
+
+```ts
+const session = db.getAuthState().session;
+const accountId = session?.user.account;
+const todos = accountId ? await db.all(app.todos.where({ owner_id: accountId })) : [];
+```
+
+Linked identities share this account ID. The issuer and subject may differ between their contexts.
 
 ## Insert a user-owned row
 
-[Insert](/docs/writing/writing-data) a row with the session's canonical user identity to associate it with the current user.
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-insert
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-insert
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-insert
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-insert
-    </include>
-  </Tab>
-</Tabs>
-
-Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, `assignee_id`, etc.&hairsp;—&hairsp;the column names have no special significance.
-
-## Session identity and authorship
-
-Jazz also records authorship and edit times through the edit metadata magic columns `$createdBy`,
-`$createdAt`, `$updatedBy`, and `$updatedAt`.
-
-Do not declare `createdAt`, `createdBy`, `updatedAt`, or `updatedBy` merely to model that same
-metadata: use these `$...` columns in queries, ordering, and permissions, and let Jazz stamp writes.
-`jazz-tools validate` points out those conventional duplicates. If importing an external system whose
-field really has one of those names, mark that one field explicitly with
-`s.allowExternalProvenanceName(...)`.
-
-See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
-columns.
-
-Jazz exposes the complete verified JWT payload under `session.claims`, including registered claims
-`iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, and `jti`, plus `null`, arrays, and objects. Registered
-fields are inspectable metadata, not an identity path. JavaScript sessions use ordinary `JSON.parse`
-number semantics; Rust server sessions use `serde_json` values. Jazz does not require, unwrap, or give special meaning to a
-nested `claims` object: if present, it is simply `session.claims.claims`. Verified `iss` and `sub`
-separately derive the reserved
-logical `session.user` from that exact `[iss, sub]` pair. Its portable value is an opaque canonical
-JSON encoding and is used for transaction authorship, `$createdBy`, `$updatedBy`, and provenance
-policies; it is interned only inside a running core. On backends,
-`await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
-also stamp authorship as that user. Client bindings expose the same derived value as
-`session.user`; use it when an application needs to store or compare an author. Raw transport
-fields such as `issuer` and `user_id` are intentionally not exposed on public session objects.
-
-`session.user` is not a user-row reference, a display name, or the JWT `sub` alone. An application
-may store it in an ordinary string column to associate its own user/profile row with Jazz
-authorship, then compare that column with `session.user` or a row's `$createdBy`.
-The name `user` is reserved in policy evaluation. A provider claim named `user` remains visible in
-the public session's raw `claims` object and can be referenced explicitly as
-`session.claims["user"]`; it can never shadow the canonical `session.user` identity.
-
-For trusted invite or membership input where you have an issuer and subject but no active Jazz
-session, use the shared constructor:
-
 ```ts
-import { userIdentity } from "jazz-tools";
-
-const invitedAuthor = userIdentity(trustedIssuer, trustedSubject);
-await db.insert(app.members, { roomId, author: invitedAuthor });
+if (accountId) {
+  db.insert(app.todos, { title: "First task", owner_id: accountId });
+}
 ```
 
-`userIdentity(...)` only validates and canonically encodes the two components. It does not verify a
-JWT, authenticate the subject, or admit that identity to Jazz; only use identity components obtained
-from a trusted authentication boundary.
+The application chooses ownership columns. Jazz independently stamps `$createdBy` and `$updatedBy` with the structured author, along with edit timestamps. Assigning `owner_id` does not change authorship.
+
+Client-side filters do not enforce access control. Define the corresponding server policy:
+
+```ts
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+});
+```
+
+Declaring those policies leaves update and delete denied until explicitly granted. See [Permissions](/docs/auth/permissions).
+
+## Session claims and authorship
+
+`session.claims` contains the provider's decoded claims. A claim named `user` remains under `session.claims.user`; it cannot shadow `session.user`. Claims do not supply the authoritative account assignment. The core verifies the bearer and resolves the registry assignment separately.
+
+`session.user` is not a profile-row reference, display name, or scalar subject string. Use a UUID account column for application ownership or a matching structured row column when storing exact authorship. Do not serialize the author into a string merely to compare it with native author columns.
 
 ### Attribution without impersonation
 
-Sometimes backend code should keep backend-level permissions but still record a user's identity in
-edit metadata. Use the attribution helpers for this:
+Backend request contexts have two distinct uses:
 
-- `context.withAttribution(issuer, userId)`&hairsp;—&hairsp;stamps writes as the exact issuer/user pair
-- `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
-- `await context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
+- `await client.forRequest(request)` verifies the bearer and registry assignment, then evaluates the requester's row policies and stamps that requester as author.
+- `await client.forAccount(account)` verifies an opaque admitted user handle and returns the same immutable user policy scope without switching the shared owner.
+- `await client.withAttribution(account)` and `await client.withAttributionForRequest(request)` record verified user authorship while retaining backend authority. Use it only in trusted backend code after the relevant authorization decision.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-server-ts/src/request-context.ts#backend-attribution-ts
-</include>
+A copied account ID or provider claim is not authorization. Ordinary clients create contexts from opaque account handles; the server verifies their credentials independently.
 
-These differ from `forRequest` / `forSession` in one key way:
-
-- `await context.forRequest(...)` / `context.forSession(...)` change both permission evaluation **and** authorship
-- `withAttribution*` only changes authorship&hairsp;—&hairsp;permissions stay at the backend level
-- `asBackend()` and unscoped `db()` writes default to `jazz:system`
-
-<Callout type="info">
-  Client-side filters are useful for UX, but they don't enforce access control on their own. Use
-  [Permissions](/docs/auth/permissions) to define row-level policies that control which sessions can
-  read or mutate a row.
-</Callout>
-
-## Next steps
-
-- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies using session identity
-- [Queries](/docs/reading/queries)&hairsp;—&hairsp;subscribe to data and filter by user
-- [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;insert, update, and delete rows
+See [Authentication](/docs/auth/authentication) for preparing handles and [Lifecycle](/docs/auth/lifecycle) for closing, linking, logout, and recovery.

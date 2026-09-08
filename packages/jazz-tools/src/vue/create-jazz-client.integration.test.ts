@@ -1,49 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { WasmSchema } from "../drivers/types.js";
-import type { QueryBuilder, TableProxy } from "../runtime/db.js";
+import { schema } from "../index.js";
+import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 
-type Todo = {
-  id: string;
-  title: string;
-  done: boolean;
-};
-
-type TodoInsert = {
-  title: string;
-  done: boolean;
-};
-
-const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
-
-const todosTable: TableProxy<Todo, TodoInsert> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: undefined as unknown as Todo,
-  _initType: undefined as unknown as TodoInsert,
-};
-
-const allTodosQuery: QueryBuilder<Todo> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: undefined as unknown as Todo,
-  _build() {
-    return JSON.stringify({
-      table: "todos",
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    });
-  },
-};
+const app = schema.defineApp({
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+});
+const todosTable = app.todos;
+const allTodosQuery = app.todos;
 
 function makeAppId(scope: string): string {
   return `vue-create-jazz-client-${scope}-${randomUUID()}`;
@@ -54,15 +19,13 @@ describe("vue/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({
-        appId: makeAppId("mutation-query"),
-      });
+      client = await createJazzClient(await localAccountConfig(makeAppId("mutation-query")));
 
       const { value: inserted } = await client.db.insert(todosTable, {
         title: "buy milk",
         done: false,
       });
-      const rows = await client.db.all(allTodosQuery);
+      const rows = await client.db.all(allTodosQuery, { tier: "local" });
 
       expect(
         rows.some(
@@ -80,11 +43,9 @@ describe("vue/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({
-        appId: makeAppId("shutdown"),
-      });
+      client = await createJazzClient(await localAccountConfig(makeAppId("shutdown")));
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
-      await client.db.all(allTodosQuery);
+      await client.db.all(allTodosQuery, { tier: "local" });
 
       await expect(client.shutdown()).resolves.toBeUndefined();
       client = null;

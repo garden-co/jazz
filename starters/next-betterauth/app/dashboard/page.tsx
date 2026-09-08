@@ -3,14 +3,19 @@
 import Image from "next/image";
 import { authClient } from "@/lib/auth-client";
 import { TodoWidget } from "@/components/todo-widget";
+import { useAuthActions } from "@/components/jazz-provider";
 
 export default function DashboardPage() {
+  const actions = useAuthActions();
   const { data: session } = authClient.useSession();
   if (!session) return null;
 
   async function handleSignOut() {
-    await authClient.signOut();
-    window.location.assign("/");
+    try {
+      await actions.signOut();
+    } catch (cause) {
+      actions.reportFailure(cause);
+    }
   }
 
   return (

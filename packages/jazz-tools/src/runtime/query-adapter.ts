@@ -9,6 +9,8 @@
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import { canonicalAuthorSubject } from "./author-id.js";
+import { stripColumnQualifier as stripQualifier } from "./query-column-name.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import { magicColumnType } from "../magic-columns.js";
@@ -64,11 +66,6 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
-}
-
-function stripQualifier(column: string): string {
-  const parts = column.split(".");
-  return parts[parts.length - 1] ?? column;
 }
 
 function toTimestampMs(value: unknown): number {
@@ -387,6 +384,55 @@ function conditionToRelPredicate(
   const columnType = getColumnType(schema, table, column);
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
+  }
+  if (columnType.type === "Row" && magicColumnType(column)) {
+    if (cond.op !== "eq" && cond.op !== "ne") {
+      throw new Error(`Structured author column "${column}" only supports eq/ne operators.`);
+    }
+    const object = (value: unknown, keys: string[]): Record<string, unknown> => {
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).length !== keys.length ||
+        keys.some((key) => !Object.hasOwn(value, key))
+      ) {
+        throw new Error(`Invalid structured author condition for "${column}".`);
+      }
+      return value as Record<string, unknown>;
+    };
+    const wholeAuthor = column === "$createdBy" || column === "$updatedBy";
+    const author = wholeAuthor ? object(cond.value, ["account", "identity"]) : undefined;
+    const identity = object(author ? author.identity : cond.value, ["issuer", "subject"]);
+    if (
+      typeof identity.issuer !== "string" ||
+      typeof identity.subject !== "string" ||
+      (author && typeof author.account !== "string")
+    ) {
+      throw new Error(`Invalid structured author condition for "${column}".`);
+    }
+    canonicalAuthorSubject(
+      identity.issuer,
+      identity.subject,
+      author?.account as string | undefined,
+    );
+    const fields = [
+      ...(author ? [{ column: `${column}.account`, op: "eq", value: author.account }] : []),
+      {
+        column: `${column}${wholeAuthor ? ".identity" : ""}.issuer`,
+        op: "eq",
+        value: identity.issuer,
+      },
+      {
+        column: `${column}${wholeAuthor ? ".identity" : ""}.subject`,
+        op: "eq",
+        value: identity.subject,
+      },
+    ];
+    const equality: RelPredicateExpr = {
+      And: fields.map((field) => conditionToRelPredicate(field, schema, table, scope)),
+    };
+    return cond.op === "eq" ? equality : { Not: equality };
   }
   if (cond.op === "match") {
     if (columnType.type !== "EnumPayload") {

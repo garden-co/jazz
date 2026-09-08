@@ -3,6 +3,8 @@
 import Image from "next/image";
 import { useActionState } from "react";
 import { authClient } from "@/lib/auth-client";
+import { getToken } from "@/lib/accounts";
+import { useJazzSession } from "jazz-tools/react";
 
 async function signInAction(_prev: string | null, formData: FormData): Promise<string | null> {
   const email = formData.get("email") as string;
@@ -14,12 +16,23 @@ async function signInAction(_prev: string | null, formData: FormData): Promise<s
     return error.message ?? "Sign-in failed";
   }
 
-  window.location.assign("/");
   return null;
 }
 
 export function SignInForm() {
-  const [error, formAction, isPending] = useActionState(signInAction, null);
+  const lifecycle = useJazzSession();
+  async function loginAction(previous: string | null, formData: FormData) {
+    const result = await signInAction(previous, formData);
+    if (result) return result;
+    try {
+      await lifecycle.loginJWT({ getToken });
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : "Sign-in failed";
+    }
+    window.location.assign("/");
+    return null;
+  }
+  const [error, formAction, isPending] = useActionState(loginAction, null);
 
   return (
     <main className="page-center">

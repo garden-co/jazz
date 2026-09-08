@@ -18,7 +18,14 @@ vi.mock("vue", async (importOriginal) => {
 import { useSession } from "./provider.js";
 
 function makeSession(user: string): PublicSession {
-  return { user, claims: {}, authMode: "local-first" };
+  return {
+    user: {
+      account: "00000000-0000-4000-8000-000000000002",
+      identity: { issuer: "urn:jazz:local-first", subject: user },
+    },
+    claims: {},
+    authMode: "local-first",
+  };
 }
 
 describe("vue/useSession", () => {

@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type Db } from "jazz-tools/backend";
+import { createJazzSession, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -53,6 +53,13 @@ export interface RunningServer extends TodoServer {
 export interface TodoServerOptions {
   /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
   jwksUrl?: string;
+  /** The deployed Jazz app used to admit external identities. */
+  appId?: string;
+  /** Upstream Jazz server that owns the account registry. */
+  serverUrl?: string;
+  /** Server-only credential for durable backend writes. */
+  backendSecret?: string;
+  adminSecret?: string;
 }
 
 // ============================================================================
@@ -70,20 +77,33 @@ export async function createServer(
   options: TodoServerOptions = {},
 ): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
+  const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
+  const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
+  const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
 
-  const context = createJazzContext({
+  if (!serverUrl || !backendSecret) {
+    throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
+  }
+
+  const session = await createJazzSession({
     appId,
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
+    serverUrl,
+    initial: { backendSecret },
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
-  const db = context.asBackend();
+  const snapshot = session.getSnapshot();
+  if (snapshot.status !== "ready" || !snapshot.client) {
+    throw snapshot.error ?? new Error("Backend session is not ready");
+  }
+  const client = snapshot.client;
+  const db = client.db;
 
   const app = express();
 
@@ -118,14 +138,14 @@ export async function createServer(
   // Authenticate every todo request before selecting a session-scoped database.
   app.use("/todos", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const db = await context.forRequest(req);
+      const db = await client.forRequest(req);
       const session = db.getAuthState().session;
       if (!session) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
       res.locals.requestDb = db;
-      res.locals.userId = session.user;
+      res.locals.userId = session.user.account;
       next();
     } catch {
       res.status(401).json({ error: "Unauthorized" });
@@ -269,10 +289,10 @@ export async function createServer(
     app,
     db,
     shutdown: async () => {
-      await context.shutdown();
+      await session.close();
     },
     flush: () => {
-      context.flush();
+      client.flush();
     },
   };
 }

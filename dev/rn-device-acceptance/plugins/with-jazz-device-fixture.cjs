@@ -1,5 +1,5 @@
 /* Expo prebuild hook: injects the test-only trusted fixture source into the
- * generated host. It intentionally does not expose configuration to JS. */
+ * generated host. Account admission stays in the shared production path. */
 const { withAndroidManifest, withDangerousMod } = require("@expo/config-plugins");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -15,23 +15,6 @@ function copyTemplate(config, platform, source, destination, afterCopy) {
       return mod;
     },
   ]);
-}
-
-function injectAndroidBuildConfig(root) {
-  const buildGradle = path.join(root, "app/build.gradle");
-  const source = fs.readFileSync(buildGradle, "utf8");
-  if (source.includes("JAZZ_DEVICE_APP_ID")) return;
-  const marker =
-    'buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\\"${findProperty(\'reactNativeReleaseLevel\') ?: \'stable\'}\\""';
-  const fields = [
-    "        // Schema/app metadata is public; endpoint and ephemeral bearers are",
-    "        // launch-only inputs from the local Rust Edge/Core harness.",
-    '        buildConfigField "String", "JAZZ_DEVICE_APP_ID", "\\"jazz-device-acceptance\\""',
-    `        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", ${JSON.stringify(JSON.stringify(JSON.stringify(require("../native/device-fixture.json").schema)))}`, // todos and policy-protected scope_rows
-  ].join("\n");
-  if (!source.includes(marker))
-    throw new Error("Expo app build.gradle no longer has the BuildConfig insertion marker");
-  fs.writeFileSync(buildGradle, source.replace(marker, `${marker}\n${fields}`));
 }
 
 module.exports = function withJazzDeviceFixture(config) {
@@ -71,7 +54,6 @@ module.exports = function withJazzDeviceFixture(config) {
           source.replace(marker, `${marker}\n              add(JazzDeviceFixturePackage())`),
         );
       }
-      injectAndroidBuildConfig(root);
     },
   );
   // The label-gated iOS simulator workflow registers this fixture after

@@ -39,11 +39,69 @@ describe("release config", () => {
       };
     };
     const step = workflow.jobs["publish-pkg-pr-new"].steps.find(
-      (candidate) => candidate.name === "Bind create-jazz preview to this immutable commit",
+      (candidate) => candidate.name === "Publish to pkg.pr.new",
     );
-    expect(step?.env).toEqual({ PREVIEW_COMMIT: "${{ github.event.pull_request.head.sha }}" });
-    expect(step?.run).toContain("jazz-source-snapshot.json");
-    expect(step?.run).toContain("schema:1");
+    expect(step?.env).toMatchObject({
+      PREVIEW_COMMIT: "${{ github.event.pull_request.head.sha }}",
+    });
+    expect(step?.run).toContain('write-preview-snapshot.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"');
+    expect(step?.run).toContain('"${PACKAGES[@]}"');
+  });
+
+  it("stages and verifies embedded inspector assets before preview publication", () => {
+    const workflow = parseYaml(
+      fs.readFileSync(path.join(repoRoot, ".github/workflows/preview-build.yml"), "utf8"),
+    );
+    const steps = workflow.jobs["publish-pkg-pr-new"].steps as Array<{
+      name?: string;
+      run?: string;
+    }>;
+    const stage = steps.findIndex(
+      (step) => step.name === "Stage inspector overlay assets into jazz-tools",
+    );
+    const verify = steps.findIndex(
+      (step) => step.name === "Verify packed inspector overlay assets",
+    );
+    const publish = steps.findIndex((step) => step.name === "Publish to pkg.pr.new");
+    expect(stage).toBeGreaterThan(-1);
+    expect(verify).toBeGreaterThan(stage);
+    expect(publish).toBeGreaterThan(verify);
+    expect(steps[stage]?.run).toContain("pnpm --filter inspector run build:embedded");
+    expect(steps[stage]?.run).toContain("pnpm --filter jazz-tools run stage:inspector-overlay");
+    const fixture = fs.mkdtempSync(path.join(tmpdir(), "jazz-preview-inspector-"));
+    try {
+      const toolsDir = path.join(fixture, "packages/jazz-tools");
+      const embedded = path.join(fixture, "packages/inspector/dist-embedded");
+      fs.mkdirSync(path.join(toolsDir, "scripts"), { recursive: true });
+      fs.mkdirSync(embedded, { recursive: true });
+      fs.writeFileSync(path.join(embedded, "embedded.html"), "<html>fixture inspector</html>");
+      fs.writeFileSync(
+        path.join(fixture, "pnpm-workspace.yaml"),
+        "packages:\n  - packages/jazz-tools\n",
+      );
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(repoRoot, "packages/jazz-tools/package.json"), "utf8"),
+      );
+      fs.writeFileSync(
+        path.join(toolsDir, "package.json"),
+        JSON.stringify({ name: manifest.name, version: manifest.version, files: manifest.files }),
+      );
+      const stagingScript = path.join(toolsDir, "scripts/stage-inspector-overlay.mjs");
+      fs.copyFileSync(
+        path.join(repoRoot, "packages/jazz-tools/scripts/stage-inspector-overlay.mjs"),
+        stagingScript,
+      );
+      execFileSync(process.execPath, [stagingScript]);
+      const runGate = () =>
+        spawnSync("bash", ["-e", "-c", steps[verify]!.run!], { cwd: fixture, encoding: "utf8" });
+      const valid = runGate();
+      expect(valid.status, valid.stderr).toBe(0);
+      // Planted missing payload: the same packed-presence gate must fail.
+      fs.rmSync(path.join(toolsDir, "dist/dev/inspector-overlay/embedded/embedded.html"));
+      expect(runGate().status).not.toBe(0);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("packs and runs the production CLI fail-closed for invalid preview receipts", () => {

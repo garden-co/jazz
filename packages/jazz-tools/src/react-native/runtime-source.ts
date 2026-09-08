@@ -1,9 +1,15 @@
+import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
-import { markTrustedReservedSession } from "../runtime/client-session.js";
+import {
+  markTrustedReservedSession,
+  parseJwtPayload,
+  internalSessionFromJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
+} from "../runtime/client-session.js";
 import type { AppContext } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
@@ -11,10 +17,16 @@ import {
   getTrustedReservedSession,
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
-import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
 import { REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR } from "./storage.js";
+import { assertAccountConfig } from "../accounts/config-capability.js";
+import {
+  beginNativeAccountSession,
+  attachNativeAccountSchema,
+  resolveNativeSession,
+} from "./account-session.js";
+import { serializeSchemaSource } from "../drivers/schema-wire.js";
 import {
   NativeForegroundDb,
   type NativeForegroundFactory,
@@ -62,17 +74,52 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
+  override get defaultDurabilityTier(): "local" {
+    return "local";
+  }
+
   private admittedSession: Session | null = null;
   private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
   private lifecycleForeground: NativeForegroundDb | null = null;
+  private pendingCapability: Uint8Array | null = null;
+  private ownsAdmission = false;
+  private explicitlyOffline = false;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (config.sqliteStorage !== undefined) {
       throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     }
     if (shouldRequireSqliteDriver(config)) {
+      if (!config.nativeRelay && config.accountId && config.accountRegistryAuthority) {
+        if (this.pendingCapability || this.admittedCapability) return;
+        assertAccountConfig(config);
+        const session = resolveNativeSession(config);
+        const module = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        const factory = module.installNativeForegroundRuntime();
+        if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
+        this.pendingCapability = beginNativeAccountSession(factory, config, session);
+        this.foregroundFactory = factory;
+        this.foregroundModule = module;
+        this.ownsAdmission = true;
+        this.admittedSession = markTrustedReservedSession({
+          ...session,
+          account_id: config.accountId,
+        });
+        this.nativeConnection = {
+          configured: () => config.serverUrl !== undefined,
+          disconnect: () => {
+            this.explicitlyOffline = true;
+            this.lifecycleForeground?.disconnectNativeUpstream();
+          },
+          reconnect: () => {
+            this.explicitlyOffline = false;
+            this.lifecycleForeground?.reconnectNativeUpstream();
+          },
+        };
+        return;
+      }
       if (config.nativeRelay) {
         if (this.admittedCapability) return;
         assertNativeRelay(config.nativeRelay);
@@ -81,6 +128,8 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const capability = new Uint8Array(config.nativeRelay.capability);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
+        if (this.foregroundFactory.accountSecret)
+          installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);
         this.foregroundModule = foreground;
         const withForeground = <T>(run: (db: NativeForegroundDb) => T): T => {
           if (this.lifecycleForeground) return run(this.lifecycleForeground);
@@ -101,6 +150,18 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         );
         try {
           const metadata = opened.nativeSessionMetadata();
+          const selected = resolveNativeSession(config);
+          if (
+            metadata.accountId !== (config.accountId ?? null) ||
+            (config.accountRegistryAuthority !== undefined &&
+              metadata.registryAuthority !== config.accountRegistryAuthority) ||
+            metadata.issuer !== selected.issuer ||
+            metadata.userId !== selected.user_id
+          ) {
+            throw new Error(
+              "React Native admitted session does not match the selected account identity",
+            );
+          }
           const configured = opened.nativeConnectionStatus().configured;
           // The admitted scope's transport configuration is immutable. Lifecycle
           // actions use the application owner, rather than opening a recovery
@@ -111,9 +172,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             reconnect: () => withForeground((db) => db.reconnectNativeUpstream()),
           };
           this.admittedSession = markTrustedReservedSession({
+            account_id: metadata.accountId ?? undefined,
             issuer: metadata.issuer,
             user_id: metadata.userId,
-            claims: {},
+            claims: selected.claims,
             authMode:
               metadata.issuer === "urn:jazz:local-first"
                 ? "local-first"
@@ -149,16 +211,27 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 
   override admitConfig(config: ReactNativeDbConfig): void {
     if (!this.admittedSession) throw new Error("React Native native session is not admitted");
-    // Public identity is derived from the native admission. Caller metadata
-    // neither chooses authorization nor overrides the displayed identity.
-    delete config.jwtToken;
-    delete config.secret;
-    delete config.adminSecret;
-    config.cookieSession = this.admittedSession;
+    if (this.ownsAdmission) return;
+    // The handle's JWT was checked against the native account/identity during
+    // load. Keep its bearer representation: reserved local-first identities
+    // deliberately cannot enter through the generic cookie-session path.
+    // Native authority still comes exclusively from the admitted capability.
     setTrustedReservedSession(config, this.admittedSession);
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
+    if (this.pendingCapability) {
+      const pending = this.pendingCapability;
+      try {
+        this.admittedCapability = attachNativeAccountSchema(
+          this.foregroundFactory!,
+          pending,
+          serializeSchemaSource(context.schema),
+        );
+      } finally {
+        this.pendingCapability = null;
+      }
+    }
     if (this.admittedCapability) {
       const factory = this.foregroundFactory;
       const module = this.foregroundModule;
@@ -167,55 +240,83 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         throw new Error("React Native native foreground runtime is not loaded");
       const session = resolveNativeSession(context.config);
       const foreground = new NativeForegroundDb(factory.openAttached(capability), module);
-      this.lifecycleForeground = foreground;
-      const runtime = NativeRuntimeAdapter.fromDb(
-        foreground,
-        context.schema,
-        randomNativeNodeBytes(),
-        authorBytesForSession(session),
-        1,
-        false,
-      );
-      const appContext: AppContext = {
-        appId: context.config.appId,
-        schema: context.schema,
-        driver: context.config.driver,
-        serverUrl: context.config.serverUrl,
-        env: context.config.env,
-        jwtToken: context.config.jwtToken,
-        cookieSession: context.config.cookieSession,
-        tier: "local",
-      };
-      setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
-      return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {
-        onAuthFailure: context.onAuthFailure,
-      });
+      try {
+        const metadata = foreground.nativeSessionMetadata();
+        if (
+          metadata.accountId !== (context.config.accountId ?? null) ||
+          metadata.issuer !== session.issuer ||
+          metadata.userId !== session.user_id ||
+          (context.config.accountRegistryAuthority !== undefined &&
+            metadata.registryAuthority !== context.config.accountRegistryAuthority)
+        ) {
+          throw new Error(
+            "React Native admitted session does not match the selected account identity",
+          );
+        }
+        if (this.explicitlyOffline) foreground.disconnectNativeUpstream();
+        this.lifecycleForeground = foreground;
+        const runtime = NativeRuntimeAdapter.fromDb(
+          foreground,
+          context.schema,
+          metadata.node,
+          authorBytesForSession(session),
+          1,
+          false,
+        );
+        const appContext: AppContext = {
+          appId: context.config.appId,
+          accountId: context.config.accountId,
+          schema: context.schema,
+          driver: context.config.driver,
+          serverUrl: context.config.serverUrl,
+          env: context.config.env,
+          jwtToken: context.config.jwtToken,
+          cookieSession: context.config.cookieSession,
+          tier: "local",
+          defaultDurabilityTier: this.defaultDurabilityTier,
+        };
+        setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
+        return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {
+          onAuthFailure: context.onAuthFailure,
+        });
+      } catch (error) {
+        this.lifecycleForeground = null;
+        foreground.close();
+        throw error;
+      }
     }
     throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
+  }
+
+  override async shutdown(): Promise<void> {
+    if (!this.ownsAdmission) return;
+    const capability = this.admittedCapability ?? this.pendingCapability;
+    if (capability) this.foregroundFactory!.releaseAccountSession!(capability);
+    this.admittedCapability = null;
+    this.pendingCapability = null;
+    this.lifecycleForeground = null;
+    this.ownsAdmission = false;
+  }
+
+  override refreshAccountToken(token: string): boolean {
+    if (!this.ownsAdmission) this.assertAuthUpdateAllowed();
+    const capability = this.admittedCapability ?? this.pendingCapability;
+    if (!capability) throw new Error("React Native account context is closed");
+    const payload = parseJwtPayload(token);
+    const session =
+      payload?.iss === "urn:jazz:local-first"
+        ? internalSessionFromVerifiedReservedJwtPayload(payload, "local-first")
+        : payload && internalSessionFromJwtPayload(payload);
+    if (!session) throw new Error("Invalid account refresh token");
+    this.foregroundFactory!.refreshAccountSession!(
+      capability,
+      JSON.stringify({ jwt: token, claims: session.claims }),
+    );
+    return true;
   }
 }
 
 function assertNativeRelay(relay: NonNullable<ReactNativeDbConfig["nativeRelay"]>): void {
   if (!(relay.capability instanceof Uint8Array) || relay.capability.byteLength !== 32)
     throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
-}
-
-function resolveNativeSession(config: ReactNativeDbConfig) {
-  const session = resolveClientInternalSessionSync({
-    ...config,
-    trustedReservedSession: getTrustedReservedSession(config),
-  });
-  if (!session)
-    throw new Error(
-      "React Native native foreground requires an already verified jwtToken or cookieSession; native token minting is not implemented",
-    );
-  return session;
-}
-
-function randomNativeNodeBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) return globalThis.crypto.getRandomValues(bytes);
-  for (let index = 0; index < bytes.length; index += 1)
-    bytes[index] = Math.floor(Math.random() * 256);
-  return bytes;
 }

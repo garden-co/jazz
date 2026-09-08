@@ -17,6 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use jazz::account_registry::AccountId;
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
@@ -65,6 +66,10 @@ pub struct LoopbackWebSocketServerConfig {
     pub storage: StorageConfig,
     /// Transport admission policy.
     pub auth_admission: AuthAdmissionConfig,
+    /// Account bound by this trusted loopback host after credential verification.
+    ///
+    /// Omit this to keep loopback sessions accountless and read-only.
+    pub admitted_account: Option<AccountId>,
 }
 
 impl LoopbackWebSocketServerConfig {
@@ -77,6 +82,7 @@ impl LoopbackWebSocketServerConfig {
             row_id_seed: None,
             storage: StorageConfig::InMemory,
             auth_admission: AuthAdmissionConfig::default(),
+            admitted_account: None,
         }
     }
 
@@ -93,6 +99,7 @@ impl LoopbackWebSocketServerConfig {
             row_id_seed: None,
             storage: StorageConfig::data_dir(data_dir),
             auth_admission: AuthAdmissionConfig::default(),
+            admitted_account: None,
         }
     }
 
@@ -105,6 +112,15 @@ impl LoopbackWebSocketServerConfig {
     /// Set loopback WebSocket admission policy.
     pub fn with_auth_admission(mut self, auth_admission: AuthAdmissionConfig) -> Self {
         self.auth_admission = auth_admission;
+        self
+    }
+
+    /// Bind this exact trusted account after a bearer credential is verified.
+    ///
+    /// The account is configuration owned by the host, never accepted from a
+    /// WebSocket handshake or provider claim.
+    pub fn with_admitted_account(mut self, account: AccountId) -> Self {
+        self.admitted_account = Some(account);
         self
     }
 
@@ -149,6 +165,7 @@ impl LoopbackWebSocketServer {
             websocket_path,
             auth_admission,
             None,
+            None,
         )
     }
 
@@ -159,6 +176,7 @@ impl LoopbackWebSocketServer {
         websocket_path: impl Into<String>,
         auth_admission: AuthAdmissionConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
+        admitted_account: Option<AccountId>,
     ) -> LoopbackWebSocketResult<Self> {
         let listener = TcpListener::bind(bind_addr)?;
         listener.set_nonblocking(true)?;
@@ -207,6 +225,7 @@ impl LoopbackWebSocketServer {
                     shell,
                     websocket_path,
                     auth_admission,
+                    admitted_account,
                     thread_shutdown,
                 )
                 .await;
@@ -264,12 +283,21 @@ impl LoopbackWebSocketServer {
         config: LoopbackWebSocketServerConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
     ) -> LoopbackWebSocketResult<Self> {
+        if config
+            .admitted_account
+            .is_some_and(|account| account.0.is_nil())
+        {
+            return Err(LoopbackWebSocketError::InvalidConfiguredAccount);
+        }
         match &config.storage {
-            StorageConfig::InMemory => Self::start_with_admission(
+            StorageConfig::InMemory => Self::start_with_storage_admission(
                 config.listener.bind_addr,
                 config.in_memory_shell_config(),
+                StorageConfig::InMemory,
                 config.listener.websocket_path.clone(),
                 config.auth_admission,
+                None,
+                config.admitted_account,
             ),
             StorageConfig::RocksDb { .. } => Self::start_with_storage_admission(
                 config.listener.bind_addr,
@@ -278,6 +306,7 @@ impl LoopbackWebSocketServer {
                 config.listener.websocket_path.clone(),
                 config.auth_admission,
                 storage_factory,
+                config.admitted_account,
             ),
             StorageConfig::SQLite { .. } => {
                 Err(LoopbackWebSocketError::DurableStorageUnavailable {
@@ -322,6 +351,8 @@ pub enum LoopbackWebSocketError {
         /// Requested storage config.
         storage: StorageConfig,
     },
+    /// The trusted loopback host attempted to assign the system account.
+    InvalidConfiguredAccount,
 }
 
 impl fmt::Display for LoopbackWebSocketError {
@@ -333,6 +364,12 @@ impl fmt::Display for LoopbackWebSocketError {
                 f,
                 "loopback WebSocket storage backend is not available for {storage:?}; this shell supports in-memory and RocksDB data-dir storage"
             ),
+            Self::InvalidConfiguredAccount => {
+                write!(
+                    f,
+                    "loopback admitted account must not be the system account"
+                )
+            }
         }
     }
 }
@@ -370,6 +407,7 @@ async fn accept_loop(
     shell: Arc<TokioMutex<InMemoryServerShell>>,
     websocket_path: String,
     auth_admission: AuthAdmissionConfig,
+    admitted_account: Option<AccountId>,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut shutdown_tick = tokio::time::interval(Duration::from_millis(10));
@@ -384,6 +422,7 @@ async fn accept_loop(
                     Arc::clone(&shell),
                     websocket_path.clone(),
                     auth_admission.clone(),
+                    admitted_account,
                 ));
             }
             _ = shutdown_tick.tick() => {
@@ -400,6 +439,7 @@ async fn handle_connection(
     shell: Arc<TokioMutex<InMemoryServerShell>>,
     websocket_path: String,
     auth_admission: AuthAdmissionConfig,
+    admitted_account: Option<AccountId>,
 ) {
     let accepted_admission = Arc::new(Mutex::new(None));
     let callback_admission = Arc::clone(&accepted_admission);
@@ -447,6 +487,13 @@ async fn handle_connection(
             return;
         }
     };
+    let admitted = match bind_trusted_loopback_account(admitted, admitted_account) {
+        Ok(admitted) => admitted,
+        Err(_) => {
+            let _ = socket.close(None).await;
+            return;
+        }
+    };
 
     let session = {
         let mut shell = shell.lock().await;
@@ -462,6 +509,18 @@ async fn handle_connection(
     };
 
     service_connection(socket, shell, session).await;
+}
+
+fn bind_trusted_loopback_account(
+    admitted: AdmittedSession,
+    account: Option<AccountId>,
+) -> Result<AdmittedSession, AuthAdmissionError> {
+    match account {
+        Some(account) if admitted.source != AdmissionSource::Anonymous => {
+            admitted.with_trusted_account(account)
+        }
+        _ => Ok(admitted),
+    }
 }
 
 fn websocket_path_matches(request_path: &str, expected_path: &str) -> bool {
@@ -690,6 +749,9 @@ fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::groove::records::Value;
+    use std::collections::BTreeMap;
+
     use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES};
 
     #[test]
@@ -749,6 +811,63 @@ mod tests {
             AuthorSubject::from_canonical(&format!(r#"["urn:jazz:static-bearer","{sub}"]"#))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn loopback_host_account_binding_is_explicit_and_ignores_provider_account_claims() {
+        // This internal receipt observes the admission envelope before it is
+        // installed into the shell. The CLI reconnect integration test covers
+        // the public write/read path using the same configured account.
+        let configured = AccountId(uuid::Uuid::from_bytes([0x71; 16]));
+        let claimed = AccountId(uuid::Uuid::from_bytes([0x72; 16]));
+        let provider_claims = BTreeMap::from([("account".to_owned(), Value::Uuid(claimed.0))]);
+        let admitted = admit_static_bearer_with_claims(
+            &AuthAdmissionConfig::static_bearer("token"),
+            Some("token"),
+            "loopback-writer",
+            provider_claims,
+            AdmissionSource::FirstFrameHandshake,
+        )
+        .expect("admit configured bearer");
+
+        let unconfigured = bind_trusted_loopback_account(admitted.clone(), None)
+            .expect("unconfigured loopback remains a reader");
+        assert_eq!(unconfigured.author.account_id(), None);
+        assert!(!unconfigured.claims.contains_key("user"));
+
+        let configured = bind_trusted_loopback_account(admitted, Some(configured))
+            .expect("bind trusted host account");
+        assert_eq!(
+            configured.author.account_id(),
+            Some(AccountId(uuid::Uuid::from_bytes([0x71; 16])))
+        );
+        assert_eq!(
+            configured.claims.get("user.account"),
+            Some(&Value::Uuid(uuid::Uuid::from_bytes([0x71; 16])))
+        );
+        assert_eq!(
+            configured
+                .claims
+                .get(&jazz::query::provider_claim_key("account")),
+            Some(&Value::Uuid(claimed.0)),
+            "a provider account claim remains namespaced and cannot select the host account"
+        );
+
+        let anonymous = admit_static_bearer_with_claims(
+            &AuthAdmissionConfig::default(),
+            None,
+            "anonymous-reader",
+            BTreeMap::new(),
+            AdmissionSource::Anonymous,
+        )
+        .expect("admit anonymous reader");
+        let anonymous = bind_trusted_loopback_account(
+            anonymous,
+            Some(AccountId(uuid::Uuid::from_bytes([0x73; 16]))),
+        )
+        .expect("configured host does not upgrade anonymous readers");
+        assert_eq!(anonymous.author.account_id(), None);
+        assert!(!anonymous.claims.contains_key("user"));
     }
 
     #[test]

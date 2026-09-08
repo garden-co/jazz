@@ -1,4 +1,6 @@
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { exportLocalFirstSecret } from "jazz-tools";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
 
 // In production, pin this to your deployed hostname so passkeys remain usable
 // across preview deployments. Leaving it undefined falls back to location.hostname.
@@ -10,7 +12,11 @@ export interface AuthBackupOptions {
   mode?: "full" | "restore-only";
 }
 
-export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions = {}): void {
+export function mountAuthBackup(
+  parent: HTMLElement,
+  session: Session,
+  options: AuthBackupOptions = {},
+): void {
   const { redirectAfterRestore, mode = "full" } = options;
   parent.innerHTML = `
     <details class="auth-backup">
@@ -129,13 +135,13 @@ export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions 
 
     if (action === "reveal" && phraseInput && phraseSlot) {
       await withBusy(async () => {
-        const secret = await BrowserAuthSecretStore.loadSecret();
-        if (!secret) {
+        const account = session.getSnapshot().account;
+        if (!account) {
           setStatus("error", "No local secret to reveal yet.");
           return;
         }
         const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-        phraseInput.value = RecoveryPhrase.fromSecret(secret);
+        phraseInput.value = RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
         phraseSlot.hidden = false;
       });
       return;
@@ -153,8 +159,8 @@ export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions 
 
     if (action === "passkey-backup") {
       await withBusy(async () => {
-        const secret = await BrowserAuthSecretStore.loadSecret();
-        if (!secret) {
+        const account = session.getSnapshot().account;
+        if (!account) {
           setStatus("error", "No local secret to back up yet.");
           return;
         }
@@ -163,7 +169,7 @@ export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions 
           appName: PASSKEY_APP_NAME,
           appHostname: PASSKEY_APP_HOSTNAME,
         });
-        await pb.backup(secret, "My account");
+        await pb.backup(exportLocalFirstSecret(account), "My account");
         setStatus("success", "Passkey backup created.");
       });
       return;
@@ -177,7 +183,7 @@ export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions 
           appHostname: PASSKEY_APP_HOSTNAME,
         });
         const secret = await pb.restore();
-        await BrowserAuthSecretStore.saveSecret(secret);
+        await session.restoreLocalFirst(secret);
         navigate();
       });
     }
@@ -188,7 +194,7 @@ export function mountAuthBackup(parent: HTMLElement, options: AuthBackupOptions 
     await withBusy(async () => {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.value.trim());
-      await BrowserAuthSecretStore.saveSecret(secret);
+      await session.restoreLocalFirst(secret);
       navigate();
     });
   });

@@ -335,6 +335,84 @@ pub fn host_revoke(host: &External<RnTestHost>, capability: Uint8Array) -> Resul
     host.revoke(capability)
 }
 
+fn account_lease(host: &RnTestHost) -> Result<*mut JazzNativeRelayHostLease> {
+    host.inner
+        .as_ref()
+        .map(|host| host.lease)
+        .ok_or_else(|| Error::from_reason("RN fixture host is closed"))
+}
+
+#[napi(js_name = "__testRnHostBeginAccountSession", skip_typescript)]
+pub fn host_begin_account_session(
+    host: &External<RnTestHost>,
+    config: String,
+    root: String,
+) -> Result<Uint8Array> {
+    let lease = account_lease(host)?;
+    bytes(|out| unsafe {
+        jazz_native_relay_host_lease_begin_account_session_json(
+            lease,
+            config.as_ptr(),
+            config.len(),
+            root.as_ptr(),
+            root.len(),
+            out,
+        )
+    })
+}
+
+#[napi(js_name = "__testRnHostAttachAccountSchema", skip_typescript)]
+pub fn host_attach_account_schema(
+    host: &External<RnTestHost>,
+    capability: Uint8Array,
+    schema: String,
+) -> Result<Uint8Array> {
+    let lease = account_lease(host)?;
+    bytes(|out| unsafe {
+        jazz_native_relay_host_lease_attach_account_schema_json(
+            lease,
+            capability.as_ptr(),
+            capability.len(),
+            schema.as_ptr(),
+            schema.len(),
+            out,
+        )
+    })
+}
+
+#[napi(js_name = "__testRnHostRefreshAccountSession", skip_typescript)]
+pub fn host_refresh_account_session(
+    host: &External<RnTestHost>,
+    capability: Uint8Array,
+    token: String,
+) -> Result<()> {
+    let lease = account_lease(host)?;
+    check(unsafe {
+        jazz_native_relay_host_lease_refresh_account_session(
+            lease,
+            capability.as_ptr(),
+            capability.len(),
+            token.as_ptr(),
+            token.len(),
+        )
+    })
+}
+
+#[napi(js_name = "__testRnHostReleaseAccountSession", skip_typescript)]
+pub fn host_release_account_session(
+    host: &External<RnTestHost>,
+    capability: Uint8Array,
+) -> Result<()> {
+    let lease = account_lease(host)?;
+    check(unsafe {
+        jazz_native_relay_host_lease_release_account_session(
+            lease,
+            capability.as_ptr(),
+            capability.len(),
+        )
+    })
+}
+
 /// Inspect the real Rust request type without executing a database operation.
 /// This test-only seam detects TS ordinal/field drift across the language boundary.
 #[napi(js_name = "__testRnDecodeForegroundCommand", skip_typescript)]
@@ -373,6 +451,9 @@ pub fn foreground_response_corpus() -> Result<String> {
             connected: true,
         },
         ForegroundDbCommandResponse::NativeSessionMetadata {
+            node: [9; 16],
+            registry_authority: "https://registry.example".into(),
+            account_id: Some([7; 16]),
             issuer: "fixture-issuer".into(),
             user_id: "fixture-user".into(),
         },

@@ -191,6 +191,7 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
 pub(super) fn test_provider_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     match author {
         AuthorSubject::System => BTreeMap::new(),
+        AuthorSubject::SystemAt(_) => BTreeMap::new(),
         AuthorSubject::Authenticated(_) => BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
             Value::Uuid(author.test_uuid()),
@@ -1114,10 +1115,14 @@ pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
             PublicTableSchemaBuilder::new("todos")
                 .column("title", PublicColumnType::Text)
                 .column("done", PublicColumnType::Boolean)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(public_session_eq("$createdBy", &session_path)),
-                ),
+                .policies(PublicTablePolicies::new().with_select(public_session_eq(
+                    if claim_name == "user" {
+                        "$createdBy"
+                    } else {
+                        "$createdBy.identity.subject"
+                    },
+                    &session_path,
+                ))),
         ),
     )
 }

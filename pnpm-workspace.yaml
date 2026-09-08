@@ -33,6 +33,7 @@ catalogs:
     vite-plugin-solid: 2.11.12
     "vite-plugin-top-level-await": 1.6.0
     "vite-plugin-wasm": 3.6.0
+    jsdom: 26.1.0
     vitest: 4.1.0
     vue-tsc: "^2.1.10"
 
@@ -50,3 +51,6 @@ allowBuilds:
 overrides:
   react: 19.2.4
   react-dom: 19.2.4
+
+patchedDependencies:
+  playwright-core@1.58.2: patches/playwright-core@1.58.2.patch

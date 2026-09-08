@@ -18,6 +18,20 @@ export type ForegroundByteCodec = {
   decode(bytes: Uint8Array): NativeForegroundResponse;
 };
 
+type PostCommitWakeTiming = {
+  readonly timeoutMs: number;
+  now(): number;
+  yieldTurn(): Promise<void>;
+  onWake?(details: { elapsedMs: number; turns: number }): void;
+  onPostCommitWakeArmed?(): void | Promise<void>;
+};
+
+const DEVICE_POST_COMMIT_WAKE_TIMING: PostCommitWakeTiming = {
+  timeoutMs: 5_000,
+  now: () => performance.now(),
+  yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+};
+
 /**
  * Exercise the installed JSI HostObject through the first v1 byte vocabulary.
  * This is intentionally not a React-Native-shaped database API: it proves the
@@ -178,8 +192,14 @@ export async function proveSameJsiRuntimeWriteSubscription(
   codec: ForegroundByteCodec,
   rowId: Uint8Array,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+  wakeTiming: PostCommitWakeTiming = DEVICE_POST_COMMIT_WAKE_TIMING,
 ): Promise<void> {
   if (rowId.byteLength !== 16) throw new Error("subscription fixture row id must be 16 bytes");
+  // Acknowledging the opt-in diagnostic bridge may resume through the JS event
+  // loop. Do it before creating either foreground, while tracing is disabled,
+  // so no B subscription callback can enter the post-commit epoch through the
+  // acknowledgement.
+  await wakeTiming.onPostCommitWakeArmed?.();
   markFailure("same-runtime-open-failed");
   const openedA = openScopeForeground(factory, capability);
   const openedB = openScopeForeground(factory, capability);
@@ -226,6 +246,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // Retire already-delivered initial-settlement notifications before A's
       // write establishes the post-commit wake epoch.
     }
+    // B alone traces the post-commit bridge path. The native flag defaults to
+    // off so all other foreground aliases and production callbacks are quiet.
+    setWakeTraceBestEffort(openedB, true);
 
     markFailure("same-runtime-write-failed");
     markFailure("same-runtime-transaction-open-failed");
@@ -255,7 +278,10 @@ export async function proveSameJsiRuntimeWriteSubscription(
 
     markFailure("same-runtime-delta-failed");
     markFailure("same-runtime-postcommit-wake-failed");
-    for (let attempt = 0; attempt < 96; attempt += 1) {
+    const wakeStartedAt = wakeTiming.now();
+    const wakeDeadline = wakeStartedAt + wakeTiming.timeoutMs;
+    let wakeTurns = 0;
+    do {
       // Both aliases get fair ordinary relay turns.  This is the same polling
       // progression used by the first native subscription slice, not a test
       // side channel into the persistent SQLite store.
@@ -264,8 +290,11 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // SQLite/IVM completion reaches this runtime through React Native's
       // CallInvoker. A synchronous drain loop starves that callback even
       // though both aliases are ticked fairly.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await wakeTiming.yieldTurn();
+      wakeTurns += 1;
+      if (wakeTiming.now() >= wakeDeadline) break;
       if (!openedB.consumeWake()) continue;
+      wakeTiming.onWake?.({ elapsedMs: wakeTiming.now() - wakeStartedAt, turns: wakeTurns });
       markFailure("same-runtime-delta-drain-failed");
       const events = await drainSubscription(
         b,
@@ -310,13 +339,20 @@ export async function proveSameJsiRuntimeWriteSubscription(
             ? "same-runtime-delta-reset-row-id-failed"
             : "same-runtime-delta-incremental-row-id-failed",
       );
-    }
+    } while (wakeTiming.now() < wakeDeadline);
     throw new Error(
-      "foreground B did not observe foreground A's committed row after bounded ticks",
+      `foreground B did not observe foreground A's committed row after ${wakeTurns} turns and ${Math.round(wakeTiming.now() - wakeStartedAt)}ms without a post-commit native wake`,
     );
   } finally {
-    a.close();
-    b.close();
+    try {
+      setWakeTraceBestEffort(openedB, false);
+    } finally {
+      try {
+        a.close();
+      } finally {
+        b.close();
+      }
+    }
   }
 }
 
@@ -366,6 +402,7 @@ export async function proveForegroundScopeIsolation(
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
   readTiming: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
+  reportWriterReadDiagnostic: (detail: string) => void | Promise<void> = () => {},
 ): Promise<void> {
   let writer: ScopeForeground | undefined;
   try {
@@ -408,14 +445,35 @@ export async function proveForegroundScopeIsolation(
       // view. This separates write/admission failures from propagation to the
       // independently attached reader below without exposing runtime details.
       markFailure("scope-isolation-writer-read-failed");
-      await readScopeRows(
-        openedWriter.runtime,
-        codec,
-        (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
-        undefined,
-        openedWriter.consumeWake,
-        readTiming,
-      );
+      const observation: ScopeReadObservation = {
+        last: "none",
+        wakes: 0,
+        polls: 0,
+        rowResponses: 0,
+        ready: false,
+      };
+      try {
+        await readScopeRows(
+          openedWriter.runtime,
+          codec,
+          (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
+          undefined,
+          openedWriter.consumeWake,
+          readTiming,
+          observation,
+        );
+      } catch (error) {
+        try {
+          void Promise.resolve(
+            reportWriterReadDiagnostic(
+              `scope-isolation-writer-read-detail:last-${observation.last}-wakes-${observation.wakes}-polls-${observation.polls}-row-responses-${observation.rowResponses}-ready-${observation.ready ? "yes" : "no"}`,
+            ),
+          ).catch(() => {});
+        } catch {
+          // Diagnostics must not replace or delay the native read failure.
+        }
+        throw error;
+      }
     }
 
     markFailure("scope-isolation-open-failed");
@@ -455,6 +513,25 @@ export async function proveForegroundScopeIsolation(
 type ScopeForeground = {
   runtime: NativeForegroundRuntime;
   consumeWake: () => boolean;
+  setWakeTrace?: (enabled: boolean) => void;
+};
+
+// An unavailable or already-torn-down private diagnostic hook must never
+// replace the receipt's native behavior or its primary failure.
+function setWakeTraceBestEffort(foreground: ScopeForeground, enabled: boolean): void {
+  try {
+    foreground.setWakeTrace?.(enabled);
+  } catch {
+    // The receipt still owns normal foreground progress and cleanup.
+  }
+}
+
+type ScopeReadObservation = {
+  last: "none" | "pending" | "subscription" | "rejected" | "closed" | "rows";
+  wakes: number;
+  polls: number;
+  rowResponses: number;
+  ready: boolean;
 };
 
 function openScopeForeground(
@@ -475,6 +552,7 @@ function openScopeForeground(
   });
   return {
     runtime: foreground,
+    setWakeTrace: foreground.setWakeTrace,
     consumeWake() {
       if (pendingWakes === 0) return false;
       pendingWakes -= 1;
@@ -494,9 +572,21 @@ async function readScopeRows(
   progressWriter: () => void = () => {},
   consumeWake: () => boolean = () => true,
   timing: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
+  observation?: ScopeReadObservation,
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
+  const observeResponse = (response: NativeForegroundResponse) => {
+    if (!observation) return;
+    observation.last =
+      response.type === "pending"
+        ? "pending"
+        : response.type === "subscriptionEvents"
+          ? "subscription"
+          : response.type === "rows"
+            ? "rows"
+            : "none";
+  };
   const prepared = execute({ type: "prepareQuery", query: scopeQuery });
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the owner-protected scope query");
@@ -534,29 +624,46 @@ async function readScopeRows(
       // publication and keep the coverage alive until the local read finishes.
       await timing.yieldTurn();
       if (timing.now() >= deadline) break;
-      if (pendingOperation !== undefined && !consumeWake()) continue;
+      if (pendingOperation !== undefined) {
+        const woke = consumeWake();
+        if (woke && observation) observation.wakes += 1;
+        if (!woke) continue;
+      }
       if (timing.now() >= deadline) break;
-      let response =
-        pendingOperation !== undefined
-          ? execute({ type: "poll", operation: pendingOperation })
-          : published
-            ? execute({ type: "all", query: prepared.query })
-            : execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      let response: NativeForegroundResponse;
+      if (pendingOperation !== undefined) {
+        if (observation) observation.polls += 1;
+        response = execute({ type: "poll", operation: pendingOperation });
+      } else if (published) {
+        response = execute({ type: "all", query: prepared.query });
+      } else {
+        response = execute({ type: "drainSubscription", subscription: subscribed.subscription });
+      }
       // Retain a newly admitted operation even if execution crossed the deadline,
       // so timeout cleanup can cancel it rather than abandoning its future.
       pendingOperation = response.type === "pending" ? response.operation : undefined;
+      observeResponse(response);
       if (timing.now() >= deadline) break;
       if (response.type === "subscriptionEvents") {
-        if (response.events.some((event) => event.type === "rejected" || event.type === "closed"))
+        if (response.events.some((event) => event.type === "rejected")) {
+          if (observation) observation.last = "rejected";
           throw new Error("scope isolation fixture subscription ended before its read");
+        }
+        if (response.events.some((event) => event.type === "closed")) {
+          if (observation) observation.last = "closed";
+          throw new Error("scope isolation fixture subscription ended before its read");
+        }
         if (!response.events.some((event) => event.type === "delta")) continue;
         published = true;
         response = execute({ type: "all", query: prepared.query });
         pendingOperation = response.type === "pending" ? response.operation : undefined;
+        observeResponse(response);
         if (timing.now() >= deadline) break;
       }
       if (response.type === "rows") {
+        if (observation) observation.rowResponses += 1;
         if (ready(response.rows)) {
+          if (observation) observation.ready = true;
           failed = false;
           return response.rows;
         }

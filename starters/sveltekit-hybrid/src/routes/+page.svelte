@@ -1,19 +1,16 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
-  import { LocalFirstAuth } from "jazz-tools/svelte";
+  import { getAuthActions } from "$lib/auth-actions";
   import TodoWidget from "$lib/TodoWidget.svelte";
   import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
-  // Auto-syncs with the layout's LocalFirstAuth instance via the shared
-  // per-store notifier, so signOut here clears the secret everywhere.
-  const auth = new LocalFirstAuth();
+  const auth = getAuthActions();
 
   async function handleSignOut() {
-    await auth.signOut();
-    await authClient.signOut();
-    await goto("/");
+    try { await auth.signOut(); await goto("/"); }
+    catch { /* The persistent provider displays sign-out failure and retry. */ }
   }
 </script>
 

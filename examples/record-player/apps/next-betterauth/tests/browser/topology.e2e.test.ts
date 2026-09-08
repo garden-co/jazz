@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, schema as s, type Db, userIdentity } from "jazz-tools";
+import { createAccountManager, createDb, schema as s, type Db } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -41,11 +41,11 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
 const recipientApp = s.defineApp({
-  invitations: s.table({ subject: s.string(), label: s.string() }),
+  invitations: s.table({ subject: s.uuid(), label: s.string() }),
 });
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
-    anyOf([{ subject: session.user }, { label: "unmatched control branch" }]),
+    anyOf([{ subject: session.user.account }, { label: "unmatched control branch" }]),
   );
   policy.invitations.allowInsert.always();
 });
@@ -80,7 +80,7 @@ const relationalRecipientApp = s.defineApp({
     .indexOnly(["playlist_id", "position"]),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
-    subject: s.string(),
+    subject: s.uuid(),
     role: s.enum("listener", "editor"),
     status: s.enum("pending", "accepted", "revoked"),
   }),
@@ -94,30 +94,30 @@ const relationalRecipientPermissions = {
   ...betterAuthPermissions,
   ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
-    policy.albums.allowInsert.where({ $createdBy: session.user });
+    policy.albums.allowInsert.where({ "$createdBy.account": session.user.account });
     policy.tracks.allowRead.where({});
-    policy.tracks.allowInsert.where({ $createdBy: session.user });
+    policy.tracks.allowInsert.where({ "$createdBy.account": session.user.account });
     const hasEditorInvitation = (playlistId: RowRefValue) =>
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user,
+        subject: session.user.account,
         role: "editor",
         status: "accepted",
       });
     const canEditPlaylist = (playlistId: RowRefValue) =>
-      anyOf([{ $createdBy: session.user }, hasEditorInvitation(playlistId)]);
+      anyOf([{ "$createdBy.account": session.user.account }, hasEditorInvitation(playlistId)]);
     const canReadPlaylist = (playlistId: RowRefValue) =>
       anyOf([
-        { $createdBy: session.user },
+        { "$createdBy.account": session.user.account },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.user,
+          subject: session.user.account,
           status: "accepted",
         }),
       ]);
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
-    policy.playlists.allowUpdate.where({ $createdBy: session.user });
+    policy.playlists.allowUpdate.where({ "$createdBy.account": session.user.account });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
     policy.playlist_entries.allowInsert.where((entry) =>
       anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
@@ -126,23 +126,35 @@ const relationalRecipientPermissions = {
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
-        { subject: session.user },
-        policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+        { subject: session.user.account },
+        policy.playlists.exists.where({
+          id: invite.playlist_id,
+          "$createdBy.account": session.user.account,
+        }),
       ]),
     );
     policy.invitations.allowInsert.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+      policy.playlists.exists.where({
+        id: invite.playlist_id,
+        "$createdBy.account": session.user.account,
+      }),
     );
     policy.invitations.allowUpdate
       .whereOld((invite) =>
         anyOf([
-          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
-          { subject: session.user, status: "pending" },
+          policy.playlists.exists.where({
+            id: invite.playlist_id,
+            "$createdBy.account": session.user.account,
+          }),
+          { subject: session.user.account, status: "pending" },
         ]),
       )
       .whereNew((invite) =>
         anyOf([
-          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          policy.playlists.exists.where({
+            id: invite.playlist_id,
+            "$createdBy.account": session.user.account,
+          }),
           allOf([
             policy.invitations.exists.where({
               id: invite.id,
@@ -151,19 +163,22 @@ const relationalRecipientPermissions = {
               role: invite.role,
               status: "pending",
             }),
-            { subject: session.user, status: "accepted" },
+            { subject: session.user.account, status: "accepted" },
           ]),
         ]),
       );
     policy.invitations.allowDelete.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+      policy.playlists.exists.where({
+        id: invite.playlist_id,
+        "$createdBy.account": session.user.account,
+      }),
     );
-    policy.playback_positions.allowRead.where({ $createdBy: session.user });
+    policy.playback_positions.allowRead.where({ "$createdBy.account": session.user.account });
     policy.playback_positions.allowInsert.always();
     policy.playback_positions.allowUpdate
-      .whereOld({ $createdBy: session.user })
-      .whereNew({ $createdBy: session.user });
-    policy.playback_positions.allowDelete.where({ $createdBy: session.user });
+      .whereOld({ "$createdBy.account": session.user.account })
+      .whereNew({ "$createdBy.account": session.user.account });
+    policy.playback_positions.allowDelete.where({ "$createdBy.account": session.user.account });
   }),
 };
 
@@ -187,8 +202,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-recipient-editor", undefined, server.appId),
       getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalUser(recipientToken);
-    const secondRecipientAuthor = canonicalUser(secondRecipientToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
+    const secondRecipientAuthor = await accountIdFor(server, secondRecipientToken);
     const owner = await openClient(server, "recipient-owner", ownerToken);
     const recipient = await openClient(
       server,
@@ -251,7 +266,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-acceptance-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-acceptance-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalUser(recipientToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
     const owner = await openClient(server, "acceptance-owner", ownerToken);
     const recipient = await openClient(server, "acceptance-recipient", recipientToken);
     const playlist = await owner
@@ -364,7 +379,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-scalar-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-scalar-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalUser(recipientToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
     const owner = await openClient(server, "scalar-owner", ownerToken);
     const recipient = await openClient(server, "scalar-recipient", recipientToken);
     const invite = await owner
@@ -406,8 +421,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
       getJazzServerJwtForUser("record-player-relation-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalUser(recipientToken);
-    const secondRecipientAuthor = canonicalUser(secondRecipientToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
+    const secondRecipientAuthor = await accountIdFor(server, secondRecipientToken);
     const owner = await openClient(server, "relation-owner", ownerToken);
     const recipient = await openClient(server, "relation-recipient", recipientToken);
     const secondRecipient = await openClient(server, "relation-listener", secondRecipientToken);
@@ -508,7 +523,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-phase-listener", undefined, server.appId),
               ]);
-              const recipientAuthor = canonicalUser(recipientToken);
+              const recipientAuthor = await accountIdFor(server, recipientToken);
               const owner = await openClient(server, "phase-owner", ownerToken);
               const recipient = await openClient(
                 server,
@@ -633,8 +648,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
               editorToken = issuedEditorToken;
-              editorAuthor = canonicalUser(issuedEditorToken);
-              listenerAuthor = canonicalUser(listenerToken);
+              editorAuthor = await accountIdFor(server, issuedEditorToken);
+              listenerAuthor = await accountIdFor(server, listenerToken);
               editorDbName = uniqueDbName("record-player-editor-persistent");
               console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
@@ -933,32 +948,41 @@ describe("RecordPlayer authenticated playlist topology", () => {
           {
             name: "exercise metadata and window queries used by the rendered screens",
             run: async () => {
-              const windowAlbum = await owner
-                .insert(app.albums, { title: "Window catalogue", artist: "Jazz" })
-                .wait({ tier: "edge" });
               const windowEntries: Array<{ id: string; trackId: string; position: number }> = [];
-              for (
-                let position = 0;
-                position < PLAYLIST_WINDOW_OFFSET + PLAYLIST_WINDOW_LIMIT + 1;
-                position += 1
-              ) {
-                const track = await owner
-                  .insert(app.tracks, {
-                    album_id: windowAlbum.id,
-                    title: `Window ${position}`,
-                    ordinal: position,
-                    duration_ms: position + 1,
-                  })
-                  .wait({ tier: "edge" });
-                const entry = await owner
-                  .insert(app.playlist_entries, {
-                    playlist_id: playlist.id,
-                    track_id: track.id,
-                    position,
-                  })
-                  .wait({ tier: "edge" });
-                windowEntries.push({ id: entry.id, trackId: track.id, position });
-              }
+              const windowPositions = Array.from(
+                { length: PLAYLIST_WINDOW_OFFSET + PLAYLIST_WINDOW_LIMIT + 1 },
+                (_, position) => position,
+              );
+              const windowRows = await (
+                await owner.transaction((tx) => {
+                  const album = tx.insert(app.albums, {
+                    title: "Window catalogue",
+                    artist: "Jazz",
+                  });
+                  const entries = windowPositions.map((position) => {
+                    const track = tx.insert(app.tracks, {
+                      album_id: album.id,
+                      title: `Window ${position}`,
+                      ordinal: position,
+                      duration_ms: position + 1,
+                    });
+                    const entry = tx.insert(app.playlist_entries, {
+                      playlist_id: playlist.id,
+                      track_id: track.id,
+                      position,
+                    });
+                    return { entry, position, track };
+                  });
+                  return { album, entries };
+                })
+              ).wait({ tier: "edge" });
+              windowEntries.push(
+                ...windowRows.entries.map(({ entry, position, track }) => ({
+                  id: entry.id,
+                  trackId: track.id,
+                  position,
+                })),
+              );
               belowWindowEntryId = windowEntries[0]!.id;
 
               // Keep this query structurally identical to RecordPlayerClient's
@@ -1354,25 +1378,36 @@ async function openClient(
   jwtToken: string,
   dbName = uniqueDbName(`record-player-${label}`),
 ): Promise<Db> {
+  const account = await registerAccount(server, jwtToken);
   return ctx.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
-      jwtToken,
+      account,
       driver: { type: "persistent", dbName },
     }),
   );
 }
 
 /**
- * External authentication retains its own raw `sub`; Jazz authorization uses
- * the canonical issuer-scoped session user derived from that JWT. Invitations store
- * precisely that value, so a same-`sub` token from another issuer cannot read
- * or accept a grant.
+ * External authentication retains its raw `sub`; account enrollment derives a
+ * stable account UUID which is the only invitation/membership value.
  */
-function canonicalUser(token: string): string {
-  const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string; sub: string };
-  return userIdentity(claims.iss, claims.sub);
+async function accountIdFor(
+  server: { appId: string; serverUrl: string },
+  token: string,
+): Promise<string> {
+  return (await registerAccount(server, token)).id;
+}
+
+async function registerAccount(server: { appId: string; serverUrl: string }, token: string) {
+  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
+  const auth = { getToken: async () => token };
+  try {
+    return await accounts.registerJWT(auth);
+  } catch {
+    return accounts.loginJWT(auth);
+  }
 }
 
 function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {

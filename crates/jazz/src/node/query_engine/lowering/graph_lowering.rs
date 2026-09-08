@@ -3870,6 +3870,11 @@ pub(super) fn claim_value(
             ));
         }
     };
+    if let Some(name) = crate::query::author_claim_path_key(&path.0) {
+        return crate::tools::policy_claims::author_policy_claims(*permission_subject)
+            .remove(&name)
+            .ok_or_else(|| UnsupportedReason::UnboundClaim(path.clone()));
+    }
     let name = match path.0.as_slice() {
         [name] => name.clone(),
         [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),
@@ -3883,7 +3888,7 @@ pub(super) fn claim_value(
         return Ok(value.clone());
     }
     match name.as_str() {
-        "user" => Ok(Value::String(permission_subject.canonical().to_owned())),
+        "user" => Ok(permission_subject.to_value()),
         _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }

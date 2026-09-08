@@ -1,3 +1,4 @@
+import type { InspectorAttachmentBinding } from "./browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -20,6 +21,7 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
       | "onStorageReset"
       | "onStorageInvalidated"
     >,
+    inspectorBinding?: InspectorAttachmentBinding,
   ) {
     this.connection = new MessagePortBrowserFollowerConnection(
       runtime,
@@ -27,6 +29,8 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
       sessionClaims,
       dbName,
       callbacks,
+      false,
+      inspectorBinding,
     );
   }
 
@@ -52,6 +56,10 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
 
   deleteStorage(): Promise<void> {
     return this.connection.deleteStorage();
+  }
+
+  waitForPendingWrites(): Promise<void> {
+    return this.connection.waitForPendingWrites();
   }
 
   flushLocal(): Promise<void> {

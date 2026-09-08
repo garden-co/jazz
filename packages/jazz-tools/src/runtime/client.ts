@@ -1,3 +1,4 @@
+import { runtimeRandomBytes } from "./runtime-entropy.js";
 /**
  * JazzClient - High-level TypeScript client for Jazz.
  *
@@ -23,13 +24,17 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 
-type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
+type RuntimeSerializedSession = Pick<
+  Session,
+  "account_id" | "issuer" | "user_id" | "claims" | "authMode"
+> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
 };
 
 function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
   const token = trustedReservedSessionToken(session);
   return {
+    account_id: session.account_id,
     issuer: session.issuer,
     user_id: session.user_id,
     claims: session.claims,
@@ -308,7 +313,7 @@ export type TxId = string & { readonly [txIdBrand]: true };
 
 /** Generate a coordination-free UUIDv7 identity for a new mutable transaction. */
 export function createOpenTransactionId(): OpenTransactionId {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const bytes = runtimeRandomBytes(16);
   const timestamp = Date.now();
   bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
   bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
@@ -884,6 +889,7 @@ export class JazzClient {
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
       appId: this.context.appId,
+      accountId: this.context.accountId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
       trustedReservedSession: getTrustedReservedSession(this.context),

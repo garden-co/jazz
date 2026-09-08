@@ -26,10 +26,10 @@ use jazz::tx::DurabilityTier;
 type BenchDb = Db<MemoryStorage>;
 
 fn author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
+    schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
 }
 fn other_author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
+    schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
 }
 
 fn public_schema_convert() -> JazzSchema {

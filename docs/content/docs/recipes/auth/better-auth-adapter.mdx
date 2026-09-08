@@ -41,7 +41,7 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely.
+The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses the admitted backend client's `db`, which has backend permissions.
 
 ```ts title="permissions.ts"
 import { definePermissions } from "jazz-tools/permissions";
@@ -61,38 +61,45 @@ export default {
 
 ## Database Adapter
 
-Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
+Create a server-side [Jazz session](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
 
 ```ts title="src/lib/auth.ts"
 import { betterAuth } from "better-auth";
-import { createJazzContext } from "jazz-tools/backend";
+import { createJazzSession } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "../../schema";
 
-const jazzContext = createJazzContext({
+const session = await createJazzSession({
+  app,
   appId: process.env.APP_ID!,
   driver: { type: "memory" },
   serverUrl: process.env.SYNC_SERVER_URL!,
   env: process.env.NODE_ENV === "production" ? "prod" : "dev",
-  backendSecret: process.env.BACKEND_SECRET!,
+  initial: { backendSecret: process.env.BACKEND_SECRET! },
 });
+
+const snapshot = session.getSnapshot();
+if (snapshot.status !== "ready" || !snapshot.client) {
+  throw snapshot.error ?? new Error("Backend session is not ready");
+}
+const client = snapshot.client;
 
 export const auth = betterAuth({
   database: jazzAdapter({
-    db: () => jazzContext.asBackend(app),
+    db: () => client.db,
     schema: app.wasmSchema,
   }),
   // ...your Better Auth config
 });
 ```
 
-| Option      | Description                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------ |
-| `db`        | A function returning a `Db` handle via `context.asBackend(app)`. Use the merged app, not `authSchema`. |
-| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                    |
-| `debugLogs` | Better Auth adapter debug logging controls.                                                            |
-| `usePlural` | Whether Better Auth model names should use plural table names.                                         |
-| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                      |
+| Option      | Description                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------- |
+| `db`        | A function returning `Db` or `Promise<Db>` from the ready backend client. Use the merged app, not `authSchema`. |
+| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                             |
+| `debugLogs` | Better Auth adapter debug logging controls.                                                                     |
+| `usePlural` | Whether Better Auth model names should use plural table names.                                                  |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                               |
 
 <Callout title="Leave Better Auth joins disabled">
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable

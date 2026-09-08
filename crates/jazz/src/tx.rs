@@ -5,7 +5,7 @@
 //! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
-use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
 use crate::protocol::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
@@ -736,13 +736,14 @@ impl RejectedTransaction {
 
     /// Author that made the transaction.
     pub fn made_by(&self) -> AuthorSubject {
-        AuthorSubject::from_canonical(
+        RowAuthor::from_value(
             self.record
                 .borrowed()
-                .get_str(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
+                .get_idx(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
                 .expect("valid rejected author"),
         )
-        .expect("canonical rejected author")
+        .expect("canonical rejected row author")
+        .as_author_subject()
     }
 
     /// Transaction HLC timestamp.
@@ -949,9 +950,9 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
-        5 => created_by: AuthorSubject,
+        5 => created_by: RowAuthor,
         6 => created_at: u64,
-        7 => updated_by: AuthorSubject,
+        7 => updated_by: RowAuthor,
         8 => updated_at: u64,
         .. user_cells,
     }
@@ -964,9 +965,9 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
-        5 => created_by: AuthorSubject,
+        5 => created_by: RowAuthor,
         6 => created_at: u64,
-        7 => updated_by: AuthorSubject,
+        7 => updated_by: RowAuthor,
         8 => updated_at: u64,
         9 => _deletion: Value,
     }
@@ -977,7 +978,7 @@ groove::define_record! {
         0 => time: u64,
         1 => node_id: u64,
         2 => kind: TxKind,
-        3 => made_by: AuthorSubject,
+        3 => made_by: RowAuthor,
         4 => rejection_reason: RejectionReasonTag,
         5 => cascade_root: Option<Value>,
         6 => reason_detail: Option<String>,

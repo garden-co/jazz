@@ -23,7 +23,7 @@ interface JazzAdapterConfig {
   debugLogs?: DBAdapterDebugLogOption;
   usePlural?: boolean;
   prefix?: string;
-  db: () => Db;
+  db: () => Db | Promise<Db>;
   schema: BackendSchemaInput;
 }
 
@@ -119,8 +119,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         } = {},
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
-        ) => Promise<Record<string, unknown>[]> = (query) =>
-          config.db().all(query, { tier: "global" }),
+        ) => Promise<Record<string, unknown>[]> = async (query) =>
+          (await config.db()).all(query, { tier: "global" }),
       ): Promise<JazzRowRecord[]> => {
         const table = getPrefixedModelName(model);
 
@@ -165,7 +165,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       const findByJazzRowId = async (model: string, jazzRowId: string) => {
         const table = getPrefixedModelName(model);
 
-        return config.db().one(
+        return (await config.db()).one(
           createQueryBuilder(table, wasmSchema, {
             conditions: [{ column: "id", op: "eq", value: jazzRowId }],
             limit: 1,
@@ -194,8 +194,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         excludeRowIds?: ReadonlySet<string>,
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
-        ) => Promise<Record<string, unknown>[]> = (query) =>
-          config.db().all(query, { tier: "global" }),
+        ) => Promise<Record<string, unknown>[]> = async (query) =>
+          (await config.db()).all(query, { tier: "global" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const uniqueConstraints = getUniqueConstraints(model);
@@ -243,8 +243,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         id: string,
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
-        ) => Promise<Record<string, unknown>[]> = (query) =>
-          config.db().all(query, { tier: "global" }),
+        ) => Promise<Record<string, unknown>[]> = async (query) =>
+          (await config.db()).all(query, { tier: "global" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const existing = await readAll(
@@ -273,7 +273,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           match: JazzRowRecord,
         ) => JazzRowRecord | Promise<JazzRowRecord>,
       ): Promise<JazzRowRecord | null> => {
-        const db = config.db();
+        const db = await config.db();
 
         while (true) {
           // Synchronize the relevant query before anchoring the exclusive snapshot. This also
@@ -308,7 +308,6 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
-      const db = config.db() as any;
       let exclusiveMutationTail = Promise.resolve();
 
       const serializeExclusiveMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -328,6 +327,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
       return {
         async create({ model, data }): Promise<any> {
+          const db = await config.db();
           const table = getPrefixedModelName(model);
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
@@ -402,6 +402,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async update({ model, where, update }): Promise<any> {
+          const db = await config.db();
           const { id: _id, ...fields } = update as Record<string, unknown>;
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
@@ -443,6 +444,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async updateMany({ model, where, update }) {
+          const db = await config.db();
           const { id: _id, ...fields } = update as Record<string, unknown>;
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
@@ -485,6 +487,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async delete({ model, where }) {
+          const db = await config.db();
           const [match] = await findAllRows(model, { where, limit: 1 });
           if (!match) {
             return;
@@ -496,6 +499,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async deleteMany({ model, where }) {
+          const db = await config.db();
           const matches = await findAllRows(model, { where });
           if (matches.length === 0) {
             return 0;

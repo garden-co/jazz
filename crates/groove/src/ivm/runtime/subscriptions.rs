@@ -1717,6 +1717,16 @@ fn lift_literal_filter_node(
                 let mut fields = fields
                     .iter()
                     .map(|field| match &field.expression {
+                        ProjectExpr::RecordField { source, path } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            let mut projected = field.clone();
+                            projected.expression = ProjectExpr::RecordField {
+                                source: FieldRef::name(source),
+                                path: path.clone(),
+                            };
+                            Ok(projected)
+                        }
                         ProjectExpr::Field(source) => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
@@ -2121,6 +2131,16 @@ fn project_fields_against_rewritten_input(
         .iter()
         .map(|field| {
             let (field_ref, nullable_projection) = match &field.expression {
+                ProjectExpr::RecordField { source, path } => {
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::RecordField {
+                        source: FieldRef::name(source),
+                        path: path.clone(),
+                    };
+                    return Ok(projected);
+                }
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
@@ -3640,8 +3660,8 @@ impl IvmRuntime {
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
-            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
@@ -3668,8 +3688,8 @@ impl IvmRuntime {
     {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
-            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             self.cancel_pending_subscription_hydration(subscription_id);
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
@@ -3722,9 +3742,7 @@ impl IvmRuntime {
                 &Retainer::PreparedShape(shape_id.retainer_key()),
             );
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
+        self.collect_unretained_ephemeral_nodes();
         Ok(())
     }
 
@@ -4266,9 +4284,7 @@ impl IvmRuntime {
                 &Retainer::PreparedShape(shape_id.retainer_key()),
             );
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
+        self.collect_unretained_ephemeral_nodes();
     }
 }
 

@@ -11,9 +11,14 @@ function git(root, args, options = {}) {
   // error.
   const result = spawnSync("git", ["-c", `safe.directory=${root}`, "-C", root, ...args], {
     encoding: null,
+    // Durable corpus fixtures can produce multi-megabyte textual diffs. Keep
+    // the complete patch in the identity instead of hitting Node's 1 MiB default.
+    maxBuffer: 64 * 1024 * 1024,
     ...options,
   });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed`);
+  if (result.error || result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed (${result.error?.code ?? result.status})`);
+  }
   return result.stdout;
 }
 function sha256(value) {

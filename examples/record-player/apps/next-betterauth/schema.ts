@@ -27,7 +27,9 @@ const schema = {
     .indexOnly(["playlist_id", "position"]),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
-    subject: s.string(),
+    // Account UUID, derived during JWT enrollment. Provider subject stays in
+    // the account's identity and is never used as application membership.
+    subject: s.uuid(),
     role: s.enum("listener", "editor"),
     status: s.enum("pending", "accepted", "revoked"),
   }),

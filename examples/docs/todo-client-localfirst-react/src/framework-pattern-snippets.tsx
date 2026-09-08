@@ -1,4 +1,5 @@
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
+import type { DbConfig } from "jazz-tools";
 import { app } from "../schema.js";
 
 function YourApp() {
@@ -6,14 +7,9 @@ function YourApp() {
 }
 
 // #region provider-react
-export function ProviderExample() {
+export function ProviderExample({ config }: { config: DbConfig }) {
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-      }}
-      fallback={<p>Loading...</p>}
-    >
+    <JazzProvider config={config} fallback={<p>Loading...</p>}>
       <YourApp />
     </JazzProvider>
   );
@@ -53,7 +49,7 @@ export function DbAccessExample() {
 
 // #region session-react
 export function SessionExample() {
-  const session = useSession(); // { user_id: string } | null
+  const session = useSession(); // { user: { account, identity }, ... } | null
 
   void session;
   return null;

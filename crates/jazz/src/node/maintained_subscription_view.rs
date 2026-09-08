@@ -21,7 +21,8 @@ use super::query_engine::{
     VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias};
+use crate::ids::{NodeAlias, NodeUuid, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
 use crate::protocol::{
     BranchKey, CoveredInputEntry, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry,
     RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer,
@@ -1859,10 +1860,22 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
         .enumerate()
         .filter_map(|(slot, field)| {
             let name = field.name.as_deref()?;
-            if slot == root_key_slot || rows.hidden_fields.contains(name) {
+            let publication = rows.publication_fields.get(name)?.clone();
+            // Provenance is retained by the collector as a routing field, but
+            // a selected magic column is public output. Keeping its terminal
+            // slot preserves both the synthesized value and recursive fields
+            // already owned by this descriptor.
+            let selected_provenance = matches!(
+                &publication,
+                CurrentRowPublicationField::ResultField {
+                    visibility: CurrentRowResultVisibility::PublicProvenance,
+                    ..
+                }
+            );
+            if slot == root_key_slot || (rows.hidden_fields.contains(name) && !selected_provenance)
+            {
                 return None;
             }
-            let publication = rows.publication_fields.get(name)?.clone();
             let public_name = publication.public_name()?.to_owned();
             let carrier = rows
                 .field_carriers
@@ -2665,8 +2678,9 @@ fn decode_typed_version_witness(
         )?),
         tx_time,
         parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
-        created_by: AuthorSubject::from_canonical(record.get_str(plan.created_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+        created_by: RowAuthor::from_value(record.get_idx(plan.created_by_idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+            .as_author_subject(),
         // Current-row provenance is public Unix milliseconds. Witness state
         // needs the corresponding history form only to identify/materialize
         // the authored version, whose provenance HLC always has counter zero.
@@ -2676,8 +2690,9 @@ fn decode_typed_version_witness(
                     "maintained witness created_at_ms exceeds packed HLC range",
                 )
             })?,
-        updated_by: AuthorSubject::from_canonical(record.get_str(plan.updated_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+        updated_by: RowAuthor::from_value(record.get_idx(plan.updated_by_idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+            .as_author_subject(),
         updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
             .map_err(|_| {
                 super::Error::InvalidStoredValue(
@@ -3187,7 +3202,7 @@ mod tests {
     use groove::schema::ColumnType;
 
     use super::*;
-    use crate::ids::{NodeUuid, SchemaVersionAlias};
+    use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionAlias};
     use crate::node::codec::{VersionRow, VersionRowParts};
     use crate::node::{Error, PhysicalColumnId};
     use crate::protocol::ResultRowEntry;
@@ -3938,9 +3953,9 @@ mod tests {
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
                 parents: Vec::new(),
-                created_by: AuthorSubject::SYSTEM,
+                created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
-                updated_by: AuthorSubject::SYSTEM,
+                updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
                 authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
@@ -3963,9 +3978,9 @@ mod tests {
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
                 parents: Vec::new(),
-                created_by: AuthorSubject::SYSTEM,
+                created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
-                updated_by: AuthorSubject::SYSTEM,
+                updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 updated_at: TxTime(time),
                 cells: BTreeMap::new(),
                 authored_columns: None,

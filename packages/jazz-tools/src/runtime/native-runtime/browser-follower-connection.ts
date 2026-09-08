@@ -8,6 +8,7 @@ import {
   deserializeBrowserRelayError,
   type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
+  type InspectorAttachmentBinding,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
@@ -19,10 +20,15 @@ type PendingRequest = {
 };
 
 type BrowserFollowerPortRpcRequest =
-  | { type: "init"; sessionClaims: Record<string, unknown> }
+  | {
+      type: "init";
+      sessionClaims: Record<string, unknown>;
+      inspectorBinding?: InspectorAttachmentBinding;
+    }
   | { type: "wait-server" }
   | { type: "disconnect" }
   | { type: "flush-local" }
+  | { type: "flush-pending-writes" }
   | { type: "close"; releaseContext?: boolean }
   | { type: "prepare-storage-reset" }
   | { type: "finish-storage-reset" }
@@ -56,6 +62,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onStorageInvalidated"
     >,
     private readonly traceRelay = false,
+    inspectorBinding?: InspectorAttachmentBinding,
   ) {
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
@@ -73,7 +80,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
     // of the pump's first outbound frame.
-    const initialized = this.request({ type: "init", sessionClaims });
+    const initialized = this.request({
+      type: "init",
+      sessionClaims,
+      ...(inspectorBinding ? { inspectorBinding } : {}),
+    });
     const connected = (async () => {
       const transport = await runtime.connectUpstreamPeer();
       if (this.closed || this.failed) {
@@ -195,6 +206,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is closed"));
   }
 
+  async waitForPendingWrites(): Promise<void> {
+    await this.flushLocal();
+    await this.request({ type: "flush-pending-writes" });
+  }
+
   async flushLocal(): Promise<void> {
     await this.ready();
     await this.pump!.flush();
@@ -276,6 +292,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
+    if (message.type === "inspector-binding") return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);

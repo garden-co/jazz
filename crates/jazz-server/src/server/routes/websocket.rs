@@ -221,7 +221,7 @@ fn ws_link_admission(
     match admission.requested_link {
         RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
         RequestedWebSocketLink::ScopeIsolatedClientRelay
-            if admission.credential == WebSocketCredential::Session
+            if admission.trust == CommitUnitTrust::Session
                 && negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
         {
             // This epoch was minted by the server for this accepted socket.
@@ -334,18 +334,57 @@ async fn ws_admission(
         serde_json::to_string(&error).unwrap_or_else(|_| "authentication failed".to_owned())
     })?;
 
-    let Some(session) = session else {
+    let Some(mut session) = session else {
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
+    // A backend-authenticated impersonation remains policy-scoped, but its
+    // authority is the backend credential, not a public account bearer.
+    if !has_authenticated_backend_session {
+        let account = peer_identity
+            .account_id()
+            .ok_or("public sessions require an enrolled account identity")?;
+        let principal = jazz::account_registry::Principal {
+            issuer: session.issuer.clone(),
+            subject: session.user_id.clone(),
+        };
+        if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+            super::accounts::admit_local_founder(state, &principal, &headers).await?;
+        }
+        let assignment = super::accounts::resolve_assignment(state, principal).await?;
+        if assignment != account {
+            return Err("account does not match authenticated identity assignment".into());
+        }
+        session.account_id = Some(account);
+    }
     ws_validate_session_identity(&session, peer_identity)?;
     Ok(WebSocketAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
-        credential: WebSocketCredential::Session,
+        credential: if has_authenticated_backend_session {
+            WebSocketCredential::Backend
+        } else {
+            WebSocketCredential::Session
+        },
         requested_link,
     })
+}
+
+async fn account_still_admitted(state: &ServerState, identity: Option<AuthorSubject>) -> bool {
+    let Some(identity) = identity else {
+        return true;
+    };
+    let Some(account) = identity.account_id() else {
+        return false;
+    };
+    let (issuer, subject) = identity.principal_parts();
+    super::accounts::resolve_assignment(
+        state,
+        jazz::account_registry::Principal { issuer, subject },
+    )
+    .await
+    .is_ok_and(|assignment| assignment == account)
 }
 
 fn session_claims(
@@ -578,7 +617,7 @@ async fn handle_ws_connection(
             return;
         }
     };
-    // This cap is deliberately scoped to externally authenticated sessions,
+    // This cap follows policy-scoped sessions, including trusted backend impersonation,
     // after credential verification.  It must not key off `SYSTEM` (or any
     // other claimed subject): trusted edge/bootstrap links share SYSTEM and a
     // single edge may transiently hold several such connections while
@@ -589,7 +628,7 @@ async fn handle_ws_connection(
             app_id: state.app_id,
             identity: admission.identity,
         },
-        admission.credential == WebSocketCredential::Session,
+        admission.trust == CommitUnitTrust::Session,
     );
 
     let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
@@ -814,7 +853,17 @@ async fn handle_ws_connection(
         "websocket negotiated"
     );
 
+    let account_identity =
+        matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
+    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
     let mut activity_rx = core_server_shell.subscribe_activity();
+    // Subscribe before checking: a revocation concurrent with this check must
+    // remain visible even if no application traffic arrives afterward.
+    if !account_still_admitted(&state, account_identity).await {
+        close_ws_for_policy(&mut socket, "account identity revoked").await;
+        core_server_shell.close(session);
+        return;
+    }
     if let Err(error) = drain_ws_outbound(&mut socket, &core_server_shell, session).await {
         send_ws_error(
             &mut socket,
@@ -828,6 +877,20 @@ async fn handle_ws_connection(
 
     'connection: loop {
         tokio::select! {
+            _ = async {
+                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
+                else if account_identity.is_some() {
+                    // Edges have no local registry watch. Recheck idle sessions,
+                    // as well as every inbound/outbound operation, without an
+                    // admission cache that could outlive revocation.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else { std::future::pending::<()>().await; }
+            } => {
+                if !account_still_admitted(&state, account_identity).await {
+                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    break;
+                }
+            }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
                     send_ws_error(
@@ -851,6 +914,10 @@ async fn handle_ws_connection(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
+                    if !account_still_admitted(&state, account_identity).await {
+                        close_ws_for_policy(&mut socket, "account identity revoked").await;
+                        break;
+                    }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
@@ -895,6 +962,10 @@ async fn handle_ws_connection(
                                 break 'connection;
                             }
                         };
+                        if !account_still_admitted(&state, account_identity).await {
+                            close_ws_for_policy(&mut socket, "account identity revoked").await;
+                            break 'connection;
+                        }
                         if !outbound.is_empty()
                             && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await
                         {
@@ -920,6 +991,10 @@ async fn handle_ws_connection(
                 _ => {}
             },
             changed = activity_rx.changed() => {
+                if !account_still_admitted(&state, account_identity).await {
+                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    break;
+                }
                 if changed.is_err() {
                     break;
                 }
@@ -1062,7 +1137,7 @@ mod tests {
         SeededRowIdSource, WireTransportAdapter, WriteHandle, WriteState,
     };
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-    use jazz::ids::NodeUuid;
+    use jazz::ids::{NodeUuid, RowAuthor};
     use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
@@ -1085,13 +1160,14 @@ mod tests {
     const WS_STORM_SIZE: usize = 24;
 
     fn session_for(identity: AuthorSubject) -> Session {
-        let (issuer, subject): (String, String) =
-            serde_json::from_str(identity.canonical()).expect("authenticated test subject");
-        Session::new(issuer, subject)
+        let (issuer, subject) = identity.principal_parts();
+        let mut session = Session::new(issuer, subject);
+        session.account_id = identity.account_id();
+        session
     }
 
     fn issuer_and_subject(identity: AuthorSubject) -> (String, String) {
-        serde_json::from_str(identity.canonical()).expect("authenticated test subject")
+        identity.principal_parts()
     }
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
     const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
@@ -1186,7 +1262,7 @@ mod tests {
 
     #[test]
     fn websocket_session_claims_use_canonical_and_collision_proof_namespaces() {
-        let session = Session::new("https://issuer.example", "verified-subject").with_claims(
+        let mut session = Session::new("https://issuer.example", "verified-subject").with_claims(
             serde_json::json!({
                 "user": "provider-spoof",
                 "role": "writer",
@@ -1198,13 +1274,21 @@ mod tests {
                 "score": 7
             }),
         );
+        let account = jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0x91; 16]));
+        session.account_id = Some(account);
         let claims = session_claims(session).expect("admit websocket claims");
 
         assert_eq!(
             claims.get("user"),
-            Some(&CoreValue::String(
-                r#"["https://issuer.example","verified-subject"]"#.to_owned()
-            ))
+            Some(
+                &RowAuthor::from_persisted_subject(
+                    AuthorSubject::authenticated("https://issuer.example", "verified-subject")
+                        .expect("authenticated author")
+                        .with_account(account),
+                )
+                .expect("admitted row author")
+                .to_value()
+            )
         );
         assert_eq!(
             claims.get("\0claims:user"),
@@ -1426,10 +1510,14 @@ mod tests {
                 PublicTableSchema::builder("docs")
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Text)
-                    .policies(
-                        public_table_policies()
-                            .with_select(PolicyExpr::eq_session("owner", vec!["user".to_owned()])),
-                    ),
+                    .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                        "owner",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ))),
             )
             .build();
         jazz::schema::JazzSchema::new(&source)
@@ -1473,6 +1561,7 @@ mod tests {
                 auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                     backend_secret: Some("backend-secret".to_owned()),
                     backend_session: Some(serde_json::json!({
+                        "account_id": identity.account_id(),
                         "issuer": issuer,
                         "user_id": user_id,
                         "claims": {},
@@ -1486,7 +1575,8 @@ mod tests {
         )
         .await
         .expect("authenticated session scope request");
-        assert_eq!(scoped_session.credential, WebSocketCredential::Session);
+        assert_eq!(scoped_session.credential, WebSocketCredential::Backend);
+        assert_eq!(scoped_session.trust, CommitUnitTrust::Session);
         assert_eq!(
             scoped_session.requested_link,
             RequestedWebSocketLink::ScopeIsolatedClientRelay,
@@ -1656,6 +1746,7 @@ mod tests {
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
+                    "account_id": authenticated.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {},
@@ -1691,6 +1782,7 @@ mod tests {
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
+                    "account_id": identity.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {
@@ -1744,7 +1836,11 @@ mod tests {
         );
         assert_eq!(
             admission.claims.get("user"),
-            Some(&CoreValue::String(identity.canonical().to_owned()))
+            Some(
+                &RowAuthor::from_persisted_subject(identity)
+                    .expect("admitted row author")
+                    .to_value()
+            )
         );
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
@@ -1974,6 +2070,7 @@ mod tests {
             "auth": {
                 "backend_secret": "backend-secret",
                 "backend_session": {
+                    "account_id": identity.account_id(),
                     "issuer": issuer,
                     "user_id": user_id,
                     "claims": {},
@@ -2700,7 +2797,7 @@ mod tests {
         }
 
         fn insert_private_doc(&self, title: &str, owner: AuthorSubject) -> jazz::ids::RowUuid {
-            let owner = owner.canonical().to_owned();
+            let (_, owner) = issuer_and_subject(owner);
             jazz::db::block_on(self.db.insert(
                 "docs",
                 RowCells::from([
@@ -3057,82 +3154,35 @@ mod tests {
             "the receiving client must materialize the row through the websocket route"
         );
     }
-    #[tokio::test(flavor = "current_thread")]
-    async fn anonymous_self_signed_session_is_read_only_over_raw_websocket_wire() {
-        let state = make_ws_convergence_test_state().await;
+    // Admission precedes context creation, so this exercises the raw public wire.
+    #[tokio::test]
+    async fn accountless_anonymous_proof_cannot_open_public_websocket() {
+        let state = make_ws_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let schema = ws_public_schema_convert();
-
-        let authenticated_identity = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let authenticated = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
-        let mut authenticated_ws =
-            open_negotiated_ws_session(addr, &state, authenticated_identity).await;
-
-        let (anonymous_identity, anonymous_prelude) =
-            ws_anonymous_prelude(state.app_id, [0xb2; 32]);
-        let anonymous =
-            TestClient::new_with_identity(schema, 0xb2, 0xb200, anonymous_identity).await;
-        let mut anonymous_ws =
-            open_negotiated_ws_with_prelude(addr, &state, anonymous_prelude).await;
-        let (anonymous_todos, anonymous_todos_attachment) =
-            settle_ws_todos_query(&anonymous, &mut anonymous_ws).await;
-
-        let permitted = authenticated.write_todo("permitted");
-        let permitted_row = permitted.row_uuid();
-        let permitted_state =
-            settle_ws_write(&authenticated, &mut authenticated_ws, &permitted).await;
-        assert_eq!(permitted_state.fate, Fate::Accepted);
-        assert_eq!(permitted_state.durability, DurabilityTier::Global);
-
-        let expected_titles = vec!["permitted".to_owned()];
-        let start = tokio::time::Instant::now();
-        let mut anonymous_titles = Vec::new();
-        while start.elapsed() < WS_SETTLE_DEADLINE {
-            let _ = pump_core_websocket_transport_once(&anonymous, &mut anonymous_ws).await;
-            anonymous_titles = anonymous.edge_todo_titles(&anonymous_todos).await;
-            if anonymous_titles == expected_titles {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            anonymous_titles, expected_titles,
-            "anonymous sessions must retain public read access"
-        );
-
-        let denied_insert = anonymous.write_todo("must be denied");
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_insert)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous inserts before permissive policy"
-        );
-
-        let denied_update = anonymous.update_todo(permitted_row, "must remain unchanged");
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_update)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous updates before permissive policy"
-        );
-
-        let denied_delete = anonymous.delete_todo(permitted_row);
-        assert_eq!(
-            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_delete)
-                .await
-                .fate,
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            "the authority must reject anonymous deletes before permissive policy"
-        );
-
-        assert_eq!(
-            anonymous.edge_todo_titles(&anonymous_todos).await,
-            expected_titles,
-            "rejected anonymous writes must not alter the public settled view"
-        );
-        anonymous.detach_query(anonymous_todos_attachment);
+        let (_, prelude) = ws_anonymous_prelude(state.app_id, [0xb3; 32]);
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect");
+        ws.send(WsMessage::Binary(prelude.into()))
+            .await
+            .expect("send proof");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("admission resolves")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected admission error")
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            decode_frame(&frames[0]).expect("error frame"),
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                ..
+            })
+        ));
     }
 
     // Internal route-boundary guard: WebSocket message boundaries are not

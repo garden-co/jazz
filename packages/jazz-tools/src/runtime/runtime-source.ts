@@ -38,6 +38,8 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 }
 
 export interface BrowserWorkerConnection {
+  /** Only a rejected initial configuration admission permits a later API call to retry. */
+  canRetryInitialConfigurationAdmission?(): boolean;
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
@@ -45,6 +47,7 @@ export interface BrowserWorkerConnection {
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
   flushLocal(): Promise<void>;
+  waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(): Promise<MessagePort>;
   shutdown(): Promise<void>;
   /** Present only after an authenticated Inspector control-port attachment. */
@@ -54,6 +57,7 @@ export interface BrowserWorkerConnection {
 export interface BrowserFollowerConnection {
   ready(): Promise<void>;
   flushLocal(): Promise<void>;
+  waitForPendingWrites(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
   detachForReconnect(): void;
@@ -95,6 +99,11 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
+  /** Client hosts can select local-first reads independently of DOM globals. */
+  get defaultDurabilityTier(): "local" | "edge" | "global" | undefined {
+    return undefined;
+  }
+
   /** Set to true when this source can host browser persistence in a dedicated worker. */
   readonly supportsBrowserWorker: boolean = false;
   /** Set to false when the runtime must receive schemas exactly as declared. */
@@ -109,13 +118,33 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     configured(): boolean;
     disconnect(): void | Promise<void>;
     reconnect(): void | Promise<void>;
+    /**
+     * Native hosts that share one transport between several Db facades own
+     * explicit-offline state at the host, rather than on an individual facade.
+     */
+    isExplicitlyOffline?(): boolean;
+    waitForTransportTransition?(): Promise<void>;
+    waitForReconnect?(signal?: AbortSignal): Promise<void>;
+    onExplicitOfflineChange?(listener: (offline: boolean) => void, signal: AbortSignal): void;
   };
 
   /** Admission-bound native sources reject updates before any public state changes. */
   assertAuthUpdateAllowed(): void {}
 
+  /** Return true when the native host renewed its own same-identity transport. */
+  refreshAccountToken(_token: string): boolean {
+    return false;
+  }
+
   /** Apply source-specific admission after the shared auth config is resolved. */
   admitConfig(_config: RuntimeConfig): void {}
+
+  /** Shared native hosts supply the pending-write barrier for all their facades. */
+  waitForPendingWrites?(signal?: AbortSignal): Promise<void>;
+
+  /** Release runtime admission after ordinary client shutdown, including a
+   * prepared source whose lazy schema client was never materialized. */
+  async shutdown(): Promise<void> {}
 
   protected async loadRuntime(_config: RuntimeConfig): Promise<unknown> {
     return undefined;

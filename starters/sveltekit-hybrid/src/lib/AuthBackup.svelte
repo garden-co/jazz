@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { LocalFirstAuth } from "jazz-tools/svelte";
+  import { exportLocalFirstSecret } from "jazz-tools";
+  import { getJazzSession } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
 
   // In production, pin this to your deployed hostname so passkeys remain
@@ -21,7 +22,7 @@
     mode?: "full" | "restore-only";
   } = $props();
 
-  const auth = new LocalFirstAuth();
+  const jazz = getJazzSession();
 
   let phrase = $state<string | null>(null);
   let restoreInput = $state("");
@@ -44,12 +45,13 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      if (!auth.secret) {
+      const account = $jazz.account;
+      if (!account) {
         status = { kind: "error", message: "No local secret to reveal yet." };
         return;
       }
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      phrase = RecoveryPhrase.fromSecret(auth.secret);
+      phrase = RecoveryPhrase.fromSecret(exportLocalFirstSecret(account));
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
     } finally {
@@ -77,7 +79,7 @@
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
       const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await auth.login(secret);
+      await jazz.restoreLocalFirst(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -90,7 +92,8 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      if (!auth.secret) {
+      const account = $jazz.account;
+      if (!account) {
         status = { kind: "error", message: "No local secret to back up yet." };
         return;
       }
@@ -99,7 +102,7 @@
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await pb.backup(auth.secret, "My account");
+      await pb.backup(exportLocalFirstSecret(account), "My account");
       status = { kind: "success", message: "Passkey backup created." };
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -118,7 +121,7 @@
         appHostname: PASSKEY_APP_HOSTNAME,
       });
       const secret = await pb.restore();
-      await auth.login(secret);
+      await jazz.restoreLocalFirst(secret);
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };

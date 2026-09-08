@@ -19,11 +19,11 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   const hasRole = (canvas: RowContext<Canvas>, role: Role) =>
     policy.canvasMembers.exists.where({
       canvasId: canvas.id,
-      memberAuthor: session.user,
+      memberAuthor: session.user.account,
       role,
     });
   const canRead = (canvas: RowContext<Canvas>) =>
-    policy.canvasMembers.exists.where({ canvasId: canvas.id, memberAuthor: session.user });
+    policy.canvasMembers.exists.where({ canvasId: canvas.id, memberAuthor: session.user.account });
   const isAdmin = (canvas: RowContext<Canvas>) => hasRole(canvas, "admin");
   // `allowedTo.insert` composes the parent's insert rule. Canvas bootstrap is
   // intentionally unconditional, so child insert rules must spell out their
@@ -38,26 +38,29 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
     anyOf([
       allowedTo.update("canvasId"),
       allOf([
-        { memberAuthor: session.user, role: "admin" },
-        policy.canvases.exists.where({ id: member.canvasId, $createdBy: session.user }),
+        { memberAuthor: session.user.account, role: "admin" },
+        policy.canvases.exists.where({
+          id: member.canvasId,
+          "$createdBy.account": session.user.account,
+        }),
       ]),
     ]),
   );
   policy.canvasMembers.allowUpdate.where(allowedTo.update("canvasId"));
   policy.canvasMembers.allowDelete.where(
-    anyOf([allowedTo.update("canvasId"), { memberAuthor: session.user }]),
+    anyOf([allowedTo.update("canvasId"), { memberAuthor: session.user.account }]),
   );
   policy.layers.allowRead.where(allowedTo.read("canvasId"));
   policy.layers.allowInsert.where((layer) =>
     anyOf([
       policy.canvasMembers.exists.where({
         canvasId: layer.canvasId,
-        memberAuthor: session.user,
+        memberAuthor: session.user.account,
         role: "editor",
       }),
       policy.canvasMembers.exists.where({
         canvasId: layer.canvasId,
-        memberAuthor: session.user,
+        memberAuthor: session.user.account,
         role: "admin",
       }),
     ]),
@@ -74,7 +77,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
       policy.layers.exists.where({ id: shape.layerId, canvasId: shape.canvasId }),
       policy.canvasMembers.exists.where({
         canvasId: shape.canvasId,
-        memberAuthor: session.user,
+        memberAuthor: session.user.account,
         role: { in: ["editor", "admin"] },
       }),
     ]),
@@ -83,13 +86,15 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   policy.checkpoints.allowRead.where(allowedTo.read("canvasId"));
   // Presence is replaceable ephemera: only its owner may update/delete it.
   // Creation remains default-deny until its product ownership rule is chosen.
-  policy.cursors.allowUpdate.whereOld({ author: session.user }).whereNew({ author: session.user });
-  policy.cursors.allowDelete.where({ author: session.user });
+  policy.cursors.allowUpdate
+    .whereOld({ author: session.user.account })
+    .whereNew({ author: session.user.account });
+  policy.cursors.allowDelete.where({ author: session.user.account });
   // Checkpoints are admin-owned durable branch markers, not cursor history.
   policy.checkpoints.allowInsert.where((checkpoint) =>
     policy.canvasMembers.exists.where({
       canvasId: checkpoint.canvasId,
-      memberAuthor: session.user,
+      memberAuthor: session.user.account,
       role: "admin",
     }),
   );

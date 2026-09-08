@@ -1,393 +1,79 @@
 ---
 title: Local-first auth
-description: "Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
-reviewedAt: "b29b48d1a"
+description: "Start offline with a recoverable account, then link an external identity without changing ownership."
+reviewedAt: "20017a2694"
 ---
 
-Local-first auth lets users start using your app immediately without signing up. Jazz generates a secret on the client, derives a stable account ID from it, and uses self-signed tokens to prove the user owns that account. The secret itself effectively _is_ the account.
-
-This secret (and therefore the account) lives wherever the user uses the app. To log in from other devices, the user needs to use the same secret.
-
-Jazz stores and exports that root only as `jazz-auth-v1:` followed by 43 unpadded base64url
-characters: exactly 32 random bytes. Browser and Expo adapters share this representation while
-using their platform's storage mechanism. Plain React Native requires an explicitly injected native
-secure-store adapter rather than falling back to browser storage. Their default storage key is a
-versioned hash of byte-exact canonical `{ appId, profile }` scope data, so it contains neither a raw
-external subject nor a transient session identifier. `backendSecret` is unrelated deployment-only
-admission material: never put it in a client bundle or a Jazz local store.
-
-| Mode          | Identity source        | Server needed? | Best for                                               |
-| ------------- | ---------------------- | -------------- | ------------------------------------------------------ |
-| `local-first` | Keypair held by client | No             | Production offline-first apps, try-before-signup flows |
-| `external`    | JWT from auth provider | Yes            | Production apps with real user accounts                |
-
-## When to use local-first auth
-
-If you want users to be able to start immediately, local-first ([client setup](#client-setup)) is a great option, but any user who clears site data (intentionally or otherwise) loses their account.
-
-You can add a [recovery passphrase](#recovery-passphrase) or [passkey backup](#passkey-backup) which allows users to more easily log in on multiple devices or recover their accounts if they delete them. However, these are often less familiar and can add UX friction.
-
-A good middle ground is starting users on local-first so they can play around immediately, but let them upgrade to a managed account when they want to, for example using Better Auth (see [signing up with BetterAuth](#signing-up-with-betterauth)).
-
-If you don't want a try-before-signup flow at all, skip local-first entirely and use [external auth](/docs/auth/authentication) from day one.
-
-You can also combine modes: let local-first users read and experiment, but require an upgrade before any sensitive action — see [Permissions by auth mode](#permissions-by-auth-mode).
+A local-first account lets someone start using an app before signing up. Jazz derives its founding identity and account from a random signing root. Creating that account works offline. When it connects, the core verifies the signing proof and admits the deterministic account.
 
 ## Client setup
 
-Load or create a secret before starting your Jazz client. The framework integrations below store it in the browser (or equivalent on native) so subsequent loads reuse the same account.
+Configure a session once:
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
-    </include>
-    `auth="local-first"` makes `JazzProvider` load or create an `appId`-scoped secret. Descendants
-    can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using the same identity.
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
-    </include>
-    `LocalFirstAuth` from `jazz-tools/svelte` also exposes `login` and `signOut` for switching or
-    clearing accounts.
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
-    </include>
-    `useLocalFirstAuth()` from `jazz-tools/solid` also exposes `login` and `signOut` for switching
-    or clearing accounts.
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="jazz-client.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
-    </include>
-  </Tab>
-</Tabs>
+```ts
+import { createJazzSession } from "jazz-tools/client";
 
-<Callout type="warn">
-  Lose the secret and you lose the account. If it's cleared (e.g. `localStorage` wiped), the account
-  and any data owned by it become inaccessible unless the user restores from a recovery passphrase,
-  a passkey backup, or an external provider they linked earlier.
-</Callout>
-
-For how the secret relates to local database storage, logout, and user switching, see
-[Auth Lifecycle](/docs/auth/lifecycle).
-
-## Backing up and restoring the secret
-
-You can keep local-first auth fully serverless and still make it recoverable. Jazz ships two backup
-helpers:
-
-| Method                      | Platforms     | Best for                                       | Trade-offs                                                                                      |
-| --------------------------- | ------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `jazz-tools/passphrase`     | Browser, Expo | Manual backup users can carry anywhere         | User must securely store a 24-word recovery passphrase, and UI has to convey the weight of this |
-| `jazz-tools/passkey-backup` | Browser only  | Fast recovery on devices that support passkeys | Passkey sync is platform-bounded                                                                |
-
-### Recovery passphrase
-
-`jazz-tools/passphrase` encodes the secret as a 24-word English passphrase, similar to
-a crypto-wallet seed phrase. Decoding the passphrase produces the exact same secret, so the user
-keeps the same Jazz account.
-
-<Callout type="warn">
-  The 24 words are just the secret encoded differently, not a password layered over it. There's no
-  hashing, no key-wrapping, no challenge-response: whoever sees the passphrase can sign in as the
-  user. This poses a difficult UX challenge: the phrase is too long for most people to remember, and
-  the risk of insecure storage is high.
-</Callout>
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-backup
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-backup
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-backup
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-backup
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-backup
-    </include>
-  </Tab>
-</Tabs>
-
-To restore, decode the user-provided passphrase back into a secret and hand it back to your
-local-first auth flow:
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-restore
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-restore
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-restore
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-restore
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-restore
-    </include>
-  </Tab>
-</Tabs>
-
-The parser is case-insensitive and tolerant of extra whitespace between words. Invalid input throws
-`RecoveryPhraseError` with codes like `invalid-length`, `invalid-word`, and
-`invalid-checksum`.
-
-<Callout type="info">
-  Calling `login()` on the framework-specific local-first auth handle (`useLocalFirstAuth()` in
-  React/Expo/Vue/Solid, `LocalFirstAuth` in Svelte) updates the mounted provider immediately. Plain
-  TypeScript uses `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
-  client — the snippets above reload the page so the new secret is picked up on the next load.
-</Callout>
-
-### Passkey backup
-
-A passkey is a credential stored and synced by the user's browser or platform (via the WebAuthn
-browser API), typically unlocked with biometrics. `jazz-tools/passkey-backup` stores the secret as
-the user handle of a discoverable WebAuthn credential. The browser only returns it after the
-authenticator confirms user presence and verification. Jazz does not separately encrypt the secret.
-This is not a full WebAuthn authentication flow&hairsp;—&hairsp;Jazz uses the credential to recover the secret,
-not to authenticate a challenge to your server.
-
-Passkey availability depends on where the user's passkey provider works. OS-native stores
-(iCloud Keychain, Google Password Manager) have platform boundaries that are not always visible
-to users. For example, a passkey created on Safari/macOS may not be available on Chrome/Windows unless the
-user is using a third-party passkey manager (1Password, Bitwarden, Dashlane etc.) that spans
-both. WebAuthn's cross-device flow (QR from laptop to phone) can bridge a session but requires
-the original device, so it doesn't help after a loss.
-
-<Callout type="warn">
-  Treat passkey backup as one option among several. Pair it with a recovery passphrase or a linked
-  provider account so the user doesn't get locked out.
-</Callout>
-
-Create the passkey from the current local-first secret:
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-backup
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-passkey-backup
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-backup
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-backup
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-passkey-backup
-    </include>
-  </Tab>
-</Tabs>
-
-Restore by reading the secret back from the passkey:
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-restore
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-vue/src/auth-snippets.ts#auth-localfirst-vue-passkey-restore
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-svelte/src/auth-snippets.svelte.ts#auth-localfirst-svelte-passkey-restore
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-solid/src/auth-snippets.ts#auth-localfirst-solid-passkey-restore
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts-passkey-restore
-    </include>
-  </Tab>
-</Tabs>
-
-<Callout type="info">
-  Passkey backup is currently browser-only. Mobile platform support is planned.
-</Callout>
-
-- `appHostname` becomes the WebAuthn relying-party ID which is the namespace passkeys are scoped to.
-  If you change it, all existing passkeys will stop working.
-
-- The `displayName` argument to `backup(secret,
-displayName)` is the user-visible name shown in the platform passkey sheet.
-
-Handle `PasskeyBackupError` in your UI to surface cases like unsupported browsers, no saved
-credential, or missing user verification. Keep a recovery passphrase or external sign-in as a
-fallback if the user might lose access to their passkey provider.
-
-## Server configuration
-
-Local-first auth is enabled by default in the cloud, and in local dev mode. For self-hosted production setups, enable it explicitly:
-
-```bash
-pnpm dlx jazz-tools@alpha server <APP_ID> --allow-local-first-auth
-```
-
-No JWKS endpoint is needed: the token is self-contained and the server can verify it on its own.
-
-## Signing up with BetterAuth
-
-Users can try your app before creating an account. When they sign up later through BetterAuth, all the data they created carries over: same Jazz account, now with an email (or OAuth identity) attached.
-
-The client generates a short-lived proof that it owns the current Jazz account and hands it to BetterAuth alongside the sign-up credentials. BetterAuth verifies the proof, records the Jazz account ID against the new user, and issues JWTs that keep pointing to the same ID. For the reasoning and sequence diagram, see [Upgrading to a provider account](/docs/reference/local-first-auth-internals#upgrading-to-a-provider-account).
-
-### Generating the proof token
-
-Before calling your sign-up endpoint, the client generates a short-lived proof that it owns the current Jazz account:
-
-<include cwd lang="tsx">
-  ../examples/auth-betterauth-chat/src/docs/local-first-proof-snippet.tsx#local-first-proof-signup
-</include>
-
-`audience` is application-defined; the string only needs to match what the server passes when verifying. `ttlSeconds` keeps the window short — 60 seconds is usually enough for a sign-up round-trip.
-
-### Verifying on sign-up
-
-On the server, a BetterAuth middleware hook intercepts sign-up requests, verifies the proof token, and assigns the proven Jazz user ID to the new BetterAuth user:
-
-<include cwd lang="ts">
-  ../examples/auth-betterauth-chat/src/docs/local-first-server-snippet.ts#local-first-verify-hook
-</include>
-
-`verifyLocalFirstIdentityProof` from `jazz-napi` handles validation — it returns `{ ok, id, error }`. If the token is missing or invalid, `error` contains the reason. The `databaseHooks.user.create.before` hook assigns the proven ID to the new BetterAuth user, so the identity carries over.
-
-### Config resolution
-
-The app switches between local-first auth and external JWT based on whether the user has a BetterAuth session:
-
-<include cwd lang="tsx">
-  ../examples/auth-betterauth-chat/src/docs/local-first-proof-snippet.tsx#local-first-config-resolution
-</include>
-
-## Permissions by auth mode
-
-You can restrict what local-first users can do until they sign up. Define an `isLocalFirstAuthMode` check in your permissions and use it to gate writes:
-
-<include cwd lang="ts">
-  ../examples/auth-betterauth-chat/src/docs/local-first-permissions-snippet.ts#local-first-permissions
-</include>
-
-## Signing up with other providers
-
-The BetterAuth example above uses a framework-specific middleware hook. With any other provider the pattern is the same — you need a server endpoint that:
-
-1. Accepts `proofToken` alongside the sign-up credentials
-2. Verifies it with `verifyLocalFirstIdentityProof` from `jazz-napi`
-3. Stores the proven Jazz user ID linked to the new user account
-4. Issues JWTs with `sub: jazzId`
-
-Sketched in pseudo-Express (`db.users.create` and `issueJwt` stand in for whatever your stack provides):
-
-```ts title="Illustrative — not a runnable example"
-import { verifyLocalFirstIdentityProof } from "jazz-napi";
-
-// POST /signup
-app.post("/signup", async (req, res) => {
-  const { email, password, proofToken } = req.body;
-
-  const {
-    ok,
-    id: jazzUserId,
-    error,
-  } = verifyLocalFirstIdentityProof(
-    proofToken,
-    "my-app-signup", // must match the audience used on the client
-  );
-  if (!ok) return res.status(400).json({ error });
-
-  // Store jazzUserId so you can mint future JWTs with it as `sub`.
-  const user = await db.users.create({ email, password, jazzId: jazzUserId });
-
-  res.json({ token: issueJwt({ sub: user.jazzId /* ... */ }) });
+const jazz = await createJazzSession({
+  appId: "my-app",
+  serverUrl: "https://core.example",
+  initial: "local-first",
 });
 ```
 
-The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
+Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`; provider JWTs are never persisted in it. Creating a local-first account works offline once runtime assets are available.
 
-Jazz derives the opaque `session.user` author identity from the JWT's exact `iss` and `sub` pair. It does not use a custom-claim fallback. Custom provider metadata belongs at the JWT top level (for example `better_auth_user_id` or `profile_id`) and is exposed under `session.claims`; Jazz does not require or flatten a nested `claims` object. Your application can associate that identity with whichever user row shape it chooses instead of rewriting an external provider's `sub`.
+Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/auth/lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
 
-## Next steps
+## Backing up and restoring the secret
 
-- [Lifecycle](/docs/auth/lifecycle) — local-first storage, logout, and upgrading auth
-- [Sessions](/docs/auth/sessions) — read the current user and scope queries to their identity
-- [Permissions](/docs/auth/permissions) — define row-level access policies
-- [Auth provider integration](/docs/recipes/auth/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider
-- [Local-first auth internals](/docs/reference/local-first-auth-internals) — token format, verification, and design rationale
+A signing root is a credential. Possession allows acting as its local-first identity. Jazz represents it as `jazz-auth-v1:` followed by 43 unpadded base64url characters encoding 32 random bytes. Export it explicitly from a live local-first handle:
+
+```ts
+import { exportLocalFirstSecret } from "jazz-tools";
+import { RecoveryPhrase } from "jazz-tools/passphrase";
+
+const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
+const phrase = RecoveryPhrase.fromSecret(secret);
+```
+
+The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles. Signing roots remain retained after logout so explicit recovery can restore them.
+
+### Recovery passphrase
+
+Restore through the session; it owns the graceful handoff:
+
+```ts
+await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+```
+
+Session account transitions wait for pending writes to sync before replacing the client. Ordinary `jazz.close()` preserves local durability without requiring online sync.
+
+### Passkey backup
+
+Browser apps can wrap the same exported root with a passkey:
+
+```ts
+import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
+
+const backup = new BrowserPasskeyBackup({
+  appName: "My App",
+  appHostname: "app.example",
+});
+await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
+```
+
+`await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
+
+## Linking an external provider
+
+An external provider can issue an ordinary JWT with `iss` and `sub`. It does not need to mint Jazz-specific claims or reuse the local-first subject.
+
+Call `await jazz.linkJWT({ getToken })`; Jazz performs graceful shutdown, linking, and client replacement. The external identity must be fresh in this application's registry. Linking requires a connection to the core and keeps the existing account ID, so account-based ownership remains valid. Earlier rows retain the exact identity that authored them.
+
+The core never moves an already assigned identity to another account. If the provider identity already has an account, the app must choose whether to log into that account or migrate data explicitly. See [Authentication](/docs/auth/authentication) for registration versus login, and [Lifecycle](/docs/auth/lifecycle) for failure and logout handling.
+
+## Permissions by auth mode
+
+Use `session.user.account` for stable account ownership. Use the exact issuer and subject when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
+
+Provider claims can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Permissions](/docs/auth/permissions), alongside ownership policies.

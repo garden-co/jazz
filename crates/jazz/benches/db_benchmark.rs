@@ -16,7 +16,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::ids::{NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::RelValueRef;
@@ -98,7 +98,7 @@ fn open_db_with_schema(seed: u64, schema: JazzSchema) -> DirectDb {
             MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AuthorSubject::for_test_uuid(AUTHOR_UUID),
+                author: schema_fixture::account_author_uuid(AUTHOR_UUID),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),

@@ -1,8 +1,10 @@
-import { authClient, useSession } from "./auth-client";
+import { useSession } from "./auth-client";
 import { SignInForm } from "./sign-in-form";
 import { TodoWidget } from "./todo-widget";
+import { useAuthActions } from "./main";
 
 export function App() {
+  const actions = useAuthActions();
   const { data: session, isPending } = useSession();
   if (isPending) return <div>Loading…</div>;
 
@@ -16,8 +18,11 @@ export function App() {
   }
 
   async function handleSignOut() {
-    await authClient.signOut();
-    window.location.assign("/");
+    try {
+      await actions.signOut();
+    } catch (cause) {
+      actions.reportFailure(cause);
+    }
   }
 
   return (

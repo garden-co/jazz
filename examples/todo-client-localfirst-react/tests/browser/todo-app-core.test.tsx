@@ -1,3 +1,5 @@
+import { createAccountManager } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 /**
  * Core browser canary for the React todo app.
  *
@@ -103,7 +105,14 @@ describe("React Todo App core browser canary", () => {
     driver?: DbConfig["driver"];
     onEdgeSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
-    const { onEdgeSettled, ...dbConfig } = config;
+    const { onEdgeSettled, secret, adminSecret: _adminSecret, ...dbConfig } = config;
+    const appId = dbConfig.appId ?? "test-app";
+    const account = await prepareTestAccount(
+      createAccountManager,
+      appId,
+      dbConfig.serverUrl ?? SERVER_URL,
+      secret,
+    );
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
@@ -111,7 +120,7 @@ describe("React Todo App core browser canary", () => {
 
     await act(async () => {
       r.render(
-        <App config={{ appId: dbConfig.appId ?? "test-app", ...dbConfig }}>
+        <App config={{ appId, ...dbConfig, account }}>
           {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
         </App>,
       );

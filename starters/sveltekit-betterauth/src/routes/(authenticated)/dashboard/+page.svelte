@@ -2,12 +2,18 @@
   import { goto } from "$app/navigation";
   import { authClient } from "$lib/auth-client";
   import TodoWidget from "$lib/TodoWidget.svelte";
+  import { getAuthActions } from "$lib/auth-actions";
 
   const session = authClient.useSession();
+  const auth = getAuthActions();
 
   async function handleSignOut() {
-    await authClient.signOut();
-    await goto("/");
+    try {
+      await auth.signOut();
+      await goto("/");
+    } catch (cause) {
+      auth.reportFailure(cause);
+    }
   }
 </script>
 

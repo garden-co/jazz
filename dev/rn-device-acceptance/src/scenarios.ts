@@ -7,6 +7,7 @@ import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
  * remaining matrix stays explicit debt and is never handed to the strict
  * device driver as a green receipt requirement.
  */
+// Historical receipt IDs named logout cover lease revocation, not credential deletion.
 export const scenarioPlan: readonly ScenarioResult[] = [
   [
     "linked-abi-admission",
@@ -34,10 +35,13 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     "With upstream stopped, a fresh app process reopens scope A's durable relay store and reads the prior process's row through createJazzClient",
   ],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
-  ["logout-revocation", "Trusted native code revokes old admission aliases before any replacement"],
+  [
+    "logout-revocation",
+    "Closing the fixture account lease revokes old admission aliases; retained credentials survive",
+  ],
   [
     "logout-auth-switch",
-    "Trusted native code revokes scope A foreground and relay aliases before admitting scope B",
+    "Close account A foreground and relay aliases before opening retained account B",
   ],
   ["backpressure", "Relay frame progress resumes after bounded backpressure"],
   ["corrupt-store", "Corrupt durable store fails closed with a structured diagnostic"],

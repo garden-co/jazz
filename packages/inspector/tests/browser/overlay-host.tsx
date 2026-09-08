@@ -8,15 +8,23 @@
 // Exercised by overlay.spec.ts.
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { JazzProvider, useAll, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
-import { installInspectorHost, type DbConfig } from "jazz-tools";
+import { JazzProvider, useAll, useJazzClient } from "jazz-tools/react";
+import {
+  createAccountManager,
+  installInspectorHost,
+  type DbConfig,
+  type AccountHandle,
+} from "jazz-tools";
 import { app } from "./schema.js";
 
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const TEST_ENV = "dev";
-const TEST_PORT = 19879;
-const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
+const SERVER_URL = (() => {
+  const url = new URL(window.location.href).searchParams.get("serverUrl");
+  if (!url) throw new Error("Inspector overlay fixture requires its owned server URL");
+  return url;
+})();
 
 function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
@@ -60,19 +68,14 @@ function SecondaryRuntime({ onReady }: { onReady: () => void }) {
   return <p hidden>Secondary runtime ready</p>;
 }
 
-function HostApp() {
-  const { secret, isLoading } = useLocalFirstAuth();
+function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: AccountHandle }) {
   const [secondaryReady, setSecondaryReady] = useState(false);
-
-  if (isLoading || !secret) {
-    return <p id="host-status">Authenticating...</p>;
-  }
 
   const config: DbConfig = {
     appId: APP_ID,
     env: TEST_ENV,
     serverUrl: SERVER_URL,
-    secret,
+    account: primary,
     // devMode must be on at subscribe time for subscription traces to register.
     // Under the jazz dev plugin the provider defaults it on automatically, but
     // this fixture runs under the inspector's own vite server (no plugin flag),
@@ -93,15 +96,8 @@ function HostApp() {
         config={{
           appId: APP_ID,
           env: TEST_ENV,
-          cookieSession: {
-            issuer: "https://inspector.test",
-            user_id: "inspector-secondary-user",
-            claims: { role: "inspector-test" },
-            authMode: "external",
-          },
-          // Deliberately share the primary runtime's logical base. The
-          // browser physical namespace must still separate this external
-          // principal from the local-first primary context.
+          account: secondary,
+          // Share the logical base: account IDs must isolate the physical roots.
           driver: { type: "persistent", dbName: APP_ID },
           devMode: true,
         }}
@@ -113,8 +109,11 @@ function HostApp() {
   );
 }
 
+const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
+const primary = accounts.createLocalFirst();
+const secondary = accounts.createLocalFirst();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <HostApp />
+    <HostApp primary={primary} secondary={secondary} />
   </StrictMode>,
 );

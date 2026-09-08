@@ -1,3 +1,7 @@
+import {
+  GracefulShutdownSyncError,
+  SharedClientShutdownError,
+} from "../runtime/graceful-shutdown-error.js";
 import { createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbConfig } from "../runtime/db.js";
@@ -41,6 +45,56 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
 
   beforeEach(() => {
     defaultClientFactory = vi.fn<JazzClientFactory>();
+  });
+
+  it.each([
+    new GracefulShutdownSyncError(new Error("sync unavailable")),
+    new SharedClientShutdownError(),
+  ])("forwards graceful shutdown and retains the open client after %s", async (failure) => {
+    const shutdown = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+    const raw = makeRawClient("graceful", shutdown);
+    let dispose!: () => void;
+    let result!: ReturnType<typeof createSolidJazzClientInternal>;
+    try {
+      createRoot((stop) => {
+        dispose = stop;
+        result = createSolidJazzClientInternal(
+          () => ({ appId: "graceful" }),
+          async () => raw,
+        );
+      });
+      await flushMicrotasks();
+      const client = result.client!;
+      await expect(client.shutdown({ waitForSync: true })).rejects.toBe(failure);
+      expect(shutdown).toHaveBeenCalledWith({ waitForSync: true });
+      expect(result.client).toBe(client);
+      await client.shutdown({ waitForSync: true });
+      expect(result.client).toBeUndefined();
+    } finally {
+      dispose?.();
+    }
+  });
+
+  it("hides the client after a terminal teardown failure", async () => {
+    const failure = new Error("storage teardown failed");
+    const shutdown = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+    const raw = makeRawClient("terminal", shutdown);
+    let dispose!: () => void;
+    let result!: ReturnType<typeof createSolidJazzClientInternal>;
+    try {
+      createRoot((stop) => {
+        dispose = stop;
+        result = createSolidJazzClientInternal(
+          () => ({ appId: "terminal" }),
+          async () => raw,
+        );
+      });
+      await flushMicrotasks();
+      await expect(result.client!.shutdown({ waitForSync: true })).rejects.toBe(failure);
+      expect(result.client).toBeUndefined();
+    } finally {
+      dispose?.();
+    }
   });
 
   it("SD-LIFE-01: on rapid reconfig, discards stale client and keeps newest run active", async () => {

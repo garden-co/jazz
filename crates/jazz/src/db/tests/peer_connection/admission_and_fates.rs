@@ -1432,7 +1432,9 @@ fn reconnect_replays_live_scope_waiters_once_and_drops_cancelled_ones() {
     let _second = crate::db::block_on(client.connect_upstream(second_transport));
     client.tick().unwrap();
     let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
-        Some(SyncMessage::AuthorizationScopeIntent { request_id, action }) => {
+        Some(SyncMessage::AuthorizationScopeIntent {
+            request_id, action, ..
+        }) => {
             assert_eq!(
                 action,
                 PermissionAdviceAction::Read {
@@ -1800,6 +1802,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     assert!(authorization_scope_receipt_matches_transport_context(
         &receipt,
         expected,
+        expected.link,
         Some(GlobalTime(0)),
     ));
     assert!(
@@ -1810,6 +1813,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
                 ..receipt.clone()
             },
             expected,
+            expected.link,
             Some(GlobalTime(0)),
         ),
         "a receipt from the opposite duplex endpoint must not cross-wire"
@@ -1826,6 +1830,158 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     assert_ne!(
         subscriber.borrow().connection_epoch,
         resumed.borrow().connection_epoch
+    );
+}
+
+#[test]
+/// A trusted backend can reconnect with concurrent, distinct tenant bindings
+/// for the same delegated identity; each answer must use only its own support
+/// receipt.
+///
+/// backend ──editor tenant scope──► reconnect ──support view + receipt──► Allowed
+/// backend ──viewer tenant scope──► reconnect ──support view + receipt──► Denied
+fn backend_permission_advice_keeps_concurrent_delegated_claim_scopes_separate_after_reconnect() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("tenant", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("tenant", &["claims", "tenant"])),
+                ),
+        ),
+    );
+    let delegated = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let backend = open_db(0xbe, AuthorSubject::SYSTEM, &schema);
+    let authority = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let owned = authority
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("owned".to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("tenant".to_owned(), Value::String("editor".to_owned())),
+            ]),
+        )
+        .unwrap()
+        .row_uuid();
+    let (backend_transport, authority_transport) = duplex_with_admitted_session_context(
+        AuthorSubject::SYSTEM,
+        NodeUuid::from_bytes([0xbe; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let mut editor = test_provider_claims(delegated);
+    editor.insert(
+        crate::query::provider_claim_key("tenant"),
+        Value::String("editor".to_owned()),
+    );
+    let mut viewer = test_provider_claims(delegated);
+    viewer.insert(
+        crate::query::provider_claim_key("tenant"),
+        Value::String("viewer".to_owned()),
+    );
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    };
+    let allowed = backend.request_permission_advice_with_delegated_session(
+        action.clone(),
+        crate::protocol::DelegatedSessionBinding {
+            identity: delegated,
+            claims: editor,
+        },
+    );
+    let denied = backend.request_permission_advice_with_delegated_session(
+        action,
+        crate::protocol::DelegatedSessionBinding {
+            identity: delegated,
+            claims: viewer,
+        },
+    );
+    // The first admitted backend link sends both intents but disappears
+    // before the authority can hydrate either support scope.
+    backend.tick().unwrap();
+    assert!(backend.detach_connection(&upstream));
+    let (reconnected_backend_transport, reconnected_authority_transport) =
+        duplex_with_admitted_session_context(
+            AuthorSubject::SYSTEM,
+            NodeUuid::from_bytes([0xbe; 16]),
+            2,
+            NodeUuid::from_bytes([0x5e; 16]),
+            2,
+        );
+    let _reconnected_upstream =
+        crate::db::block_on(backend.connect_upstream(reconnected_backend_transport));
+    let _reconnected_subscriber = authority.server.accept_subscriber_with_claims_and_trust(
+        reconnected_authority_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    for _ in 0..16 {
+        backend.tick().unwrap();
+        authority.tick().unwrap();
+    }
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut allowed = Box::pin(allowed);
+    let mut denied = Box::pin(denied);
+    assert_eq!(
+        allowed.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Allowed),
+        "backend must receive and apply the editor-bound authority receipt"
+    );
+    assert_eq!(
+        denied.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Denied),
+        "viewer binding must not coalesce with the editor support scope"
+    );
+}
+
+#[test]
+fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
+    // Internal protocol-admission test: a raw intent is the only way to plant
+    // a forged delegation field; public callers cannot manufacture it.
+    let schema = owner_read_schema();
+    let ordinary = AuthorSubject::for_test_bytes([0xa0; 16]);
+    let forged = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut client_transport, server_transport) = duplex_with_admitted_session_context(
+        ordinary,
+        NodeUuid::from_bytes([0xa0; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let subscriber = server.accept_subscriber(server_transport, ordinary);
+    client_transport
+        .send(SyncMessage::AuthorizationScopeIntent {
+            request_id: PermissionAdviceRequestId([0xa1; 16]),
+            action: PermissionAdviceAction::Read {
+                table: "todos".to_owned(),
+                row: row(1),
+            },
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: forged,
+                claims: BTreeMap::new(),
+            }),
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an ordinary session link cannot turn a forged delegation into authority advice"
     );
 }
 
@@ -1997,7 +2153,10 @@ fn scope_receipt_claim_transition_ignores_late_a_support_and_requires_fresh_b_re
         else {
             break;
         };
-        if let SyncMessage::AuthorizationScopeIntent { request_id, action } = message {
+        if let SyncMessage::AuthorizationScopeIntent {
+            request_id, action, ..
+        } = message
+        {
             assert_eq!(
                 action,
                 PermissionAdviceAction::Read {
@@ -3143,6 +3302,165 @@ fn scope_isolated_relay_terminal_write_rejects_denied_handshake_claims() {
             .0,
         Fate::Rejected(_)
     ));
+}
+
+#[test]
+fn scope_relay_upload_rejects_forged_system_origin_before_persistence() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let client = open_db(0xaa, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("forged system provenance", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a candidate before relay admission");
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit { mut tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    tx.made_by = AuthorSubject::system_at(NodeUuid::from_bytes([0x6a; 16]));
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("relay can send a raw forged upload");
+
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("relay provenance must match the admitted session");
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .is_none(),
+        "a rejected relay envelope must not retain forged system attribution"
+    );
+}
+
+/// A scope-isolated relay cannot substitute any independently attributed
+/// principal for its immutable delegated session binding.
+#[test]
+fn scope_relay_upload_rejects_forged_user_origin_before_persistence() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbb; 16]);
+    let client = open_db(0xaa, alice, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            cells("forged user provenance", false, alice),
+            Default::default(),
+        )
+        .expect("client can stage a candidate before relay admission");
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit { mut tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("staged candidate retains its exact commit unit")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    tx.made_by = bob;
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("relay can send a raw forged upload");
+
+    let error = subscriber
+        .borrow_mut()
+        .tick()
+        .expect_err("scope relay provenance must match the admitted session");
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .is_none(),
+        "a rejected relay envelope must not retain forged user attribution"
+    );
+}
+
+/// A scope relay may resend an authority-owned unit that is already stored.
+/// Its immutable delegated binding does not become that unit's authority, and
+/// it cannot rewrite the durable system origin while replaying it.
+#[test]
+fn scope_relay_replays_known_system_origin_without_claiming_authority() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let write = server
+        .insert("todos", cells("authority-owned", false, alice))
+        .expect("system authority can create the durable unit");
+    let tx_id = write.mergeable_tx_id();
+    let unit = server
+        .server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("settled authority unit remains replayable");
+    let SyncMessage::CommitUnit { mut tx, versions } = unit else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    assert!(matches!(tx.made_by, AuthorSubject::SystemAt(_)));
+    assert_eq!(tx.permission_subject, Some(AuthorSubject::SYSTEM));
+    // This differs only in a raw untrusted permission hint. The relay must
+    // redact it before duplicate identity comparison, not reject a known unit.
+    tx.permission_subject = Some(alice);
+
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+        server_transport,
+        alice,
+        BTreeMap::new(),
+        9,
+    );
+    relay_transport
+        .send(SyncMessage::CommitUnit { tx, versions })
+        .expect("scope relay can retransmit the known unit");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("known authority replay is idempotent");
+
+    let SyncMessage::CommitUnit { tx: stored, .. } = server
+        .node()
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .expect("known replay does not remove the authority transaction")
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    assert!(matches!(stored.made_by, AuthorSubject::SystemAt(_)));
+    assert_ne!(stored.permission_subject, Some(alice));
 }
 
 /// Empty scope-relay claims are an admitted empty snapshot, not an invitation
@@ -4538,13 +4856,19 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .iter()
         .find(|unit| unit.tx.tx_id == tx_id)
         .unwrap();
+    let SyncMessage::CommitUnit { mut tx, versions } = canonical.clone() else {
+        unreachable!("commit_unit_for returns a CommitUnit")
+    };
+    assert_eq!(tx.permission_subject, Some(alice));
+    tx.permission_subject = None;
+    let canonical_carrier = SyncMessage::CommitUnit { tx, versions };
     assert_eq!(
         SyncMessage::CommitUnit {
             tx: unit.tx.clone(),
             versions: unit.versions.clone()
         },
-        canonical,
-        "the publication must retain the exact canonical admitted write"
+        canonical_carrier,
+        "the publication retains the exact durable write while omitting its local capability"
     );
     drop(outbox);
     client_upstream
@@ -4587,7 +4911,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
                         SyncMessage::CommitUnit {
                             tx: unit.tx.clone(),
                             versions: unit.versions.clone(),
-                        } == canonical))
+                        } == canonical_carrier))
         });
     assert!(
         uploaded,
@@ -5256,4 +5580,156 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
     drop(reopened_live);
 
     assert_ne!(first_id, reopened_id);
+}
+
+// Internal: the public API intentionally cannot forge raw SessionClaims or
+// host-admitted transport trust. Pin both retained evaluator bindings here;
+// real concurrent claim-gated reads are covered by napi.for-request.test.ts.
+#[test]
+fn delegated_subscription_binding_survives_backend_raw_claim_refresh() {
+    let schema = owner_read_schema();
+    let delegated_identity = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let delegated_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
+    )]);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    relay_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: delegated_identity,
+                claims: delegated_claims.clone(),
+            }),
+        }))
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let coverage = {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("the core connection serves the trusted relay")
+        };
+        state.served[&subscription].clone()
+    };
+    let later_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb2; 16]).test_uuid()),
+    )]);
+    relay_transport
+        .send(SyncMessage::SessionClaims {
+            identity: delegated_identity,
+            claims: later_claims.clone(),
+        })
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .session_claims_for(delegated_identity),
+        later_claims,
+        "the trusted backend compatibility update must actually be admitted"
+    );
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("the core connection remains a subscriber link")
+    };
+    let group = &state.coverage_groups[&coverage];
+    assert_eq!(
+        group.policy_binding_origin,
+        CoveragePolicyBindingOrigin::Delegated
+    );
+    assert_eq!(
+        group.policy_binding,
+        (delegated_identity, delegated_claims.clone())
+    );
+    assert_eq!(
+        state.peer.subscription_policy_binding(subscription),
+        Some((delegated_identity, delegated_claims)),
+        "refreshing the backend author claims must not retarget a delegated usage site"
+    );
+}
+
+// Internal: only host admission can select connection trust. Raw wire claims
+// must not grant request delegation to a session, authority, or admin link.
+#[test]
+fn delegated_request_binding_requires_backend_client_link() {
+    for trust in [
+        CommitUnitTrust::Session,
+        CommitUnitTrust::TrustedAuthority,
+        CommitUnitTrust::TrustedAdmin,
+    ] {
+        let schema = owner_read_schema();
+        let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: RegisterShapeOptions::default().read_view_key(),
+        };
+        let (mut client, transport) = duplex();
+        let subscriber = server.accept_subscriber_with_trust(
+            transport,
+            AuthorSubject::for_test_bytes([0xb4; 16]),
+            trust,
+        );
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts: RegisterShapeOptions::default(),
+            })
+            .unwrap();
+        client
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::SYSTEM,
+                    claims: BTreeMap::new(),
+                }),
+            }))
+            .unwrap();
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+        }
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert!(
+            state.served.is_empty(),
+            "{trust:?} must not admit delegated queries"
+        );
+    }
 }

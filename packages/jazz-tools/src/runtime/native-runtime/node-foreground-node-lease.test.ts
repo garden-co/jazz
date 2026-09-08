@@ -1,3 +1,6 @@
+import { generateAuthSecret } from "../auth-secret-store.js";
+import { getDbInternalSession, setTrustedReservedSession } from "../db-internal-session.js";
+import { localAccountConfig } from "../testing/account-fixtures.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,7 +17,7 @@ import { createBrowserAuthSessionKey } from "../browser-worker-config.js";
 
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
-const publicRuntimeEntry = new URL("../../../dist/runtime/index.js", import.meta.url).href;
+const publicRuntimeEntry = new URL("../../../dist/index.js", import.meta.url).href;
 const memoryApp = s.defineApp({ notes: s.table({ title: s.string() }) });
 
 afterEach(async () => {
@@ -44,6 +47,7 @@ function spawnPublicPersistentDb(
   root: string,
   appId: string,
   mode: "hold" | "close",
+  secret: string,
 ): PublicNodeChild {
   const child = spawn(
     process.execPath,
@@ -51,8 +55,11 @@ function spawnPublicPersistentDb(
       "--input-type=module",
       "--eval",
       [
-        `import { createDb } from ${JSON.stringify(publicRuntimeEntry)};`,
-        `const db = await createDb({ appId: ${JSON.stringify(appId)} });`,
+        `import { createDb, createAccountManager } from ${JSON.stringify(publicRuntimeEntry)};`,
+        `let stored = null;`,
+        `const accounts = await createAccountManager({ appId: ${JSON.stringify(appId)}, serverUrl: "http://127.0.0.1:1", store: { async read() { return stored; }, async update(transform) { stored = transform(stored); } } });`,
+        `const account = accounts.restoreLocalFirst(${JSON.stringify(secret)});`,
+        `const db = await createDb({ appId: ${JSON.stringify(appId)}, account });`,
         'process.stdout.write("ready\\n");',
         mode === "close"
           ? 'await db.shutdown(); process.stdout.write("closed\\n");'
@@ -150,7 +157,7 @@ describe("Node foreground node leases", () => {
     roots.push(root);
     const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
     try {
-      const db = await createDb({ appId: "memory-lease-test", driver: { type: "memory" } });
+      const db = await createDb(await localAccountConfig("memory-lease-test"));
       db.insert(memoryApp.notes, { title: "first write" });
       await db.shutdown();
       await expect(readdir(join(root, ".jazz"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -217,17 +224,23 @@ describe("Node foreground node leases", () => {
     const root = await mkdtemp(join(tmpdir(), "jazz-node-public-foreground-lease-"));
     roots.push(root);
     const appId = "node-public-lease-test";
+    const secret = generateAuthSecret();
+    const sample = await createDb(await localAccountConfig(appId, undefined, secret));
+    const runtimeConfig = sample.getConfig();
+    setTrustedReservedSession(runtimeConfig, getDbInternalSession(sample));
+    const authScope = createBrowserAuthSessionKey(runtimeConfig);
+    await sample.shutdown();
     const options: NodeForegroundNodeLeaseOptions = {
       appId,
       env: "dev",
-      authScope: createBrowserAuthSessionKey({ appId }),
+      authScope,
     };
     const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
     const directory = nodeForegroundNodeLeaseDirectoryForTest(options);
     cwdSpy.mockRestore();
 
-    const first = spawnPublicPersistentDb(root, appId, "hold");
-    const second = spawnPublicPersistentDb(root, appId, "hold");
+    const first = spawnPublicPersistentDb(root, appId, "hold", secret);
+    const second = spawnPublicPersistentDb(root, appId, "hold", secret);
     try {
       await Promise.all([first.ready, second.ready]);
       expect(await readdir(join(directory, "active"))).toHaveLength(2);
@@ -236,7 +249,7 @@ describe("Node foreground node leases", () => {
 
       // A crash leaves both active claims quarantined. The recovered process
       // receives a fresh UUID, then returns only that UUID cleanly.
-      const recovered = spawnPublicPersistentDb(root, appId, "close");
+      const recovered = spawnPublicPersistentDb(root, appId, "close", secret);
       await recovered.ready;
       await waitForExit(recovered.child);
 
@@ -245,7 +258,7 @@ describe("Node foreground node leases", () => {
       expect(clean).toHaveLength(1);
       const cleanReplacementNode = clean[0];
 
-      const reopened = spawnPublicPersistentDb(root, appId, "hold");
+      const reopened = spawnPublicPersistentDb(root, appId, "hold", secret);
       await reopened.ready;
       try {
         const active = await readdir(join(directory, "active"));

@@ -1,4 +1,7 @@
 import { render } from "solid-js/web";
 import { App } from "./App.js";
 
-render(() => <App />, document.getElementById("app")!);
+import { prepareAccountConfig } from "./account.js";
+
+const config = await prepareAccountConfig();
+render(() => <App config={config} />, document.getElementById("app")!);

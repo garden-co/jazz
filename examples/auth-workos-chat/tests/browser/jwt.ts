@@ -1,6 +1,8 @@
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from "jose";
+import { WORKOS_CLIENT_ID } from "../../constants.js";
 
 const KID = "auth-workos-chat-test-key";
+export const TEST_WORKOS_JWT_ISSUER = "https://workos.test/";
 
 export interface TestKeySet {
   publicJwk: JWK;
@@ -20,6 +22,8 @@ export async function createTestKeySet(): Promise<TestKeySet> {
   async function mintJwt(role: string, sub: string): Promise<string> {
     return new SignJWT({ role })
       .setProtectedHeader({ alg: "ES256", kid: KID })
+      .setIssuer(TEST_WORKOS_JWT_ISSUER)
+      .setAudience(WORKOS_CLIENT_ID)
       .setSubject(sub)
       .setIssuedAt()
       .setExpirationTime("1h")

@@ -157,6 +157,7 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
 
   const session = resolveClientInternalSessionSync({
     appId: config.appId,
+    accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
     trustedReservedSession: getTrustedReservedSession(config),
@@ -168,8 +169,27 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
     authMode: session.authMode,
     // Reuse the public/session and row-authorship identity codec. JSON array
     // encoding preserves exact issuer + subject boundaries and spelling.
-    user: canonicalAuthorSubject(session.issuer, session.user_id),
+    user: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
+}
+
+function browserStorageScope(
+  config: DbConfig,
+): BrowserAuthScope | { kind: "account"; account: string; registry: string } {
+  if (config.accountId && !config.adminSecret) {
+    return {
+      kind: "account",
+      account: config.accountId,
+      registry: accountRegistryAuthority(config),
+    };
+  }
+  return browserAuthScope(config);
+}
+
+function accountRegistryAuthority(config: DbConfig): string {
+  if (!config.accountRegistryAuthority)
+    throw new Error("Account storage requires its registry authority");
+  return config.accountRegistryAuthority;
 }
 
 /** Stable, non-secret exact namespace for one browser authentication scope. */
@@ -181,6 +201,7 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
     appId: config.appId,
     env: config.env ?? "dev",
     auth: browserAuthScope(config),
+    ...(config.accountId ? { registry: accountRegistryAuthority(config) } : {}),
   });
 }
 
@@ -201,7 +222,7 @@ export function createBrowserStorageOwner(config: DbConfig): string {
     version: 1,
     appId: config.appId,
     env: config.env ?? "dev",
-    auth: browserAuthScope(config),
+    auth: browserStorageScope(config),
   });
 }
 
@@ -212,7 +233,10 @@ export function createBrowserStorageOwner(config: DbConfig): string {
  * briefly exposing the old root under the new session.
  */
 export function assertBrowserStorageOwnerUnchanged(current: DbConfig, next: DbConfig): void {
-  if (createBrowserStorageOwner(current) !== createBrowserStorageOwner(next)) {
+  if (
+    createBrowserStorageOwner(current) !== createBrowserStorageOwner(next) ||
+    createBrowserAuthSessionKey(current) !== createBrowserAuthSessionKey(next)
+  ) {
     throw new Error(
       "Cannot change the authenticated user of a live persistent browser Db; shut it down and reopen for the new user, or explicitly reset its storage",
     );
@@ -234,7 +258,7 @@ export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: st
     version: 1,
     appId: config.appId,
     env: config.env ?? "dev",
-    auth: browserAuthScope(config),
+    auth: browserStorageScope(config),
   });
   return `${baseName}::jazz-browser-v1::${encodeURIComponent(scope)}`;
 }
@@ -243,10 +267,11 @@ function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientInternalSessionSync({
     appId: config.appId,
+    accountId: config.accountId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
     trustedReservedSession: getTrustedReservedSession(config),
   });
   if (!session?.user_id || session.authMode === "anonymous") return "anonymous";
-  return `${session.authMode}:${JSON.stringify([session.issuer, session.user_id])}`;
+  return `${session.authMode}:${canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)}`;
 }

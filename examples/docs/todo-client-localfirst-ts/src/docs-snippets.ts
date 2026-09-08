@@ -1,4 +1,10 @@
-import { PersistedWriteRejectedError, ReadTier, schema as s, type Db } from "jazz-tools";
+import {
+  PersistedWriteRejectedError,
+  ReadTier,
+  schema as s,
+  type Db,
+  type RowAuthor,
+} from "jazz-tools";
 import { app } from "../schema.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -187,11 +193,11 @@ export async function canCreateTodo(db: Db, title: string) {
 // #endregion dry-run-permissions-ts
 
 // #region reading-edit-metadata-magic-columns-ts
-export async function readTodoEditMetadata(db: Db, currentUserId: string, updatedSinceMs: number) {
+export async function readTodoEditMetadata(db: Db, author: RowAuthor, updatedSinceMs: number) {
   return db.all(
     app.todos
       .where({
-        $createdBy: currentUserId,
+        $createdBy: author,
         $updatedAt: { gt: updatedSinceMs },
       })
       .select("title", "$createdBy", "$createdAt", "$updatedBy", "$updatedAt"),

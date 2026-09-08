@@ -6,6 +6,7 @@ import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
+import { testAuthorBytes } from "./account-fixtures.js";
 import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
 import { readCorrectnessArtifactSnapshot } from "../../../../../dev/artifacts/test-artifact-store.mjs";
 
@@ -139,10 +140,6 @@ export async function createWasmRuntime(
   });
 
   return runtime;
-}
-
-function testAuthorBytes(seed: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
 }
 
 function deterministicBytes(seed: string): Uint8Array {

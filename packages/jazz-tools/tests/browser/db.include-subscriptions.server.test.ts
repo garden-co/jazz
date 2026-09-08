@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  createDb,
   generateAuthSecret,
   schema,
   type CompiledPermissions,
@@ -8,7 +7,13 @@ import {
   type RowOf,
 } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { TestCleanup, uniqueDbName, waitForCondition, withTimeout } from "./support.js";
+import {
+  TestCleanup,
+  createBrowserTestDb,
+  uniqueDbName,
+  waitForCondition,
+  withTimeout,
+} from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = schema.defineApp({
@@ -388,15 +393,14 @@ describe("websocket include subscriptions", () => {
 async function openDb(
   appId: string,
   serverUrl: string,
-  adminSecret: string,
+  _adminSecret: string,
   label: string,
   secret: string,
 ): Promise<Db> {
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId,
       serverUrl,
-      adminSecret,
       secret,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),

@@ -7,7 +7,7 @@ import { useAuthState } from "./use-auth-state.js";
 import { makeFakeClient } from "./test-utils.js";
 
 describe("useAuthState", () => {
-  it("returns authMode, canonical user, and claims", async () => {
+  it("returns authMode, structured user, and claims", async () => {
     const client = makeFakeClient({
       authMode: "local-first",
       userId: "u-1",
@@ -19,7 +19,10 @@ describe("useAuthState", () => {
       ),
     });
     expect(result.current.authMode).toBe("local-first");
-    expect(result.current.user).toBe("u-1");
+    expect(result.current.user).toEqual({
+      account: "00000000-0000-4000-8000-000000000002",
+      identity: { issuer: "urn:jazz:local-first", subject: "u-1" },
+    });
     expect(result.current.claims).toEqual({ role: "admin" });
     expect(result.current.error).toBeUndefined();
   });
@@ -33,7 +36,10 @@ describe("useAuthState", () => {
     });
     act(() => client.__markUnauthenticated("expired"));
     expect(result.current.error).toBe("expired");
-    expect(result.current.user).toBe("u-1");
+    expect(result.current.user).toEqual({
+      account: "00000000-0000-4000-8000-000000000002",
+      identity: { issuer: "https://issuer.example", subject: "u-1" },
+    });
   });
 
   it("returns no status or transport", () => {

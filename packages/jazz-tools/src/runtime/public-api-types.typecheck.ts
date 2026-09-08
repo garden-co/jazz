@@ -36,7 +36,9 @@ const cookieSession = {
   authMode: "external" as const,
 };
 declare const publicSession: PublicSession;
-publicSession.user satisfies string;
+publicSession.user.account satisfies string | null;
+publicSession.user.identity.issuer satisfies string;
+publicSession.user.identity.subject satisfies string;
 // @ts-expect-error Raw transport issuer is not exposed by PublicSession.
 void publicSession.issuer;
 // @ts-expect-error Raw transport subject is not exposed by PublicSession.
@@ -49,31 +51,31 @@ publicDb.getInternalSession();
 // @ts-expect-error Trusted reserved sessions are not public configuration.
 void publicDb.getConfig().trustedReservedSession;
 
+declare const account: import("../index.js").AccountHandle;
+const enrolled: PackageDbConfig = { appId: "app", serverUrl: "https://core.example", account };
+const runtimeEnrolled: RuntimeDbConfig = enrolled;
+// @ts-expect-error Public contexts require an enrolled account handle.
 const unauthenticated: PackageDbConfig = { appId: "app" };
-const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };
-const jwt: RuntimeDbConfig = { appId: "app", jwtToken: "jwt" };
-const cookie: RuntimeDbConfig = {
-  appId: "app",
-  cookieSession,
+// @ts-expect-error Credentials are enrolled outside contexts.
+const localFirst: PackageDbConfig = { ...enrolled, secret: "secret" };
+// @ts-expect-error External JWTs must be registered or logged in first.
+const jwt: RuntimeDbConfig = { ...enrolled, jwtToken: "jwt" };
+// @ts-expect-error Cookie claims cannot replace account admission.
+const cookie: RuntimeDbConfig = { ...enrolled, cookieSession };
+// @ts-expect-error Admin credentials belong to backend APIs.
+const admin: PackageDbConfig = { ...enrolled, adminSecret: "admin" };
+// @ts-expect-error Backend credentials belong to jazz-tools/backend.
+const backend: PackageDbConfig = { ...enrolled, backendSecret: "backend" };
+// @ts-expect-error Raw account IDs cannot substitute for opaque handles.
+const forged: PackageDbConfig = { appId: "app", account: { id: "account" } };
+const forgedAuthority: PackageDbConfig = {
+  ...enrolled,
+  // @ts-expect-error Registry authority is obtained only from the handle.
+  accountRegistryAuthority: "https://other.example",
 };
-const admin: PackageDbConfig = { appId: "app", adminSecret: "admin" };
-const backend: PackageDbConfig = {
-  appId: "app",
-  // @ts-expect-error backend admission credentials are server-only; use jazz-tools/backend.
-  backendSecret: "backend",
-  cookieSession,
-};
-const optionalJwt: PackageDbConfig = {
-  appId: "app",
-  jwtToken: undefined as string | undefined,
-};
-
-// @ts-expect-error Local-first and JWT authentication are mutually exclusive.
-const localFirstWithJwt: PackageDbConfig = { appId: "app", secret: "secret", jwtToken: "jwt" };
-// @ts-expect-error Local-first and cookie authentication are mutually exclusive.
-const localFirstWithCookie: PackageDbConfig = { appId: "app", secret: "secret", cookieSession };
-// @ts-expect-error JWT and cookie authentication are mutually exclusive.
-const jwtWithCookie: RuntimeDbConfig = { appId: "app", jwtToken: "jwt", cookieSession };
+void forgedAuthority;
+void runtimeEnrolled;
+void forged;
 
 void packageInsertOptions;
 void runtimeInsertOptions;
@@ -83,9 +85,5 @@ void jwt;
 void cookie;
 void admin;
 void backend;
-void optionalJwt;
-void localFirstWithJwt;
-void localFirstWithCookie;
-void jwtWithCookie;
 void (null as unknown as PackageCreateOptions);
 void (null as unknown as RuntimeCreateOptions);

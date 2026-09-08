@@ -1,6 +1,5 @@
 import * as React from "react";
-import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { JazzSessionProvider, type JazzSessionConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -28,21 +27,8 @@ const defaultAppId = "00000000-0000-0000-0000-000000000002";
 declare const process: { env: Record<string, string | undefined> };
 const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
-
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? envAppId ?? defaultAppId;
-
-  return {
-    appId,
-    env: overrides.env ?? "dev",
-    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    secret,
-    adminSecret: overrides.adminSecret ?? envAdminSecret,
-    ...overrides,
-  };
-}
-
+const appId = envAppId ?? defaultAppId;
+const serverUrl = envServerUrl ?? defaultServerUrl;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -81,17 +67,17 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: Partial<DbConfig>;
+  config?: JazzSessionConfig;
   fallback?: React.ReactNode;
 };
 
 // #region context-setup-expo
 export default function App({ config, fallback }: AppProps = {}) {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
-  const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
+    <JazzSessionProvider
+      config={config ?? { appId, serverUrl, initial: "local-first" }}
+      fallback={fallback ?? defaultFallback}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -99,7 +85,7 @@ export default function App({ config, fallback }: AppProps = {}) {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion context-setup-expo

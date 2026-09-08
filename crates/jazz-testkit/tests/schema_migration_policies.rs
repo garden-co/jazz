@@ -89,6 +89,9 @@ async fn push_full_catalogue(server: &JazzServer, schemas: &[Schema], lenses: &[
 async fn connect_with_fresh_client_id(builder: TestingClient<'_>) -> JazzClient {
     let mut context = builder.build_context();
     context.client_id = Some(ClientId::new());
+    support::enroll_test_context(&mut context)
+        .await
+        .expect("enroll test identity");
     let client = jazz_testkit::connect(context)
         .await
         .expect("connect test client");

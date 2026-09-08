@@ -7,19 +7,17 @@ product slice, not another generic Todo tutorial.
 ## What it demonstrates
 
 - Better Auth owns the browser session, signs an ES256 JWT, and exposes its
-  JWKS route; Jazz recreates its provider after a principal change and only
-  refreshes a JWT for the same principal.
+  JWKS route. Jazz enrolls that JWT into an account handle: sign-up uses
+  `registerJWT`, sign-in uses `loginJWT`, and the provider receives the result.
 - Better Auth's generated tables are persisted through a trusted backend Jazz
-  context and carry explicit deny-all client policies. The dashboard performs
-  the one idempotent profile bootstrap after authentication; read hooks do not
-  create accounts, profiles, rooms, or memberships.
+  context and carry explicit deny-all client policies. Creating a room can
+  provision its profile; read hooks do not create accounts, profiles, rooms, or memberships.
 - A room creator may bootstrap their own membership and admit another profile.
   The room UI lists members and lets its issuer-scoped creator admit or remove
   them. A guest cannot add themself. A message must reference a profile owned by
-  the authenticated canonical `session.user`. Profiles and memberships store
-  that same `[issuer, subject]` identity, so equal raw Better Auth user ids from
-  different issuers cannot inherit one another's profile, rooms, membership, or
-  send authority. Revocation rejects subsequent writes at the serving authority;
+  `session.user.account`. Profiles, memberships, and row provenance store that
+  enrolled account UUID. The external issuer and subject remain account identity
+  metadata, never membership values. Revocation rejects subsequent writes at the serving authority;
   it does not erase rows already retained locally.
 - The attachment picker accepts inline PNG, JPEG, WebP, text, and PDF files up
   to 256 KiB. This is client-side UX validation only, not a Jazz authorization,

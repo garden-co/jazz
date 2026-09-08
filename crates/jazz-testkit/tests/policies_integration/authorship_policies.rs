@@ -4,7 +4,7 @@ use std::time::Duration;
 use jazz::query::Query;
 
 use super::support::wait_for_edge_txs;
-use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
+use super::support::{connect_ready_client, wait_for_rows};
 use super::{pe, permissions};
 use jazz::tools::{
     ColumnType, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
@@ -34,18 +34,49 @@ fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Val
 }
 
 fn canonical_user_principal(user_id: &str) -> Value {
-    Value::from(
-        Session::new("urn:jazz:test", user_id)
-            .author_subject()
-            .expect("test session has a canonical author subject")
-            .canonical()
-            .to_owned(),
-    )
+    structured_author(user_id, None)
 }
 
-async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
+fn structured_author(user_id: &str, account: Option<jazz::account_registry::AccountId>) -> Value {
+    Value::Row {
+        id: None,
+        values: vec![
+            account
+                .map(|id| Value::Uuid(ObjectId::from_uuid(id.0)))
+                .unwrap_or(Value::Null),
+            Value::Row {
+                id: None,
+                values: vec![
+                    Value::Text("urn:jazz:test".into()),
+                    Value::Text(user_id.into()),
+                ],
+            },
+        ],
+    }
+}
+
+async fn connect_author(
+    server: &JazzServer,
+    schema: &jazz::tools::Schema,
+    user_id: &str,
+) -> (JazzClient, Value) {
+    let (context, client) = jazz_testkit::TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .ready_on("notes", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+    let author = structured_author(
+        user_id,
+        Some(context.account_id.expect("enrolled public author")),
+    );
+    (client, author)
+}
+
+async fn create_note_as(client: &JazzClient, title: &str) -> ObjectId {
     client
-        .for_session(Session::new("urn:jazz:test", user_id))
         .insert("notes", note_input(title))
         .expect("create note with session-authored provenance")
         .0
@@ -90,7 +121,9 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         .start()
         .await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
-    let session = Session::new("urn:jazz:test", super::ALICE_ID);
+    let account = jazz::account_registry::AccountId(uuid::Uuid::from_u128(0xa11ce));
+    let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+    session.account_id = Some(account);
     let transaction = backend
         .for_session(session.clone())
         .begin_transaction()
@@ -112,7 +145,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         .expect("transaction reads retain the explicit session author");
     assert_eq!(
         staged_rows[0].1,
-        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        vec![
+            "session transaction".into(),
+            structured_author(super::ALICE_ID, Some(account)),
+            structured_author(super::ALICE_ID, Some(account)),
+        ],
         "staged provenance must not use the backend SYSTEM author"
     );
     let transaction_id = transaction.commit().expect("commit session transaction");
@@ -127,7 +164,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
     .await;
     assert_eq!(
         rows[0].1,
-        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        vec![
+            "session transaction".into(),
+            structured_author(super::ALICE_ID, Some(account)),
+            structured_author(super::ALICE_ID, Some(account)),
+        ],
         "backend SYSTEM identity must not replace the explicit session author"
     );
 
@@ -194,10 +235,10 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
-    let alice_note = create_note_as(&alice, super::ALICE_ID, "alice note").await;
-    let bob_note = create_note_as(&bob, super::BOB_ID, "bob note").await;
+    let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
+    let alice_note = create_note_as(&alice, "alice note").await;
+    let bob_note = create_note_as(&bob, "bob note").await;
 
     let query = Query::from("notes")
         .select(["title", "$createdBy", "$updatedBy"])
@@ -212,7 +253,11 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
     .await;
     assert_eq!(
         alice_rows[0].1,
-        provenance_values("alice note", super::ALICE_ID, super::ALICE_ID)
+        vec![
+            Value::Text("alice note".into()),
+            alice_author.clone(),
+            alice_author.clone()
+        ]
     );
 
     let bob_rows = wait_for_rows(
@@ -224,19 +269,19 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
     .await;
     assert_eq!(
         bob_rows[0].1,
-        provenance_values("bob note", super::BOB_ID, super::BOB_ID)
+        vec![
+            Value::Text("bob note".into()),
+            bob_author.clone(),
+            bob_author.clone()
+        ]
     );
 
-    let denied_update = bob
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
-        .update(alice_note, vec![("title".to_string(), "bob edit".into())]);
+    let denied_update = bob.update(alice_note, vec![("title".to_string(), "bob edit".into())]);
     assert!(
         denied_update.is_err(),
         "bob should not be able to update alice's row under $createdBy policy"
     );
-    let denied_delete = bob
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
-        .delete(alice_note);
+    let denied_delete = bob.delete(alice_note);
     assert!(
         denied_delete.is_err(),
         "bob should not be able to delete alice's row under $createdBy policy"
@@ -249,7 +294,12 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
         |rows| {
             (rows.len() == 1
                 && rows[0].0 == alice_note
-                && rows[0].1 == provenance_values("alice note", super::ALICE_ID, super::ALICE_ID))
+                && rows[0].1
+                    == vec![
+                        Value::Text("alice note".into()),
+                        alice_author.clone(),
+                        alice_author.clone(),
+                    ])
             .then_some(rows)
         },
     )
@@ -263,7 +313,12 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
         |rows| {
             (rows.len() == 1
                 && rows[0].0 == bob_note
-                && rows[0].1 == provenance_values("bob note", super::BOB_ID, super::BOB_ID))
+                && rows[0].1
+                    == vec![
+                        Value::Text("bob note".into()),
+                        bob_author.clone(),
+                        bob_author.clone(),
+                    ])
             .then_some(rows)
         },
     )
@@ -313,12 +368,12 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
 
     let system_note = create_note_without_session(&backend, "server-generated").await;
-    let alice_note = create_note_as(&alice, super::ALICE_ID, "alice note").await;
+    let alice_note = create_note_as(&alice, "alice note").await;
     let query = Query::from("notes")
         .select(["title", "$createdBy"])
         .order_by("title", jazz::query::OrderDirection::Asc);
@@ -332,10 +387,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
     .await;
     assert_eq!(
         alice_rows[0].1,
-        vec![
-            Value::from("alice note"),
-            canonical_user_principal(super::ALICE_ID),
-        ]
+        vec![Value::from("alice note"), alice_author.clone(),]
     );
     assert!(
         alice_rows.iter().all(|(id, _)| *id != system_note),
@@ -402,12 +454,12 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
 
     let system_note = create_note_without_session(&backend, "server-generated").await;
-    let alice_note = create_note_as(&alice, super::ALICE_ID, "alice note").await;
+    let alice_note = create_note_as(&alice, "alice note").await;
     let query = Query::from("notes")
         .select(["title", "$createdBy"])
         .order_by("title", jazz::query::OrderDirection::Asc);
@@ -430,7 +482,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .expect("alice-owned row should be visible");
     assert_eq!(
         alice_owned.1,
-        vec![Value::from("alice note"), super::ALICE_ID.into()]
+        vec![Value::from("alice note"), alice_author.clone()]
     );
     let system_owned = alice_rows
         .iter()
@@ -497,8 +549,8 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
+    let (alice, _alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
 
     let attributed_note =
@@ -571,8 +623,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let query = Query::from("notes").select([
         "title",
         "shared",
@@ -584,7 +636,6 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     // The shared flag bootstraps the row into Bob's local state before the
     // `$updatedBy` handoff on the later update.
     let note_id = alice
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert(
             "notes",
             jazz::row_input!("title" => "draft", "shared" => true),
@@ -601,14 +652,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(initial_rows[0].1[0], Value::from("draft"));
     assert_eq!(initial_rows[0].1[1], Value::from(true));
-    assert_eq!(
-        initial_rows[0].1[2],
-        canonical_user_principal(super::ALICE_ID)
-    );
-    assert_eq!(
-        initial_rows[0].1[3],
-        canonical_user_principal(super::ALICE_ID)
-    );
+    assert_eq!(initial_rows[0].1[2], alice_author.clone());
+    assert_eq!(initial_rows[0].1[3], alice_author.clone());
     let Value::Timestamp(initial_created_at) = initial_rows[0].1[4] else {
         panic!("$createdAt should decode as timestamp")
     };
@@ -625,11 +670,10 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(bob_rows[0].1[0], Value::from("draft"));
     assert_eq!(bob_rows[0].1[1], Value::from(true));
-    assert_eq!(bob_rows[0].1[2], canonical_user_principal(super::ALICE_ID));
-    assert_eq!(bob_rows[0].1[3], canonical_user_principal(super::ALICE_ID));
+    assert_eq!(bob_rows[0].1[2], alice_author.clone());
+    assert_eq!(bob_rows[0].1[3], alice_author.clone());
 
     let bob_update = bob
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             note_id,
             vec![
@@ -663,8 +707,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(bob_rows[0].1[0], Value::from("revised by bob"));
     assert_eq!(bob_rows[0].1[1], Value::from(false));
-    assert_eq!(bob_rows[0].1[2], canonical_user_principal(super::ALICE_ID));
-    assert_eq!(bob_rows[0].1[3], canonical_user_principal(super::BOB_ID));
+    assert_eq!(bob_rows[0].1[2], alice_author.clone());
+    assert_eq!(bob_rows[0].1[3], bob_author.clone());
     let Value::Timestamp(updated_created_at) = bob_rows[0].1[4] else {
         panic!("updated $createdAt should decode as timestamp")
     };
@@ -712,11 +756,11 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
-    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
 
-    let alice_note = create_note_as(&alice, super::ALICE_ID, "alice note").await;
-    let bob_note = create_note_as(&bob, super::BOB_ID, "bob note").await;
+    let alice_note = create_note_as(&alice, "alice note").await;
+    let bob_note = create_note_as(&bob, "bob note").await;
 
     let query = Query::from("notes")
         .select([
@@ -740,8 +784,8 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
         .find(|(id, _)| *id == alice_note)
         .expect("alice-authored row should be present");
     assert_eq!(alice_row.1[0], Value::from("alice note"));
-    assert_eq!(alice_row.1[1], canonical_user_principal(super::ALICE_ID));
-    assert_eq!(alice_row.1[2], canonical_user_principal(super::ALICE_ID));
+    assert_eq!(alice_row.1[1], alice_author.clone());
+    assert_eq!(alice_row.1[2], alice_author.clone());
     let Value::Timestamp(alice_created_at) = alice_row.1[3] else {
         panic!("alice $createdAt should decode as timestamp")
     };
@@ -755,8 +799,8 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
         .find(|(id, _)| *id == bob_note)
         .expect("bob-authored row should be present");
     assert_eq!(bob_row.1[0], Value::from("bob note"));
-    assert_eq!(bob_row.1[1], canonical_user_principal(super::BOB_ID));
-    assert_eq!(bob_row.1[2], canonical_user_principal(super::BOB_ID));
+    assert_eq!(bob_row.1[1], bob_author.clone());
+    assert_eq!(bob_row.1[2], bob_author.clone());
     let Value::Timestamp(bob_created_at) = bob_row.1[3] else {
         panic!("bob $createdAt should decode as timestamp")
     };

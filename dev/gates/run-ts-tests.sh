@@ -44,7 +44,7 @@ fi
 # Browser-only receipts keep their topology out of that target and run through
 # `test:browser` below, where their Vitest projects own the Jazz server commands.
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}
-browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth test:browser"}
+browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
 log_dir=${RUNNER_TEMP:-/tmp}
@@ -95,6 +95,9 @@ interrupt() {
 
 trap 'interrupt 130' INT
 trap 'interrupt 143' TERM
+
+echo "Node test live log: ${node_tests_log}"
+echo "Browser test live log: ${browser_tests_log}"
 
 setsid bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!

@@ -5,7 +5,17 @@ import permissions from "../../permissions.js";
 
 let testApp: PolicyTestApp;
 const issuer = "https://poster-shop.test";
-const authorFor = (userId: string) => JSON.stringify([issuer, userId]);
+const accountIds = new Map<string, string>();
+
+function authorFor(userId: string, identityIssuer = issuer): string {
+  const key = [identityIssuer, userId].join("\u0000");
+  let accountId = accountIds.get(key);
+  if (!accountId) {
+    accountId = crypto.randomUUID();
+    accountIds.set(key, accountId);
+  }
+  return accountId;
+}
 beforeEach(async () => {
   testApp = await createPolicyTestApp(app, permissions, expect);
 });
@@ -17,18 +27,21 @@ it("allows an admin to bootstrap a canvas and an editor to add same-canvas shape
   const owner = testApp.as({
     issuer,
     user_id: ownerId,
+    account_id: authorFor(ownerId),
     claims: {},
     authMode: "external",
   });
   const editor = testApp.as({
     issuer,
     user_id: editorId,
+    account_id: authorFor(editorId),
     claims: {},
     authMode: "external",
   });
   const sameSubjectOtherIssuer = testApp.as({
     issuer: "https://other-poster-provider.test",
     user_id: editorId,
+    account_id: authorFor(editorId, "https://other-poster-provider.test"),
     claims: {},
     authMode: "external",
   });
@@ -106,18 +119,21 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   const owner = testApp.as({
     issuer,
     user_id: ownerId,
+    account_id: authorFor(ownerId),
     claims: {},
     authMode: "external",
   });
   const editor = testApp.as({
     issuer,
     user_id: editorId,
+    account_id: authorFor(editorId),
     claims: {},
     authMode: "external",
   });
   const viewer = testApp.as({
     issuer,
     user_id: viewerId,
+    account_id: authorFor(viewerId),
     claims: {},
     authMode: "external",
   });
@@ -191,6 +207,7 @@ it("denies cross-canvas shapes even for an admin of both canvases", async () => 
   const owner = testApp.as({
     issuer,
     user_id: ownerId,
+    account_id: authorFor(ownerId),
     claims: {},
     authMode: "external",
   });
@@ -233,12 +250,14 @@ it("keeps cursor creation default-deny until its ownership semantics are specifi
   const owner = testApp.as({
     issuer,
     user_id: ownerId,
+    account_id: authorFor(ownerId),
     claims: {},
     authMode: "external",
   });
   const editor = testApp.as({
     issuer,
     user_id: editorId,
+    account_id: authorFor(editorId),
     claims: {},
     authMode: "external",
   });

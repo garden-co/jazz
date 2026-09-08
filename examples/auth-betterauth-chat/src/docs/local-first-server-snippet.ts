@@ -1,10 +1,10 @@
 import { betterAuth } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
 import { jwt } from "better-auth/plugins";
 
 // #region local-first-verify-hook
+// Better Auth owns its subjects. Jazz core verifies ordinary provider JWTs
+// during linking; no sign-up proof hook or provider user-ID replacement is needed.
 export const auth = betterAuth({
-  // ...your database, email, plugins config
   plugins: [
     jwt({
       jwks: { keyPairConfig: { alg: "ES256" } },
@@ -14,40 +14,5 @@ export const auth = betterAuth({
       },
     }),
   ],
-  hooks: {
-    before: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== "/sign-up/email") return;
-
-      const { verifyLocalFirstIdentityProof } = await import("jazz-napi");
-      const {
-        ok,
-        error,
-        id: provedUserId,
-      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "betterauth-signup");
-      if (!ok) {
-        throw new APIError("BAD_REQUEST", { message: error });
-      }
-
-      return {
-        context: {
-          ...ctx,
-          body: { ...ctx.body, provedUserId },
-        },
-      };
-    }),
-  },
-  databaseHooks: {
-    user: {
-      create: {
-        before: async (user: any, ctx: any) => {
-          // Assign the proven Jazz user ID to the BetterAuth user
-          const provedUserId = ctx?.body?.provedUserId;
-          if (provedUserId) {
-            return { data: { ...user, id: provedUserId } };
-          }
-        },
-      },
-    },
-  },
 });
 // #endregion local-first-verify-hook

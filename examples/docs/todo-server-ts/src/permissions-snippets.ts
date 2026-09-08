@@ -4,18 +4,18 @@ import { schema as s } from "jazz-tools";
 const schema = {
   projects: s.table({
     name: s.string(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
   }),
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
   }),
   todoShares: s.table({
     todoId: s.ref("todos"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     can_read: s.boolean(),
   }),
 };
@@ -25,15 +25,15 @@ const exampleApp = s.defineApp(schema);
 
 // #region permissions-simple-ts
 s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowRead.where({ owner_id: session.user.account });
   // Users cannot create todos with different owners
-  policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
   // Users can update their own todos, but only if not already done
   policy.todos.allowUpdate
-    .whereOld(allOf([{ owner_id: session.user }, { done: false }]))
-    .whereNew({ owner_id: session.user });
+    .whereOld(allOf([{ owner_id: session.user.account }, { done: false }]))
+    .whereNew({ owner_id: session.user.account });
   // Users can only delete their own todos
-  policy.todos.allowDelete.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 // #endregion permissions-simple-ts
 
@@ -84,7 +84,10 @@ s.definePermissions(exampleApp, ({ policy, anyOf, allOf, allowedTo }) => {
 s.definePermissions(exampleApp, ({ policy, allOf, anyOf, allowedTo, session }) => {
   // Users can read a todo if they own it, or if it's not done and they can read its project.
   policy.todos.allowRead.where(
-    anyOf([{ owner_id: session.user }, allOf([{ done: false }, allowedTo.read("project")])]),
+    anyOf([
+      { owner_id: session.user.account },
+      allOf([{ done: false }, allowedTo.read("project")]),
+    ]),
   );
 });
 // #endregion permissions-combinators-ts
@@ -92,7 +95,7 @@ s.definePermissions(exampleApp, ({ policy, allOf, anyOf, allowedTo, session }) =
 // #region permissions-session-claims-ts
 s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where(
-    anyOf([{ owner_id: session.user }, session.where({ "claims.role": "manager" })]),
+    anyOf([{ owner_id: session.user.account }, session.where({ "claims.role": "manager" })]),
   );
 });
 // #endregion permissions-session-claims-ts
@@ -113,10 +116,10 @@ s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
   // Users can read a todo if they own it, or if someone shared it with them.
   policy.todos.allowRead.where((todo) =>
     anyOf([
-      { owner_id: session.user },
+      { owner_id: session.user.account },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user,
+        user_id: session.user.account,
         can_read: true,
       }),
     ]),
@@ -126,9 +129,9 @@ s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
 
 // #region permissions-update-protected-columns
 s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user }).whereNew((updatedTodo) =>
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user.account }).whereNew((updatedTodo) =>
     allOf([
-      { owner_id: session.user },
+      { owner_id: session.user.account },
       // `parentId` and `projectId` cannot be updated.
       policy.todos.exists.where({
         id: updatedTodo.id,
@@ -144,7 +147,7 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 s.definePermissions(exampleApp, ({ policy, session }) => {
   // User can only update their own rows, and the result must still be owned by them
   policy.todos.allowUpdate
-    .whereOld({ owner_id: session.user })
-    .whereNew({ owner_id: session.user });
+    .whereOld({ owner_id: session.user.account })
+    .whereNew({ owner_id: session.user.account });
 });
 // #endregion permissions-whereold-wherenew-ts

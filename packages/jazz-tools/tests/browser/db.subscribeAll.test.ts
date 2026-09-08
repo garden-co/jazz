@@ -5,7 +5,7 @@ import {
   type QueryBuilder,
   type TableProxy,
 } from "../../src/runtime/db.js";
-import { createDb } from "../../src/runtime/default-create-db.js";
+import { createBrowserTestDb as createDb } from "./support.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 
@@ -189,7 +189,7 @@ function makeQuery<T>(
 async function waitForCondition(
   check: () => boolean,
   timeoutMs: number,
-  errorMessage: string,
+  errorMessage: string | (() => string),
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -198,11 +198,28 @@ async function waitForCondition(
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(errorMessage);
+  throw new Error(typeof errorMessage === "function" ? errorMessage() : errorMessage);
 }
 
 function hasChangeForId<T>(delta: SubscriptionDelta<T>, kind: 0 | 1 | 2, id: string): boolean {
   return delta.delta.some((change) => change.kind === kind && change.id === id);
+}
+
+function describeSubscriptionHistory<T extends { id: string }>(deltas: SubscriptionDelta<T>[]) {
+  const maxFrames = 16;
+  const maxIdsPerFrame = 8;
+  return {
+    frameCount: deltas.length,
+    frames: deltas.slice(-maxFrames).map((delta) => ({
+      reset: delta.reset === true,
+      changeCount: delta.delta.length,
+      changes: delta.delta
+        .slice(0, maxIdsPerFrame)
+        .map((change) => ({ kind: change.kind, id: change.id })),
+      resultCount: delta.all.length,
+      resultIds: delta.all.slice(0, maxIdsPerFrame).map((row) => row.id),
+    })),
+  };
 }
 
 describe("internal subscription delta browser integration", () => {
@@ -488,7 +505,9 @@ describe("internal subscription delta browser integration", () => {
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 0, value.id)),
       4000,
-      "expected the live subscription to observe the subsequent write",
+      () =>
+        "expected the live subscription to observe the subsequent write; " +
+        `history=${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
     expect(deltas[0]?.all).toEqual([]);
     expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
@@ -883,29 +902,52 @@ describe("internal subscription delta browser integration", () => {
       }),
     );
 
+    // Observe existing txId promises only; fulfillment does not prove Local durability.
+    // Adding Local waits here would
+    // advance transport and could hide the cold-hop delivery failure (#2621).
+    const txIdStates: Record<string, "pending" | "fulfilled" | "rejected"> = {};
+    function observeTxId<T extends { txId: Promise<unknown> }>(label: string, write: T): T {
+      txIdStates[label] = "pending";
+      void write.txId.then(
+        () => {
+          txIdStates[label] = "fulfilled";
+        },
+        () => {
+          txIdStates[label] = "rejected";
+        },
+      );
+      return write;
+    }
+
     const {
       value: { id: orgAId },
-    } = db.insert(orgs, { name: "Org A" });
+    } = observeTxId("orgA", db.insert(orgs, { name: "Org A" }));
     const {
       value: { id: orgBId },
-    } = db.insert(orgs, { name: "Org B" });
+    } = observeTxId("orgB", db.insert(orgs, { name: "Org B" }));
     const {
       value: { id: teamAId },
-    } = db.insert(teams, {
-      name: "Team A",
-      org_id: orgAId,
-      parent_id: undefined,
-    });
+    } = observeTxId(
+      "teamA",
+      db.insert(teams, {
+        name: "Team A",
+        org_id: orgAId,
+        parent_id: undefined,
+      }),
+    );
     const {
       value: { id: teamBId },
-    } = db.insert(teams, {
-      name: "Team B",
-      org_id: orgBId,
-      parent_id: undefined,
-    });
+    } = observeTxId(
+      "teamB",
+      db.insert(teams, {
+        name: "Team B",
+        org_id: orgBId,
+        parent_id: undefined,
+      }),
+    );
     const {
       value: { id: userId },
-    } = db.insert(users, { name: "Mover", team_id: teamAId });
+    } = observeTxId("user", db.insert(users, { name: "Mover", team_id: teamAId }));
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -924,7 +966,9 @@ describe("internal subscription delta browser integration", () => {
         return latestAll.length === 1 && latestAll[0]?.id === teamAId;
       },
       4000,
-      "expected initial team hop result",
+      () =>
+        "expected initial team hop result; " +
+        `txIdStates=${JSON.stringify(txIdStates)}; history=${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
 
     await db.update(users, userId, { team_id: teamBId });

@@ -51,6 +51,8 @@ export interface RuntimeSourcesConfig {
    * still derives and verifies its own namespace from the attached session.
    */
   inspectorHostPhysicalDbName?: string;
+  /** @internal Worker-verified diagnostic attachment scope; never public account admission. */
+  inspectorBinding?: import("./native-runtime/browser-worker-protocol.js").InspectorAttachmentBinding;
 
   /**
    * @internal Verified identity forwarded by the same-origin inspector host.
@@ -70,6 +72,8 @@ export type AuthMode = "external" | "local-first" | "anonymous";
  * Session context for policy evaluation.
  */
 export interface Session {
+  /** Account admitted by the registry; never inferred from provider claims. */
+  account_id?: string;
   /** Validated JWT issuer (`iss`). */
   issuer: string;
   /** User identifier */
@@ -83,19 +87,17 @@ export interface Session {
 /**
  * A session that Jazz has admitted for use by a client binding.
  *
- * `user` is the opaque, canonical JSON encoding of the admitted JWT's exact
- * `[iss, sub]` pair. Policies see it as `session.user`, and Jazz records the
- * same identity in `$createdBy` and
- * `$updatedBy`. It is deliberately distinct from `user_id`: the latter is the
- * provider-controlled raw JWT `sub`.
- *
- * This is not a user-row reference, display name, or raw `sub`. Applications
- * must obtain it from an admitted session rather than constructing it
- * themselves. Local interning is an implementation detail and is never
- * exposed here.
+ * `user` retains both stable account ownership and the exact JWT identity used
+ * to act. Compare `user.account` for ownership across linked identities; compare
+ * all fields for exact authorship. Provider claims never supply account IDs.
+ * Intern handles are process-local Rust details and are never exposed here.
  */
 export interface PublicSession {
-  readonly user: string;
+  /** Anonymous/internal readers may have no admitted account; row authors always do. */
+  readonly user: Readonly<{
+    account: string | null;
+    identity: import("../magic-columns.js").RowAuthor["identity"];
+  }>;
   readonly claims: Readonly<Record<string, unknown>>;
   readonly authMode: AuthMode;
 }
@@ -104,6 +106,8 @@ export interface PublicSession {
  * Configuration for connecting to Jazz.
  */
 export interface AppContext {
+  /** @internal Registry-admitted account supplied by an account handle. */
+  accountId?: string;
   /** Application identifier (used for isolation) */
   appId: string;
 

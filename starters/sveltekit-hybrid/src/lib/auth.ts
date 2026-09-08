@@ -1,7 +1,6 @@
 import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { bearer, jwt } from "better-auth/plugins";
-import { APIError, createAuthMiddleware } from "better-auth/api";
 import { sveltekitCookies } from "better-auth/svelte-kit";
 import { getRequestEvent } from "$app/server";
 import { env } from "$env/dynamic/private";
@@ -38,46 +37,6 @@ export const auth = betterAuth({
     autoSignIn: true,
     minPasswordLength: 8,
     requireEmailVerification: false,
-  },
-  hooks: {
-    // Gate email sign-up on a valid local-first proof token. The signup form
-    // mints this by asking Jazz to sign a short-lived token bound to the
-    // browser's anonymous Jazz identity; BetterAuth then carries that
-    // identity forward so the user's existing local data survives the
-    // upgrade.
-    before: createAuthMiddleware(async (ctx) => {
-      if (ctx.path !== "/sign-up/email") return;
-
-      const { verifyLocalFirstIdentityProof } = await import("jazz-napi");
-      const {
-        ok,
-        error,
-        id: provedUserId,
-      } = verifyLocalFirstIdentityProof(ctx.body?.proofToken, "sveltekit-localfirst-signup");
-      if (!ok) {
-        throw new APIError("BAD_REQUEST", { message: error });
-      }
-
-      return {
-        context: {
-          ...ctx,
-          body: { ...ctx.body, provedUserId },
-        },
-      };
-    }),
-  },
-  databaseHooks: {
-    user: {
-      create: {
-        before: async (user, context) => {
-          const provedUserId = (context?.body as { provedUserId?: string } | undefined)
-            ?.provedUserId;
-          if (provedUserId) {
-            return { data: { ...user, id: provedUserId } };
-          }
-        },
-      },
-    },
   },
   plugins: [
     bearer(),

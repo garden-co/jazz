@@ -5,10 +5,10 @@ A small React + Vite example that shows how to integrate an external JWT auth se
 What it demonstrates:
 
 - A local Express auth server that issues ES256 JWTs and exposes a JWKS endpoint
-- Passing a JWT token directly to `JazzProvider` to authenticate as a named user
-- Recreating `JazzProvider` on login and logout instead of mutating a live client across principal changes
+- Resolving provider JWTs into opaque account handles before opening Jazz contexts
+- Linking fresh provider identities outside contexts after ordinary graceful shutdown
 - Falling back to local-first auth when no token is present
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
 Passwords are stored in plain text in memory for example simplicity only.
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
@@ -63,3 +63,18 @@ for posting to Announcements vs the general chat. The runtime auth
 server (`server/auth-server.ts`) and the sign-in UI are covered by
 the example itself when run via `pnpm dev` + `pnpm dev:auth` — they
 aren't exercised by `pnpm test`.
+
+### Account lifecycle
+
+Provider sign-in uses `loginJWT` to resolve a registered account. Sign-up creates
+an ordinary provider identity, gracefully shuts down the local Jazz client,
+then links the new JWT to its account using `linkJWT`. The provider does not
+rewrite user IDs or mint special proof claims. New contexts receive only the
+returned account handle.
+
+If linking fails, the existing account is reopened. On reload a failed provider
+login also preserves the retained local account, and the UI offers a link retry.
+A new account is explicitly registered only when there is no retained local
+account to link. These operations never merge existing accounts. Signing out
+closes the client before clearing provider credentials and choosing a new local
+account.

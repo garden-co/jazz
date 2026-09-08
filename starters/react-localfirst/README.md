@@ -2,7 +2,7 @@
 
 A minimal Vite + React starter for [Jazz](https://jazz.tools) with a pure
 local-first todo app. Users' data persists under a per-device anonymous Jazz
-identity.
+identity managed by an opaque account handle.
 
 ## What this starter gives you
 
@@ -11,7 +11,7 @@ identity.
   plugin in `vite.config.ts`.
 - Row-level permissions wired through `$createdBy`, so every row is
   automatically scoped to the user who created it.
-- Zero auth code to wade through while you get your bearings.
+- A session that restores the selected handle or creates a local-first account.
 
 ## Getting started
 
@@ -38,11 +38,7 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-Every browser gets its own Ed25519 secret, generated and stored by
-`BrowserAuthSecretStore` on first load. That secret becomes the identity
-Jazz uses for all subsequent writes. `<JazzProvider auth="local-first">`
-loads or generates the secret client-side and hands the same local-first
-identity to its descendants.
+`JazzSessionProvider` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -108,12 +104,8 @@ anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 
-- **One device per user.** The secret lives in browser storage; clearing
-  site data wipes the identity and the user starts fresh. There is no
-  account portability between devices or browsers.
-- **No account recovery.** If a user loses their device, their data is
-  gone. When those constraints matter, use the `react-selfhosted-hybrid`
-  starter instead.
+- **Back up before clearing browser storage.** The selected account is local
+  to this browser until the user saves the recovery phrase or passkey backup.
 
 ## Where to go next
 

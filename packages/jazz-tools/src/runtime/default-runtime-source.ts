@@ -142,7 +142,7 @@ export function selfSignedClientProofFromConfig(
   return {
     token: config.jwtToken,
     appId: config.appId,
-    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id),
+    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
 }
 
@@ -232,6 +232,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
     const context: AppContext = {
       appId: config.appId,
+      accountId: config.accountId,
       schema,
       driver: config.driver,
       serverUrl: config.serverUrl,
@@ -312,6 +313,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           onStorageReset,
           onStorageInvalidated,
         },
+        config.runtimeSources.inspectorBinding,
       );
     }
     return new SharedBrowserWorkerConnection(

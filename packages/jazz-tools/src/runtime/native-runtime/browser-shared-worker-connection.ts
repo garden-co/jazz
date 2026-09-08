@@ -79,7 +79,7 @@ function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): st
  * explicit clean return or retirement.
  */
 export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
-  private worker: SharedWorker | null = null;
+  private worker: Pick<SharedWorker, "port"> | null = null;
   private port: MessagePort | null = null;
   private closed = false;
 
@@ -165,8 +165,24 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     );
   }
 
+  /** @internal A context-scoped lease port minted by Inspector control. */
+  static async acquireFromPort(
+    port: MessagePort,
+    options: BrowserForegroundNodeLeaseOptions,
+  ): Promise<SharedBrowserForegroundNodeLease> {
+    const outcome = await this.acquireFromWorkerGeneration(
+      { port },
+      options,
+      `inspector:${options.dbName}:${options.storageOwner}`,
+      crypto.randomUUID(),
+      FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS,
+    );
+    if (outcome.type !== "ready") throw new Error("Inspector worker is no longer available");
+    return outcome.lease;
+  }
+
   private static acquireFromWorkerGeneration(
-    worker: SharedWorker,
+    worker: Pick<SharedWorker, "port">,
     options: BrowserForegroundNodeLeaseOptions,
     cleanupKey: string,
     attemptId: string,
@@ -343,6 +359,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
 export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
+  private initialConfigurationAdmissionRejected = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
@@ -464,7 +481,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           // report that rejection before the caller's operation has observed
           // readiness. The outer, constructor-owned state machine turns this
           // into the same explicit error after it has installed containment.
-          resolve({ connected: false, error: deserializeBrowserRelayError(event.data.error) });
+          const error = deserializeBrowserRelayError(event.data.error);
+          this.initialConfigurationAdmissionRejected =
+            error.message === "incompatible persistent browser configuration";
+          resolve({ connected: false, error });
           return;
         }
         if (event.data?.type === "worker-closing") {
@@ -579,6 +599,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.reconnect(authJson, sessionClaims);
   }
 
+  canRetryInitialConfigurationAdmission(): boolean {
+    return this.initialConfigurationAdmissionRejected;
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -587,6 +611,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     this.connection = null;
     this.worker?.port.close();
     this.worker = null;
+  }
+
+  async waitForPendingWrites(): Promise<void> {
+    await this.ready();
+    await this.connection?.waitForPendingWrites();
   }
 
   async flushLocal(): Promise<void> {

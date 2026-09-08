@@ -1,7 +1,7 @@
-import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { createBrowserTestDb } from "./account-fixtures.js";
 
 export interface RemoteBrowserDbCreateInput {
   id: string;
@@ -67,6 +67,8 @@ function makeAllRowsQuery(
 }
 
 export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): Promise<void> {
+  if (input.adminSecret !== undefined)
+    throw new Error("Remote browser fixtures do not admit backend credentials");
   const store = getRemoteStateStore();
   const existing = store.get(input.id);
   if (existing) {
@@ -75,7 +77,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
   }
 
   const schema = JSON.parse(input.schemaJson) as WasmSchema;
-  const db = await createDb({
+  const db = await createBrowserTestDb({
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
@@ -83,7 +85,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
       ? { jwtToken: input.jwtToken }
       : input.localFirstSecret
         ? { secret: input.localFirstSecret }
-        : { adminSecret: input.adminSecret }),
+        : {}),
     logLevel: input.logLevel,
   });
 
@@ -208,4 +210,30 @@ export async function closeRemoteBrowserDb(id: string): Promise<void> {
 
   await state.db.shutdown();
   store.delete(id);
+}
+
+/** Return the account-scoped physical root currently owned by this fixture. */
+export async function remoteBrowserDbPhysicalName(id: string): Promise<string> {
+  const state = getRemoteStateStore().get(id);
+  if (!state) throw new Error(`Remote browser db "${id}" was not initialized`);
+  const port = await state.db.openInspectorControlPort();
+  port.start();
+  const requestId = crypto.randomUUID();
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const onMessage = (
+        event: MessageEvent<{ type?: string; id?: string; contexts?: { dbName: string }[] }>,
+      ) => {
+        if (event.data.type !== "contexts" || event.data.id !== requestId) return;
+        port.removeEventListener("message", onMessage);
+        const dbName = event.data.contexts?.[0]?.dbName;
+        if (dbName) resolve(dbName);
+        else reject(new Error(`Remote browser db "${id}" has no worker context`));
+      };
+      port.addEventListener("message", onMessage);
+      port.postMessage({ type: "list-contexts", id: requestId });
+    });
+  } finally {
+    port.postMessage({ type: "close" });
+  }
 }

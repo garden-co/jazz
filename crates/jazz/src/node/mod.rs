@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -33,7 +33,8 @@ use thiserror::Error;
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
+    SchemaVersionId,
 };
 use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
@@ -703,7 +704,10 @@ where
     S: OrderedKvStorage,
 {
     pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
-        self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
+        // Binding mutations reserve through the shared clock before taking
+        // the node lock. A reused foreground must advance that mirror too,
+        // or its first synchronous reservation can repeat its predecessor.
+        self.merge_tx_time(high_water.tick_after()?);
         Ok(())
     }
 }
@@ -808,6 +812,18 @@ impl CachedTransactionVersions {
 }
 
 /// Query registration, cache, current-row graph, and settled-result state.
+#[derive(Clone, Debug)]
+struct PolicyProofStackEntry {
+    table: String,
+    lease: Weak<()>,
+}
+
+#[derive(Clone, Debug)]
+struct ScopedPolicyAuthorizationGraphReplacement {
+    previous: Option<query_eval::PolicyAuthorizationGraph>,
+    lease: Weak<()>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
     /// Prepared query plans keyed by shape, durability tier, and parameter
@@ -819,9 +835,13 @@ struct QueryServing {
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
+    /// Temporary point-policy replacements required by one compiler turn. The
+    /// weak lease lets a later owner restore state if that turn is cancelled.
+    policy_authorization_graph_replacements:
+        BTreeMap<String, Vec<ScopedPolicyAuthorizationGraphReplacement>>,
     /// Policy tables currently being compiled as membership proofs. This is
     /// transient recursion state, not a cache.
-    policy_proof_stack: Vec<String>,
+    policy_proof_stack: Vec<PolicyProofStackEntry>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction, indexed by
@@ -1786,7 +1806,7 @@ impl CurrentRow {
     /// Read one application field through its explicit publication binding.
     /// Unlike a descriptor/carrier lookup this remains exact when a literal
     /// application name equals another field's generated storage carrier.
-    #[cfg(feature = "runtime")]
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn application_field(&self, name: &str) -> Option<Value> {
         let index = self.application_column_index_by_name(name)?;
         self.record.borrowed().get_idx(index).ok()
@@ -1823,11 +1843,9 @@ impl CurrentRow {
         };
         let record = self.record.borrowed();
         Ok(Some(match column {
-            "$createdBy" | "$updatedBy" => {
-                let author = AuthorSubject::from_canonical(record.get_str(index)?)
-                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
-                Value::String(author.canonical().to_owned())
-            }
+            "$createdBy" | "$updatedBy" => RowAuthor::from_value(record.get_idx(index)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
             _ => unreachable!("provenance_field_index accepts only provenance columns"),
         }))
@@ -1850,11 +1868,13 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+            created_by: RowAuthor::from_value(borrowed.get_idx(created_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
             created_at: borrowed.get_u64(created_at_idx)?,
-            updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+            updated_by: RowAuthor::from_value(borrowed.get_idx(updated_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .as_author_subject(),
             updated_at: borrowed.get_u64(updated_at_idx)?,
         }))
     }
@@ -1895,15 +1915,6 @@ impl CurrentRow {
             )
             .with_identity(records::FieldIdentity::Name(public_name))
         }));
-        descriptor_fields.extend([
-            records::DescriptorField::new("$createdBy", records::ValueType::String),
-            records::DescriptorField::new("$createdAt", records::ValueType::U64),
-            records::DescriptorField::new("$updatedBy", records::ValueType::String),
-            records::DescriptorField::new("$updatedAt", records::ValueType::U64),
-            records::DescriptorField::new("tx_time", records::ValueType::U64),
-            records::DescriptorField::new("tx_node_id", records::ValueType::U64),
-        ]);
-        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let mut values = vec![Value::Uuid(self.row_uuid().0)];
         let row_uuid_field = self
             .record
@@ -1948,10 +1959,26 @@ impl CurrentRow {
             binding_fields.push(binding);
             binding_field_names.push(Some(public_name));
         }
+        // Derived rows (for example aggregates) have no originating write.
+        // Preserve that absence instead of inventing system provenance.
         if let Some(provenance) = self.provenance()? {
-            values.push(Value::String(provenance.created_by.canonical().to_owned()));
+            descriptor_fields.extend([
+                records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+                records::DescriptorField::new("$createdAt", records::ValueType::U64),
+                records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+                records::DescriptorField::new("$updatedAt", records::ValueType::U64),
+            ]);
+            values.push(
+                RowAuthor::from_persisted_subject(provenance.created_by)
+                    .map_err(|_| Error::UnadmittedWriteAuthor)?
+                    .to_value(),
+            );
             values.push(Value::U64(provenance.created_at));
-            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+            values.push(
+                RowAuthor::from_persisted_subject(provenance.updated_by)
+                    .map_err(|_| Error::UnadmittedWriteAuthor)?
+                    .to_value(),
+            );
             values.push(Value::U64(provenance.updated_at));
             binding_fields.extend(
                 ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"]
@@ -1967,23 +1994,18 @@ impl CurrentRow {
                     }),
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
-        } else {
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-            binding_fields.extend([CurrentRowBindingRole::LogicalField; 4]);
-            binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
+            descriptor_fields.extend([
+                records::DescriptorField::new("tx_time", records::ValueType::U64),
+                records::DescriptorField::new("tx_node_id", records::ValueType::U64),
+            ]);
             values.push(Value::U64(time.0));
             values.push(Value::U64(node.0));
-        } else {
-            values.push(Value::U64(0));
-            values.push(Value::U64(0));
+            binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
+            binding_field_names.extend(std::iter::repeat_n(None, 2));
         }
-        binding_fields.extend([CurrentRowBindingRole::LogicalField; 2]);
-        binding_field_names.extend(std::iter::repeat_n(None, 2));
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
         let raw = descriptor.create(&values)?;
         let mut projected = Self::new_with_explicit_binding_fields_and_names(
             table.name.clone(),
@@ -2928,6 +2950,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// A session without a registry-admitted account attempted durable authorship.
+    #[error("durable writes require an admitted account author")]
+    UnadmittedWriteAuthor,
     /// Exact branch selector is missing, malformed, or inconsistent with row cells.
     #[error("invalid branch key: {0}")]
     InvalidBranchKey(String),

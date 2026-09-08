@@ -1153,7 +1153,7 @@ where
                     PhysicalCurrentClass::Global,
                 )?),
                 &storage_tables[1],
-                register_global_current_values(version, Some(global_time)),
+                register_global_current_values(version, Some(global_time))?,
             ),
         };
         let rows = self
@@ -1300,7 +1300,7 @@ where
                         &self
                             .table_in_schema(version.table(), schema_version)?
                             .global_current_storage_tables()[1],
-                        register_global_current_values(version, Some(global_time)),
+                        register_global_current_values(version, Some(global_time))?,
                     )
                     .expect("valid register global current row"),
                 ),
@@ -1384,7 +1384,7 @@ where
                         &self
                             .table_in_schema(version.table(), schema_version)?
                             .ahead_current_storage_tables()[1],
-                        register_global_current_values(version, None),
+                        register_global_current_values(version, None)?,
                     )
                     .expect("valid register ahead current row"),
                 ),

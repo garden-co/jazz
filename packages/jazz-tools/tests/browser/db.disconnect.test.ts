@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
-import { createDb } from "../../src/runtime/default-create-db.js";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
@@ -8,6 +7,7 @@ import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
+  createBrowserTestDb as createDb,
   sleep,
   uniqueDbName,
   waitForCondition,
@@ -494,7 +494,23 @@ describe("Db disconnect/reconnect", () => {
           tier: "local",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
-      );
+      ).catch((error: unknown) => {
+        const runtime = (
+          db as unknown as {
+            getClient(schema: typeof todos._schema): {
+              getRuntime(): { describeQueryCoverageWaits(): unknown };
+            };
+          }
+        )
+          .getClient(todos._schema)
+          .getRuntime();
+        if (error instanceof Error) {
+          const receipt = JSON.stringify(runtime.describeQueryCoverageWaits());
+          error.message += `; queryCoverage=${receipt}`;
+          error.stack += `\nQuery coverage state: ${receipt}`;
+        }
+        throw error;
+      });
       expect(localRows.some((row) => row.title === offlineTitle)).toBe(true);
 
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
@@ -550,12 +566,31 @@ describe("Db disconnect/reconnect", () => {
 
       await db.disconnect();
 
-      const localWait = db
-        .insert(todos, { title: "local wait", done: false })
-        .wait({ tier: "local" });
+      const write = db.insert(todos, { title: "local wait", done: false });
+      const localWait = write.wait({ tier: "local" });
+      // #2639: distinguish submission from the worker's Local acknowledgement
+      // if this intermittently stalls, without logging identifiers or rows.
+      const phase = { transactionId: "pending", localWait: "pending" };
+      void write.txId.then(
+        () => {
+          phase.transactionId = "fulfilled";
+        },
+        () => {
+          phase.transactionId = "rejected";
+        },
+      );
+      void localWait.then(
+        () => {
+          phase.localWait = "fulfilled";
+        },
+        () => {
+          phase.localWait = "rejected";
+        },
+      );
       await withWorkerOperationTimeout(
         localWait,
         "worker mode: local wait should resolve while disconnected",
+        () => phase,
       );
 
       const edgeWait = db.insert(todos, { title: "edge wait", done: false }).wait({ tier: "edge" });
@@ -781,11 +816,20 @@ async function expectStillPending<T>(
   throw new Error(`${label} ${result.state}${reason}`);
 }
 
-async function withWorkerOperationTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+async function withWorkerOperationTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  failurePhase?: () => { transactionId: string; localWait: string },
+): Promise<T> {
   const startedAt = performance.now();
   let softDeadlineExceeded = false;
+  let softDeadlineDelayMs: number | null = null;
   const softDeadline = setTimeout(() => {
     softDeadlineExceeded = true;
+    softDeadlineDelayMs = Math.max(
+      0,
+      Math.round(performance.now() - startedAt - LOCAL_OPERATION_TIMEOUT_MS),
+    );
   }, LOCAL_OPERATION_TIMEOUT_MS);
 
   try {
@@ -796,6 +840,15 @@ async function withWorkerOperationTimeout<T>(promise: Promise<T>, label: string)
       );
     }
     return result;
+  } catch (error) {
+    if (failurePhase) {
+      console.warn("JAZZ_LOCAL_WAIT_FAILURE", {
+        ...failurePhase(),
+        elapsedMs: Math.round(performance.now() - startedAt),
+        softDeadlineDelayMs,
+      });
+    }
+    throw error;
   } finally {
     clearTimeout(softDeadline);
   }

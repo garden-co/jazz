@@ -1709,10 +1709,12 @@ impl EdgeFateCommitIdentity {
     fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
         let mut versions = versions.to_vec();
         versions.sort();
-        Self {
-            tx: tx.clone(),
-            versions,
-        }
+        let mut tx = tx.clone();
+        // An edge route compares durable commit identity across a local staged
+        // write and redacted carrier retransmissions. Its local policy hint is
+        // deliberately excluded from that identity.
+        tx.permission_subject = None;
+        Self { tx, versions }
     }
 
     fn matches(&self, other: &Self) -> bool {
@@ -2103,6 +2105,10 @@ enum PendingUpstreamCommand {
         /// A fresh request binds its claims when its selected authority admits
         /// it; a reconnect must preserve the original immutable binding.
         session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        /// A backend-selected snapshot which must cross the upstream boundary.
+        /// This remains separate from the locally captured lease binding: direct
+        /// sessions authenticate at transport admission and never self-delegate.
+        delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     },
 }
 
@@ -2169,6 +2175,14 @@ struct CoverageGroup {
     policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    /// #2653: one generated opening awaiting semantic transport acceptance.
+    /// Retry its exact receipt before advancing this group again.
+    pending_initial_update: Option<(SubscriptionKey, SyncMessage)>,
+    /// Remaining recipients of one generated incremental publication.
+    pending_incremental_updates: VecDeque<(SubscriptionKey, SyncMessage)>,
+    /// Query runtime token governing the unaccepted publications above.
+    /// Unlike catalogue lineage sequence, it changes for same-version policy edits.
+    publication_runtime_token: Option<u64>,
     /// Claim revision whose replacement opening reset is currently being
     /// delivered. A retry of that same revision resumes this per-subscriber
     /// cursor; a newer admission revision starts every live usage over.
@@ -2241,6 +2255,8 @@ struct AuthorizationScopeLeaseRequest {
     /// operation is allocated. Receipts are evaluated on an Upstream link,
     /// which has no subscriber-side ambient claims to consult.
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Present only for a host-admitted backend or scope-isolated relay request.
+    delegated_session: Option<crate::protocol::DelegatedSessionBinding>,
     /// Every local caller sharing this authority hydration.  The first id is
     /// the wire correlation id; later ids never cause another support view.
     waiters: BTreeSet<PermissionAdviceRequestId>,
@@ -3024,6 +3040,19 @@ fn coverage_key(
     }
 }
 
+fn request_coverage_key(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+    policy_binding: &Option<(AuthorSubject, BTreeMap<String, Value>)>,
+) -> CoverageKey {
+    let mut key = coverage_key(shape, binding, opts);
+    key.policy_binding = policy_binding.as_ref().map(|(identity, claims)| {
+        crate::protocol::PolicyBindingKey::from_canonical_parts(*identity, claims.clone())
+    });
+    key
+}
+
 fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
     trust.is_trusted() || permissions_ready
 }
@@ -3053,12 +3082,10 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::AuthorizationScopeDecision { .. }
     ) || (matches!(message, SyncMessage::SessionClaims { .. })
         && (peer.rejects_raw_session_claims()
-            // A trusted backend is the one non-relay transport allowed to
-            // assert a session snapshot. It needs that snapshot to submit a
-            // user-attributed write whose policy reads session claims. The
-            // authenticated server admission selected its trust level; this
-            // must not turn an ordinary client or a subjectless relay into a
-            // claim issuer.
+            // Host-admitted trusted links may maintain the compatibility
+            // claims map (including backend user-attributed writes). This
+            // legacy map authority is distinct from request delegation below:
+            // only a backend ClientLink can assert an arbitrary query scope.
             || (!ingest.trust.is_trusted()
                 && !delegated_session_capability(ingest, peer.role()))))
 }
@@ -3072,8 +3099,8 @@ fn delegated_session_capability(ingest: CommitUnitIngestContext, peer_role: Peer
 }
 
 /// Select the immutable session snapshot permitted for one request. Direct
-/// links use their host-admitted session; only a scope-isolated relay with an
-/// exact server-issued binding can carry a delegated snapshot. A generic
+/// links use their host-admitted session. A trusted backend may assert a
+/// request snapshot; a scope-isolated relay needs an exact server-issued binding. A generic
 /// multiplexed relay has no per-binding capability yet, so it must forward
 /// rather than select a user policy subject. Keeping Subscribe and repair on
 /// this one admission rule prevents one path from accidentally treating a
@@ -3094,6 +3121,12 @@ fn admitted_request_policy_binding(
         Some(delegated) if delegated_session_capability(ingest, peer.role()) => {
             let binding = (delegated.identity, delegated.claims);
             peer.admits_relay_binding(&binding).then_some(binding)
+        }
+        Some(delegated)
+            if ingest.trust == CommitUnitTrust::TrustedBackend
+                && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+        {
+            Some((delegated.identity, delegated.claims))
         }
         Some(_) => None,
     }
@@ -4222,6 +4255,10 @@ struct SubscriptionState {
     snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
+    /// A replacement graph opened cold. Keep the last complete facade only
+    /// until the replacement has its first local terminal batch, then publish
+    /// one complete reset from that retained baseline.
+    cold_runtime_replacement: bool,
     sender: UnboundedSender<SubscriptionEvent>,
 }
 
@@ -4626,6 +4663,12 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// Identity captured by a trusted request scope, if one was attached.
+    pub fn request_identity(&self) -> Option<AuthorSubject> {
+        self.request_identity_claims
+            .as_ref()
+            .map(|(author, _)| *author)
+    }
     /// Capture the admitted claims for this trusted-serving request.
     /// Clones retain the same immutable scope across asynchronous owner waits.
     pub fn with_identity_claims(
@@ -4634,14 +4677,17 @@ impl PreparedQuery {
         claims: BTreeMap<String, Value>,
     ) -> Self {
         self.request_identity_claims = Some((author, claims));
+        // Plans prepared before admission may embed SYSTEM or another scope.
+        // Resolve them again under this immutable request's authorization.
+        self.local_plan = None;
+        self.global_plan = None;
         self
     }
 
-    fn scoped_node<'a, S: OrderedKvStorage>(
+    fn request_policy_binding(
         &self,
-        node: &'a mut NodeState<S>,
         author: AuthorSubject,
-    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+    ) -> Result<Option<(AuthorSubject, BTreeMap<String, Value>)>, Error> {
         if self
             .request_identity_claims
             .as_ref()
@@ -4652,6 +4698,15 @@ impl PreparedQuery {
                 "prepared request identity does not match read identity",
             ));
         }
+        Ok(self.request_identity_claims.clone())
+    }
+
+    fn scoped_node<'a, S: OrderedKvStorage>(
+        &self,
+        node: &'a mut NodeState<S>,
+        author: AuthorSubject,
+    ) -> Result<crate::node::ActiveSessionClaimsScope<'a, S>, Error> {
+        self.request_policy_binding(author)?;
         Ok(node.scoped_optional_session_claims(
             author,
             self.request_identity_claims

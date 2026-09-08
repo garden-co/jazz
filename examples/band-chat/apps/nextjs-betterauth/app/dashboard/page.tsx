@@ -1,16 +1,16 @@
 "use client";
 
 import { BandChat } from "@/src/BandChat";
-import { authClient } from "@/src/lib/auth-client";
+import { useBandChatLifecycle } from "@/components/jazz-provider";
 
 export default function DashboardPage() {
-  async function signOut() {
-    await authClient.signOut();
-    window.location.assign("/");
+  const { signOut } = useBandChatLifecycle();
+  async function handleSignOut() {
+    await signOut();
   }
   return (
     <>
-      <button className="sign-out" onClick={() => void signOut()} type="button">
+      <button className="sign-out" onClick={() => void handleSignOut()} type="button">
         Sign out
       </button>
       <BandChat />

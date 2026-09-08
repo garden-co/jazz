@@ -1,3 +1,4 @@
+import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import {
   compactVerify,
   decodeProtectedHeader,
@@ -19,8 +20,16 @@ import {
 import type { Session } from "../runtime/context.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
+// Only verified requests that completed account admission receive this capability.
+const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
+export function verifiedLocalFirstRequestProof(session: Session) {
+  return localFirstProofs.get(session);
+}
+
 export interface BackendRequestAuthConfig {
   appId: string;
+  /** Canonical core registry required by public request-derived contexts. */
+  accountRegistry?: string;
   jwksUrl?: string;
   jwtPublicKey?: BackendJwtPublicKey;
   jwtIssuer?: string;
@@ -430,7 +439,7 @@ async function verifyExternalJwt(
   }
 
   throw new Error(
-    "Received external JWT, but createJazzContext() has no jwksUrl or jwtPublicKey. Configure one of them or verify upstream and call forSession().",
+    "Received external JWT, but createJazzSession() has no jwksUrl or jwtPublicKey. Configure one of them to verify request credentials.",
   );
 }
 
@@ -441,11 +450,24 @@ export async function resolveRequestSession(
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
+  const admit = async (session: Session): Promise<Session> => {
+    if (!config.accountRegistry) return session; // standalone signature-verification helper
+    const assignment = await requestAccountRegistry(
+      config.accountRegistry,
+      session.issuer === LOCAL_FIRST_JWT_ISSUER ? "found-local-first" : "login",
+      token,
+    );
+    session.account_id = readAccountAssignment(assignment, {
+      issuer: session.issuer,
+      subject: session.user_id,
+    });
+    return session;
+  };
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
     if (!allowLocalFirstAuth) {
       throw new Error(
-        "Received local-first JWT, but createJazzContext() has allowLocalFirstAuth disabled.",
+        "Received local-first JWT, but createJazzSession() has allowLocalFirstAuth disabled.",
       );
     }
 
@@ -457,11 +479,13 @@ export async function resolveRequestSession(
     if (session.user_id !== verifiedUserId) {
       throw new Error("Invalid local-first identity proof");
     }
-    return session;
+    const admitted = await admit(session);
+    localFirstProofs.set(admitted, { token, appId: config.appId });
+    return admitted;
   }
 
   const session = requireJwtSession(payload);
   rejectReservedExternalJwtIssuer(session);
   await verifyExternalJwt(token, payload, config);
-  return session;
+  return admit(session);
 }

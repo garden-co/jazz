@@ -9,6 +9,7 @@ import {
   boundedDiagnostic,
   parseLaunchProcessId,
   relevantAppLogs,
+  foregroundWakeDiagnostic,
   safeDeviceDiagnostic,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
@@ -76,6 +77,20 @@ try {
       `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
       `app receipt file:\n${boundedDiagnostic(receiptFile())}`,
       `app JavaScript/native diagnostic:\n${safeDeviceDiagnostic(diagnosticFile())}`,
+      `foreground wake trace:\n${foregroundWakeDiagnostic(
+        trySimctl([
+          "spawn",
+          udid,
+          "log",
+          "show",
+          "--last",
+          "3m",
+          "--style",
+          "compact",
+          "--predicate",
+          'process == "JazzRNdeviceacceptance" AND eventMessage CONTAINS "JazzForegroundWake"',
+        ]),
+      )}`,
       `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
       `recent app logs (capped):\n${relevantAppLogs(
         trySimctl([
@@ -117,10 +132,6 @@ try {
         control.endpoint,
         "-JazzDeviceEdgeEndpoint",
         localSession.endpoint,
-        "-JazzDeviceBearerA",
-        localSession.bearerA,
-        "-JazzDeviceBearerB",
-        localSession.bearerB,
       ]),
     );
     const expected = {

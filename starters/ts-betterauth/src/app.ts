@@ -2,26 +2,115 @@ import type { Db } from "jazz-tools";
 import { authClient, type AuthSession } from "./auth-client.js";
 import { mountTodoWidget } from "./todo-widget.js";
 import { mountSignInForm } from "./sign-in-form.js";
+import type { createJazzSession } from "jazz-tools/client";
+type Session = Awaited<ReturnType<typeof createJazzSession>>;
+import { getToken } from "./accounts.js";
 
 export interface AppHandle {
   setDb(db: Db | null): void;
   destroy(): void;
 }
 
-export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
-  let db = initialDb;
+export type Authenticate = (
+  enroll: boolean,
+  request: () => Promise<{ error?: { message?: string | null } | null }>,
+) => Promise<void>;
+
+export function mountApp(
+  root: HTMLElement,
+  jazz: Session,
+  initialRegistrationError?: Error,
+): AppHandle {
+  let db: Db | null = jazz.getSnapshot().client?.db ?? null;
+  let registrationError = initialRegistrationError;
+  let recovery: "login" | "register" = initialRegistrationError ? "login" : "register";
+  let actionError: Error | undefined;
+  let sessionVersion = 0;
+  let handledSession = sessionKey(authClient.useSession.get());
+  let admittedSession = db ? handledSession : null;
+  let explicitAuth = false;
   let unsubscribeTodos: (() => void) | null = null;
 
   const sessionAtom = authClient.useSession;
   let session: AuthSession = sessionAtom.get();
-  const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
-    session = next;
-    render();
-  });
+
+  function reconcile(next: AuthSession) {
+    const key = sessionKey(next);
+    if (explicitAuth || key === handledSession) return;
+    handledSession = key;
+    admittedSession = null;
+    const version = ++sessionVersion;
+    void (key ? jazz.loginJWT({ getToken }) : jazz.logout())
+      .then(() => {
+        if (version === sessionVersion) {
+          registrationError = undefined;
+          admittedSession = key;
+        }
+      })
+      .catch((cause) => {
+        if (version === sessionVersion) {
+          recovery = "login";
+          registrationError = cause instanceof Error ? cause : new Error(String(cause));
+        }
+      })
+      .finally(render);
+  }
+
+  const authenticate: Authenticate = async (enroll, request) => {
+    explicitAuth = true;
+    const version = ++sessionVersion;
+    try {
+      const result = await request();
+      if (result.error)
+        throw new Error(result.error.message ?? (enroll ? "Sign-up failed" : "Sign-in failed"));
+      const current = await authClient.getSession();
+      handledSession = sessionKey({ data: current.data });
+      if (version !== sessionVersion) return;
+      await (enroll ? jazz.registerJWT({ getToken }) : jazz.loginJWT({ getToken }));
+      registrationError = undefined;
+      admittedSession = handledSession;
+    } catch (cause) {
+      if (sessionKey(sessionAtom.get())) {
+        recovery = enroll ? "register" : "login";
+        registrationError = cause instanceof Error ? cause : new Error(String(cause));
+      }
+      throw cause;
+    } finally {
+      explicitAuth = false;
+      reconcile(sessionAtom.get());
+      render();
+    }
+  };
 
   async function handleSignOut() {
-    await authClient.signOut();
-    location.assign("/");
+    try {
+      await jazz.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      location.assign("/");
+    } catch (cause) {
+      actionError = cause instanceof Error ? cause : new Error(String(cause));
+      recovery = "login";
+      render();
+    }
+  }
+
+  async function register() {
+    const version = ++sessionVersion;
+    const recoveryKey = sessionKey(session);
+    const failedAction = actionError;
+    try {
+      await (recovery === "login" ? jazz.loginJWT({ getToken }) : jazz.registerJWT({ getToken }));
+      if (version === sessionVersion && sessionKey(session) === recoveryKey) {
+        registrationError = undefined;
+        admittedSession = recoveryKey;
+        if (actionError === failedAction) actionError = undefined;
+      }
+    } catch (cause) {
+      if (version === sessionVersion && sessionKey(session) === recoveryKey)
+        registrationError = cause instanceof Error ? cause : new Error(String(cause));
+    }
+    render();
   }
 
   function render() {
@@ -40,12 +129,16 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
           <div data-slot="signin"></div>
         </main>
       `;
-      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!);
+      mountSignInForm(root.querySelector<HTMLElement>('[data-slot="signin"]')!, authenticate);
       return;
     }
 
-    if (!db) {
-      root.innerHTML = `<div>Loading…</div>`;
+    if (!db || admittedSession !== sessionKey(session)) {
+      const error = registrationError ?? actionError ?? jazz.getSnapshot().error;
+      root.innerHTML = error
+        ? `<main class="page-center"><div class="card"><p class="alert-error" role="alert">${escapeHtml(error.message)}</p><p>Finish setting up your Jazz account.</p><button type="button" class="btn-primary" data-action="register">${recovery === "login" ? "Retry sign in" : "Complete account setup"}</button></div></main>`
+        : `<div>Loading…</div>`;
+      root.querySelector('[data-action="register"]')?.addEventListener("click", register);
       return;
     }
 
@@ -53,6 +146,7 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
     const name = session.data.user?.name ?? "";
     root.innerHTML = `
       <main class="dashboard">
+        ${actionError ? `<aside class="alert-error" role="alert">${escapeHtml(actionError.message)} Retry sign out when syncing is available.</aside>` : ""}
         <header>
           <img src="/jazz.svg" alt="Jazz" class="wordmark" width="80" height="24" />
           <div class="auth-nav">
@@ -70,6 +164,19 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
     );
   }
 
+  let acceptingInitialSessionSnapshot = true;
+  const unsubscribeSession = sessionAtom.subscribe((next: AuthSession) => {
+    const isSynchronousInitialSnapshot = acceptingInitialSessionSnapshot;
+    session = next;
+    reconcile(next);
+    // Better Auth synchronously publishes the current session from subscribe().
+    // The initial render below already uses it, so do not tear down the newly
+    // mounted todo subscription before its opening snapshot. Later notifications
+    // still render, including same-session profile changes.
+    if (!isSynchronousInitialSnapshot) render();
+  });
+  acceptingInitialSessionSnapshot = false;
+
   render();
 
   return {
@@ -82,6 +189,12 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
       unsubscribeSession();
     },
   };
+}
+
+function sessionKey(next: {
+  data?: { session?: { id?: string } | null; user?: { id?: string } | null } | null;
+}): string | null {
+  return next.data?.session?.id ?? next.data?.user?.id ?? null;
 }
 
 function escapeHtml(s: string): string {

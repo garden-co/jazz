@@ -73,9 +73,9 @@ link or retrying after a transient error won't create duplicate rows.
 
 The route reads and writes as the backend: the invitee has no read access to the chat until they're
 a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
-insert their own membership directly. Your normal auth middleware resolves the caller to a Jazz
-`Session` first. `withAttributionForSession` then keeps backend permissions while stamping the
-membership's edit metadata to that exact issuer/subject pair.
+insert their own membership directly. The ready backend client verifies the bearer with `await client.withAttributionForRequest(request)`,
+which keeps backend permissions while stamping the membership's edit metadata to the verified
+caller. An opaque admitted account handle can instead be passed to `await client.withAttribution(account)`.
 
 The transaction is what makes redemption correct under concurrency. A multi-use invite stays in
 the table, so it is deliberately replayable by anyone holding the link. A single-use invite is
@@ -84,7 +84,7 @@ cannot both succeed. If the authority rejects the transaction because another re
 race, report that failure to the client and let it retry only if that remains appropriate for your
 UI.
 
-The `context` referenced below is the backend Jazz context for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
+The `client` referenced below is the ready backend Jazz client for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
 
 <include cwd lang="ts" meta='title="api/invite/redeem.ts"'>
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route

@@ -1,8 +1,9 @@
 import { authClient } from "./auth-client.js";
+import type { Authenticate } from "./app.js";
 
 type Mode = "signin" | "signup";
 
-export function mountSignInForm(parent: HTMLElement): void {
+export function mountSignInForm(parent: HTMLElement, authenticate: Authenticate): void {
   let mode: Mode = "signin";
 
   function render() {
@@ -59,21 +60,21 @@ export function mountSignInForm(parent: HTMLElement): void {
       const email = (form.elements.namedItem("email") as HTMLInputElement).value;
       const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
-      const result =
-        mode === "signup"
-          ? await authClient.signUp.email({
-              name: (form.elements.namedItem("name") as HTMLInputElement).value,
-              email,
-              password,
-            })
-          : await authClient.signIn.email({ email, password });
-
-      submit.disabled = false;
-
-      if (result.error) {
-        errorEl.textContent =
-          result.error.message ?? (mode === "signup" ? "Sign-up failed" : "Sign-in failed");
+      try {
+        await authenticate(mode === "signup", () =>
+          mode === "signup"
+            ? authClient.signUp.email({
+                name: (form.elements.namedItem("name") as HTMLInputElement).value,
+                email,
+                password,
+              })
+            : authClient.signIn.email({ email, password }),
+        );
+      } catch (cause) {
+        errorEl.textContent = cause instanceof Error ? cause.message : "Account setup failed";
         errorEl.hidden = false;
+      } finally {
+        submit.disabled = false;
       }
     });
   }

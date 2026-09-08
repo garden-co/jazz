@@ -6,18 +6,27 @@ import { useRouter } from "next/navigation";
 import { TodoWidget } from "@/components/todo-widget";
 import { AuthBackup } from "@/components/auth-backup";
 import { authClient } from "@/lib/auth-client";
-import { useLocalFirstAuth } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
+import { useProviderError } from "@/components/jazz-provider";
 
 function HeaderActions() {
   const router = useRouter();
+  const lifecycle = useJazzSession();
+  const reportError = useProviderError();
   const { data: authSession } = authClient.useSession();
-  const auth = useLocalFirstAuth();
 
   if (authSession?.session) {
     async function handleSignOut() {
-      await authClient.signOut();
-      await auth.signOut();
-      router.push("/");
+      reportError(undefined);
+      try {
+        await lifecycle.logout();
+        const result = await authClient.signOut();
+        if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+        await lifecycle.createLocalFirst();
+        router.push("/");
+      } catch (cause) {
+        reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      }
     }
 
     return (

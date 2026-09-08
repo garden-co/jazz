@@ -62,17 +62,16 @@ it("isolates pending advice handles and retires them on cancel and close", async
   });
 });
 
-it("keeps local and spoofed permission advice unknown without an authority", async () => {
+it("rejects spoofed credentials and keeps local permission advice unknown without an authority", async () => {
   await withNativeRelayFixture(app, async (fixture) => {
-    const db = await fixture.createDb({
-      ...fixture.config,
-      cookieSession: {
-        issuer: "https://spoof.example",
-        user_id: "spoofed",
-        claims: {},
-        authMode: "external",
-      },
-    });
+    await expect(
+      fixture.createDb({
+        ...fixture.config,
+        // @ts-expect-error A raw credential cannot override the selected handle.
+        cookieSession: { issuer: "https://spoof.example", user_id: "spoofed", claims: {} },
+      }),
+    ).rejects.toThrow("account_handle_required");
+    const db = await fixture.createDb();
     const row = await db.insert(app.notes, { title: "local" }).wait({ tier: "local" });
     expect(
       await Promise.all([
@@ -125,10 +124,14 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
         await withNativeRelayFixture(
           nativeApp,
           async (bob) => {
-            const other = await bob.createDb({
-              ...bob.config,
-              cookieSession: options("alice").session,
-            });
+            await expect(
+              bob.createDb({
+                ...bob.config,
+                // @ts-expect-error An unrelated credential cannot override Bob's account.
+                cookieSession: options("alice").session,
+              }),
+            ).rejects.toThrow("account_handle_required");
+            const other = await bob.createDb();
             await other.all(app.notes, { tier: ReadTier.Remote });
             expect(await other.canRead(app.notes, row.id)).toBe("denied");
             expect(await other.canInsert(app.notes, { title: "dry run" })).toBe("allowed");

@@ -14,10 +14,56 @@ describe("React Native public mutations through the real foreground C ABI", () =
         .insert(app.documents, { title: "original", done: false })
         .wait({ tier: "local" });
       await db.update(app.documents, row.id, { title: "patched" }).wait({ tier: "local" });
+      expect(
+        await db.one(app.documents.select("$createdBy", "$updatedBy").where({ id: row.id })),
+      ).toMatchObject({
+        $createdBy: {
+          account: fixture.config.account.id,
+          identity: fixture.config.account.identity,
+        },
+        $updatedBy: {
+          account: fixture.config.account.id,
+          identity: fixture.config.account.identity,
+        },
+      });
       expect(await db.one(app.documents.where({ id: row.id }))).toEqual({
         ...row,
         title: "patched",
       });
+      const author = {
+        account: fixture.config.account.id,
+        identity: fixture.config.account.identity,
+      };
+      expect(await db.all(app.documents.where({ $createdBy: author }))).toHaveLength(1);
+      expect(
+        await db.all(app.documents.where({ "$createdBy.account": author.account })),
+      ).toHaveLength(1);
+      expect(
+        await db.all(app.documents.where({ "$createdBy.identity": author.identity })),
+      ).toHaveLength(1);
+      expect(await db.all(app.documents.where({ $createdBy: { ne: author } }))).toEqual([]);
+      expect(
+        await db.all(
+          app.documents.where({
+            $createdBy: { ne: { ...author, account: "11111111-1111-4111-8111-111111111111" } },
+          }),
+        ),
+      ).toHaveLength(1);
+      // Row authors are durable, admitted identities. Accountless sessions can
+      // read, but cannot be represented as a `$createdBy` predicate.
+      await expect(
+        db.all(
+          app.documents.where({
+            $createdBy: {
+              ne: {
+                ...author,
+                // @ts-expect-error Persisted row authors always have an account.
+                account: null,
+              },
+            },
+          }),
+        ),
+      ).rejects.toThrow('Invalid structured author condition for "$createdBy"');
       await db.upsert(app.documents, row.id, { done: true }).wait({ tier: "local" });
       expect(await db.one(app.documents.where({ id: row.id }))).toEqual({
         ...row,

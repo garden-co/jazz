@@ -1,14 +1,16 @@
 // #region context-setup-react-minimal
+import type { AccountHandle } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
 
-export default function App() {
+// Prepare the account outside the context with createAccountManager.
+export default function App({ account }: { account: AccountHandle }) {
   return (
     <JazzProvider
       config={{
         appId: "<your-app-id>",
+        account,
       }}
-      auth="local-first"
     >
       <h1>Todos</h1>
       <TodoList />
@@ -18,11 +20,13 @@ export default function App() {
 // #endregion context-setup-react-minimal
 
 // #region context-setup-react-runtime-sources
-export function AppWithRuntimeSources() {
+// Prepare this handle with the same runtimeSources and registry authority.
+export function AppWithRuntimeSources({ account }: { account: AccountHandle }) {
   return (
     <JazzProvider
       config={{
         appId: "my-app",
+        account,
         serverUrl: "https://my-jazz-server.example.com",
         runtimeSources: {
           baseUrl: "/assets/jazz/",

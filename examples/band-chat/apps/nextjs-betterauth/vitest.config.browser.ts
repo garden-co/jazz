@@ -43,6 +43,7 @@ export default defineConfig({
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
+      trace: "retain-on-failure",
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {

@@ -6,7 +6,14 @@
     "jsEngine": "hermes",
     "newArchEnabled": true,
     "plugins": ["expo-dev-client", "jazz-rn", "./plugins/with-jazz-device-fixture.cjs"],
-    "android": { "package": "dev.jazz.rndeviceacceptance" },
-    "ios": { "bundleIdentifier": "dev.jazz.rndeviceacceptance" }
+    "android": {
+      "package": "dev.jazz.rndeviceacceptance"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.rndeviceacceptance"
+    },
+    "experiments": {
+      "autolinkingModuleResolution": true
+    }
   }
 }

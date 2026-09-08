@@ -1,12 +1,12 @@
-import { schema as s, userIdentity } from "jazz-tools";
-import type { JazzContext } from "jazz-tools/backend";
+import { schema as s } from "jazz-tools";
+import type { JazzClient } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
   chats: s.table({}),
   chatMembers: s.table({
     chatId: s.ref("chats"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     inviteId: s.string().optional(),
   }),
   chatInvites: s.table({
@@ -23,7 +23,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 // #region invite-permissions
 s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chats.allowRead.where((chat) =>
-    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user }),
+    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user.account }),
   );
   policy.chats.allowInsert.always();
 
@@ -31,8 +31,8 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // member of their chats.
   policy.chatMembers.allowRead.where((member) =>
     anyOf([
-      { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
+      { user_id: session.user.account },
+      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
     ]),
   );
 
@@ -41,51 +41,42 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // privileges.
   policy.chatMembers.allowInsert.where((member) =>
     allOf([
-      { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
+      { user_id: session.user.account },
+      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
     ]),
   );
 
   // Users can leave; chat creators can remove any member.
   policy.chatMembers.allowDelete.where((member) =>
     anyOf([
-      { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
+      { user_id: session.user.account },
+      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
     ]),
   );
 
   // Invite codes are bearer capabilities. They never sync back down to a client.
   policy.chatInvites.allowRead.never();
   policy.chatInvites.allowInsert.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
+    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user.account }),
   );
   policy.chatInvites.allowDelete.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
+    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user.account }),
   );
 });
 // #endregion invite-permissions
 
-declare const context: JazzContext;
-
-// Supplied by your authentication middleware after it has verified the caller.
-type AuthenticatedRequest = Request & {
-  session: {
-    issuer: string;
-    user_id: string;
-    authMode: "external" | "local-first";
-    claims: Record<string, unknown>;
-  };
-};
+declare const client: JazzClient;
 
 // #region invite-redeem-route
-export async function POST(req: AuthenticatedRequest): Promise<Response> {
-  const { session } = req;
-  const user = userIdentity(session.issuer, session.user_id);
+export async function POST(req: Request): Promise<Response> {
+  const requester = await client.forRequest(req);
+  const user = requester.getAuthState().session?.user.account;
+  if (!user) return new Response("Account required", { status: 401 });
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
-  // This handle has backend permissions but attributes writes to the authenticated session.
-  const backendDb = context.withAttributionForSession(session, app);
+  // Preserve the verified caller as author while using backend permissions.
+  const backendDb = await client.withAttributionForRequest(req);
   const result = await backendDb.exclusiveTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.

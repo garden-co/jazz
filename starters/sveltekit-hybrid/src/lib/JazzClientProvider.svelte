@@ -1,73 +1,55 @@
 <script lang="ts">
-  import {
-    JazzSvelteProvider,
-    LocalFirstAuth,
-  } from "jazz-tools/svelte";
-  import type { Snippet } from "svelte";
+  import { onMount, type Snippet } from "svelte";
+  import { JazzSessionProvider, createJazzSession, type JazzSession, type JazzClient } from "jazz-tools/svelte";
+  import { credential } from "$lib/accounts";
+  import { authClient } from "$lib/auth-client";
   import { env } from "$env/dynamic/public";
-  import { getToken } from "$lib/auth-client";
-  import JazzTokenRefresh from "$lib/JazzTokenRefresh.svelte";
-
-  let {
-    authenticated,
-    children: pageChildren,
-  }: { authenticated: boolean; children: Snippet } = $props();
-
-  const appId = env.PUBLIC_JAZZ_APP_ID;
-  const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
-
-  const auth = new LocalFirstAuth();
-  let jwtToken = $state<string | null>(null);
-
-  $effect(() => {
-    if (!appId || !serverUrl) {
-      const missing = [
-        !appId && "PUBLIC_JAZZ_APP_ID",
-        !serverUrl && "PUBLIC_JAZZ_SERVER_URL",
-      ]
-        .filter((v) => !!v)
-        .join(" & ");
-      console.error(
-        `${missing} not set — the jazzSvelteKit() plugin should inject these.`,
-      );
+  import { setAuthActions } from "$lib/auth-actions";
+  import AccountStatus from "$lib/AccountStatus.svelte";
+  let { children: pageChildren }: { children?: Snippet } = $props();
+  let jazz = $state.raw<JazzSession<JazzClient>>();
+  let error = $state<Error>();
+  let authError = $state<Error>();
+  async function signOut() {
+    if (!jazz) return;
+    try {
+      await jazz.logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await jazz.createLocalFirst();
+      authError = undefined;
+    } catch (cause) {
+      authError = cause instanceof Error ? cause : new Error(String(cause));
+      throw cause;
     }
-  });
-
-  $effect(() => {
-    if (!authenticated) {
-      jwtToken = null;
-      return;
-    }
+  }
+  setAuthActions({ signOut });
+  onMount(() => {
+    const appId = env.PUBLIC_JAZZ_APP_ID;
+    const serverUrl = env.PUBLIC_JAZZ_SERVER_URL;
+    if (!appId || !serverUrl) throw new Error("PUBLIC_JAZZ_APP_ID and PUBLIC_JAZZ_SERVER_URL must be set");
     let cancelled = false;
-    getToken().then((token) => {
-      if (!cancelled) jwtToken = token;
-    });
-    return () => {
-      cancelled = true;
-    };
-  });
-
-  let config = $derived.by(() => {
-    if (!appId || !serverUrl) return null;
-    if (authenticated) {
-      return jwtToken ? { appId, serverUrl, jwtToken } : null;
-    }
-    return !auth.isLoading && auth.secret
-      ? { appId, serverUrl, secret: auth.secret }
-      : null;
+    let owner: JazzSession<JazzClient> | undefined;
+    void (async () => {
+      owner = await createJazzSession({ appId, serverUrl, initial: "local-first" });
+      if (cancelled) { await owner.close(); return; }
+      const auth = await authClient.getSession();
+      if (auth.data?.session) {
+        try { await owner.loginJWT({ getToken: credential }); }
+        catch (cause) { if (owner.getSnapshot().account?.identity.issuer !== "urn:jazz:local-first") throw cause; }
+      }
+      if (cancelled) await owner.close();
+      else jazz = owner;
+    })().catch((cause) => { if (!cancelled) error = cause instanceof Error ? cause : new Error(String(cause)); });
+    return () => { cancelled = true; if (owner) void owner.close().catch(console.error); };
   });
 </script>
 
-{#if config}
-  <JazzSvelteProvider {config}>
-    {#snippet children({ db })}
-      {#if authenticated}
-        <JazzTokenRefresh {db} />
-      {/if}
-      {@render pageChildren?.()}
-    {/snippet}
-    {#snippet fallback()}
-      <p>Loading...</p>
-    {/snippet}
-  </JazzSvelteProvider>
-{/if}
+{#if error}<p role="alert">{error.message}</p>
+{:else if jazz}
+  {#if authError}<p role="alert">{authError.message}</p><button onclick={() => signOut().catch(() => {})}>Retry sign out</button>{/if}
+  <JazzSessionProvider session={jazz}>
+    {#snippet children()}<AccountStatus />{@render pageChildren?.()}{/snippet}
+    {#snippet fallback()}<AccountStatus />{/snippet}
+  </JazzSessionProvider>
+{:else}<p>Loading...</p>{/if}

@@ -1,30 +1,24 @@
 <!-- #region auth-external-svelte -->
 <script lang="ts">
-  import {
-    JazzSvelteProvider,
-    type JazzContext,
-  } from "jazz-tools/svelte";
-
-  const appId = "my-app";
-  const jazzServerUrl = "http://127.0.0.1:4200";
-
-  let jwtToken = $state<string | undefined>();
-
-  function onSignedIn(providerJwt: string) {
-    jwtToken = providerJwt;
-  }
-
-  const config = $derived({
-    appId,
-    serverUrl: jazzServerUrl,
-    jwtToken,
-  });
+  import type { Snippet } from "svelte";
+  import { createAccountManager, type DbConfig } from "jazz-tools";
+  import { JazzSvelteProvider, accountState } from "jazz-tools/svelte";
+  let { accounts, getToken, config, children }: {
+    accounts: Awaited<ReturnType<typeof createAccountManager>>;
+    getToken: () => Promise<string>;
+    config: Omit<DbConfig, "account">;
+    children: Snippet;
+  } = $props();
+  // Keep this app-owned manager stable for the lifetime of the login screen.
+  const selection = $derived(accountState(accounts));
+  // Login starts outside a context. Before linking, await the old context's
+  // shutdown({ waitForSync: true }), then call accounts.linkJWT outside it.
+  function signIn() { void accounts.loginJWT({ getToken }).catch(() => {}); }
 </script>
-
-<JazzSvelteProvider {config}>
-  {#snippet children({ db }: { db: NonNullable<JazzContext["db"]> })}
-    <button onclick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
-    <!-- Your app content here -->
-  {/snippet}
-</JazzSvelteProvider>
+{#if $selection.account}
+  <JazzSvelteProvider config={{ ...config, account: $selection.account }}>{@render children()}</JazzSvelteProvider>
+{:else}
+  <button disabled={!!$selection.pending} onclick={signIn}>Sign in</button>
+  {#if $selection.error}<p role="alert">{$selection.error.message}</p>{/if}
+{/if}
 <!-- #endregion auth-external-svelte -->

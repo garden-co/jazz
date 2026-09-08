@@ -1,7 +1,11 @@
 import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
 import { serializeClientConfig } from "../runtime/client-config-key.js";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
+import {
+  GracefulShutdownSyncError,
+  SharedClientShutdownError,
+} from "../runtime/graceful-shutdown-error.js";
 import {
   attachSubscriptionStore,
   subscriptionStoreKey,
@@ -88,9 +92,19 @@ export function createSolidJazzClientInternal(
 
         const wrappedClient = {
           ...client,
-          shutdown: () => {
+          shutdown: async (options?: Parameters<JazzClient["shutdown"]>[0]) => {
+            try {
+              await client.shutdown(options);
+            } catch (error) {
+              if (
+                !(error instanceof GracefulShutdownSyncError) &&
+                !(error instanceof SharedClientShutdownError)
+              ) {
+                disconnectRunId();
+              }
+              throw error;
+            }
             disconnectRunId();
-            return client.shutdown();
           },
         };
         const subscriptionStore = (client as Partial<WithSubscriptionStore>)[subscriptionStoreKey];

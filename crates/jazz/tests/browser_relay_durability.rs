@@ -206,6 +206,8 @@ fn assert_scheduled_urgencies(
     );
 }
 
+// All user actors below share the synthetic test issuer. Text ownership
+// addresses its subject explicitly; session.user is the complete author record.
 fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
@@ -262,7 +264,7 @@ fn band_chat_message_schema() -> JazzSchema {
         "room_members",
         vec![
             outer_eq("room_id", "room_id"),
-            session_eq("member_author", &["user"]),
+            session_eq("member_author", &["user", "identity", "subject"]),
         ],
     );
     compile_schema(
@@ -3052,7 +3054,7 @@ fn band_chat_owner_foreground_receives_guest_message_through_two_scope_relays() 
                     ("room_id".to_owned(), Value::Uuid(room.row_uuid().0)),
                     (
                         "member_author".to_owned(),
-                        Value::String(member.canonical().to_owned()),
+                        Value::String(member.principal_parts().1),
                     ),
                 ]),
                 Default::default(),

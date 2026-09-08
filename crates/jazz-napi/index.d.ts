@@ -20,10 +20,12 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
-  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
-  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
-  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
-  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  /** Admit a verified local-first account for this backend runtime only. */
+  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
@@ -98,6 +100,7 @@ export declare class NapiDb {
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   prepareQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
+  prepareRelationQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
   /**
    * Execute an ordinary prepared read. The optional transaction id selects
    * that transaction's snapshot and staged overlay; an explicit author
@@ -105,6 +108,11 @@ export declare class NapiDb {
    * only from an explicit backend open.
    */
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Compatibility state for explicitly serialized low-level callers. This
+   * map is shared per author; concurrent delegated requests must instead
+   * capture claims with prepareQueryAsync/prepareRelationQueryAsync.
+   */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
    * Materialize a prepared relation snapshot, optionally through an open
@@ -157,6 +165,11 @@ export declare class NapiDb {
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
+  /** Return the originating node clock before a host releases its memory runtime. */
+  foregroundTxTimeHighWater(): bigint
+  /** Merge a checked host-retained node clock before opening new local writes. */
+  seedForegroundTxTimeHighWater(highWater: bigint): void
+  waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 

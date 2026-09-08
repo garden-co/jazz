@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::account_registry::AccountId;
 use crate::groove::records::Value;
 use crate::ids::{AuthorSubject, AuthorSubjectError};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
@@ -166,8 +167,35 @@ pub struct AdmittedSession {
     pub author: AuthorSubject,
     /// Application claims admitted for this session.
     pub claims: BTreeMap<String, Value>,
+    /// Verified provider claims before identity-derived bindings are added.
+    provider_claims: BTreeMap<String, Value>,
     /// Admission source.
     pub source: AdmissionSource,
+}
+
+impl AdmittedSession {
+    /// Bind a host-configured account after credential verification.
+    ///
+    /// The account is not request material: transport hosts may call this
+    /// only with their own trusted admission configuration. Rebuilding the
+    /// policy claim map keeps `user` and `user.account` derived from the
+    /// newly admitted row author while retaining the verified provider data.
+    pub fn with_trusted_account(mut self, account: AccountId) -> Result<Self, AuthAdmissionError> {
+        if self.source == AdmissionSource::Anonymous {
+            return Err(AuthAdmissionError::AccountBindingRequiresCredential);
+        }
+        if account.0.is_nil() {
+            return Err(AuthAdmissionError::TrustedAccountIsSystem);
+        }
+        self.author = self.author.with_account(account);
+        self.claims = admitted_session_claims(
+            &self.issuer,
+            &self.subject,
+            self.author,
+            self.provider_claims.clone(),
+        );
+        Ok(self)
+    }
 }
 
 /// Where an admission decision came from.
@@ -194,6 +222,10 @@ pub enum AuthAdmissionError {
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
     InvalidHandshake(String),
+    /// A host account binding was attempted for an accountless anonymous session.
+    AccountBindingRequiresCredential,
+    /// A host account binding selected the reserved system account.
+    TrustedAccountIsSystem,
     /// The credential attempted to claim an invalid or Jazz-reserved author identity.
     InvalidAuthorSubject(AuthorSubjectError),
 }
@@ -205,6 +237,18 @@ impl fmt::Display for AuthAdmissionError {
             Self::InvalidBearer => write!(f, "invalid bearer auth"),
             Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
             Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
+            Self::AccountBindingRequiresCredential => {
+                write!(
+                    f,
+                    "trusted account binding requires an authenticated credential"
+                )
+            }
+            Self::TrustedAccountIsSystem => {
+                write!(
+                    f,
+                    "trusted account binding must not select the system account"
+                )
+            }
             Self::InvalidAuthorSubject(error) => write!(f, "invalid author subject: {error}"),
         }
     }
@@ -253,12 +297,14 @@ pub fn admit_static_bearer_with_claims(
         _ => STATIC_BEARER_ISSUER,
     };
     let author = AuthorSubject::reserved(issuer, &subject)?;
-    let claims = admitted_session_claims(issuer, &subject, author, claims);
+    let provider_claims = claims;
+    let claims = admitted_session_claims(issuer, &subject, author, provider_claims.clone());
     Ok(AdmittedSession {
         issuer: issuer.to_owned(),
         author,
         subject,
         claims,
+        provider_claims,
         source,
     })
 }
@@ -298,17 +344,14 @@ pub fn admit_bearer_jwt(
     let issuer = decoded.claims.iss;
     let subject = decoded.claims.sub;
     let author = author_subject_from_issuer_and_subject(&issuer, &subject)?;
-    let claims = admitted_session_claims(
-        &issuer,
-        &subject,
-        author,
-        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
-    );
+    let provider_claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
+    let claims = admitted_session_claims(&issuer, &subject, author, provider_claims.clone());
     Ok(AdmittedSession {
         issuer,
         author,
         subject,
         claims,
+        provider_claims,
         source,
     })
 }
@@ -371,17 +414,19 @@ pub fn admit_local_first_jwt(
     }
     let subject = decoded.claims.sub;
     let author = AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?;
+    let provider_claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
     let claims = admitted_session_claims(
         LOCAL_FIRST_JWT_ISSUER,
         &subject,
         author,
-        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
+        provider_claims.clone(),
     );
     Ok(AdmittedSession {
         issuer: LOCAL_FIRST_JWT_ISSUER.to_owned(),
         author,
         subject,
         claims,
+        provider_claims,
         source: AdmissionSource::LocalFirstJwt,
     })
 }
@@ -395,14 +440,12 @@ pub fn admitted_session_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    let (author_issuer, author_subject): (String, String) =
-        serde_json::from_str(author.canonical())
-            .expect("admitted authors always have canonical issuer/subject JSON");
+    let (author_issuer, author_subject) = author.principal_parts();
     debug_assert_eq!(
         (author_issuer, author_subject),
         (issuer.to_owned(), subject.to_owned())
     );
-    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
+    crate::tools::policy_claims::canonical_policy_binding_claims(&author, claims)
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {

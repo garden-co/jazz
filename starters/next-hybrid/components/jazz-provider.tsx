@@ -1,82 +1,124 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider as JazzBaseProvider, useDb, useLocalFirstAuth } from "jazz-tools/react";
+import { createContext, useContext, useEffect, useState } from "react";
+import { JazzSessionProvider, useJazzSession, useJazzSessionOwner } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
-
+import { getToken } from "@/lib/accounts";
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
+const ProviderErrorContext = createContext<React.Dispatch<React.SetStateAction<Error | undefined>>>(
+  () => {},
+);
+export const useProviderError = () => useContext(ProviderErrorContext);
 
-function JwtRefresh() {
-  const db = useDb();
-  useEffect(
-    () =>
-      db.onAuthChanged((state) => {
-        if (state.error !== "expired") return;
-        authClient
-          .$fetch<{ token: string }>("/token", { method: "GET" })
-          .then(({ data, error }) => {
-            if (!error && data?.token) db.updateAuthToken(data.token);
-          });
-      }),
-    [db],
-  );
-  return null;
-}
-
-/**
- * Jazz provider for the local-first + BetterAuth starter. Watches the
- * Better Auth session and builds the appropriate DbConfig — an anonymous
- * local-first secret when there's no session, a Better Auth JWT when
- * there is.
- */
-export function JazzProvider({ children }: React.PropsWithChildren) {
-  const { data: authSession, isPending } = authClient.useSession();
-  const { secret, isLoading: secretLoading } = useLocalFirstAuth();
-  const [jwtToken, setJwtToken] = useState<string | null>(null);
-  const authenticated = Boolean(authSession?.session);
-
-  useEffect(() => {
-    if (!authenticated) {
-      setJwtToken(null);
-      return;
-    }
-    let cancelled = false;
-    authClient.$fetch<{ token: string }>("/token", { method: "GET" }).then(({ data, error }) => {
-      if (cancelled) return;
-      if (!error && data?.token) setJwtToken(data.token);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [authenticated]);
-
-  const config = useMemo<DbConfig | null>(() => {
-    if (!APP_ID || !SERVER_URL) {
-      const missing = [
-        !APP_ID && "NEXT_PUBLIC_JAZZ_APP_ID",
-        !SERVER_URL && "NEXT_PUBLIC_JAZZ_SERVER_URL",
-      ]
-        .filter((v) => !!v)
-        .join(" & ");
-      throw new Error(
-        `${missing} not set. The withJazz Next plugin injects these at dev time; in production, set them explicitly in your environment.`,
-      );
-    }
-    if (authenticated) {
-      return jwtToken ? { appId: APP_ID, serverUrl: SERVER_URL, jwtToken } : null;
-    }
-    if (secretLoading || !secret) return null;
-    return { appId: APP_ID, serverUrl: SERVER_URL, secret };
-  }, [authenticated, jwtToken, secret, secretLoading]);
-
-  if (isPending || !config) return null;
+function SessionContent({
+  children,
+  providerError,
+}: React.PropsWithChildren<{ providerError?: Error }>) {
+  const {
+    status,
+    error: sessionError,
+    loginJWT,
+    linkJWT,
+    createLocalFirst,
+    retry,
+  } = useJazzSession();
+  const error = sessionError ?? providerError;
+  const reportError = useProviderError();
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
 
   return (
-    <JazzBaseProvider config={config} fallback={<p>Loading...</p>}>
-      <JwtRefresh />
-      {children}
-    </JazzBaseProvider>
+    <>
+      {error && (
+        <aside className="alert-error" role="alert">
+          {error.message}
+          <button
+            type="button"
+            onClick={() =>
+              void linkJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry linking
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry account preparation
+          </button>
+        </aside>
+      )}
+      {status === "ready" ? (
+        children
+      ) : status === "signed-out" ? (
+        <div>
+          <button
+            onClick={() =>
+              void loginJWT({ getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
+        </div>
+      ) : (
+        <p>Loading...</p>
+      )}
+    </>
+  );
+}
+
+export function JazzProvider({ children }: React.PropsWithChildren) {
+  if (!APP_ID || !SERVER_URL) throw new Error("Jazz app ID and server URL must be set");
+  const { session, error, retry } = useJazzSessionOwner({
+    appId: APP_ID,
+    serverUrl: SERVER_URL,
+    initial: "local-first",
+  });
+  const [providerError, setProviderError] = useState<Error>();
+  useEffect(() => {
+    if (!session) return;
+    void authClient
+      .getSession()
+      .then((auth) => (auth.data?.session ? session.loginJWT({ getToken }) : undefined))
+      .catch((cause) =>
+        setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+      );
+  }, [session]);
+  if (!session)
+    return error ? (
+      <p role="alert">
+        {error.message}{" "}
+        <button onClick={() => void retry().catch(() => {})}>Retry account preparation</button>
+      </p>
+    ) : (
+      <p>Loading...</p>
+    );
+  return (
+    <ProviderErrorContext.Provider value={setProviderError}>
+      <JazzSessionProvider
+        session={session}
+        fallback={<SessionContent providerError={providerError} />}
+      >
+        <SessionContent providerError={providerError}>{children}</SessionContent>
+      </JazzSessionProvider>
+    </ProviderErrorContext.Provider>
   );
 }

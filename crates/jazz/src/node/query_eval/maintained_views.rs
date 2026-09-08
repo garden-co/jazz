@@ -104,6 +104,13 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn has_root_collector(&self) -> bool {
         self.terminal_schemas.has_root_collector()
     }
+
+    /// Whether this replacement graph has consumed its first local terminal
+    /// batch. Before this point an empty materialization is pending, not an
+    /// authorization result.
+    pub(crate) fn initial_snapshot_received(&self) -> bool {
+        self.initial_received
+    }
 }
 
 /// A plan retained solely to keep a maintained subscription graph alive.

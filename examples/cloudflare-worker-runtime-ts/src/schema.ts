@@ -1,19 +1,8 @@
-import { col } from "../../../packages/jazz-tools/src/dsl.js";
-import {
-  defineApp,
-  defineTable,
-  type App,
-  type RowOf,
-  type Schema,
-} from "../../../packages/jazz-tools/src/typed-app.js";
+import { schema as s } from "jazz-tools";
 
 const schema = {
-  todos: defineTable({
-    title: col.string(),
-    done: col.boolean(),
-  }),
+  todos: s.table({ title: s.string(), done: s.boolean() }),
 };
-
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
-export type Todo = RowOf<typeof app.todos>;
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+export type Todo = s.RowOf<typeof app.todos>;

@@ -6,8 +6,16 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { userIdentity } from "jazz-tools";
-import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
+import { createAccountManager } from "jazz-tools";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJwtIssuer,
+  type LocalJazzServerHandle,
+  type TestJwtIssuerHandle,
+} from "jazz-tools/testing";
+import permissions from "../permissions.js";
+import { app } from "../schema.js";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -28,11 +36,30 @@ type Identity = {
   user: string;
 };
 
-function createIdentity(jwtIssuer: TestJwtIssuerHandle, userId: string): Identity {
+async function createIdentity(
+  jwtIssuer: TestJwtIssuerHandle,
+  upstream: LocalJazzServerHandle,
+  userId: string,
+): Promise<Identity> {
   const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  return { token, userId, user: userIdentity(EXTERNAL_ISSUER, userId) };
+  let stored: string | null = null;
+  const accounts = await createAccountManager({
+    appId: upstream.appId,
+    serverUrl: upstream.url,
+    env: `todo-server-integration-${crypto.randomUUID()}`,
+    store: {
+      async read() {
+        return stored;
+      },
+      async update(transform) {
+        stored = transform(stored);
+      },
+    },
+  });
+  const account = await accounts.registerJWT(token);
+  return { token, userId, user: account.id };
 }
 let primaryIdentity: Identity;
 let jwtIssuer: TestJwtIssuerHandle;
@@ -50,12 +77,25 @@ function authenticatedFetch(
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
+  let upstream: LocalJazzServerHandle;
 
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
-    primaryIdentity = createIdentity(jwtIssuer, "todo-rest-integration");
+    upstream = await startLocalJazzServer({
+      jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: EXTERNAL_ISSUER,
+      jwtAudience: jwtIssuer.audience,
+    });
+    await deploy({
+      serverUrl: upstream.url,
+      appId: upstream.appId,
+      adminSecret: upstream.adminSecret,
+      schema: app,
+      permissions,
+    });
+    primaryIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-integration");
     // Create server with Fjall-backed storage (temp directory)
-    const todoServer = await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl });
+    const todoServer = await createServer(undefined, jazzOptions());
 
     // Start on random available port
     server = await startServer(todoServer, 0);
@@ -67,7 +107,18 @@ describe("Todo Server Integration", () => {
       await stopServer(server);
     }
     await jwtIssuer?.stop();
+    await upstream?.stop();
   });
+
+  function jazzOptions() {
+    return {
+      jwksUrl: jwtIssuer.jwksUrl,
+      appId: upstream.appId,
+      serverUrl: upstream.url,
+      backendSecret: upstream.backendSecret,
+      adminSecret: upstream.adminSecret,
+    };
+  }
 
   describe("Health Check", () => {
     it("returns healthy status", async () => {
@@ -156,7 +207,7 @@ describe("Todo Server Integration", () => {
       const address = occupied.address();
       if (!address || typeof address === "string") throw new Error("expected TCP listener");
 
-      const candidate = await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl });
+      const candidate = await createServer(undefined, jazzOptions());
       try {
         await expect(startServer(candidate, address.port)).rejects.toMatchObject({
           code: "EADDRINUSE",
@@ -186,8 +237,8 @@ describe("Todo Server Integration", () => {
 
   describe("Policy-Aware Requests", () => {
     it("filters rows by the authenticated session owner", async () => {
-      const alice = createIdentity(jwtIssuer, "todo-rest-policy-alice");
-      const bob = createIdentity(jwtIssuer, "todo-rest-policy-bob");
+      const alice = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-alice");
+      const bob = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-bob");
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
 
@@ -253,10 +304,7 @@ describe("Todo Server Integration", () => {
       const dbPath = join(dataDir, "jazz.db");
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(
-        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -279,10 +327,7 @@ describe("Todo Server Integration", () => {
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(
-        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
 
       // The server's public authenticated route must be able to serve the
       // persisted current state immediately after reopening, rather than only
@@ -307,13 +352,13 @@ describe("Todo Server Integration", () => {
       await stopServer(server2);
     });
 
+    // The 256 revision receipt intentionally authenticates every HTTP write
+    // through the remote account registry before proving cold-restart state.
+    // Keep its timeout scoped: ordinary routes retain the suite's 60s bound.
     it("returns the current value after dense update history and a restart", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
       const dbPath = join(dataDir, "jazz.db");
-      const server1 = await startServer(
-        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
 
       let todoId: string | undefined;
       try {
@@ -338,10 +383,7 @@ describe("Todo Server Integration", () => {
         await stopServer(server1);
       }
 
-      const server2 = await startServer(
-        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
       try {
         const response = await authenticatedFetch(`${server2.baseUrl}/todos/${todoId}`);
         expect(response.status).toBe(200);
@@ -352,20 +394,21 @@ describe("Todo Server Integration", () => {
       } finally {
         await stopServer(server2);
       }
-    });
+    }, 120_000);
   });
 
   describe("SSE Live Endpoint", () => {
     it("streams only the authenticated caller's todos and updates on changes", async () => {
       // Use an isolated server instance so this test has an independent persistence context.
-      const sseServer = await startServer(
-        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const sseServer = await startServer(await createServer(undefined, jazzOptions()), 0);
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
-        const otherIdentity = createIdentity(jwtIssuer, "todo-rest-sse-other");
+        // The suite shares one deployed upstream, so use an identity that has
+        // no earlier todos rather than assuming a fresh local server implies a
+        // fresh remote account view.
+        const sseIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-primary");
+        const otherIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
           {
@@ -379,7 +422,7 @@ describe("Todo Server Integration", () => {
         const foreignTodo: Todo = await foreignCreate.json();
 
         // Connect to SSE endpoint
-        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`);
+        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`, {}, sseIdentity);
         expect(res.status).toBe(200);
         expect(res.headers.get("content-type")).toBe("text/event-stream");
 
@@ -413,11 +456,15 @@ describe("Todo Server Integration", () => {
         expect(initial).toEqual([]);
 
         // 2. Create a todo - should see it in next event
-        const createRes = await authenticatedFetch(`${sseBaseUrl}/todos`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: "SSE Test Todo" }),
-        });
+        const createRes = await authenticatedFetch(
+          `${sseBaseUrl}/todos`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: "SSE Test Todo" }),
+          },
+          sseIdentity,
+        );
         expect(createRes.status).toBe(201);
         const createdTodo: Todo = await createRes.json();
 
@@ -427,20 +474,26 @@ describe("Todo Server Integration", () => {
         expect(afterCreate[0].title).toBe("SSE Test Todo");
 
         // 3. Update the todo - should see updated state
-        await authenticatedFetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ done: true }),
-        });
+        await authenticatedFetch(
+          `${sseBaseUrl}/todos/${createdTodo.id}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ done: true }),
+          },
+          sseIdentity,
+        );
 
         const afterUpdate = await readEvent();
         expect(afterUpdate.length).toBe(1);
         expect(afterUpdate[0].done).toBe(true);
 
         // 4. Delete the todo - should see empty list again
-        await authenticatedFetch(`${sseBaseUrl}/todos/${createdTodo.id}`, {
-          method: "DELETE",
-        });
+        await authenticatedFetch(
+          `${sseBaseUrl}/todos/${createdTodo.id}`,
+          { method: "DELETE" },
+          sseIdentity,
+        );
 
         const afterDelete = await readEvent();
         expect(afterDelete).toEqual([]);

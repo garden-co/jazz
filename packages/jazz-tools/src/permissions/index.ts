@@ -757,8 +757,14 @@ type DirectWhereInputGuard<Input, WhereInput> = [Input] extends [(...args: never
         : [error: "Input is not assignable to the allowed where input type"];
 
 export type SessionContext = {
-  /** Opaque canonical JSON `[iss,sub]` identity used by provenance columns. */
-  readonly user: SessionRefValue;
+  /** Exact author; compare account for ownership shared by linked identities. */
+  readonly user: SessionRefValue & {
+    readonly account: SessionRefValue;
+    readonly identity: SessionRefValue & {
+      readonly issuer: SessionRefValue;
+      readonly subject: SessionRefValue;
+    };
+  };
   /** Raw provider claims, kept separate from Jazz-owned session identity. */
   readonly claims: Readonly<Record<string, SessionRefValue>>;
   readonly authMode: SessionRefValue;
@@ -1972,6 +1978,7 @@ export function rawPermissionExpression(expression: PolicyExpr): PermissionExpre
 }
 
 function splitQualifiedColumn(column: string): [string | undefined, string] {
+  if (column.startsWith("$")) return [undefined, column];
   const dotIndex = column.indexOf(".");
   if (dotIndex < 0) {
     return [undefined, column];
@@ -1989,6 +1996,13 @@ export function createSessionContext(): SessionContext {
   const claimRef = (...path: string[]): SessionRefValue => ({
     __jazzPermissionKind: "session-ref",
     path,
+  });
+  const user = Object.assign(claimRef("user"), {
+    account: claimRef("user", "account"),
+    identity: Object.assign(claimRef("user", "identity"), {
+      issuer: claimRef("user", "identity", "issuer"),
+      subject: claimRef("user", "identity", "subject"),
+    }),
   });
   const whereBuilder = Object.assign(
     (input: Record<string, unknown>): SessionWhereCondition =>
@@ -2014,7 +2028,8 @@ export function createSessionContext(): SessionContext {
             },
           );
         }
-        if (prop === "user" || prop === "authMode") return claimRef(prop);
+        if (prop === "user") return user;
+        if (prop === "authMode") return claimRef(prop);
         throw new Error(
           `Unknown session property ${prop}; raw provider claims must use session.claims["${prop}"]`,
         );

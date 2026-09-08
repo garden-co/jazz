@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.53",
+  "version": "2.0.0-alpha.54",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "bin": {
@@ -73,6 +73,10 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
+    "./_dev/inspector-client": {
+      "types": "./dist/_dev/inspector-client.d.ts",
+      "default": "./dist/_dev/inspector-client.js"
+    },
     "./_dev/schema-hash": {
       "types": "./dist/_dev/schema-hash.d.ts",
       "default": "./dist/_dev/schema-hash.js"
@@ -120,7 +124,11 @@
       "types": "./dist/passkey-backup.d.ts",
       "default": "./dist/passkey-backup.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./_dev/native-account-session": {
+      "types": "./dist/_dev/native-account-session.d.ts",
+      "default": "./dist/_dev/native-account-session.js"
+    }
   },
   "publishConfig": {
     "access": "public",
@@ -144,9 +152,10 @@
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:public-api && pnpm typecheck:react-native",
     "typecheck:public-api": "tsc --project tsconfig.public-api.json",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
-    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
+    "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",

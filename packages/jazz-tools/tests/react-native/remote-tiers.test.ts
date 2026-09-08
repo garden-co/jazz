@@ -199,7 +199,9 @@ it("keeps local work usable while remote read tiers recover from an established 
 
         const write = db.insert(app.todos, { title: "durable through outage", done: false });
         const local = await write.wait({ tier: "local" });
-        await expect.poll(async () => db.all(app.todos, { tier: ReadTier.Local })).toEqual([local]);
+        await expect
+          .poll(async () => db.all(app.todos, { tier: ReadTier.LocalFirst }))
+          .toEqual([local]);
 
         let remoteIfPossibleSettled = false;
         const remoteIfPossible = db.all(app.todos, { tier: ReadTier.RemoteIfPossible }).then(

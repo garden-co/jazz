@@ -1,8 +1,9 @@
-import { createHmac } from "node:crypto";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { requestAccountRegistry } from "../accounts/registry-client.js";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
-import { createJazzContext, type JazzContext } from "../backend/index.js";
+import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
   startTestJwtIssuer,
@@ -50,24 +51,6 @@ type AtomicUser = {
   transitionStatus: string;
 };
 
-const TEST_EXTERNAL_JWT_SECRET = "better-auth-adapter-test-secret";
-const TEST_EXTERNAL_JWT_KID = "better-auth-adapter-test";
-
-function signedExternalTestToken(subject: string): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "HS256", typ: "JWT", kid: TEST_EXTERNAL_JWT_KID }),
-    "utf8",
-  ).toString("base64url");
-  const payload = Buffer.from(
-    JSON.stringify({ iss: "https://better-auth-test.example", sub: subject }),
-    "utf8",
-  ).toString("base64url");
-  const signature = createHmac("sha256", TEST_EXTERNAL_JWT_SECRET)
-    .update(`${header}.${payload}`, "utf8")
-    .digest("base64url");
-  return `${header}.${payload}.${signature}`;
-}
-
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
@@ -86,8 +69,12 @@ describe("jazzAdapter", () => {
   });
 
   it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
+    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
+      jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
     await deployProject({
       serverUrl: server.url,
@@ -102,12 +89,9 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
-      jwtPublicKey: {
-        kty: "oct",
-        kid: TEST_EXTERNAL_JWT_KID,
-        alg: "HS256",
-        k: Buffer.from(TEST_EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
-      },
+      jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
 
     try {
@@ -125,7 +109,8 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const token = signedExternalTestToken("ordinary-session-user");
+      const token = jwtIssuer.jwtForUser("ordinary-session-user");
+      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
@@ -147,6 +132,7 @@ describe("jazzAdapter", () => {
     } finally {
       await context.shutdown();
       await server.stop();
+      await jwtIssuer.stop();
     }
   }, 30_000);
 
@@ -240,6 +226,7 @@ describe("jazzAdapter", () => {
         .wait({ tier: "global" });
 
       const token = jwtIssuer.jwtForUser("external-policy-user");
+      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
@@ -326,6 +313,29 @@ describe("jazzAdapter", () => {
     afterEach(async () => {
       await context.shutdown();
       await server.stop();
+    });
+
+    it("awaits backend admission lazily and recovers after an unavailable backend", async () => {
+      const db = context.asBackend(wasmSchemaExample);
+      const supplyDb = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Backend admission unavailable"))
+        .mockResolvedValue(db);
+      const asyncAdapter = jazzAdapter({ db: supplyDb, schema: wasmSchemaExample })({});
+      expect(supplyDb).not.toHaveBeenCalled();
+      const data = { name: "Async backend", email: "async@example.com", emailVerified: false };
+      await expect(asyncAdapter.create({ model: "user", data })).rejects.toThrow(
+        "Backend admission unavailable",
+      );
+      const created = await asyncAdapter.create({ model: "user", data });
+      const where = [{ field: "id", value: created.id }];
+      expect(await asyncAdapter.findOne({ model: "user", where })).toMatchObject(data);
+      await asyncAdapter.update({ model: "user", where, update: { name: "Updated" } });
+      expect(await asyncAdapter.findOne({ model: "user", where })).toMatchObject({
+        name: "Updated",
+      });
+      await asyncAdapter.delete({ model: "user", where });
+      expect(await asyncAdapter.findOne({ model: "user", where })).toBeNull();
     });
 
     it("lowers supported result bounds into the Jazz query", async () => {

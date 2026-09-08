@@ -350,13 +350,13 @@ declare module "jazz-wasm" {
       localNode: Uint8Array,
       localEpoch: bigint,
     ): Promise<WasmTransport>;
-    acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
+    acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): Promise<WasmTransport>;
     acceptSubscriberWithSelfSignedProof(
       claims: Record<string, unknown>,
       token: string,
       appId: string,
       claimedAuthor: string,
-    ): WasmTransport;
+    ): Promise<WasmTransport>;
     mergeableTx(openTransactionId: string): WasmTx;
     mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): WasmTx;
     exclusiveTx(openTransactionId: string): WasmTx;

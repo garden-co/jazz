@@ -112,6 +112,8 @@ fn exists(table: &str, conditions: Vec<PublicPolicyExpr>) -> PublicPolicyExpr {
     }
 }
 
+// All user actors below share the synthetic test issuer. Text ownership
+// addresses its subject explicitly; session.user is the complete author record.
 fn schema() -> JazzSchema {
     schema_with_membership_policy(Some(PublicPolicyExpr::True))
 }
@@ -121,7 +123,7 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
         MEMBERSHIPS,
         vec![
             outer_eq("team", "team"),
-            session_eq("user", &["user"]),
+            session_eq("user", &["user", "identity", "subject"]),
             session_eq("region", &["claims", "region"]),
         ],
     );
@@ -172,7 +174,11 @@ fn two_hop_seeded_policy_schema() -> JazzSchema {
                     column: "user".to_owned(),
                 },
                 op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["user".to_owned()]),
+                right: RelValueRef::SessionRef(vec![
+                    "user".to_owned(),
+                    "identity".to_owned(),
+                    "subject".to_owned(),
+                ]),
             },
         }),
         columns: vec![RelProjectColumn {
@@ -442,10 +448,7 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
             MEMBERSHIPS,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
-                (
-                    "user".to_owned(),
-                    Value::String(user.canonical().to_owned()),
-                ),
+                ("user".to_owned(), Value::String(user.principal_parts().1)),
                 ("region".to_owned(), Value::String(region.to_owned())),
             ]),
             jazz::db::InsertOptions {
@@ -559,10 +562,7 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
             GROUP_MEMBERS,
             BTreeMap::from([
                 ("group".to_owned(), Value::Uuid(group.0)),
-                (
-                    "user".to_owned(),
-                    Value::String(user.canonical().to_owned()),
-                ),
+                ("user".to_owned(), Value::String(user.principal_parts().1)),
             ]),
             jazz::db::InsertOptions {
                 row_id: Some(membership),
@@ -646,7 +646,7 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
 fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let policy = PublicPolicyExpr::Or(vec![
         text_eq("visibility", "public"),
-        session_eq("owner", &["user"]),
+        session_eq("owner", &["user", "identity", "subject"]),
         session_eq("region", &["claims", "region"]),
     ]);
     let schema = compile_schema(
@@ -672,7 +672,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("visibility".to_owned(), Value::String("public".to_owned())),
             (
                 "owner".to_owned(),
-                Value::String(writer().canonical().to_owned()),
+                Value::String(writer().principal_parts().1),
             ),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
@@ -688,7 +688,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("visibility".to_owned(), Value::String("private".to_owned())),
             (
                 "owner".to_owned(),
-                Value::String(user_a().canonical().to_owned()),
+                Value::String(user_a().principal_parts().1),
             ),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
@@ -704,7 +704,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("visibility".to_owned(), Value::String("private".to_owned())),
             (
                 "owner".to_owned(),
-                Value::String(writer().canonical().to_owned()),
+                Value::String(writer().principal_parts().1),
             ),
             ("region".to_owned(), Value::String("region-a".to_owned())),
         ]),
@@ -819,7 +819,10 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         session_eq("joinCode", &["claims", "join_code"]),
         exists(
             CHAT_MEMBERS,
-            vec![outer_eq("chatId", "id"), session_eq("userId", &["user"])],
+            vec![
+                outer_eq("chatId", "id"),
+                session_eq("userId", &["user", "identity", "subject"]),
+            ],
         ),
     ]);
     let schema = compile_schema(
@@ -834,7 +837,10 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
                 TableSchemaBuilder::new(CHAT_MEMBERS)
                     .fk_column("chatId", CHATS)
                     .column("userId", PublicColumnType::Text)
-                    .policies(read_and_allow_all_writes(session_eq("userId", &["user"]))),
+                    .policies(read_and_allow_all_writes(session_eq(
+                        "userId",
+                        &["user", "identity", "subject"],
+                    ))),
             )
             .build(),
     );
@@ -908,7 +914,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
             ("chatId".to_owned(), Value::Uuid(chat_a.0)),
             (
                 "userId".to_owned(),
-                Value::String(user_a().canonical().to_owned()),
+                Value::String(user_a().principal_parts().1),
             ),
         ]),
         jazz::db::InsertOptions {
@@ -948,7 +954,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
             ("chatId".to_owned(), Value::Uuid(chat_b.0)),
             (
                 "userId".to_owned(),
-                Value::String(user_b().canonical().to_owned()),
+                Value::String(user_b().principal_parts().1),
             ),
         ]),
         jazz::db::InsertOptions {
@@ -1533,7 +1539,10 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
         session_eq("team", &["claims", "shared_scope"]),
         exists(
             MEMBERSHIPS,
-            vec![outer_eq("team", "team"), session_eq("user", &["user"])],
+            vec![
+                outer_eq("team", "team"),
+                session_eq("user", &["user", "identity", "subject"]),
+            ],
         ),
     ]);
     let membership_policy = session_eq("region", &["claims", "shared_scope"]);

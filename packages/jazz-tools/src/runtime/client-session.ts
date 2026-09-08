@@ -1,7 +1,10 @@
+import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
 
 export interface ClientSessionInput {
+  /** @internal Assignment supplied by a validated account handle. */
+  accountId?: string;
   appId: string;
   jwtToken?: string;
   cookieSession?: Session;
@@ -38,17 +41,12 @@ const trustedReservedSessions = new WeakSet<Session>();
 const trustedReservedSessionTokens = new WeakMap<Session, string>();
 const trustedReservedSessionTokenValues = new Map<
   string,
-  { issuer: string; user_id: string; authMode: Session["authMode"] }
+  { account_id?: string; issuer: string; user_id: string; authMode: Session["authMode"] }
 >();
 
 function newTrustedReservedSessionToken(): string {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  if (globalThis.crypto?.getRandomValues) {
-    const bytes = new Uint8Array(16);
-    globalThis.crypto.getRandomValues(bytes);
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  }
-  throw new Error("Trusted reserved sessions require a cryptographically secure runtime");
+  const bytes = runtimeRandomBytes(16);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function markTrustedReservedSession<T extends Session>(session: T): T {
@@ -68,6 +66,7 @@ export function trustedReservedSessionToken(session: Session): string | undefine
     trustedReservedSessionTokens.set(session, token);
   }
   trustedReservedSessionTokenValues.set(token, {
+    account_id: session.account_id,
     issuer: session.issuer,
     user_id: session.user_id,
     authMode: session.authMode,
@@ -76,13 +75,14 @@ export function trustedReservedSessionToken(session: Session): string | undefine
 }
 
 export function isTrustedReservedSession(
-  session: Pick<Session, "issuer" | "user_id" | "authMode">,
+  session: Pick<Session, "account_id" | "issuer" | "user_id" | "authMode">,
   token: unknown,
 ): boolean {
   if (!isReservedJazzIssuer(session.issuer) || typeof token !== "string") return false;
   const trusted = trustedReservedSessionTokenValues.get(token);
   return (
     trusted?.issuer === session.issuer &&
+    trusted.account_id === session.account_id &&
     trusted.user_id === session.user_id &&
     trusted.authMode === session.authMode
   );
@@ -118,8 +118,8 @@ function isPolicyClaimValue(value: unknown): boolean {
 }
 
 /**
- * Project verified JWT metadata into Groove's deliberately non-recursive
- * policy corpus. This is kept separate from `PublicSession.claims`: registered
+ * Project decoded JWT metadata into Groove's deliberately non-recursive
+ * local advisory policy corpus. The server independently verifies its JWT. This is kept separate from `PublicSession.claims`: registered
  * transport/security fields are verified identity, not provider policy data;
  * objects are handler metadata, not policy values.
  */
@@ -303,15 +303,22 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
       trustedReservedSessionToken(config.trustedReservedSession),
     )
   ) {
+    const internalSession = config.accountId
+      ? markTrustedReservedSession({
+          ...config.trustedReservedSession,
+          account_id: config.accountId,
+        })
+      : config.trustedReservedSession;
     return {
       transport: "bearer",
-      session: withCanonicalUser(config.trustedReservedSession),
-      internalSession: config.trustedReservedSession,
+      session: withCanonicalUser(internalSession),
+      internalSession,
     };
   }
 
   const payload = parseJwtPayload(config.jwtToken ?? "");
   const jwtInternal = payload ? internalSessionFromJwtPayload(payload) : null;
+  if (jwtInternal && config.accountId) jwtInternal.account_id = config.accountId;
   if (jwtInternal) {
     return {
       transport: "bearer",

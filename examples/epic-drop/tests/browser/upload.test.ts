@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, generateAuthSecret, type Db } from "jazz-tools";
+import { createAccountManager, createDb, generateAuthSecret, type Db } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { fileListQuery } from "../../src/file-list-query.js";
 import { APP_ID, TEST_PORT } from "./test-constants.js";
@@ -13,6 +14,11 @@ afterEach(async () => {
 async function openDb(label: string): Promise<Db> {
   const db = await createDb({
     appId: APP_ID,
+    account: await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+    ),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);
@@ -23,7 +29,12 @@ async function openRemoteDb(label: string, secret: string): Promise<Db> {
   const db = await createDb({
     appId: APP_ID,
     serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-    secret,
+    account: await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+      secret,
+    ),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);
@@ -31,7 +42,7 @@ async function openRemoteDb(label: string, secret: string): Promise<Db> {
 }
 
 function sessionUser(db: Db): string {
-  const id = db.getAuthState().session?.user;
+  const id = db.getAuthState().session?.user.account;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }
@@ -39,13 +50,13 @@ function sessionUser(db: Db): string {
 describe("EpicDrop streamed upload foundation", () => {
   it("streams multiple browser chunks and exposes only selected folder metadata", async () => {
     const db = await openDb("metadata");
-    const folder = db.insert(app.folders, { name: "Demos", owner_id: "anonymous" });
+    const folder = db.insert(app.folders, { name: "Demos", owner_id: sessionUser(db) });
     const uploaded = await db.insertStreaming(app.files, {
       folder_id: folder.value.id,
       name: "set-list.wav",
       content_type: "audio/wav",
       size_bytes: 9,
-      owner_id: "anonymous",
+      owner_id: sessionUser(db),
       contents: (async function* () {
         yield new Uint8Array([1, 2, 3]);
         yield new Uint8Array([4, 5]);
@@ -69,7 +80,7 @@ describe("EpicDrop streamed upload foundation", () => {
 
   it("does not publish a cancelled stream and permits a clean retry", async () => {
     const db = await openDb("retry");
-    const folder = db.insert(app.folders, { name: "Interrupted", owner_id: "anonymous" });
+    const folder = db.insert(app.folders, { name: "Interrupted", owner_id: sessionUser(db) });
 
     await expect(
       db.insertStreaming(app.files, {
@@ -77,7 +88,7 @@ describe("EpicDrop streamed upload foundation", () => {
         name: "partial.wav",
         content_type: "audio/wav",
         size_bytes: 64 * 1024,
-        owner_id: "anonymous",
+        owner_id: sessionUser(db),
         contents: (async function* () {
           yield new Uint8Array(40 * 1024).fill(7);
           throw new Error("simulated browser stream cancellation");
@@ -91,7 +102,7 @@ describe("EpicDrop streamed upload foundation", () => {
       name: "retry.wav",
       content_type: "audio/wav",
       size_bytes: 64 * 1024,
-      owner_id: "anonymous",
+      owner_id: sessionUser(db),
       contents: (async function* () {
         yield new Uint8Array(32 * 1024).fill(3);
         yield new Uint8Array(32 * 1024).fill(5);

@@ -1,4 +1,5 @@
 #include "foreground-runtime.h"
+#include "account-store-lock.h"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +12,26 @@
 #include <utility>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+#ifdef __APPLE__
+#include <os/log.h>
+#endif
+
 namespace jazz::rn {
+
+void traceForegroundWake(const char *stage) noexcept {
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_ERROR, "JazzForegroundWake", "%s", stage);
+#elif defined(__APPLE__)
+  // The iOS driver reads only this app process's bounded unified-log tail.
+  // Every stage is a fixed literal selected in this translation unit.
+  os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, "JazzForegroundWake %{public}s", stage);
+#else
+  (void)stage;
+#endif
+}
 
 constexpr const char *kWakeCallbacksGlobal = "__jazzNativeForegroundWakeCallbacksV1";
 constexpr uint8_t kWakeImmediate = 0;
@@ -71,6 +91,16 @@ class ForegroundWakeRegistration final
         lease, foreground_, &ForegroundWakeRegistration::wakeFromOwner, this);
   }
 
+  // This is a bounded device-receipt diagnostic, not part of the foreground
+  // wake contract. It is off unless the one receipt alias explicitly enables
+  // it, and the same mutex that protects the coalescer makes toggling safe
+  // against owner-thread wake delivery.
+  void setTraceEnabled(bool enabled) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    traceEnabled_ = enabled;
+    if (enabled) traceForegroundWake("enabled");
+  }
+
   /** Clear the Rust scheduler synchronously before this callback context can
    * be destroyed. This never touches JSI, so platform invalidation may call it
    * while a runtime is already being torn down. */
@@ -95,26 +125,46 @@ class ForegroundWakeRegistration final
 
   void requestWake(uint64_t foreground, uint8_t kind, uint64_t delayMs) noexcept {
     std::shared_ptr<facebook::react::CallInvoker> invoker;
+    bool traceRequested = false;
+    const char *traceRejected = nullptr;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (foreground != foreground_) return;
-      if (kind == kWakeCancelled) {
-        active_ = false;
-        pending_ = false;
-        return;
+      if (foreground != foreground_) {
+        if (traceEnabled_) traceRejected = "foreground-mismatch";
+      } else if (!active_) {
+        if (traceEnabled_) traceRejected = "inactive";
+      } else {
+        // Record bridge entry before coalescing can return for an already
+        // scheduled wake. The fixed marker intentionally carries no identity or
+        // payload data.
+        traceRequested = traceEnabled_;
+        if (kind == kWakeCancelled) {
+          active_ = false;
+          pending_ = false;
+        } else {
+          mergeWakeLocked(kind, delayMs);
+          if (!scheduled_ && callInvoker_) {
+            scheduled_ = true;
+            invoker = callInvoker_;
+          }
+        }
       }
-      if (!active_) return;
-      mergeWakeLocked(kind, delayMs);
-      if (scheduled_ || !callInvoker_) return;
-      scheduled_ = true;
-      invoker = callInvoker_;
     }
+    if (traceRejected) traceForegroundWake(traceRejected);
+    if (traceRequested) traceForegroundWake("requested");
+    if (!invoker) return;
     schedule(std::move(invoker));
   }
 
   void schedule(std::shared_ptr<facebook::react::CallInvoker> invoker) noexcept {
     try {
       auto self = shared_from_this();
+      bool traceScheduled = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        traceScheduled = traceEnabled_;
+      }
+      if (traceScheduled) traceForegroundWake("scheduled");
       invoker->invokeAsync([self = std::move(self)](Runtime &runtime) {
         self->deliver(runtime);
       });
@@ -130,6 +180,7 @@ class ForegroundWakeRegistration final
   void deliver(Runtime &runtime) {
     uint8_t kind = kWakeDeferred;
     uint64_t delayMs = 0;
+    bool traceDelivery = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       scheduled_ = false;
@@ -138,7 +189,9 @@ class ForegroundWakeRegistration final
       delivering_ = true;
       kind = kind_;
       delayMs = delayMs_;
+      traceDelivery = traceEnabled_;
     }
+    if (traceDelivery) traceForegroundWake("delivered");
 
     try {
       auto callbacks = runtime.global().getProperty(runtime, kWakeCallbacksGlobal);
@@ -147,6 +200,8 @@ class ForegroundWakeRegistration final
         if (callback.isObject() && callback.asObject(runtime).isFunction(runtime)) {
           auto urgency = String::createFromUtf8(runtime, urgencyFor(kind, delayMs));
           callback.asObject(runtime).asFunction(runtime).call(runtime, Value(std::move(urgency)));
+          // This marker means the JSI callback returned to the native bridge.
+          if (traceDelivery) traceForegroundWake("callback-invoked");
         }
       }
     } catch (const JSError &) {
@@ -200,6 +255,7 @@ class ForegroundWakeRegistration final
   bool pending_{false};
   bool scheduled_{false};
   bool delivering_{false};
+  bool traceEnabled_{false};
   uint8_t kind_{kWakeDeferred};
   uint64_t delayMs_{0};
 };
@@ -385,12 +441,22 @@ std::vector<uint8_t> copyForegroundCommand(Runtime &runtime, const Value &value)
   return std::vector<uint8_t>(begin, begin + length);
 }
 
+class NativeResponseOwner final {
+ public:
+  explicit NativeResponseOwner(jazz_native_relay_bytes *bytes) noexcept : bytes_(bytes) {}
+  ~NativeResponseOwner() { jazz_native_relay_bytes_free(bytes_); }
+  NativeResponseOwner(const NativeResponseOwner &) = delete;
+  NativeResponseOwner &operator=(const NativeResponseOwner &) = delete;
+ private:
+  jazz_native_relay_bytes *bytes_;
+};
+
 Value foregroundResponse(Runtime &runtime, jazz_native_relay_bytes *response) {
+  NativeResponseOwner ownership(response);
   std::vector<uint8_t> bytes;
   if (response->len != 0) {
     bytes.assign(response->data, response->data + response->len);
   }
-  jazz_native_relay_bytes_free(response);
   auto arrayBuffer = ArrayBuffer(runtime, std::make_shared<VectorMutableBuffer>(std::move(bytes)));
   auto uint8Array = runtime.global().getPropertyAsFunction(runtime, "Uint8Array");
   return uint8Array.callAsConstructor(runtime, std::move(arrayBuffer));
@@ -482,6 +548,24 @@ class ForegroundHandle final : public HostObject,
             return Value::undefined();
           });
     }
+    if (property == "setWakeTrace") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "setWakeTrace"), 1,
+          [self = shared_from_this()](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (self->closed_) {
+              throw JSError(runtime, "Jazz native foreground runtime is closed");
+            }
+            if (count != 1 || !args[0].isBool()) {
+              throw JSError(runtime, "Jazz native foreground wake trace requires a boolean");
+            }
+            auto lease_lock = self->lease_->lockIfActive();
+            if (!lease_lock.owns_lock()) {
+              throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
+            }
+            self->wake_->setTraceEnabled(args[0].getBool());
+            return Value::undefined();
+          });
+    }
     if (property == "execute") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "execute"), 1,
@@ -512,12 +596,13 @@ class ForegroundHandle final : public HostObject,
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(5);
+    names.reserve(6);
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));
     names.emplace_back(PropNameID::forAscii(runtime, "execute"));
     names.emplace_back(PropNameID::forAscii(runtime, "setTickScheduler"));
+    names.emplace_back(PropNameID::forAscii(runtime, "setWakeTrace"));
     return names;
   }
 
@@ -571,6 +656,114 @@ class ForegroundFactory final : public HostObject {
     if (property == "abiVersion") {
       return Value(jazz_native_relay_abi_version());
     }
+    if (property == "beginAccountSession" || property == "attachAccountSchema" ||
+        property == "releaseAccountSession" || property == "refreshAccountSession") {
+      const auto arity = (property == "attachAccountSchema" || property == "refreshAccountSession") ? 2 : 1;
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forUtf8(runtime, property), arity,
+          [lease = lease_, property, arity](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != static_cast<size_t>(arity)) throw JSError(runtime, "Invalid native account arguments");
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            jazz_native_relay_bytes output{nullptr, 0};
+            jazz_native_relay_status status;
+            if (property == "beginAccountSession") {
+              if (!args[0].isString()) throw JSError(runtime, "Native account setup requires logical metadata");
+              const auto request = args[0].asString(runtime).utf8(runtime);
+              const auto &root = lease->storageRoot();
+              status = jazz_native_relay_host_lease_begin_account_session_json(
+                  lease->nativeLease(), reinterpret_cast<const uint8_t *>(request.data()), request.size(),
+                  reinterpret_cast<const uint8_t *>(root.data()), root.size(), &output);
+            } else {
+              const auto capability = copyAdmittedCapability(runtime, args[0]);
+              if (property == "releaseAccountSession") {
+                status = jazz_native_relay_host_lease_release_account_session(
+                    lease->nativeLease(), capability.data(), capability.size());
+                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "releaseAccountSession");
+                return Value::undefined();
+              }
+              if (property == "refreshAccountSession") {
+                if (!args[1].isString()) throw JSError(runtime, "Native account refresh requires session JSON");
+                const auto request = args[1].asString(runtime).utf8(runtime);
+                status = jazz_native_relay_host_lease_refresh_account_session(
+                    lease->nativeLease(), capability.data(), capability.size(),
+                    reinterpret_cast<const uint8_t *>(request.data()), request.size());
+                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "refreshAccountSession");
+                return Value::undefined();
+              }
+              if (!args[1].isString()) throw JSError(runtime, "Native account schema must be canonical JSON");
+              const auto schema = args[1].asString(runtime).utf8(runtime);
+              status = jazz_native_relay_host_lease_attach_account_schema_json(
+                  lease->nativeLease(), capability.data(), capability.size(),
+                  reinterpret_cast<const uint8_t *>(schema.data()), schema.size(), &output);
+            }
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, property.c_str());
+            return foregroundResponse(runtime, &output);
+          });
+    }
+    if (property == "withAccountStoreLock") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "withAccountStoreLock"), 1,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != 1 || !args[0].isObject() || !args[0].asObject(runtime).isFunction(runtime)) {
+              throw JSError(runtime, "Jazz account store update requires a synchronous callback");
+            }
+            if (!lease->active()) throw JSError(runtime, "Jazz native runtime is closed");
+            try {
+              AccountStoreLock lock(lease->storageRoot());
+              if (!lease->active()) throw JSError(runtime, "Jazz native runtime is closed");
+              const auto result = args[0].asObject(runtime).asFunction(runtime).call(runtime);
+              if (!result.isUndefined()) {
+                throw JSError(runtime, "Jazz account store callback must return undefined synchronously");
+              }
+              return Value::undefined();
+            } catch (const std::exception &error) {
+              throw JSError(runtime, error.what());
+            }
+          });
+    }
+    if (property == "accountSecret") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "accountSecret"), 0,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *, size_t count) {
+            if (count != 0) throw JSError(runtime, "Jazz accountSecret takes no arguments");
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            jazz_native_relay_bytes output{nullptr, 0};
+            const auto status = jazz_native_relay_account_secret(&output);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "accountSecret");
+            return foregroundResponse(runtime, &output);
+          });
+    }
+    if (property == "mintLocalFirstToken") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "mintLocalFirstToken"), 4,
+          [lease = lease_](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != 4 || !args[1].isString() || !args[2].isNumber() || !args[3].isNumber()) {
+              throw JSError(runtime, "Jazz local-first mint requires seed, audience, TTL, and timestamp");
+            }
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
+            const auto seed = copyForegroundCommand(runtime, args[0]);
+            const auto audience = args[1].asString(runtime).utf8(runtime);
+            const auto ttl = args[2].asNumber();
+            const auto now = args[3].asNumber();
+            constexpr double maxSafeInteger = 9007199254740991.0;
+            if (seed.size() != 32 || !std::isfinite(ttl) || ttl <= 0 || ttl > maxSafeInteger ||
+                std::floor(ttl) != ttl || !std::isfinite(now) || now < 0 || now > maxSafeInteger ||
+                std::floor(now) != now) {
+              throw JSError(runtime, "Jazz local-first mint arguments are invalid");
+            }
+            jazz_native_relay_bytes output{nullptr, 0};
+            const auto status = jazz_native_relay_mint_local_first_token(
+                seed.data(), seed.size(), reinterpret_cast<const uint8_t *>(audience.data()),
+                audience.size(), static_cast<uint64_t>(ttl), static_cast<uint64_t>(now), &output);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "mintLocalFirstToken");
+            NativeResponseOwner ownership(&output);
+            const std::string token(reinterpret_cast<const char *>(output.data), output.len);
+            return Value(facebook::jsi::String::createFromUtf8(runtime, token));
+          });
+    }
     if (property == "openAttached") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "openAttached"), 1,
@@ -605,7 +798,14 @@ class ForegroundFactory final : public HostObject {
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(2);
+    names.reserve(8);
+    names.emplace_back(PropNameID::forAscii(runtime, "beginAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "attachAccountSchema"));
+    names.emplace_back(PropNameID::forAscii(runtime, "releaseAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "refreshAccountSession"));
+    names.emplace_back(PropNameID::forAscii(runtime, "withAccountStoreLock"));
+    names.emplace_back(PropNameID::forAscii(runtime, "accountSecret"));
+    names.emplace_back(PropNameID::forAscii(runtime, "mintLocalFirstToken"));
     names.emplace_back(PropNameID::forAscii(runtime, "abiVersion"));
     names.emplace_back(PropNameID::forAscii(runtime, "openAttached"));
     return names;

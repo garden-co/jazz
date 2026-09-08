@@ -1,61 +1,43 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, useDb, useAuthState } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSessionOwner,
+  useJazzSession,
+  useAuthState,
+} from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
   readStoredAuthSession,
-  type StoredAuthSession,
   writeStoredAuthSession,
 } from "./auth-storage.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { requestSignIn, requestSignUp } from "./api.js";
 
-type ChatShellProps = {
-  onStoredAuthSessionChange(session: StoredAuthSession | null): void;
-};
+type Credentials = (email: string, password: string) => Promise<void>;
 
-function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
-  const db = useDb();
-  const { authMode, claims, userId } = useAuthState();
+function ChatShell({
+  onSignIn,
+  onSignUp,
+  onSignOut,
+}: {
+  onSignIn: Credentials;
+  onSignUp: Credentials;
+  onSignOut: () => Promise<void>;
+}) {
+  const { authMode, claims, user } = useAuthState();
+  const userId = user?.account ?? null;
   const role = typeof claims.role === "string" ? claims.role : null;
-
-  async function handleSignIn(email: string, password: string) {
-    const session = await requestSignIn(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onStoredAuthSessionChange(session);
-  }
-
-  async function handleSignUp(email: string, password: string) {
-    const session = await requestSignUp(email, password);
-    writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onStoredAuthSessionChange(session);
-  }
-
-  function handleSignOut() {
-    clearStoredAuthSession(DEFAULT_APP_ID);
-    onStoredAuthSessionChange(null);
-  }
-
-  React.useEffect(() => {
-    return db.onAuthChanged((state) => {
-      if (state.error) {
-        clearStoredAuthSession(DEFAULT_APP_ID);
-        onStoredAuthSessionChange(null);
-      }
-    });
-  }, [db, onStoredAuthSessionChange]);
-
   return (
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={authMode !== "anonymous"}
+          loggedIn={authMode === "external"}
           role={role}
-          onSignIn={handleSignIn}
-          onSignUp={handleSignUp}
-          onSignOut={handleSignOut}
+          onSignIn={onSignIn}
+          onSignUp={onSignUp}
+          onSignOut={onSignOut}
         />
 
         <ChatPanel
@@ -78,32 +60,162 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
   );
 }
 
+const config = {
+  appId: DEFAULT_APP_ID,
+  serverUrl: SYNC_SERVER_URL,
+  driver: { type: "memory" as const },
+};
+
 export function App() {
-  const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
-    readStoredAuthSession(DEFAULT_APP_ID),
+  const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
+  const [providerError, setProviderError] = React.useState<Error>();
+  React.useEffect(() => {
+    if (!session) return;
+    void (async () => {
+      const saved = readStoredAuthSession(DEFAULT_APP_ID);
+      if (saved) await session.loginJWT({ getToken: async () => saved.token });
+    })().catch((cause) =>
+      setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+    );
+  }, [session]);
+  if (!session)
+    return error ? (
+      <p role="alert">
+        {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </p>
+    ) : (
+      <p>Preparing account…</p>
+    );
+  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
+  return (
+    <JazzSessionProvider session={session} fallback={screen}>
+      {screen}
+    </JazzSessionProvider>
   );
+}
 
-  const config = React.useMemo((): DbConfig => {
-    const sharedConfig = {
-      appId: DEFAULT_APP_ID,
-      env: "dev" as const,
-      serverUrl: SYNC_SERVER_URL,
-      driver: { type: "memory" as const },
-    };
+function SessionScreen({
+  providerError,
+  reportError,
+}: {
+  providerError?: Error;
+  reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+}) {
+  const session = useJazzSession();
+  const {
+    account,
+    status,
+    error: sessionError,
+    loginJWT,
+    linkJWT,
+    registerJWT,
+    logout,
+    createLocalFirst,
+    retry,
+  } = session;
+  const error = sessionError ?? providerError;
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
 
-    if (storedAuthSession) {
-      return {
-        ...sharedConfig,
-        jwtToken: storedAuthSession.token,
-      };
+  async function signIn(email: string, password: string) {
+    const auth = await requestSignIn(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await loginJWT({ getToken: async () => auth.token });
+    clearProviderError();
+  }
+  async function signUp(email: string, password: string) {
+    const auth = await requestSignUp(email, password);
+    writeStoredAuthSession(DEFAULT_APP_ID, auth);
+    await linkJWT({ getToken: async () => auth.token });
+    clearProviderError();
+  }
+  async function signOut() {
+    reportError(undefined);
+    try {
+      await logout();
+      clearStoredAuthSession(DEFAULT_APP_ID);
+      await createLocalFirst();
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      throw cause;
     }
-
-    return sharedConfig;
-  }, [storedAuthSession]);
+  }
+  async function registerProvider() {
+    const auth = readStoredAuthSession(DEFAULT_APP_ID);
+    if (!auth) throw new Error("Sign in to the provider first");
+    const getToken = async () => auth.token;
+    if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
+    else await registerJWT({ getToken });
+  }
 
   return (
-    <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
-      <ChatShell onStoredAuthSessionChange={setStoredAuthSession} />
-    </JazzProvider>
+    <>
+      {error && (
+        <div role="alert">
+          <p>{error.message}</p>
+          <button
+            onClick={() =>
+              void registerProvider()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            {account?.identity.issuer === "urn:jazz:local-first"
+              ? "Link provider identity to this account"
+              : "Create a new Jazz account for this provider identity"}
+          </button>
+          <button
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {status === "ready" ? (
+        <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
+      ) : status === "signed-out" ? (
+        <div>
+          <button
+            onClick={() =>
+              void loginJWT({
+                getToken: async () => {
+                  const saved = readStoredAuthSession(DEFAULT_APP_ID);
+                  if (!saved) throw new Error("Sign in to the provider first");
+                  return saved.token;
+                },
+              })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
+          <button
+            onClick={() =>
+              void signOut()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign out
+          </button>
+        </div>
+      ) : (
+        <p>Preparing account…</p>
+      )}
+    </>
   );
 }

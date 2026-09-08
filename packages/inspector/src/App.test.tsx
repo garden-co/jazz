@@ -12,8 +12,11 @@ const fetchStoredPermissionsMock = vi.fn();
 const fetchStoredWasmSchemaMock = vi.fn();
 const devtoolsProviderMock = vi.fn();
 
+vi.mock("jazz-tools/_dev/inspector-client", () => ({
+  createInspectorAdminClient: (...args: unknown[]) => createJazzClientMock(...args),
+}));
+
 vi.mock("jazz-tools/react", () => ({
-  createJazzClient: (...args: unknown[]) => createJazzClientMock(...args),
   JazzClientProvider: ({ children }: { children: ReactNode }) => children,
 }));
 

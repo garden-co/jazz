@@ -1,4 +1,6 @@
 // Public exports
+export type { RowAuthor } from "./magic-columns.js";
+export { SYSTEM_ACCOUNT_ID, SYSTEM_ISSUER } from "./magic-columns.js";
 
 // DSL for schema definitions
 export {
@@ -44,6 +46,7 @@ export type {
   ColumnBuilderValue,
   ColumnTransform,
   StringColumn,
+  UuidColumn,
   BooleanColumn,
   IntColumn,
   TimestampColumn,
@@ -148,3 +151,31 @@ export * from "./permissions/index.js";
 // publishes the handle for the same-origin overlay iframe.
 export * from "./dev/inspector-overlay/inspector-host-types.js";
 export { installInspectorHost, type InspectorHostDb } from "./dev/inspector-overlay/host-bridge.js";
+
+export {
+  createAccountManager,
+  type AccountManagerConfig,
+} from "./accounts/create-account-manager.js";
+export type {
+  AccountHandle,
+  AccountIdentity,
+  AccountSnapshot,
+  AccountManager,
+} from "./accounts/state.js";
+export {
+  AccountAuthError,
+  exportLocalFirstSecret,
+  type BackendAuth,
+  type JWTAuth,
+} from "./accounts/enrollment.js";
+export type { AccountStore } from "./accounts/persistence.js";
+
+export { accountRegistryUrl } from "./accounts/context.js";
+
+export { createJazzSession, type JazzSessionConfig } from "./session/create-jazz-session.js";
+export type {
+  JazzSession,
+  JazzSessionActions,
+  JazzSessionSnapshot,
+  JazzSessionOperation,
+} from "./session/state.js";

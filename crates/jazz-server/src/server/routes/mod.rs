@@ -8,6 +8,7 @@
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
+mod accounts;
 mod http;
 mod utils;
 mod websocket;
@@ -90,6 +91,7 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
+        .route("/accounts/resolve", post(accounts::resolve_for_edge))
         .route("/schemas", post(publish_schema_handler))
         .route("/schema-connectivity", get(schema_connectivity_handler))
         .route("/permissions/head", get(permissions_head_handler))
@@ -103,7 +105,21 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         )
         .layer(DefaultBodyLimit::max(MAX_ADMIN_REQUEST_BODY_BYTES));
+    let account_routes = Router::new()
+        .route("/register", post(accounts::register))
+        .route("/found-local-first", post(accounts::found_local_first))
+        .route("/revoke", post(accounts::revoke))
+        .route("/login", post(accounts::login))
+        .route("/links/request", post(accounts::request_link))
+        .route("/links/accept", post(accounts::accept_link))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            accounts::forward_if_edge,
+        ))
+        .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
+        .nest("/accounts", account_routes)
+        .route("/backend/admit", post(accounts::admit_backend))
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
@@ -158,6 +174,58 @@ mod tests {
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
     };
+
+    #[tokio::test]
+    async fn backend_admission_requires_exact_service_secret_and_application() {
+        let state = make_sync_test_state("backend-admission-secret").await;
+        let router = super::create_router(state);
+        for (secret, path, expected) in [
+            (
+                None,
+                test_app_route("/backend/admit"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("wrong"),
+                test_app_route("/backend/admit"),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Some("backend-admission-secret"),
+                test_app_route("/backend/admit"),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                Some("backend-admission-secret"),
+                format!("/apps/{}/backend/admit", AppId::from_name("other-app")),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let mut request = axum::http::Request::builder().method("POST").uri(path);
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Backend-Secret", secret);
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let router = super::create_router(make_sync_test_state("expected").await);
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/backend/admit"))
+                    .header("Authorization", "Bearer backend-admission-secret")
+                    .body(body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {

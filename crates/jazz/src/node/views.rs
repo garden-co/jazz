@@ -92,7 +92,7 @@ fn merge_receiver_version_bundle_ref(
     };
     let mut existing_tx_identity = existing.tx.clone();
     existing_tx_identity.n_total_writes = 0;
-    let mut incoming_tx_identity = bundle.tx.clone();
+    let mut incoming_tx_identity = incoming.tx.clone();
     incoming_tx_identity.n_total_writes = 0;
     if existing_tx_identity != incoming_tx_identity
         || existing.fate != incoming.fate
@@ -165,6 +165,9 @@ fn canonical_receiver_bundle(bundle: VersionBundleRef<'_>) -> Result<VersionBund
     }
     let mut owned = bundle.to_owned_bundle();
     owned.versions = versions;
+    // A served view carries durable provenance, never the sender's local
+    // policy capability. Normalize before merged-bundle identity checks too.
+    owned.tx = transaction_without_permission_subject(&owned.tx);
     Ok(owned)
 }
 
@@ -456,6 +459,7 @@ where
             persisted_tx_ids.insert(*tx_id);
             let mut stored_identity = stored.tx.clone();
             stored_identity.n_total_writes = 0;
+            stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
             if stored_identity != incoming_identity {
@@ -2156,11 +2160,15 @@ where
         Ok(())
     }
 
-    async fn ingest_view_bundle(&mut self, bundle: VersionBundle) -> Result<(), Error> {
+    async fn ingest_view_bundle(&mut self, mut bundle: VersionBundle) -> Result<(), Error> {
         validate_received_view_bundle_global_time_durability(
             bundle.global_time,
             bundle.durability,
         )?;
+        // View carriers may replay a transaction learned under a local
+        // permission capability. They never transport that capability into a
+        // receiving store or onward view publication.
+        bundle.tx = transaction_without_permission_subject(&bundle.tx);
         if usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len()) {
             return Err(Error::MalformedViewUpdate(
                 "version bundle count does not match its declared scope payload",
@@ -2169,6 +2177,7 @@ where
         if let Some(stored) = self.query_transaction(bundle.tx.tx_id).await? {
             let mut stored_identity = stored.tx;
             stored_identity.n_total_writes = 0;
+            stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
             if stored_identity != incoming_identity {
@@ -2498,7 +2507,7 @@ where
             kind,
             n_total_writes,
             made_by,
-            permission_subject,
+            permission_subject: _,
             base_snapshot,
             user_metadata_json,
             contribution_merge,
@@ -2535,7 +2544,13 @@ where
             }
         }
         let versions = versions.into_values().collect::<Vec<_>>();
-        let scope = if usize::try_from(n_total_writes).ok() == Some(versions.len()) {
+        // A relay may only retain the selected fragment of an upstream
+        // view-scoped bundle. Its stored cardinality then describes that
+        // fragment, so matching it to the selected versions does not prove
+        // that the complete transaction is known.
+        let scope = if !stored_tx.view_scoped_cardinality
+            && usize::try_from(n_total_writes).ok() == Some(versions.len())
+        {
             crate::protocol::VersionBundleScope::CompleteTransaction
         } else {
             crate::protocol::VersionBundleScope::ViewScoped
@@ -2551,7 +2566,9 @@ where
                     .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?,
             },
             made_by,
-            permission_subject,
+            // Policy capabilities are local authority state and never part of
+            // a view or repair carrier. Durable made_by remains explicit.
+            permission_subject: None,
             base_snapshot,
             row_read_set: None,
             absent_read_set: None,

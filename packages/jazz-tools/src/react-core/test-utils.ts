@@ -1,3 +1,5 @@
+import { accountRegistryUrl } from "../accounts/context.js";
+import { createAccountManagerWithRuntime } from "../accounts/enrollment.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { AuthMode, PublicSession } from "../runtime/context.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
@@ -8,7 +10,14 @@ export function makeFakeClient(params: {
   claims: Record<string, unknown>;
 }) {
   const session: PublicSession = {
-    user: params.userId,
+    user: {
+      account: "00000000-0000-4000-8000-000000000002",
+      identity: {
+        issuer:
+          params.authMode === "external" ? "https://issuer.example" : `urn:jazz:${params.authMode}`,
+        subject: params.userId,
+      },
+    },
     claims: params.claims,
     authMode: params.authMode,
   };
@@ -38,4 +47,22 @@ export function makeFakeClient(params: {
     },
     {} as any,
   );
+}
+
+/** Mock only native crypto for provider lifecycle tests; use a real opaque handle. */
+export function makeFakeAccount(appId = "app-1", serverUrl = "https://jazz.example.com") {
+  const identity = {
+    issuer: "urn:jazz:local-first",
+    subject: "00000000-0000-4000-8000-000000000001",
+  };
+  return createAccountManagerWithRuntime({
+    registry: accountRegistryUrl(serverUrl, appId),
+    localFirst: {
+      create: () => ({
+        accountId: "00000000-0000-4000-8000-000000000002",
+        identity,
+        auth: `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject }))}.sig`,
+      }),
+    },
+  }).createLocalFirst();
 }

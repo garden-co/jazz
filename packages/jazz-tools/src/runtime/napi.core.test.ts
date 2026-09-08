@@ -1,3 +1,5 @@
+import { schema as s } from "../index.js";
+import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -15,6 +17,7 @@ import { openConfig } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -27,6 +30,32 @@ import {
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
+const TEST_EXTERNAL_ISSUER = "https://issuer.example";
+
+function testExternalAccountId(userId: string): string {
+  return testAccountId(JSON.stringify([TEST_EXTERNAL_ISSUER, userId]));
+}
+
+function testExternalSession(userId: string, claims: Record<string, unknown> = {}) {
+  return {
+    issuer: TEST_EXTERNAL_ISSUER,
+    user_id: userId,
+    account_id: testExternalAccountId(userId),
+    claims,
+  };
+}
+
+function testExternalSessionJson(userId: string, claims: Record<string, unknown> = {}): string {
+  return JSON.stringify(testExternalSession(userId, claims));
+}
+
+function testExternalAuthorBytes(userId: string): Uint8Array {
+  const session = testExternalSession(userId);
+  return new TextEncoder().encode(
+    JSON.stringify([session.account_id, session.issuer, session.user_id]),
+  );
+}
+
 const debugSubscriptionEventFixture = hasJazzNapiBuild()
   ? (
       require("jazz-napi") as typeof import("jazz-napi") & {
@@ -104,7 +133,7 @@ it("accepts only canonical authors through the NAPI open-config codec", async ()
         true,
       ),
     ),
-  ).toThrow(/canonical UTF-8 JSON/i);
+  ).toThrow(/canonical UTF-8 author identity/i);
 });
 
 it("ships a zstd-capable NAPI receiver and rejects an uncompiled negotiated feature before admission", async () => {
@@ -435,10 +464,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     db.close?.();
   });
 
-  it("selects and filters public provenance authors as canonical text", async () => {
+  it("selects and filters public provenance authors as structured records", async () => {
     const { NapiDb } = await loadNapiModule();
     const authorSeed = "jazz-napi-public-provenance:author";
-    const author = JSON.stringify(["urn:jazz:test", authorSeed]);
+    const author = {
+      account: testAccountId(authorSeed),
+      identity: { issuer: "urn:jazz:test", subject: authorSeed },
+    };
+    const provenanceApp = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
@@ -456,22 +489,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     await expect(
       runtime.query(
-        JSON.stringify({
-          table: "todos",
-          select_columns: ["title", "$createdBy", "$updatedBy"],
-          relation_ir: {
-            Filter: {
-              input: { TableScan: { table: "todos" } },
-              predicate: {
-                Cmp: {
-                  left: { column: "$createdBy" },
-                  op: "Eq",
-                  right: { Literal: { type: "Text", value: author } },
-                },
-              },
-            },
-          },
-        }),
+        translateQuery(
+          provenanceApp.todos
+            .select("title", "$createdBy", "$updatedBy")
+            .where({ $createdBy: author })
+            ._build(),
+          TEST_SCHEMA,
+        ),
         null,
         "local",
       ),
@@ -481,8 +505,40 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         id: inserted.id,
         values: [
           { type: "Text", value: "created by canonical author" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Uuid", value: author.account },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
+          expect.objectContaining({
+            type: "Row",
+            value: expect.objectContaining({
+              values: [
+                { type: "Uuid", value: author.account },
+                expect.objectContaining({
+                  type: "Row",
+                  value: expect.objectContaining({
+                    values: [
+                      { type: "Text", value: author.identity.issuer },
+                      { type: "Text", value: author.identity.subject },
+                    ],
+                  }),
+                }),
+              ],
+            }),
+          }),
         ],
       },
     ]);
@@ -757,11 +813,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         yield "streamed update";
       })(),
       JSON.stringify({
-        session: {
-          issuer: "https://issuer.example",
-          user_id: ALICE_ID,
-          claims: { role: "editor" },
-        },
+        session: testExternalSession(ALICE_ID, { role: "editor" }),
         updated_at: 42_000,
       }),
       inserted.id,
@@ -1375,8 +1427,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       11,
       true,
     );
-    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceSession = testExternalSessionJson(ALICE_ID);
+    const bobSession = testExternalSessionJson(BOB_ID);
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1468,8 +1520,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
     runtimes.push(runtime);
 
-    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceSession = testExternalSessionJson(ALICE_ID);
+    const bobSession = testExternalSessionJson(BOB_ID);
     const query = JSON.stringify({ table: "todos" });
     const aliceUpdates: unknown[] = [];
     // Terminal layouts are registered once at the subscription boundary and
@@ -1569,8 +1621,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       true,
       { readAuthorizationHost: "trusted-serving" },
     );
-    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceSession = testExternalSessionJson(ALICE_ID);
+    const bobSession = testExternalSessionJson(BOB_ID);
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1632,8 +1684,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { readAuthorizationHost: "trusted-serving" },
     );
     runtimes.push(runtime);
-    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceSession = testExternalSessionJson(ALICE_ID);
+    const bobSession = testExternalSessionJson(BOB_ID);
     const aliceTodo = runtime.insert(
       "todos",
       {
@@ -1693,10 +1745,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       prepareQuery(queryJson: string): unknown;
     };
     const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
-    const aliceAuthor = new TextEncoder().encode(
-      JSON.stringify(["https://issuer.example", ALICE_ID]),
-    );
-    const bobAuthor = new TextEncoder().encode(JSON.stringify(["https://issuer.example", BOB_ID]));
+    const aliceAuthor = testExternalAuthorBytes(ALICE_ID);
+    const bobAuthor = testExternalAuthorBytes(BOB_ID);
     await expect(
       Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, aliceAuthor)),
     ).resolves.toBeInstanceOf(Uint8Array);
@@ -1732,7 +1782,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         OWNED_TODOS_SCHEMA,
         deterministicBytes(`jazz-napi-permission-advice:${userId}:node`),
-        new TextEncoder().encode(JSON.stringify(["https://issuer.example", userId])),
+        testExternalAuthorBytes(userId),
         sourceId,
         true,
       );
@@ -1741,11 +1791,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         webSocketUrl(server!.url, appId),
         JSON.stringify({
           backend_secret: server!.backendSecret,
-          backend_session: {
-            issuer: "https://issuer.example",
-            user_id: userId,
-            claims: { sub: userId },
-          },
+          backend_session: testExternalSession(userId, { sub: userId }),
         }),
       );
       return runtime;
@@ -1843,8 +1889,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       JSON.stringify({ backend_secret: server.backendSecret }),
     );
 
-    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceSession = testExternalSessionJson(ALICE_ID);
+    const bobSession = testExternalSessionJson(BOB_ID);
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -2219,7 +2265,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         CHAT_POLICY_SCHEMA,
         deterministicBytes(`jazz-napi-core-branch-policy:${userId}:node`),
-        new TextEncoder().encode(JSON.stringify(["https://issuer.example", userId])),
+        testExternalAuthorBytes(userId),
         sourceId,
         true,
       );
@@ -2228,7 +2274,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         webSocketUrl(server!.url, appId),
         JSON.stringify({
           backend_secret: "core-napi-branch-policy-backend",
-          backend_session: { issuer: "https://issuer.example", user_id: userId, claims: {} },
+          backend_session: testExternalSession(userId),
         }),
       );
       return runtime;
@@ -2247,11 +2293,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "writer public chat insert did not settle at edge",
     );
 
-    const bobSession = JSON.stringify({
-      issuer: "https://issuer.example",
-      user_id: BOB_ID,
-      claims: {},
-    });
+    const bobSession = testExternalSessionJson(BOB_ID);
     const propagatedRow = await waitFor(async () => {
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
@@ -2372,10 +2414,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     }
   });
 });
-
-function testAuthorBytes(seed: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
-}
 
 function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;

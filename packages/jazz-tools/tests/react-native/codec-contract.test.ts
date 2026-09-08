@@ -12,6 +12,11 @@ const txId = Uint8Array.from({ length: 16 }, () => 7);
 const optionsJson = '{"readTier":"local","view":{"head":"main"}}';
 const cases: [string, unknown, unknown][] = [
   [
+    "graceful shutdown",
+    { type: "waitForPendingWrites", tier: "core" },
+    { WaitForPendingWrites: { tier: "core" } },
+  ],
+  [
     "insert advice",
     {
       type: "permissionAdvice",
@@ -152,7 +157,14 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         explicitlyOffline: false,
         connected: true,
       },
-      { type: "nativeSessionMetadata", issuer: "fixture-issuer", userId: "fixture-user" },
+      {
+        type: "nativeSessionMetadata",
+        node: new Uint8Array(16).fill(9),
+        registryAuthority: "https://registry.example",
+        accountId: "07070707-0707-0707-0707-070707070707",
+        issuer: "fixture-issuer",
+        userId: "fixture-user",
+      },
     ]);
     for (const response of responses) {
       expect(() =>
@@ -170,7 +182,15 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
     expect(() => decodeCommandInRust(Uint8Array.of(18, 1, 0, 2))).toThrow();
   });
   test("permission advice command and result ordinals are frozen", () => {
-    for (const [index, [, command]] of cases.slice(0, 4).entries()) {
+    for (const [index, [, command]] of cases
+      .filter(
+        ([, command]) =>
+          typeof command === "object" &&
+          command !== null &&
+          "type" in command &&
+          command.type === "permissionAdvice",
+      )
+      .entries()) {
       expect([
         ...encodeNativeForegroundCommand(command as NativeForegroundCommand).subarray(0, 2),
       ]).toEqual([38, index]);

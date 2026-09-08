@@ -1,3 +1,4 @@
+import { localAccountConfig } from "./testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Db, type QueryBuilder } from "./db.js";
 import { createDb } from "./default-create-db.js";
@@ -39,7 +40,9 @@ afterEach(async () => {
 
 async function makeDb(devMode?: boolean): Promise<Db> {
   const db = await createDb({
-    appId: `dev-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    ...(await localAccountConfig(
+      `dev-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )),
     devMode,
   });
   dbs.push(db);

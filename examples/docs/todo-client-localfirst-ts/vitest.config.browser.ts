@@ -11,6 +11,7 @@ export default defineConfig({
   test: {
     browser: {
       enabled: true,
+      trace: "retain-on-failure",
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
     },

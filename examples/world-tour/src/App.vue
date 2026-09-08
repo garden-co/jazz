@@ -142,7 +142,7 @@ function switchView() {
   }
 }
 
-ensureData(db, session.value?.user, canEdit.value).catch((err) =>
+ensureData(db, session.value?.user.account ?? undefined, canEdit.value).catch((err) =>
   console.error("Failed to ensure data:", err),
 );
 

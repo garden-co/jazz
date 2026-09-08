@@ -1,61 +1,31 @@
 "use client";
 
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider, useDb, useLocalFirstAuth, useAuthState } from "jazz-tools/react";
+import {
+  JazzSessionProvider,
+  useJazzSessionOwner,
+  useJazzSession,
+  useAuthState,
+} from "jazz-tools/react";
 import { ChatPanel } from "../src/ChatPanel";
 import { AuthCard } from "../src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
-function ChatShell(): React.JSX.Element {
-  const db = useDb();
-  const { claims, authMode, userId } = useAuthState();
-  const isAuthenticated = authMode === "external";
+type Credentials = (email: string, password: string) => Promise<void>;
+
+function ChatShell({
+  onSignIn,
+  onSignUp,
+  onSignOut,
+}: {
+  onSignIn: Credentials;
+  onSignUp: Credentials;
+  onSignOut: () => Promise<void>;
+}): React.JSX.Element {
+  const { claims, authMode, user } = useAuthState();
+  const userId = user?.account ?? null;
   const role = typeof claims.role === "string" ? claims.role : null;
-  const canPostAnnouncements = isAuthenticated && role === "admin";
-  const canPostGeneric = isAuthenticated && (role === "admin" || role === "member");
-
-  const localFirstAuth = useLocalFirstAuth();
-
-  async function handleSignIn(email: string, password: string) {
-    const res = await authClient.signIn.email({
-      email,
-      password,
-    });
-
-    if (res.error) {
-      throw new Error(res.error.message);
-    }
-  }
-
-  async function handleSignUp(email: string, password: string) {
-    const proofToken = await db.getLocalFirstIdentityProof({
-      ttlSeconds: 60,
-      audience: "betterauth-signup",
-    });
-
-    if (!proofToken) {
-      throw new Error("Sign up requires an active Jazz session");
-    }
-
-    // proofToken is a custom field consumed by our server-side sign-up hook
-    const res = await authClient.signUp.email({
-      email,
-      name: email,
-      password,
-      proofToken,
-    } as Parameters<typeof authClient.signUp.email>[0]);
-
-    if (res.error) {
-      throw new Error(res.error.message);
-    }
-  }
-
-  async function handleSignOut() {
-    await authClient.signOut();
-    await localFirstAuth.signOut();
-  }
-
+  const canPostAnnouncements = authMode === "external" && role === "admin";
   return (
     <main className="app-shell">
       <span data-testid="user-id" style={{ display: "none" }}>
@@ -65,9 +35,9 @@ function ChatShell(): React.JSX.Element {
         <AuthCard
           loggedIn={authMode !== "local-first"}
           role={claims.role as string | null | undefined}
-          onSignIn={handleSignIn}
-          onSignUp={handleSignUp}
-          onSignOut={handleSignOut}
+          onSignIn={onSignIn}
+          onSignUp={onSignUp}
+          onSignOut={onSignOut}
         />
 
         <ChatPanel
@@ -91,82 +61,159 @@ function ChatShell(): React.JSX.Element {
   );
 }
 
-function useBetterAuthJWT() {
-  const { data, isPending } = authClient.useSession();
-  const [jwt, setJWT] = React.useState<string | null>(null);
-  const [isLoadingJWT, setIsLoadingJWT] = React.useState(false);
+const config = {
+  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+  serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+};
 
-  const sessionId = data?.session?.id;
-
-  React.useEffect(() => {
-    let cancelled = false;
-
-    if (isPending) {
-      return;
-    }
-
-    if (!sessionId) {
-      setJWT(null);
-      setIsLoadingJWT(false);
-      return;
-    }
-
-    setIsLoadingJWT(true);
-
-    void getJwtFromBetterAuth().then((accessToken) => {
-      if (cancelled) {
-        return;
-      }
-
-      setJWT(accessToken ?? null);
-      setIsLoadingJWT(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isPending, sessionId]);
-
-  function getRefreshedJWT() {
-    return getJwtFromBetterAuth();
-  }
-
-  return {
-    isLoading: isPending || isLoadingJWT || (!!sessionId && !jwt),
-    jwt,
-    getRefreshedJWT,
-  };
+async function getToken(): Promise<string> {
+  const token = await getJwtFromBetterAuth();
+  if (!token) throw new Error("Better Auth did not provide a token");
+  return token;
 }
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+export default function Page() {
+  const { session, error, retry } = useJazzSessionOwner({ ...config, initial: "local-first" });
+  const [providerError, setProviderError] = React.useState<Error>();
+  React.useEffect(() => {
+    if (!session) return;
+    void (async () => {
+      const token = await getJwtFromBetterAuth();
+      if (token) await session.loginJWT({ getToken });
+    })().catch((cause) =>
+      setProviderError(cause instanceof Error ? cause : new Error(String(cause))),
+    );
+  }, [session]);
+  if (!session)
+    return error ? (
+      <p role="alert">
+        {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
+      </p>
+    ) : (
+      <p>Preparing account…</p>
+    );
+  const screen = <SessionScreen providerError={providerError} reportError={setProviderError} />;
+  return (
+    <JazzSessionProvider session={session} fallback={screen}>
+      {screen}
+    </JazzSessionProvider>
+  );
+}
 
-export default function Page(): React.JSX.Element {
-  const betterAuth = useBetterAuthJWT();
-  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
+function SessionScreen({
+  providerError,
+  reportError,
+}: {
+  providerError?: Error;
+  reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+}) {
+  const session = useJazzSession();
+  const {
+    account,
+    status,
+    error: sessionError,
+    loginJWT,
+    linkJWT,
+    registerJWT,
+    logout,
+    createLocalFirst,
+    retry,
+  } = session;
+  const error = sessionError ?? providerError;
+  const clearProviderError = () =>
+    reportError((current) => (current === providerError ? undefined : current));
 
-  const config = React.useMemo((): DbConfig => {
-    const shared = {
-      appId,
-      env: "dev" as const,
-      serverUrl,
-    };
-    return betterAuth.jwt
-      ? { ...shared, jwtToken: betterAuth.jwt }
-      : { ...shared, secret: localFirstSecret ?? undefined };
-  }, [betterAuth.jwt, localFirstSecret]);
-
-  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) {
-    return <p className="loading-state">Loading auth credentials...</p>;
+  async function signIn(email: string, password: string) {
+    const result = await authClient.signIn.email({ email, password });
+    if (result.error) throw new Error(result.error.message);
+    await loginJWT({ getToken });
+    clearProviderError();
+  }
+  async function signUp(email: string, password: string) {
+    const result = await authClient.signUp.email({ email, name: email, password });
+    if (result.error) throw new Error(result.error.message);
+    await linkJWT({ getToken });
+    clearProviderError();
+  }
+  async function signOut() {
+    reportError(undefined);
+    try {
+      await logout();
+      const result = await authClient.signOut();
+      if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
+      await createLocalFirst();
+    } catch (cause) {
+      reportError(cause instanceof Error ? cause : new Error(String(cause)));
+      throw cause;
+    }
+  }
+  async function registerProvider() {
+    if (account?.identity.issuer === "urn:jazz:local-first") await linkJWT({ getToken });
+    else await registerJWT({ getToken });
   }
 
   return (
-    <JazzProvider
-      config={config}
-      onJWTExpired={() => betterAuth.getRefreshedJWT()}
-      fallback={<p className="loading-state">Loading Jazz DB...</p>}
-    >
-      <ChatShell />
-    </JazzProvider>
+    <>
+      {error && (
+        <div role="alert">
+          <p>{error.message}</p>
+          <button
+            onClick={() =>
+              void registerProvider()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            {account?.identity.issuer === "urn:jazz:local-first"
+              ? "Link provider identity to this account"
+              : "Create a new Jazz account for this provider identity"}
+          </button>
+          <button
+            onClick={() =>
+              void retry()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {status === "ready" ? (
+        <ChatShell onSignIn={signIn} onSignUp={signUp} onSignOut={signOut} />
+      ) : status === "signed-out" ? (
+        <div>
+          <button
+            onClick={() =>
+              void loginJWT({ getToken: getToken })
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign in
+          </button>
+          <button
+            onClick={() =>
+              void createLocalFirst()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Continue locally
+          </button>
+          <button
+            onClick={() =>
+              void signOut()
+                .then(clearProviderError)
+                .catch(() => {})
+            }
+          >
+            Retry sign out
+          </button>
+        </div>
+      ) : (
+        <p>Preparing account…</p>
+      )}
+    </>
   );
 }

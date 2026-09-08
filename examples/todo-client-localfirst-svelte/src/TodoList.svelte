@@ -8,7 +8,7 @@
 	const todos = new QuerySubscription(app.todos);
 	// #endregion reading-reactive-svelte
 	const session = getSession();
-	const sessionUserId = $derived(session.current?.user ?? null);
+	const sessionUserId = $derived(session.current?.user.account ?? null);
 	let title = $state('');
 
 	function handleSubmit(e: SubmitEvent) {

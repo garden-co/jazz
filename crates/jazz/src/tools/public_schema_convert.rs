@@ -353,9 +353,11 @@ fn column_type_for_operand(
     column: &str,
     column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> Option<TypedLiteralTarget> {
+    if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
+        return Some(TypedLiteralTarget::Core(ty.clone()));
+    }
     match column {
         "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
-        "$createdBy" | "$updatedBy" => Some(TypedLiteralTarget::Core(GrooveColumnType::String)),
         "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
         _ => column_types
             .get(table)
@@ -2699,6 +2701,9 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let Some(name) = crate::query::author_claim_path_key(path_segments) {
+        return Ok(Operand::Claim(name));
+    }
     if path_segments.len() == 1 && PUBLIC_USER_SESSION_PATHS.contains(&path_segments[0].as_str()) {
         return Ok(Operand::Claim(DIRECT_USER_CLAIM.to_owned()));
     }
@@ -4059,7 +4064,11 @@ mod tests {
                                     PolicyExpr::Cmp {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
-                                        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+                                        value: PolicyValue::SessionRef(vec![
+                                            "user".to_owned(),
+                                            "identity".to_owned(),
+                                            "subject".to_owned(),
+                                        ]),
                                     },
                                     PolicyExpr::Cmp {
                                         column: "role".to_owned(),

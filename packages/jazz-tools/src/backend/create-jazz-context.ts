@@ -1,3 +1,4 @@
+import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
@@ -19,7 +20,7 @@ import {
   type SchemaSourceInput,
   type WasmSchemaSource,
 } from "../schema-source.js";
-import { resolveRequestSession } from "./request-auth.js";
+import { resolveRequestSession, verifiedLocalFirstRequestProof } from "./request-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -69,6 +70,12 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
+/** @internal A memory handle retains its node clock across failed-transition reopen. */
+export interface BackendNodeClock {
+  initialHighWater?: bigint;
+  closed(highWater: bigint): void;
+}
+
 type FlushableRuntime = Runtime & { flush?: () => void };
 
 function schemaHasNativePolicies(schema: WasmSchema): boolean {
@@ -79,16 +86,53 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;
+  private backendSyncEnabled = false;
+  private isDisconnected = false;
+  private reconnectWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
+  private explicitOfflineListeners = new Map<
+    (offline: boolean) => void,
+    { signal: AbortSignal; onAbort: () => void }
+  >();
+  private transportTransition: Promise<void> = Promise.resolve();
+  private shutdownState: "open" | "closing" | "closed" = "open";
+  private shutdownPromise?: Promise<void>;
+  private gracefulWait?: object;
 
   constructor(
     private readonly config: ResolvedBackendContextConfig,
     private readonly nodeIdentityScope: string,
+    private readonly nodeIdentity?: Uint8Array,
+    private readonly nodeClock?: BackendNodeClock,
   ) {
     super();
+    this.nativeConnection = {
+      configured: () => !!this.config.serverUrl,
+      disconnect: () => this.disconnectTransport(),
+      reconnect: () => this.reconnectTransport(),
+      isExplicitlyOffline: () => this.isDisconnected,
+      waitForTransportTransition: () => this.waitForTransportTransition(),
+      waitForReconnect: (signal) => this.waitForReconnect(signal),
+      onExplicitOfflineChange: (listener, signal) => {
+        if (signal.aborted) return;
+        const onAbort = () => this.explicitOfflineListeners.delete(listener);
+        this.explicitOfflineListeners.set(listener, { signal, onAbort });
+        signal.addEventListener("abort", onAbort, { once: true });
+      },
+    };
   }
 
   get currentRuntime(): FlushableRuntime | undefined {
     return this.runtime;
+  }
+
+  admitSession(session: Session): void {
+    this.assertOpen();
+    const proof = verifiedLocalFirstRequestProof(session);
+    if (!proof) return;
+    if (proof.appId !== this.config.appId || !(this.runtime instanceof NativeRuntimeAdapter)) {
+      throw new Error("Local-first request proof does not match the backend runtime");
+    }
+    this.runtime.admitLocalFirstSession(session, proof.token, this.config.appId);
   }
 
   override createClient({
@@ -96,6 +140,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     schema,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
+    this.assertOpen();
     const hasSeparatePermissionsBundle =
       this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
     const schemaJson = serializeRuntimeSchema(schema, {
@@ -117,7 +162,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      this.nodeIdentity ??
+        deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
@@ -133,6 +179,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           },
     );
 
+    if (this.nodeClock?.initialHighWater !== undefined) {
+      if (!(this.runtime instanceof NativeRuntimeAdapter))
+        throw new Error("Backend node clock requires the native runtime");
+      this.runtime.seedForegroundTxTimeHighWater(this.nodeClock.initialHighWater);
+    }
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
@@ -153,21 +204,177 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     return this.client;
   }
 
-  async shutdown(): Promise<void> {
-    const client = this.client;
-    this.client = undefined;
-    this.runtime = undefined;
-    this.initializedSchemaJson = undefined;
-    if (client) {
-      await client.shutdown();
+  override async waitForPendingWrites(signal?: AbortSignal): Promise<void> {
+    this.assertOpen();
+    // Fence every facade while the shared owner settles its existing writes.
+    const attempt = {};
+    this.gracefulWait = attempt;
+    const release = () => {
+      if (this.gracefulWait === attempt) this.gracefulWait = undefined;
+    };
+    signal?.addEventListener("abort", release, { once: true });
+    try {
+      if (signal?.aborted) throw new Error("Graceful shutdown cancelled");
+      if (this.runtime instanceof NativeRuntimeAdapter) {
+        await this.runtime.waitForPendingWrites("global");
+      }
+      // Success keeps the fence until shutdown; failure restores the live source.
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", release);
     }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.shutdownState === "closed") return;
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    this.shutdownState = "closing";
+    this.rejectReconnectWaiters(this.shutdownError());
+    const client = this.client;
+    const shutdown = this.enqueueTransportTransition(async () => {
+      const highWater =
+        this.nodeClock && this.runtime instanceof NativeRuntimeAdapter
+          ? await this.runtime.quiesceForegroundTxTimeHighWater()
+          : (this.nodeClock?.initialHighWater ?? 0n);
+      await client?.shutdown();
+      this.nodeClock?.closed(highWater);
+      this.client = undefined;
+      this.runtime = undefined;
+      this.initializedSchemaJson = undefined;
+      this.backendSyncEnabled = false;
+      this.isDisconnected = false;
+      this.shutdownState = "closed";
+      for (const { signal, onAbort } of this.explicitOfflineListeners.values()) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      this.explicitOfflineListeners.clear();
+    });
+    this.shutdownPromise = shutdown;
+    // A failed native close may have partially torn down the runtime. Keep
+    // the source terminal and retain the failure rather than admitting a new
+    // facade or pretending the old client can be used again.
+    await shutdown;
+  }
+
+  enableBackendSync(client: JazzClient): void {
+    this.assertOpen();
+    if (!this.config.serverUrl) return;
+    if (!this.config.backendSecret) {
+      throw new Error(
+        "backendSecret required for request/session-scoped sync when serverUrl is configured.",
+      );
+    }
+    client.asBackend();
+    if (this.backendSyncEnabled) return;
+    this.backendSyncEnabled = true;
+    if (!this.isDisconnected) this.connectBackendTransport(client);
+  }
+
+  private connectBackendTransport(client: JazzClient): void {
+    if (!this.config.serverUrl) return;
+    client.connectTransport(this.config.serverUrl, {
+      jwt_token: undefined,
+      backend_secret: this.config.backendSecret,
+      backend_session: this.config.cookieSession,
+    });
+  }
+
+  private async disconnectTransport(): Promise<void> {
+    this.assertOpen();
+    await this.enqueueTransportTransition(async () => {
+      await this.client?.disconnectTransport();
+      this.isDisconnected = true;
+      this.publishExplicitOfflineState();
+    });
+  }
+
+  private async reconnectTransport(): Promise<void> {
+    this.assertOpen(true);
+    await this.enqueueTransportTransition(() => {
+      if (this.client && this.backendSyncEnabled) this.connectBackendTransport(this.client);
+      this.isDisconnected = false;
+      this.publishExplicitOfflineState();
+    });
+    this.resolveReconnectWaiters();
+  }
+
+  private async waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    this.assertOpen();
+    await this.transportTransition;
+    if (signal?.aborted) return;
+    this.assertOpen();
+    if (!this.isDisconnected) return;
+    await new Promise<void>((resolve, reject) => {
+      const finish = () => {
+        this.reconnectWaiters.delete(waiter);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const fail = (error: Error) => {
+        this.reconnectWaiters.delete(waiter);
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const waiter = { resolve: finish, reject: fail };
+      this.reconnectWaiters.add(waiter);
+    });
+  }
+
+  private async waitForTransportTransition(): Promise<void> {
+    this.assertOpen();
+    await this.transportTransition;
+    this.assertOpen();
+  }
+
+  private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
+    const transition = this.transportTransition.then(run, run);
+    this.transportTransition = transition.catch(() => undefined);
+    return transition;
+  }
+
+  private publishExplicitOfflineState(): void {
+    for (const listener of this.explicitOfflineListeners.keys()) {
+      try {
+        listener(this.isDisconnected);
+      } catch {
+        // Observers must not turn a completed transport state change into a
+        // failed transition for every scoped Db sharing this source.
+      }
+    }
+  }
+
+  private resolveReconnectWaiters(): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const { resolve } of waiters) resolve();
+  }
+
+  private rejectReconnectWaiters(error: Error): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const { reject } of waiters) reject(error);
+  }
+
+  assertOpen(allowSyncRecovery = false): void {
+    if (this.shutdownState !== "open" || (this.gracefulWait && !allowSyncRecovery))
+      throw this.shutdownError();
+  }
+
+  private shutdownError(): Error {
+    return new Error("JazzContext is shutting down or has already shut down.");
   }
 }
 
 class BackendDb extends Db {
   constructor(
     config: DbConfig,
-    coreSource: RuntimeSource<DbConfig>,
+    private readonly coreSource: BackendRuntimeSource,
     private readonly client: JazzClient,
     private readonly runtimeSchema: WasmSchema,
     private readonly operationContext: {
@@ -198,15 +405,19 @@ class BackendDb extends Db {
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
+    this.coreSource.assertOpen();
+    this.assertOpen();
     return this.client;
   }
 
   protected override getCurrentClient(): JazzClient {
+    this.coreSource.assertOpen();
+    this.assertOpen();
     return this.client;
   }
 }
 
-function deterministicBytes(seed: string): Uint8Array {
+export function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;
   const bytes = new Uint8Array(16);
   const view = new DataView(bytes.buffer);
@@ -245,9 +456,12 @@ export class JazzContext {
   private readonly defaultSchemaInput?: BackendSchemaInput;
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
-  private backendSyncEnabled = false;
 
-  constructor(config: BackendContextConfig) {
+  constructor(
+    config: BackendContextConfig,
+    nodeIdentity?: Uint8Array,
+    nodeClock?: BackendNodeClock,
+  ) {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
@@ -258,7 +472,12 @@ export class JazzContext {
       config.driver.type === "persistent"
         ? config.driver.dataPath
         : `memory:${Date.now()}:${Math.random()}`;
-    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope);
+    this.coreSource = new BackendRuntimeSource(
+      this.config,
+      this.nodeIdentityScope,
+      nodeIdentity,
+      nodeClock,
+    );
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
@@ -293,6 +512,7 @@ export class JazzContext {
     backendScoped = false,
     backendReads = false,
   ): Db {
+    if (session) this.coreSource.admitSession(session);
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
@@ -347,6 +567,16 @@ export class JazzContext {
     return this.wrapDb(client, schema);
   }
 
+  /** @internal Display admitted SYSTEM provenance without passing it as policy authority. */
+  openBackendAccount(session: Session): Db {
+    const { client, schema } = this.getClientAndSchema();
+    this.enableBackendSyncIfConfigured(client);
+    return new BackendDb(this.buildDbConfig(), this.coreSource, client, schema, null, {
+      authMode: "external",
+      session: withCanonicalUser(session),
+    });
+  }
+
   /**
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
@@ -378,29 +608,16 @@ export class JazzContext {
    * to a sync server. Local-only runtimes can scope sessions without backend auth.
    */
   private enableBackendSyncIfConfigured(client: JazzClient): void {
-    if (!this.config.serverUrl) {
-      return;
-    }
-    if (!this.config.backendSecret) {
-      throw new Error(
-        "backendSecret required for request/session-scoped sync when serverUrl is configured.",
-      );
-    }
-    client.asBackend();
-    if (this.backendSyncEnabled) {
-      return;
-    }
-    client.connectTransport(this.config.serverUrl, {
-      jwt_token: undefined,
-      backend_secret: this.config.backendSecret,
-      backend_session: this.config.cookieSession,
-    });
-    this.backendSyncEnabled = true;
+    this.coreSource.enableBackendSync(client);
   }
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
+    if (!this.config.serverUrl) {
+      throw new Error("forRequest requires a configured core serverUrl for account admission");
+    }
     return await resolveRequestSession(request, {
       appId: this.config.appId,
+      accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
       jwksUrl: this.config.jwksUrl,
       jwtPublicKey: this.config.jwtPublicKey,
       jwtIssuer: this.config.jwtIssuer,
@@ -410,11 +627,12 @@ export class JazzContext {
   }
 
   /**
-   * Build a requester-scoped `Db` from an authenticated request.
+   * Verify the original bearer and resolve its active core account before
+   * building a requester-scoped `Db`. External login never registers an identity.
    */
   async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const { client, schema } = this.getClientAndSchema(source);
     const session = await this.resolveRequestSession(request);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, schema, session, undefined, true);
   }
@@ -429,8 +647,9 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      undefined,
-      canonicalAuthorSubject(session.issuer, session.user_id),
+      session,
+      canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+      true,
       true,
     );
   }
@@ -444,7 +663,8 @@ export class JazzContext {
   }
 
   /**
-   * Build a session-scoped `Db` for server-side impersonation flows.
+   * Build a session-scoped `Db` for explicitly trusted server-side impersonation.
+   * This bypasses public account admission; the backend owns every supplied claim.
    */
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
@@ -463,7 +683,6 @@ export class JazzContext {
    * Shutdown the context and release runtime resources.
    */
   async shutdown(): Promise<void> {
-    this.backendSyncEnabled = false;
     await this.coreSource.shutdown();
   }
 }

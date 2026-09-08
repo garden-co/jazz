@@ -4,12 +4,12 @@ import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 const schema = {
   ...betterAuthSchema,
   organizations: s.table({ name: s.string(), slug: s.string() }),
-  people: s.table({ userId: s.string(), name: s.string() }),
+  people: s.table({ userId: s.uuid(), name: s.string() }),
   teams: s.table({ organizationId: s.ref("organizations"), name: s.string() }),
   memberships: s.table({
     organizationId: s.ref("organizations"),
     personId: s.ref("people"),
-    userId: s.string(),
+    userId: s.uuid(),
     role: s.string(),
   }),
   teamAssignments: s.table({

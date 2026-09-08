@@ -9,7 +9,7 @@ const schema = {
   }),
   todoShares: s.table({
     todoId: s.ref("todos"),
-    user_id: s.string(),
+    user_id: s.uuid(),
     can_edit: s.boolean(),
   }),
 };
@@ -22,10 +22,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 s.definePermissions(app, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where((todo) =>
     anyOf([
-      { $createdBy: session.user },
+      { "$createdBy.account": session.user.account },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user,
+        user_id: session.user.account,
       }),
     ]),
   );
@@ -34,39 +34,43 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
 
   policy.todos.allowUpdate.where((todo) =>
     anyOf([
-      { $createdBy: session.user },
+      { "$createdBy.account": session.user.account },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user,
+        user_id: session.user.account,
         can_edit: true,
       }),
     ]),
   );
 
-  policy.todos.allowDelete.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
 
   // Only the todo creator can manage shares
   policy.todoShares.allowInsert.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      $createdBy: session.user,
+      "$createdBy.account": session.user.account,
     }),
   );
-  policy.todoShares.allowRead.where({ user_id: session.user });
+  policy.todoShares.allowRead.where({ user_id: session.user.account });
   policy.todoShares.allowDelete.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      $createdBy: session.user,
+      "$createdBy.account": session.user.account,
     }),
   );
 });
 // #endregion shared-permissions
 
 // #region shared-grant
-export function shareTodo(db: ReturnType<typeof useDb>, todoId: string, recipientUserId: string) {
+export function shareTodo(
+  db: ReturnType<typeof useDb>,
+  todoId: string,
+  recipientAccountId: string,
+) {
   db.insert(app.todoShares, {
     todoId,
-    user_id: recipientUserId,
+    user_id: recipientAccountId,
     can_edit: false,
   });
 }
@@ -79,14 +83,18 @@ export function SharedWithMe() {
     data: shares,
     isLoading,
     error,
-  } = useAll(app.todoShares.where({ user_id: session!.user }).include({ todo: true }));
+  } = useAll(
+    session?.user.account
+      ? app.todoShares.where({ user_id: session.user.account }).include({ todo: true })
+      : undefined,
+  );
 
   if (isLoading) return <p>Loading…</p>;
   if (error) return <p>Something went wrong!</p>;
 
   return (
     <ul>
-      {shares.map((share) =>
+      {shares?.map((share) =>
         share.todo ? (
           <li key={share.id}>
             {share.todo.title}

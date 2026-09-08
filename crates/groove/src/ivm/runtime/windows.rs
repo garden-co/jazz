@@ -1383,7 +1383,17 @@ fn encode_runtime_primary_key_part(
             key.push(1);
             encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+        Value::Record(record) => {
+            // Prepared authorization bindings can carry whole author records
+            // through runtime window groups. Match OwnedRecord identity using
+            // both its descriptor and bytes, never process-local intern IDs.
+            // This is not the durable arrangement/primary-key codec.
+            key.push(15);
+            let descriptor = records::encode_record_descriptor(record.descriptor())?;
+            encode_runtime_ordered_bytes(key, &descriptor);
+            encode_runtime_ordered_bytes(key, record.raw());
+        }
+        Value::Array(_) | Value::Enum(_) | Value::Large(_) => {
             return Err(IvmRuntimeError::UnsupportedJoinKey);
         }
     }

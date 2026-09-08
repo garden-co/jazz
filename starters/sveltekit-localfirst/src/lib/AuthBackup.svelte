@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { LocalFirstAuth } from "jazz-tools/svelte";
+  import { exportLocalFirstSecret } from "jazz-tools";
+  import { getJazzSession } from "jazz-tools/svelte";
   import { goto } from "$app/navigation";
 
   // In production, pin this to your deployed hostname so passkeys remain
@@ -21,12 +22,13 @@
     mode?: "full" | "restore-only";
   } = $props();
 
-  const auth = new LocalFirstAuth();
+  const jazz = getJazzSession();
 
   let phrase = $state<string | null>(null);
   let restoreInput = $state("");
   let status = $state<Status>({ kind: "idle" });
   let busy = $state(false);
+  let open = $state(false);
 
   async function navigate() {
     if (redirectAfterRestore) await goto(redirectAfterRestore);
@@ -44,12 +46,8 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      if (!auth.secret) {
-        status = { kind: "error", message: "No local secret to reveal yet." };
-        return;
-      }
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      phrase = RecoveryPhrase.fromSecret(auth.secret);
+      phrase = RecoveryPhrase.fromSecret(exportLocalFirstSecret($jazz.account!));
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
     } finally {
@@ -76,8 +74,7 @@
     busy = true;
     try {
       const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-      const secret = RecoveryPhrase.toSecret(restoreInput.trim());
-      await auth.login(secret);
+      await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(restoreInput.trim()));
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -90,16 +87,12 @@
     status = { kind: "idle" };
     busy = true;
     try {
-      if (!auth.secret) {
-        status = { kind: "error", message: "No local secret to back up yet." };
-        return;
-      }
       const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
       const pb = new BrowserPasskeyBackup({
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      await pb.backup(auth.secret, "My account");
+      await pb.backup(exportLocalFirstSecret($jazz.account!), "My account");
       status = { kind: "success", message: "Passkey backup created." };
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -117,8 +110,7 @@
         appName: PASSKEY_APP_NAME,
         appHostname: PASSKEY_APP_HOSTNAME,
       });
-      const secret = await pb.restore();
-      await auth.login(secret);
+      await jazz.restoreLocalFirst(await pb.restore());
       await navigate();
     } catch (err) {
       status = { kind: "error", message: describeError(err) };
@@ -128,7 +120,9 @@
   }
 </script>
 
-<details class="auth-backup">
+{#if $jazz.error}<p class="alert-error" role="alert">{$jazz.error.message}</p>{/if}
+
+<details class="auth-backup" bind:open>
   <summary>Back up or restore your local-only account</summary>
   <p class="auth-backup-hint">
     Save your account's recovery phrase or a passkey so you can get back in

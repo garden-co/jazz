@@ -1,8 +1,8 @@
 import type { Request, Response } from "express";
-import type { JazzContext } from "jazz-tools/backend";
+import type { JazzClient } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 
-declare const context: JazzContext;
+declare const client: JazzClient;
 
 function sendQueryError(res: Response): void {
   res.status(500).json({ error: "Failed to query todos" });
@@ -11,7 +11,7 @@ function sendQueryError(res: Response): void {
 // #region backend-request-handler-ts
 export async function listTodosForRequester(req: Request, res: Response): Promise<void> {
   try {
-    const requester = await context.forRequest(req, schemaApp);
+    const requester = await client.forRequest(req);
     const rows = await requester.all(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
@@ -23,7 +23,7 @@ export async function listTodosForRequester(req: Request, res: Response): Promis
 // #region permissions-simple-ts
 export async function listTodosWithSimplePolicy(req: Request, res: Response): Promise<void> {
   try {
-    const requester = await context.forRequest(req, schemaApp);
+    const requester = await client.forRequest(req);
     const rows = await requester.all(schemaApp.todos.where({ done: false }));
     res.json(rows);
   } catch {
@@ -38,7 +38,7 @@ export async function listTodosWithInheritedPolicy(
   res: Response,
 ): Promise<void> {
   try {
-    const requester = await context.forRequest(req, schemaApp);
+    const requester = await client.forRequest(req);
     const rows = await requester.all(schemaApp.todos.where({ projectId: req.params.projectId }));
     res.json(rows);
   } catch {
@@ -49,18 +49,10 @@ export async function listTodosWithInheritedPolicy(
 
 // #region backend-attribution-ts
 export async function createAttributedHandles(req: Request) {
-  const syntheticSession = {
-    issuer: "urn:jazz:docs",
-    user_id: "user_123",
-    authMode: "external" as const,
-    claims: {},
-  };
-
   return {
-    backendDb: context.asBackend(schemaApp),
-    attributedDb: context.withAttribution("urn:jazz:docs", "user_123", schemaApp),
-    attributedSessionDb: context.withAttributionForSession(syntheticSession, schemaApp),
-    attributedRequestDb: await context.withAttributionForRequest(req, schemaApp),
+    backendDb: client.db,
+    requesterDb: await client.forRequest(req),
+    attributedRequestDb: await client.withAttributionForRequest(req),
   };
 }
 // #endregion backend-attribution-ts

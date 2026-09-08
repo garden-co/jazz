@@ -7,9 +7,8 @@ const schema = {
   canvasMembers: s
     .table({
       canvasId: s.ref("canvases"),
-      // App-owned identity values are canonical JSON `[issuer, subject]`, not
-      // provider-local Better Auth ids. This keeps memberships issuer-scoped.
-      memberAuthor: s.string(),
+      // Jazz account ids are stable across linked external identities.
+      memberAuthor: s.uuid(),
       role: s.enum("viewer", "editor", "admin"),
     })
     .indexOnly(["canvasId", "memberAuthor"]),
@@ -55,7 +54,7 @@ const schema = {
   cursors: s
     .table({
       canvasId: s.ref("canvases"),
-      author: s.string(),
+      author: s.uuid(),
       x: s.float(),
       y: s.float(),
       color: s.string(),

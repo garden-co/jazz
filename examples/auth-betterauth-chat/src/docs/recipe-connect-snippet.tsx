@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
 import { authClient } from "../lib/auth-client";
 
 function YourApp() {
@@ -8,31 +7,38 @@ function YourApp() {
 
 // #region betterauth-jazz-react
 export function App() {
-  const { data: session, isPending } = authClient.useSession();
-  const [token, setToken] = useState<string | undefined>();
-
-  useEffect(() => {
-    if (isPending || !session?.session) {
-      setToken(undefined);
-      return;
-    }
-
-    authClient.token().then((res) => {
-      if (res.error) return;
-      setToken(res.data.token);
-    });
-  }, [isPending, session?.session?.id]);
-
   return (
-    <JazzProvider
-      config={{
-        appId: "my-app",
-        serverUrl: "wss://your-jazz-server.example.com",
-        jwtToken: token,
-      }}
+    <JazzSessionProvider
+      config={{ appId: "my-app", serverUrl: "wss://your-jazz-server.example.com" }}
+      fallback={<ConnectAccount />}
     >
       <YourApp />
-    </JazzProvider>
+    </JazzSessionProvider>
+  );
+}
+
+function ConnectAccount() {
+  const { loginJWT, error, status } = useJazzSession();
+  // Provider sign-in happens first. Login requires an already registered or
+  // linked identity; it never silently creates an account.
+  return (
+    <>
+      {error && <p role="alert">{error.message}</p>}
+      <button
+        disabled={status === "transitioning"}
+        onClick={() =>
+          void loginJWT({
+            getToken: async () => {
+              const result = await authClient.token();
+              if (result.error) throw new Error(result.error.message);
+              return result.data.token;
+            },
+          }).catch(() => {})
+        }
+      >
+        Connect signed-in account
+      </button>
+    </>
   );
 }
 // #endregion betterauth-jazz-react

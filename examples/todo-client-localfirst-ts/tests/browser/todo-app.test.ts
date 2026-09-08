@@ -1,3 +1,5 @@
+import { createAccountManager } from "jazz-tools";
+import { prepareTestAccount } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the vanilla TS todo app.
  *
@@ -55,7 +57,17 @@ describe("Vanilla TS Todo App E2E", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
+    const appId = config?.appId ?? APP_ID;
+    const account =
+      config?.account ??
+      (await prepareTestAccount(
+        createAccountManager,
+        appId,
+        config?.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+      ));
     const { db, destroy } = await startApp(el, {
+      appId,
+      account,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
     });
@@ -259,9 +271,14 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const account = await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
 
     // First session: mount, add todo, destroy
-    const el1 = await mount({ driver: { type: "persistent", dbName } });
+    const el1 = await mount({ account, driver: { type: "persistent", dbName } });
     addTodo(el1, "Survive reload");
 
     await waitFor(
@@ -272,8 +289,8 @@ describe("Vanilla TS Todo App E2E", () => {
 
     await destroyInstance(el1);
 
-    // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mount({ driver: { type: "persistent", dbName } });
+    // Second session: remount with same account and dbName — IndexedDB data should load
+    const el2 = await mount({ account, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

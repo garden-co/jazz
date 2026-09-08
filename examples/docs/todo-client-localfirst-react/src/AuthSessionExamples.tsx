@@ -9,7 +9,7 @@ export function AuthSessionExamples() {
   // #endregion auth-session-react-hook
 
   // #region auth-session-react-user
-  const sessionUser = session?.user ?? null;
+  const sessionUser = session?.user.account ?? null;
   // #endregion auth-session-react-user
 
   // #region auth-session-react-query

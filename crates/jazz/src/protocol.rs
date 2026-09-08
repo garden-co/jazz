@@ -17,7 +17,8 @@ use groove::records::{
 };
 
 use crate::ids::{
-    AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaLineagePublicationId,
+    SchemaVersionId,
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -199,6 +200,9 @@ pub enum SyncMessage {
         request_id: PermissionAdviceRequestId,
         /// Candidate operation; all support scope details are authority-derived.
         action: PermissionAdviceAction,
+        /// Immutable session snapshot delegated by a host-admitted backend or
+        /// scope-isolated relay. Ordinary links must leave this absent.
+        delegated_session: Option<DelegatedSessionBinding>,
     },
     /// One authority-selected support clause for an authorization intent.
     /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
@@ -879,9 +883,98 @@ mod version_record_wire_row {
 
     const MAGIC: &[u8; 5] = b"JVRR\x01";
 
+    // Descriptor identity includes immutable names, layouts, nested types and
+    // enum registry/case schemas. Cache only successful canonicalization;
+    // arbitrary OwnedRecord bytes still require validation on every call.
+    const MAX_DESCRIPTOR_PROOFS: usize = 16;
+    const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
+
+    #[derive(Clone)]
+    struct DescriptorProof {
+        source: RecordDescriptor,
+        canonical: RecordDescriptor,
+        encoded: std::sync::Arc<[u8]>,
+    }
+
+    #[derive(Default)]
+    struct DescriptorProofCache {
+        entries: std::collections::VecDeque<DescriptorProof>,
+        bytes: usize,
+    }
+
+    impl DescriptorProofCache {
+        fn remember(&mut self, proof: DescriptorProof) {
+            // This is a retention limit, never an input acceptance limit.
+            if proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES {
+                return;
+            }
+            while self.entries.len() >= MAX_DESCRIPTOR_PROOFS
+                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES
+            {
+                let evicted = self.entries.pop_front().expect("nonempty bounded cache");
+                self.bytes -= evicted.encoded.len();
+            }
+            self.bytes += proof.encoded.len();
+            self.entries.push_back(proof);
+        }
+    }
+
+    thread_local! {
+        static DESCRIPTOR_PROOFS: std::cell::RefCell<DescriptorProofCache> =
+            std::cell::RefCell::new(DescriptorProofCache::default());
+    }
+
+    fn descriptor_for_encode(
+        descriptor: &RecordDescriptor,
+    ) -> Result<DescriptorProof, groove::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
+            cache
+                .borrow()
+                .entries
+                .iter()
+                .rev()
+                .find(|proof| proof.source == *descriptor)
+                .cloned()
+        }) {
+            return Ok(proof);
+        }
+        let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
+        let canonical = groove::records::decode_persisted_record_descriptor(&encoded)?;
+        let proof = DescriptorProof {
+            source: *descriptor,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
+    fn descriptor_for_decode(encoded: &[u8]) -> Result<DescriptorProof, groove::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
+            cache
+                .borrow()
+                .entries
+                .iter()
+                .rev()
+                .find(|proof| proof.encoded.as_ref() == encoded)
+                .cloned()
+        }) {
+            return Ok(proof);
+        }
+        let canonical = groove::records::decode_persisted_record_descriptor(encoded)?;
+        let proof = DescriptorProof {
+            source: canonical,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
     pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
-        let descriptor = groove::records::encode_persisted_record_descriptor(record.descriptor())?;
-        let canonical = groove::records::decode_persisted_record_descriptor(&descriptor)?;
+        let proof = descriptor_for_encode(record.descriptor())?;
+        let descriptor = &proof.encoded;
+        let canonical = proof.canonical;
         let values = canonical.bind(record.raw()).to_values()?;
         if canonical.create(&values)? != record.raw() {
             return Err(groove::records::Error::NonCanonicalRecord);
@@ -909,9 +1002,7 @@ mod version_record_wire_row {
                 .map_err(|_| invalid())?,
         ) as usize;
         let end = 9usize.checked_add(length).ok_or_else(invalid)?;
-        let descriptor = groove::records::decode_persisted_record_descriptor(
-            bytes.get(9..end).ok_or_else(invalid)?,
-        )?;
+        let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
         let raw = bytes.get(end..).ok_or_else(invalid)?;
         let values = descriptor.bind(raw).to_values()?;
         if descriptor.create(&values)? != raw {
@@ -924,6 +1015,88 @@ mod version_record_wire_row {
     mod tests {
         use super::*;
         use groove::records::{DescriptorField, FieldIdentity};
+
+        // These internal tests exercise the exact untrusted byte boundary and
+        // proof reuse, which ordinary client queries cannot observe directly.
+        #[test]
+        fn descriptor_proof_cache_preserves_rejection_on_miss_and_hit() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let raw = descriptor.create(&[Value::U64(7)]).unwrap();
+            let record = OwnedRecord::new(raw.clone(), descriptor);
+            let encoded = encode(&record).unwrap();
+            let descriptor_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap()) as usize;
+            let mut malformed_descriptor = encoded.clone();
+            malformed_descriptor.insert(9 + descriptor_len, 0);
+            malformed_descriptor[5..9]
+                .copy_from_slice(&((descriptor_len + 1) as u32).to_le_bytes());
+            let mut malformed_row = encoded.clone();
+            malformed_row.push(0);
+            let mut malformed_raw = raw;
+            malformed_raw.push(0);
+            for warm in [false, true] {
+                DESCRIPTOR_PROOFS
+                    .with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+                if warm {
+                    assert_eq!(decode(&encoded).unwrap(), record);
+                    let first = descriptor_for_encode(&descriptor).unwrap();
+                    let second = descriptor_for_decode(&first.encoded).unwrap();
+                    assert!(std::sync::Arc::ptr_eq(&first.encoded, &second.encoded));
+                }
+                assert!(decode(&malformed_descriptor).is_err());
+                DESCRIPTOR_PROOFS
+                    .with(|cache| assert_eq!(cache.borrow().entries.len(), usize::from(warm)));
+                assert!(decode(&malformed_row).is_err());
+                assert!(encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).is_err());
+                assert_eq!(encode(&record).unwrap(), encoded);
+            }
+        }
+
+        #[test]
+        fn descriptor_proof_cache_keys_include_inline_enum_identity() {
+            use groove::records::{EnumCase, EnumSchema};
+            let payload = RecordDescriptor::new([("value", ValueType::U64)]);
+            let first = EnumSchema::new("choice", [EnumCase::new("one", payload)])
+                .unwrap()
+                .with_registry_id(1);
+            let mut second = first.clone();
+            second.registry_id = 2;
+            let mut third = first.clone();
+            third.cases[0].name = "other".to_owned();
+            let mut encoded = Vec::new();
+            for schema in [first, second, third] {
+                let descriptor =
+                    RecordDescriptor::new([("choice", ValueType::Enum(Box::new(schema)))]);
+                let proof = descriptor_for_encode(&descriptor).unwrap();
+                assert_eq!(
+                    proof.encoded.as_ref(),
+                    groove::records::encode_persisted_record_descriptor(&descriptor).unwrap()
+                );
+                encoded.push(proof.encoded);
+            }
+            assert_ne!(encoded[0], encoded[1]);
+            assert_ne!(encoded[0], encoded[2]);
+        }
+
+        #[test]
+        fn descriptor_proof_cache_limits_retention_not_valid_input() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let descriptor =
+                RecordDescriptor::new([("x".repeat(MAX_DESCRIPTOR_PROOF_BYTES), ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let encoded = encode(&record).unwrap();
+            assert_eq!(decode(&encoded).unwrap(), record);
+            DESCRIPTOR_PROOFS.with(|cache| assert!(cache.borrow().entries.is_empty()));
+            for index in 0..MAX_DESCRIPTOR_PROOFS + 1 {
+                let descriptor =
+                    RecordDescriptor::new([(format!("field_{index}"), ValueType::U64)]);
+                descriptor_for_encode(&descriptor).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_BYTES);
+            });
+        }
 
         #[test]
         fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
@@ -1061,11 +1234,8 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            let encoded = borrowed.get_str(index).map_err(|_| malformed())?;
-            let author = AuthorSubject::from_canonical(encoded).map_err(|_| malformed())?;
-            if author.canonical().as_bytes() != encoded.as_bytes() {
-                return Err(malformed());
-            }
+            RowAuthor::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+                .map_err(|_| malformed())?;
         }
         borrowed
             .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
@@ -1166,9 +1336,13 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
-            Value::String(created_by.canonical().to_owned()),
+            RowAuthor::from_persisted_subject(created_by)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             Value::U64(created_at_ms),
-            Value::String(updated_by.canonical().to_owned()),
+            RowAuthor::from_persisted_subject(updated_by)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .to_value(),
             Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
@@ -1276,13 +1450,14 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        AuthorSubject::from_canonical(
+        RowAuthor::from_value(
             self.record
                 .borrowed()
-                .get_str(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
+        .as_author_subject()
     }
 
     /// Original creation timestamp for this logical row in Unix milliseconds.
@@ -1295,13 +1470,14 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        AuthorSubject::from_canonical(
+        RowAuthor::from_value(
             self.record
                 .borrowed()
-                .get_str(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")
+        .as_author_subject()
     }
 
     /// Update timestamp for this row version in Unix milliseconds.
@@ -1382,9 +1558,9 @@ groove::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => created_by: AuthorSubject,
+        2 => created_by: RowAuthor,
         3 => created_at: u64,
-        4 => updated_by: AuthorSubject,
+        4 => updated_by: RowAuthor,
         5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
@@ -2138,6 +2314,54 @@ impl PolicyBindingKey {
         self.canonical_claims.claims()
     }
 
+    /// Store provider claims once; reserved author bindings are reconstructed
+    /// from the separately stored exact identity when they match it. Other
+    /// scalar bindings remain exact; authorization validation lives at admission.
+    pub(crate) fn directory_value(&self) -> Result<Value, String> {
+        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+            &self.identity,
+            BTreeMap::new(),
+        );
+        let mut claims = self.claims().clone();
+        let mut presence = 0_u8;
+        // Bits use the eight derived names' canonical UTF-8 ordering. Absent
+        // entries remain absent: internal bindings may intentionally be partial.
+        for (bit, (name, expected)) in derived.into_iter().enumerate() {
+            if claims.get(&name) == Some(&expected) {
+                claims.remove(&name);
+                presence |= 1 << bit;
+            }
+        }
+        policy_directory_payload(presence, policy_binding_directory_claims_value(&claims)?)
+    }
+
+    pub(crate) fn from_directory_value(
+        identity: AuthorSubject,
+        value: Value,
+    ) -> Result<Self, String> {
+        let Value::Record(record) = value else {
+            return Err("policy directory payload must be record".into());
+        };
+        if *record.descriptor() != policy_directory_descriptor() {
+            return Err("policy directory descriptor mismatch".into());
+        }
+        let Value::U8(presence) = record.get_idx(0).map_err(|error| error.to_string())? else {
+            return Err("policy directory presence must be u8".into());
+        };
+        let value = record.get_idx(1).map_err(|error| error.to_string())?;
+        let mut claims = policy_binding_directory_claims_from_value(value)?;
+        for (bit, (name, expected)) in
+            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, BTreeMap::new())
+                .into_iter()
+                .enumerate()
+        {
+            if presence & (1 << bit) != 0 && claims.insert(name, expected).is_some() {
+                return Err("policy directory contains a redundant identity-derived claim".into());
+            }
+        }
+        Ok(Self::from_canonical_parts(identity, claims))
+    }
+
     pub(crate) fn directory_digest(&self) -> [u8; 32] {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
@@ -2190,11 +2414,31 @@ pub(crate) fn policy_binding_directory_claims_from_value(
     Ok(claims)
 }
 
+fn policy_directory_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("derived_v1", ValueType::U8),
+        (
+            "claims_v1",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(
+                *policy_claim_node_descriptor(),
+            )))),
+        ),
+    ])
+}
+
+fn policy_directory_payload(presence: u8, claims: Value) -> Result<Value, String> {
+    let descriptor = policy_directory_descriptor();
+    Ok(Value::Record(OwnedRecord::new(
+        descriptor
+            .create(&[Value::U8(presence), claims])
+            .map_err(|error| error.to_string())?,
+        descriptor,
+    )))
+}
+
 /// Direct-store value type for the collision-checked policy-binding directory.
 pub(crate) fn policy_binding_directory_claims_value_type() -> ValueType {
-    ValueType::Array(Box::new(ValueType::Record(Box::new(
-        *policy_claim_node_descriptor(),
-    ))))
+    ValueType::Record(Box::new(policy_directory_descriptor()))
 }
 
 const POLICY_CLAIM_DIRECTORY_MAX_NODES: usize = 1024;
@@ -5469,8 +5713,17 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 None => bytes.push(0),
             }
         }
-        Value::Record(_) => {
-            panic!("record-valued values have no v3 protocol encoding")
+        Value::Record(record) => {
+            // Policy comparison keys retain the complete portable record,
+            // including typed field identities. Migration defaults still
+            // reject records before this shared helper can encode them.
+            bytes.push(16);
+            put_bytes(
+                bytes,
+                &groove::records::encode_record_descriptor(record.descriptor())
+                    .expect("admitted policy record descriptor has canonical encoding"),
+            );
+            put_bytes(bytes, record.raw());
         }
         Value::Enum(_) => {
             panic!(
@@ -5715,6 +5968,111 @@ mod tests {
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn policy_directory_rebuilds_only_identity_derived_claims() {
+        // The private directory stores provider data and an exact identity;
+        // its encoded payload must not retain a second author representation.
+        let identity = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                [7; 16],
+            )));
+        let provider = BTreeMap::from([("role".into(), Value::String("editor".into()))]);
+        let claims =
+            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, provider);
+        let key = PolicyBindingKey::from_canonical_parts(identity, claims.clone());
+        let encoded = key.directory_value().unwrap();
+        let Value::Record(fields) = encoded.clone() else {
+            panic!("typed directory record")
+        };
+        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(255));
+        let stored =
+            policy_binding_directory_claims_from_value(fields.get_idx(1).unwrap()).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored.get("\0claims:role"),
+            Some(&Value::String("editor".into()))
+        );
+        let rebuilt = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+        assert_eq!(rebuilt, key);
+        assert_eq!(rebuilt.directory_digest(), key.directory_digest());
+        let mut inconsistent = claims;
+        inconsistent.insert("user".into(), Value::String("spoof".into()));
+        // Internal policy tests may deliberately bind provider sub or user to
+        // a different scalar. Storage preserves it; admission owns validation.
+        let inconsistent = PolicyBindingKey::from_canonical_parts(identity, inconsistent);
+        assert_eq!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                inconsistent.directory_value().unwrap()
+            )
+            .unwrap(),
+            inconsistent
+        );
+        let redundant = policy_binding_directory_claims_value(&BTreeMap::from([(
+            "user".into(),
+            Value::String("spoof".into()),
+        )]))
+        .unwrap();
+        assert!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                policy_directory_payload(255, redundant).unwrap()
+            )
+            .is_err()
+        );
+        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+            &identity,
+            BTreeMap::new(),
+        );
+        assert_eq!(derived.len(), 8);
+        for mask in 0_u16..=255 {
+            let partial = derived
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, (key, value))| (key.clone(), value.clone()))
+                .collect();
+            let key = PolicyBindingKey::from_canonical_parts(identity, partial);
+            let encoded = key.directory_value().unwrap();
+            let Value::Record(fields) = &encoded else {
+                panic!("typed directory record")
+            };
+            assert_eq!(fields.get_idx(0).unwrap(), Value::U8(mask as u8));
+            let recovered = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+            assert_eq!(recovered, key);
+            assert_eq!(recovered.directory_digest(), key.directory_digest());
+        }
+    }
+
+    #[test]
+    fn canonical_policy_claims_preserve_record_descriptor_and_payload() {
+        // Internal comparison identity is not directly observable through a
+        // public query; distinguish equal bytes with different field identities.
+        let record = |field: &str, value: u64| {
+            let descriptor = RecordDescriptor::new([(field, ValueType::U64)]);
+            Value::Record(OwnedRecord::new(
+                descriptor.create(&[Value::U64(value)]).unwrap(),
+                descriptor,
+            ))
+        };
+        let claims = |value| CanonicalPolicyClaims::new(BTreeMap::from([("user".into(), value)]));
+        assert_eq!(claims(record("a", 1)), claims(record("a", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("b", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("a", 2)));
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        assert_ne!(
+            claims(author.to_value()),
+            claims(
+                author
+                    .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                        [7; 16]
+                    )))
+                    .to_value()
+            )
+        );
     }
 
     #[test]
@@ -6149,9 +6507,13 @@ mod tests {
             .create(&[
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(high), tx_id_value(low)]),
-                Value::String(author.canonical().to_owned()),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(7),
-                Value::String(author.canonical().to_owned()),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
@@ -6241,9 +6603,13 @@ mod tests {
             vec![
                 Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
                 Value::Array(vec![tx_id_value(low), tx_id_value(high)]),
-                Value::String(author.canonical().to_owned()),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(7),
-                Value::String(author.canonical().to_owned()),
+                RowAuthor::from_persisted_subject(author)
+                    .unwrap()
+                    .to_value(),
                 Value::U64(8),
                 Value::Nullable(None),
                 Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
@@ -6267,7 +6633,30 @@ mod tests {
         };
 
         let mut noncanonical_author = base_values();
-        noncanonical_author[2] = Value::String(r#"[ "issuer", "subject" ]"#.to_owned());
+        // Structurally valid native bytes still need principal validation.
+        // An empty issuer cannot become a valid author by arriving in a row.
+        let ValueType::Record(author_descriptor) = RowAuthor::value_type() else {
+            unreachable!()
+        };
+        let ValueType::Record(principal_descriptor) = &author_descriptor.fields()[1].value_type
+        else {
+            unreachable!()
+        };
+        let principal = Value::Record(OwnedRecord::new(
+            principal_descriptor
+                .create(&[
+                    Value::String(String::new()),
+                    Value::String("subject".into()),
+                ])
+                .unwrap(),
+            principal_descriptor.as_ref().clone(),
+        ));
+        noncanonical_author[2] = Value::Record(OwnedRecord::new(
+            author_descriptor
+                .create(&[Value::Uuid(uuid::Uuid::from_bytes([0x66; 16])), principal])
+                .unwrap(),
+            author_descriptor.as_ref().clone(),
+        ));
         let message = malformed_message(make_record(
             table.wire_record_descriptor(),
             noncanonical_author,
@@ -6913,9 +7302,9 @@ mod tests {
             schema_id(1),
             RowUuid::from_bytes([1; 16]),
             Vec::new(),
-            AuthorSubject::SYSTEM,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
             1,
-            AuthorSubject::SYSTEM,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
             1,
             &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
             None,

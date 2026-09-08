@@ -15,7 +15,8 @@ import {
   type ShallowRef,
 } from "vue";
 import type { PublicSession } from "../runtime/context.js";
-import type { Db, DbConfig } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 

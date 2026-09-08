@@ -1,15 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
-import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import type { AccountStore } from "../../src/accounts/persistence.js";
 import { createJazzClient } from "../../src/svelte/create-jazz-client.js";
 import SvelteClientProviderHarness from "./fixtures/SvelteClientProviderHarness.svelte";
 import SvelteProviderConfigHarness from "./fixtures/SvelteProviderConfigHarness.svelte";
 import { waitForCondition } from "./support.js";
 
-function makeJwt(payload: Record<string, unknown>): string {
-  const encode = (value: unknown) =>
-    btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.`;
+function inMemoryAccountStore(): AccountStore {
+  let selected: string | null = null;
+  return {
+    async read() {
+      return selected;
+    },
+    async update(transform) {
+      selected = transform(selected);
+    },
+  };
+}
+
+async function createTestAccountManager(appId: string) {
+  return createAccountManager({
+    appId,
+    serverUrl: "https://svelte-provider.example",
+    store: inMemoryAccountStore(),
+  });
 }
 
 describe("JazzSvelteProvider config handover", () => {
@@ -27,30 +42,30 @@ describe("JazzSvelteProvider config handover", () => {
     target = document.createElement("div");
     document.body.appendChild(target);
 
+    const accounts = await createTestAccountManager(appId);
+    const initialAccount = accounts.createLocalFirst();
+    const replacementAccount = accounts.createLocalFirst();
     component = mount(SvelteProviderConfigHarness, {
       target,
       props: {
         initialConfig: {
           appId,
           driver: { type: "persistent", dbName },
-          secret: generateAuthSecret(),
+          account: initialAccount,
         },
         replacementConfig: {
           appId,
           driver: { type: "persistent", dbName },
-          jwtToken: makeJwt({
-            sub: crypto.randomUUID(),
-            iss: "https://auth.example.com",
-          }),
+          account: replacementAccount,
         },
       },
     });
 
     await waitForCondition(
       async () =>
-        target?.querySelector('[data-provider-state="ready"]')?.textContent === "local-first",
+        target?.querySelector("[data-provider-account]")?.textContent === initialAccount.id,
       10_000,
-      "the local-first client to become ready",
+      "the initial opaque-account client to become ready",
     );
 
     (component as { useReplacementConfig(): void }).useReplacementConfig();
@@ -59,19 +74,21 @@ describe("JazzSvelteProvider config handover", () => {
 
     await waitForCondition(
       async () =>
-        target?.querySelector('[data-provider-state="ready"]')?.textContent === "external",
+        target?.querySelector("[data-provider-account]")?.textContent === replacementAccount.id,
       10_000,
-      "the replacement JWT client to become ready",
+      "the replacement opaque-account client to become ready",
     );
   });
 });
 
 describe("JazzSvelteClientProvider client ownership", () => {
   it("provides a promised client without shutting it down on unmount", async () => {
+    const appId = `svelte-client-provider-${crypto.randomUUID()}`;
+    const accounts = await createTestAccountManager(appId);
     const client = await createJazzClient({
-      appId: `svelte-client-provider-${crypto.randomUUID()}`,
+      appId,
       driver: { type: "memory" },
-      secret: generateAuthSecret(),
+      account: accounts.createLocalFirst(),
     });
     const shutdown = vi.spyOn(client, "shutdown");
     const target = document.createElement("div");

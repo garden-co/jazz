@@ -1,3 +1,5 @@
+import { createAccountManager } from "jazz-tools";
+import { prepareTestAccount } from "../../../../testing/accounts.js";
 /**
  * E2E browser tests for the vanilla TS todo app.
  *
@@ -51,21 +53,32 @@ describe("Vanilla TS Todo App E2E", () => {
   const instances: Array<{ container: HTMLDivElement; destroy: () => Promise<void> }> = [];
 
   /** Mount the app into a fresh container. */
-  async function mount(config?: Partial<DbConfig>): Promise<HTMLDivElement> {
+  async function mount(config?: Partial<DbConfig> & { secret?: string }): Promise<HTMLDivElement> {
     const { container } = await mountWithDb(config);
     return container;
   }
 
   /** Mount the app into a fresh container and expose its public Db API. */
   async function mountWithDb(
-    config?: Partial<DbConfig>,
+    config?: Partial<DbConfig> & { secret?: string },
   ): Promise<{ container: HTMLDivElement; db: Db }> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
+    const { secret, ...overrides } = config ?? {};
+    const account =
+      overrides.account ??
+      (await prepareTestAccount(
+        createAccountManager,
+        overrides.appId ?? APP_ID,
+        overrides.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        secret,
+      ));
     const { db, destroy } = await startApp(el, {
+      appId: overrides.appId ?? APP_ID,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
-      ...config,
+      ...overrides,
+      account,
     });
     instances.push({ container: el, destroy });
 
@@ -257,9 +270,14 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const account = await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      `http://127.0.0.1:${TEST_PORT}`,
+    );
 
     // First session: mount, add todo, destroy
-    const el1 = await mount({ driver: { type: "persistent", dbName } });
+    const el1 = await mount({ account, driver: { type: "persistent", dbName } });
     addTodo(el1, "Survive reload");
 
     await waitFor(
@@ -271,7 +289,7 @@ describe("Vanilla TS Todo App E2E", () => {
     await destroyInstance(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mount({ driver: { type: "persistent", dbName } });
+    const el2 = await mount({ account, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

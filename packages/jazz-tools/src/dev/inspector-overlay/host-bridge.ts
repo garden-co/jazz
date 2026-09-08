@@ -5,6 +5,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
+  resolveClientInternalSessionSync,
 } from "../../runtime/client-session.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
@@ -12,10 +13,15 @@ import {
   INSPECTOR_SUBSCRIPTIONS_MESSAGE,
   serializeActiveSubscriptions,
   type JazzInspectorHost,
+  type InspectorHostConfig,
 } from "./inspector-host-types.js";
-import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
+import {
+  openAggregatedBrowserInspectorControlPort,
+  getRegisteredInspectorConfig,
+} from "./browser-control-registry.js";
 import {
   getDbInternalSession,
+  getTrustedReservedSession,
   setTrustedReservedSession,
 } from "../../runtime/db-internal-session.js";
 
@@ -49,22 +55,16 @@ function overlayBrowserWorkerSession(
 function buildOverlayDbConfig(
   config: DbConfig,
   session: ReturnType<typeof getDbInternalSession>,
-): DbConfig {
+): InspectorHostConfig {
   const browserWorkerSession = overlayBrowserWorkerSession(config, session);
-  const identityCredential = config.jwtToken
-    ? { jwtToken: config.jwtToken }
-    : config.secret
-      ? { secret: config.secret }
-      : config.cookieSession
-        ? { cookieSession: config.cookieSession }
-        : {};
-
-  const physicalConfig: DbConfig = {
+  if (!config.jwtToken) throw new Error("Inspector host requires a resolved client bearer");
+  const physicalConfig: InspectorHostConfig = {
     appId: config.appId,
+    accountId: config.accountId,
+    accountRegistryAuthority: config.accountRegistryAuthority,
     serverUrl: config.serverUrl,
     env: config.env,
-    ...identityCredential,
-    ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
+    jwtToken: config.jwtToken,
     // `persistent` selects the SharedWorker connection so this client joins
     // the host's IndexedDB-backed runtime. Pass the original logical base so
     // the usual app/environment/auth derivation yields that exact same root.
@@ -103,8 +103,17 @@ export function installInspectorHost(
   inspectorWindows.add(iframeWindow);
 
   const handle: JazzInspectorHost = {
-    getConnectionConfig() {
-      return buildOverlayDbConfig(db.getConfig(), getDbInternalSession(db));
+    getConnectionConfig(contextKey) {
+      if (contextKey === undefined)
+        return buildOverlayDbConfig(db.getConfig(), getDbInternalSession(db));
+      const selected = getRegisteredInspectorConfig(contextKey);
+      return buildOverlayDbConfig(
+        selected,
+        resolveClientInternalSessionSync({
+          ...selected,
+          trustedReservedSession: getTrustedReservedSession(selected),
+        }),
+      );
     },
     openControlPort() {
       return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());

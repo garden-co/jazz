@@ -1,3 +1,4 @@
+import { recoverPendingIndexedDbWrites } from "./tests/browser/indexeddb-pending-recovery-node.js";
 import {
   liveEdgeBackendOpen,
   liveEdgeBackendInsert,
@@ -111,6 +112,8 @@ export default defineConfig({
         },
       ],
       commands: {
+        recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
+          recoverPendingIndexedDbWrites(context, page, config),
         writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {
           const output = process.env.JAZZ_BROWSER_CORPUS_OUT;
           if (!output) return null;

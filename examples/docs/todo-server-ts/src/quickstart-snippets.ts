@@ -1,36 +1,41 @@
 // #region quickstart-server-setup-ts
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import { createJazzContext } from "jazz-tools/backend";
+import { createJazzSession } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-const context = createJazzContext({
+const session = await createJazzSession({
   appId: process.env.JAZZ_APP_ID ?? "todo-server-ts",
   app: schemaApp,
   permissions,
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
-  serverUrl: process.env.JAZZ_SERVER_URL,
-  backendSecret: process.env.JAZZ_BACKEND_SECRET,
+  serverUrl: process.env.JAZZ_SERVER_URL!,
+  initial: { backendSecret: process.env.JAZZ_BACKEND_SECRET! },
   jwksUrl: process.env.JAZZ_JWKS_URL,
   jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false",
 });
 
+const snapshot = session.getSnapshot();
+if (snapshot.status !== "ready" || !snapshot.client) {
+  throw snapshot.error ?? new Error("Backend session is not ready");
+}
+const client = snapshot.client;
 const api = new Hono();
 // #endregion quickstart-server-setup-ts
 
 // #region quickstart-server-write-ts
 api.post("/api/todos", async (c) => {
-  const db = await context.forRequest(c.req);
+  const db = await client.forRequest(c.req);
   const session = db.getAuthState().session;
-  if (!session) return c.json({ error: "Unauthenticated" }, 401);
+  if (!session?.user.account) return c.json({ error: "Account required" }, 401);
   const { title } = await c.req.json();
 
   const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
-    owner_id: session.user,
+    owner_id: session.user.account,
   });
 
   return c.json(todo, 201);
@@ -39,7 +44,7 @@ api.post("/api/todos", async (c) => {
 
 // #region quickstart-server-read-ts
 api.get("/api/todos", async (c) => {
-  const db = await context.forRequest(c.req);
+  const db = await client.forRequest(c.req);
   const todos = await db.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
@@ -49,7 +54,7 @@ api.get("/api/todos", async (c) => {
 
 // #region quickstart-server-update-ts
 api.patch("/api/todos/:id", async (c) => {
-  const db = await context.forRequest(c.req);
+  const db = await client.forRequest(c.req);
   const { id } = c.req.param();
   const { done } = await c.req.json();
   db.update(schemaApp.todos, id, { done });
@@ -57,7 +62,7 @@ api.patch("/api/todos/:id", async (c) => {
 });
 
 api.delete("/api/todos/:id", async (c) => {
-  const db = await context.forRequest(c.req);
+  const db = await client.forRequest(c.req);
   const { id } = c.req.param();
   db.delete(schemaApp.todos, id);
   return c.json({ ok: true });

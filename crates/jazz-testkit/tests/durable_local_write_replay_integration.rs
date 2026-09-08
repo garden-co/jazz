@@ -38,6 +38,10 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
         jazz_storage_rocksdb::RocksDbStorageFactory,
     ));
 
+    support::enroll_test_context(&mut context)
+        .await
+        .expect("enroll before going offline");
+
     // Keep the initial write offline so only the reopened client can deliver
     // it. The context still carries the helper's ordinary long-lived JWT.
     let mut offline_context = context.clone();

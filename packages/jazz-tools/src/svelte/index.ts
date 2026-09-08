@@ -11,3 +11,28 @@ export {
   type AuthSecretStore,
   type BrowserAuthSecretStoreOptions,
 } from "../runtime/auth-secret-store.js";
+
+export {
+  createAccountManager,
+  type AccountManagerConfig,
+} from "../accounts/create-account-manager.js";
+export type {
+  AccountHandle,
+  AccountIdentity,
+  AccountSnapshot,
+  AccountManager,
+} from "../accounts/state.js";
+export {
+  AccountAuthError,
+  exportLocalFirstSecret,
+  type BackendAuth,
+  type JWTAuth,
+} from "../accounts/enrollment.js";
+export type { AccountStore } from "../accounts/persistence.js";
+
+export { accountState } from "./account-state.js";
+
+export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export type { JazzSession, JazzSessionSnapshot } from "../session/state.js";
+export { default as JazzSessionProvider } from "./JazzSessionProvider.svelte";
+export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";

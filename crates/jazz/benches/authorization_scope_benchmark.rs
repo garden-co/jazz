@@ -38,13 +38,13 @@ fn other_author() -> AuthorSubject {
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
     let mut table = TableSchemaBuilder::new("items")
-        // `session.user` is Jazz's canonical issuer-and-subject identity, so
-        // model the owner column with the same portable text representation.
+        // These actors share the fixed test issuer; keep subject ownership
+        // as text while the runtime author remains a structured record.
         .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text)
         .column("score", ColumnType::Timestamp)
         .policies(
-            TablePolicies::new().with_select(schema_fixture::session_user_id_column("owner_id")),
+            TablePolicies::new().with_select(schema_fixture::session_subject_column("owner_id")),
         );
     for index in 0..extra_columns {
         table = table.column(&format!("metadata_{index}"), ColumnType::Text);
@@ -83,7 +83,7 @@ fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
     let mut cells = BTreeMap::from([
         (
             "owner_id".to_owned(),
-            Value::String(owner.canonical().to_owned()),
+            Value::String(owner.principal_parts().1),
         ),
         ("name".to_owned(), Value::String(format!("Item {index}"))),
         ("score".to_owned(), Value::U64(index as u64)),

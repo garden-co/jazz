@@ -487,7 +487,26 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false).await
+        self.below_global_transaction_ids(Some(author), false, false).await
+    }
+
+    /// A Global synchronization barrier also needs the authority timestamp.
+    /// A Global durability observation alone is not a completed write receipt.
+    pub(crate) async fn synchronizing_transaction_ids_for_author(
+        &mut self,
+        author: AuthorSubject,
+    ) -> Result<Vec<TxId>, Error> {
+        self.below_global_transaction_ids(Some(author), false, true).await
+    }
+
+    /// A trusted backend owns every author scope created by its node. Restrict
+    /// this scan by transaction origin, never by its SYSTEM display identity.
+    pub(crate) async fn synchronizing_transaction_ids_for_node(
+        &mut self,
+        node: NodeUuid,
+    ) -> Result<Vec<TxId>, Error> {
+        Ok(self.below_global_transaction_ids(None, false, true).await?
+            .into_iter().filter(|tx| tx.node == node).collect())
     }
 
     /// Edge-host recovery includes accepted writes from every originating
@@ -496,13 +515,14 @@ where
     pub(crate) async fn pending_edge_authority_transaction_ids(
         &mut self,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(None, true).await
+        self.below_global_transaction_ids(None, true, false).await
     }
 
     async fn below_global_transaction_ids(
         &mut self,
         author: Option<AuthorSubject>,
         edge_only: bool,
+        include_missing_authority_timestamp: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
         for raw in self
@@ -516,18 +536,20 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = AuthorSubject::from_canonical(
-                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            let made_by = RowAuthor::from_value(
+                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?;
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+            .as_author_subject();
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
-            if author.is_some_and(|author| made_by != author)
+            if author.is_some_and(|author| !durable_author_matches(author, made_by))
                 || if edge_only {
                     fate != 1 || durability != DurabilityTier::Edge
                 } else {
-                    !(fate == 0 || fate == 1) || durability >= DurabilityTier::Global
+                    !(fate == 0 || fate == 1)
+                        || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
                 }
             {
                 continue;
@@ -561,6 +583,14 @@ where
         let Some(node_alias) = self.node_aliases.get(&node).copied() else {
             return Ok(PendingTransactionScan::default());
         };
+        // `$madeBy` is durable provenance. A local system capability records
+        // its specific node origin, while authority evaluation continues to
+        // use `AuthorSubject::SYSTEM` separately.
+        let durable_author = if author == AuthorSubject::SYSTEM {
+            AuthorSubject::system_at(node)
+        } else {
+            author
+        };
 
         let mut scan = PendingTransactionScan::default();
         for raw in self
@@ -575,11 +605,12 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || AuthorSubject::from_canonical(
-                    record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                || RowAuthor::from_value(
+                    record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                    != author
+                .as_author_subject()
+                    != durable_author
             {
                 continue;
             }
@@ -697,7 +728,7 @@ where
             return Ok(());
         };
         let digest = policy.directory_digest();
-        let claims = crate::protocol::policy_binding_directory_claims_value(policy.claims())
+        let claims = policy.directory_value()
             .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
         let store = self
             .database
@@ -709,18 +740,12 @@ where
                     "policy binding directory subject must be string",
                 ));
             };
-            let existing_claims = existing.get_idx(1)?;
-            let existing_claims =
-                crate::protocol::policy_binding_directory_claims_from_value(existing_claims)
-                    .map_err(|_| {
-                        Error::InvalidStoredValue("policy binding directory claims are invalid")
-                    })?;
-            let existing = crate::protocol::PolicyBindingKey::from_canonical_parts(
+            let existing = crate::protocol::PolicyBindingKey::from_directory_value(
                 AuthorSubject::from_canonical(&subject).map_err(|_| {
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
-                existing_claims,
-            );
+                existing.get_idx(1)?,
+            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
             if existing != *policy {
                 return Err(Error::InvalidStoredValue(
                     "policy binding digest aliases a distinct exact policy identity",
@@ -763,7 +788,10 @@ where
                 .map(|key| DirectRecordStoreWrite::Delete { key })
                 .collect::<Vec<_>>();
             for fact in adds {
-                operations.push(settled_program_fact_storage_write(&authority_result_key, fact)?);
+                operations.push(settled_program_fact_storage_write(
+                    &authority_result_key,
+                    fact,
+                )?);
             }
             store.write_many(&operations).await?;
             return Ok(());
@@ -837,18 +865,12 @@ where
                     "policy binding directory subject must be string",
                 ));
             };
-            let claims = crate::protocol::policy_binding_directory_claims_from_value(
-                entry.value.get_idx(1)?,
-            )
-            .map_err(|_| {
-                Error::InvalidStoredValue("policy binding directory claims are invalid")
-            })?;
-            let policy = crate::protocol::PolicyBindingKey::from_canonical_parts(
+            let policy = crate::protocol::PolicyBindingKey::from_directory_value(
                 AuthorSubject::from_canonical(&subject).map_err(|_| {
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
-                claims,
-            );
+                entry.value.get_idx(1)?,
+            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
             if policy.directory_digest() != digest
                 || policies
                     .insert(digest, policy.clone())
@@ -1248,5 +1270,14 @@ where
     /// Return accumulated storage-read metrics and reset them.
     pub fn take_storage_read_metrics(&self) -> groove::db::StorageReadMetrics {
         self.database.take_storage_read_metrics()
+    }
+}
+
+/// Compare an authority/session request with durable provenance without ever
+/// turning persisted node attribution back into the system capability.
+fn durable_author_matches(requested: AuthorSubject, stored: AuthorSubject) -> bool {
+    match requested {
+        AuthorSubject::System => matches!(stored, AuthorSubject::SystemAt(_)),
+        _ => stored == requested,
     }
 }

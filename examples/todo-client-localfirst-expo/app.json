@@ -12,6 +12,9 @@
     },
     "ios": {
       "bundleIdentifier": "dev.jazz.todo.localfirstexpo"
+    },
+    "experiments": {
+      "autolinkingModuleResolution": true
     }
   }
 }

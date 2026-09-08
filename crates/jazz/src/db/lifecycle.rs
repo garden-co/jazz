@@ -195,6 +195,9 @@ where
     pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
         let mut db = Self::open(config).await?;
         db.backend_attribution = true;
+        db.node
+            .restore_backend_pending_uploads(db.identity.node)
+            .await?;
         Ok(db)
     }
 
@@ -292,6 +295,9 @@ where
     ) -> Result<Self, Error> {
         let mut db = Self::open_history_complete(config).await?;
         db.backend_attribution = true;
+        db.node
+            .restore_backend_pending_uploads(db.identity.node)
+            .await?;
         Ok(db)
     }
 
@@ -846,6 +852,30 @@ where
         self.node.take_queued_mutation_failure(tx_id)
     }
 
+    /// Wait for this author's pending writes, including recovered durable writes.
+    /// Trusted backends include every author scope originating on their own node.
+    ///
+    /// This snapshots after settling already-queued local mutations. Callers
+    /// performing graceful shutdown must stop admitting new mutations first.
+    /// Transport progress remains owned by the normal runtime scheduler.
+    pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        self.node.settle_local_publications().await?;
+        let pending = {
+            let mut node = self.node.node.lock().await;
+            if self.backend_attribution {
+                node.synchronizing_transaction_ids_for_node(self.identity.node)
+                    .await?
+            } else {
+                node.synchronizing_transaction_ids_for_author(self.identity.author)
+                    .await?
+            }
+        };
+        for tx_id in pending {
+            self.wait_for_transaction(tx_id, tier).await?;
+        }
+        Ok(())
+    }
+
     /// Wait until `tx_id` reaches `tier` or is rejected.
     ///
     /// An explicit wait consumes a rejection, preventing the same failure from
@@ -1008,6 +1038,19 @@ where
         action: PermissionAdviceAction,
     ) -> PermissionAdviceFuture {
         self.node.request_permission_advice(action)
+    }
+
+    /// Request advice under one immutable session snapshot selected by an
+    /// already-authenticated backend host. This does not grant delegation to
+    /// ordinary client, admin, or authority links; upstream admission decides
+    /// whether the snapshot is usable.
+    pub fn request_permission_advice_with_delegated_session(
+        &self,
+        action: PermissionAdviceAction,
+        session: crate::protocol::DelegatedSessionBinding,
+    ) -> PermissionAdviceFuture {
+        self.node
+            .request_permission_advice_with_delegated_session(action, session)
     }
 
     /// Resolve outstanding permission preflights as `Unknown` and suppress

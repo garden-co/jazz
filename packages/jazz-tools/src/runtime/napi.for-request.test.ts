@@ -1,10 +1,12 @@
+import { createServer } from "node:http";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { schema as s } from "jazz-tools";
-import { canonicalAuthorSubject } from "./author-id.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
@@ -16,15 +18,15 @@ const todoApp = s.defineApp({
     title: s.string(),
     done: s.boolean(),
     description: s.string().optional(),
-    owner_id: s.string(),
+    owner_id: s.uuid(),
   }),
 });
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
-  policy.todos.allowUpdate.where({ owner_id: session.user });
-  policy.todos.allowDelete.where({ owner_id: session.user });
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowUpdate.where({ owner_id: session.user.account });
+  policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
 // ---------------------------------------------------------------------------
@@ -57,13 +59,22 @@ const externalJwtPublicKey = {
  * tests exercise public request admission; reserved Jazz issuers are covered
  * separately by the local-first rejection test below.
  */
-function createExternalIdentity(actorName: string): ExternalIdentity {
+async function createExternalIdentity(
+  actorName: string,
+  server: { url: string },
+  appId: string,
+): Promise<ExternalIdentity> {
   const header = Buffer.from(
     JSON.stringify({ alg: "HS256", typ: "JWT", kid: EXTERNAL_JWT_KID }),
     "utf8",
   ).toString("base64url");
   const payload = Buffer.from(
-    JSON.stringify({ iss: EXTERNAL_ISSUER, sub: actorName }),
+    JSON.stringify({
+      iss: EXTERNAL_ISSUER,
+      sub: actorName,
+      aud: "napi-request-audience",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }),
     "utf8",
   ).toString("base64url");
   const signature = createHmac("sha256", EXTERNAL_JWT_SECRET)
@@ -71,7 +82,35 @@ function createExternalIdentity(actorName: string): ExternalIdentity {
     .digest("base64url");
   const token = `${header}.${payload}.${signature}`;
   const userId = actorName;
-  return { token, userId, user: canonicalAuthorSubject(EXTERNAL_ISSUER, userId) };
+  const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
+  const response = await requestAccountRegistry(
+    accountRegistryUrl(server.url, appId),
+    "register",
+    token,
+  );
+  return { token, userId, user: readAccountAssignment(response, identity) };
+}
+
+async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
+  const jwks = createServer((_request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ keys: [externalJwtPublicKey] }));
+  });
+  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+  onTestFinished(
+    () =>
+      new Promise<void>((resolve, reject) =>
+        jwks.close((error) => (error ? reject(error) : resolve())),
+      ),
+  );
+  const address = jwks.address();
+  if (!address || typeof address === "string") throw new Error("No JWKS port");
+  return startLocalJazzServer({
+    ...options,
+    jwksUrl: `http://127.0.0.1:${address.port}`,
+    jwtIssuer: EXTERNAL_ISSUER,
+    jwtAudience: "napi-request-audience",
+  });
 }
 
 async function createLocalFirstIdentity(
@@ -156,22 +195,22 @@ async function createConcurrentTestEnv() {
   const adminSecret = "napi-concurrent-admin-secret";
   const scopeTag = `concurrent-scope-${randomUUID()}`;
 
-  const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   const context = await createTestContext(server, appId, backendSecret, adminSecret);
 
   onTestFinished(async () => {
     await server.stop();
   });
 
-  const alice = createExternalIdentity("alice");
-  const bob = createExternalIdentity("bob");
+  const alice = await createExternalIdentity("alice", server, appId);
+  const bob = await createExternalIdentity("bob", server, appId);
 
   const [aliceDb, bobDb] = await Promise.all([
     context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
     context.forRequest({ headers: { authorization: `Bearer ${bob.token}` } }),
   ]);
 
-  return { context, appId, alice, bob, aliceDb, bobDb, scopeTag };
+  return { context, server, appId, alice, bob, aliceDb, bobDb, scopeTag };
 }
 
 // ---------------------------------------------------------------------------
@@ -198,14 +237,14 @@ describe("forRequest auth and policy", () => {
     const adminSecret = "napi-request-admin-secret";
     const scopeTag = `request-scope-${randomUUID()}`;
 
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     const context = await createTestContext(server, appId, backendSecret, adminSecret);
 
     onTestFinished(async () => {
       await server.stop();
     });
 
-    const alice = createExternalIdentity("alice");
+    const alice = await createExternalIdentity("alice", server, appId);
     const aliceDb = await context.forRequest({
       headers: { authorization: `Bearer ${alice.token}` },
     });
@@ -240,7 +279,7 @@ describe("forRequest auth and policy", () => {
           title: "imposter",
           done: false,
           description: scopeTag,
-          owner_id: "someone-else",
+          owner_id: "00000000-0000-4000-8000-000000000099",
         })
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -273,6 +312,7 @@ describe("forRequest auth and policy", () => {
       app: todoApp,
       permissions: todoAppPermissions,
       driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+      serverUrl: "http://127.0.0.1:1",
       allowLocalFirstAuth: false,
     });
 
@@ -301,6 +341,7 @@ describe("forRequest auth and policy", () => {
       app: todoApp,
       permissions: todoAppPermissions,
       driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+      serverUrl: "http://127.0.0.1:1",
     });
 
     onTestFinished(async () => {
@@ -332,7 +373,7 @@ describe("forRequest auth and policy", () => {
     const adminSecret = "napi-query-admin-secret";
     const scopeTag = `session-scope-${randomUUID()}`;
 
-    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
 
     // Publish schema once via the writer context; the reader shares the same published schema.
     const writerContext = await createTestContext(server, appId, backendSecret, adminSecret);
@@ -357,9 +398,9 @@ describe("forRequest auth and policy", () => {
       await server.stop();
     });
 
-    const alice = createExternalIdentity("alice");
-    const bob = createExternalIdentity("bob");
-    const carol = createExternalIdentity("carol");
+    const alice = await createExternalIdentity("alice", server, appId);
+    const bob = await createExternalIdentity("bob", server, appId);
+    const carol = await createExternalIdentity("carol", server, appId);
 
     const writerBackend = writerContext.asBackend();
     const readerBackend = readerContext.asBackend();
@@ -394,6 +435,7 @@ describe("forRequest auth and policy", () => {
 
     const aliceSessionDb = readerContext.forSession({
       user_id: alice.userId,
+      account_id: alice.user,
       claims: {},
       issuer: EXTERNAL_ISSUER,
       authMode: "external",
@@ -403,6 +445,7 @@ describe("forRequest auth and policy", () => {
     });
     const bobSessionDb = readerContext.forSession({
       user_id: bob.userId,
+      account_id: bob.user,
       claims: {},
       issuer: EXTERNAL_ISSUER,
       authMode: "external",
@@ -799,9 +842,9 @@ describe("forRequest concurrent session isolation", () => {
    *   carol ──forRequest──► carolDb ──► all() ──► []
    */
   it("forRequest user with no rows gets empty results, not another user's rows", async () => {
-    const { context, alice, aliceDb, scopeTag } = await createConcurrentTestEnv();
+    const { context, server, appId, alice, aliceDb, scopeTag } = await createConcurrentTestEnv();
 
-    const carol = createExternalIdentity("carol");
+    const carol = await createExternalIdentity("carol", server, appId);
     const carolDb = await context.forRequest({
       headers: { authorization: `Bearer ${carol.token}` },
     });
@@ -832,3 +875,285 @@ describe("forRequest concurrent session isolation", () => {
     expect(carolRows).toEqual([]);
   }, 30_000);
 });
+
+it.each(["table", "relation"] as const)(
+  "keeps concurrent same-identity request claims isolated through %s reads",
+  async (kind) => {
+    const appId = randomUUID();
+    const backendSecret = "request-scope-backend";
+    const adminSecret = "request-scope-admin";
+    const app = s.defineApp({
+      rooms: s.table({ title: s.string(), code: s.string() }),
+      links: s.table({ room: s.ref("rooms") }),
+    });
+    const query = kind === "relation" ? app.links.hopTo("room") : app.rooms;
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.rooms.allowRead.where({ code: session.claims["join_code"] });
+      policy.links.allowRead.where({});
+    });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+    onTestFinished(() => server.stop());
+    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const writer = createJazzContext({
+      appId,
+      app,
+      permissions,
+      serverUrl: server.url,
+      backendSecret,
+      env: "test",
+      tier: "local",
+      driver: { type: "memory" },
+    });
+    const reader = createJazzContext({
+      appId,
+      app,
+      permissions,
+      serverUrl: server.url,
+      backendSecret,
+      env: "test",
+      tier: "local",
+      driver: { type: "memory" },
+    });
+    onTestFinished(async () => {
+      await reader.shutdown();
+      await writer.shutdown();
+    });
+    await writer
+      .asBackend()
+      .insert(app.rooms, { title: "room-a", code: "code-a" })
+      .wait({ tier: "edge" })
+      .then(async (row) => {
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+        return row;
+      });
+    await writer
+      .asBackend()
+      .insert(app.rooms, { title: "room-b", code: "code-b" })
+      .wait({ tier: "edge" })
+      .then(async (row) => {
+        await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+        return row;
+      });
+    const identity = await createExternalIdentity("same-actor", server, appId);
+    const base = {
+      user_id: identity.userId,
+      account_id: identity.user,
+      issuer: EXTERNAL_ISSUER,
+      authMode: "external" as const,
+    };
+    const a = reader.forSession({ ...base, claims: { join_code: "code-a" } });
+    const b = reader.forSession({ ...base, claims: { join_code: "code-b" } });
+    const neither = reader.forSession({ ...base, claims: {} });
+    for (let round = 0; round < 3; round++) {
+      const [rowsA, rowsB, rowsNeither, rowsBackend] = await Promise.all([
+        a.all(query, { tier: "edge" }),
+        b.all(query, { tier: "edge" }),
+        neither.all(query, { tier: "edge" }),
+        reader.asBackend().all(query, { tier: "edge" }),
+      ]);
+      expect(rowsA.map((row) => row.title)).toEqual(["room-a"]);
+      expect(rowsB.map((row) => row.title)).toEqual(["room-b"]);
+      expect(rowsNeither).toEqual([]);
+      expect(rowsBackend.map((row) => row.title).sort()).toEqual(["room-a", "room-b"]);
+    }
+    const seenA: string[][] = [],
+      seenB: string[][] = [],
+      seenNeither: string[][] = [],
+      seenBackend: string[][] = [];
+    const stops = [
+      a.subscribe(query, (rows) => seenA.push(rows.map((row) => row.title).sort()), {
+        tier: "edge",
+      }),
+      b.subscribe(query, (rows) => seenB.push(rows.map((row) => row.title).sort()), {
+        tier: "edge",
+      }),
+      neither.subscribe(query, (rows) => seenNeither.push(rows.map((row) => row.title).sort()), {
+        tier: "edge",
+      }),
+      reader
+        .asBackend()
+        .subscribe(query, (rows) => seenBackend.push(rows.map((row) => row.title).sort()), {
+          tier: "edge",
+        }),
+    ];
+    try {
+      await vi.waitFor(() => {
+        expect(seenA.at(-1)).toEqual(["room-a"]);
+        expect(seenB.at(-1)).toEqual(["room-b"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+        expect(seenBackend.at(-1)).toEqual(["room-a", "room-b"]);
+      });
+      await writer
+        .asBackend()
+        .insert(app.rooms, { title: "room-a-next", code: "code-a" })
+        .wait({ tier: "edge" })
+        .then(async (row) => {
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+          return row;
+        });
+      await writer
+        .asBackend()
+        .insert(app.rooms, { title: "room-b-next", code: "code-b" })
+        .wait({ tier: "edge" })
+        .then(async (row) => {
+          await writer.asBackend().insert(app.links, { room: row.id }).wait({ tier: "edge" });
+          return row;
+        });
+      await vi.waitFor(() => {
+        expect(seenA.at(-1)).toEqual(["room-a", "room-a-next"]);
+        expect(seenB.at(-1)).toEqual(["room-b", "room-b-next"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+      });
+      // The backend cache is broader than either request. Local subscriptions
+      // must enforce claims; remote subscriptions must not overlay these writes.
+      const backend = reader.asBackend();
+      await backend.disconnect();
+      await backend
+        .insert(app.rooms, { title: "local-a", code: "code-a" })
+        .wait({ tier: "local" })
+        .then(async (row) => {
+          await backend.insert(app.links, { room: row.id }).wait({ tier: "local" });
+          return row;
+        });
+      await backend
+        .insert(app.rooms, { title: "local-b", code: "code-b" })
+        .wait({ tier: "local" })
+        .then(async (row) => {
+          await backend.insert(app.links, { room: row.id }).wait({ tier: "local" });
+          return row;
+        });
+      expect(
+        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "edge" }),
+      ).toEqual([]);
+      const localA: string[][] = [],
+        localB: string[][] = [];
+      const stopLocalA = a.subscribe(
+        query,
+        (rows) => localA.push(rows.map((row) => row.title).sort()),
+        { tier: "local" },
+      );
+      const stopLocalB = b.subscribe(
+        query,
+        (rows) => localB.push(rows.map((row) => row.title).sort()),
+        { tier: "local" },
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(localA.at(-1)).toContain("local-a");
+          expect(localB.at(-1)).toContain("local-b");
+        });
+        expect(localA.flat()).not.toContain("local-b");
+        expect(localB.flat()).not.toContain("local-a");
+        expect(seenA.at(-1)).toEqual(["room-a", "room-a-next"]);
+        expect(seenB.at(-1)).toEqual(["room-b", "room-b-next"]);
+        expect(seenNeither.at(-1)).toEqual([]);
+      } finally {
+        stopLocalA();
+        stopLocalB();
+      }
+      expect(seenA.flat().every((title) => title.startsWith("room-a"))).toBe(true);
+      expect(seenB.flat().every((title) => title.startsWith("room-b"))).toBe(true);
+    } finally {
+      stops.forEach((stop) => stop());
+    }
+  },
+);
+
+it("shares explicit backend transport state across scoped Db wrappers", async () => {
+  const appId = randomUUID();
+  const backendSecret = "shared-transport-backend";
+  const adminSecret = "shared-transport-admin";
+  const app = s.defineApp({ notes: s.table({ title: s.string() }) });
+  const permissions = s.definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.where({});
+  });
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+  onTestFinished(() => server.stop());
+  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
+  const writer = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  const reader = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  onTestFinished(async () => {
+    await reader.shutdown();
+    await writer.shutdown();
+  });
+
+  const owner = reader.asBackend();
+  const sibling = reader.asBackend();
+  await owner.disconnect();
+  await sibling.insert(app.notes, { title: "offline-sibling" }).wait({ tier: "local" });
+
+  // A new request-scoped facade must observe the source's explicit-offline
+  // state; constructing it must not reconnect the shared client.
+  const later = reader.asBackend();
+  await later.insert(app.notes, { title: "offline-later" }).wait({ tier: "local" });
+  expect(await writer.asBackend().all(app.notes, { tier: "edge" })).toEqual([]);
+
+  await sibling.reconnect();
+  await vi.waitFor(async () => {
+    expect(
+      (await writer.asBackend().all(app.notes, { tier: "edge" })).map((note) => note.title).sort(),
+    ).toEqual(["offline-later", "offline-sibling"]);
+  });
+}, 30_000);
+
+it("rejects a scoped remote wait when its context shuts down offline", async () => {
+  const appId = randomUUID();
+  const backendSecret = "shutdown-transport-backend";
+  const adminSecret = "shutdown-transport-admin";
+  const app = s.defineApp({ notes: s.table({ title: s.string() }) });
+  const permissions = s.definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.where({});
+  });
+  const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+  onTestFinished(() => server.stop());
+  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { createJazzContext } = await import("../backend/create-jazz-context.js");
+  const context = createJazzContext({
+    appId,
+    app,
+    permissions,
+    serverUrl: server.url,
+    backendSecret,
+    env: "test",
+    tier: "local",
+    driver: { type: "memory" },
+  });
+  onTestFinished(() => context.shutdown());
+
+  const owner = context.asBackend();
+  const sibling = context.asBackend();
+  await owner.disconnect();
+  const pendingRemoteRead = sibling.all(app.notes, { tier: "edge" });
+  const rejectedRead = expect(pendingRemoteRead).rejects.toThrow("JazzContext is shutting down");
+  const closing = context.shutdown();
+  expect(() => sibling.insert(app.notes, { title: "during-close" })).toThrow(
+    "JazzContext is shutting down",
+  );
+  await closing;
+  await rejectedRead;
+  expect(() => sibling.insert(app.notes, { title: "after-close" })).toThrow(
+    "JazzContext is shutting down",
+  );
+  expect(() => context.asBackend()).toThrow("JazzContext is shutting down");
+}, 30_000);

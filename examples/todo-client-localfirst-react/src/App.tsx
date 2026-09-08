@@ -1,22 +1,8 @@
 import * as React from "react";
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { JazzProvider, JazzSessionProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
-
-const appId = import.meta.env.VITE_JAZZ_APP_ID;
-const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-
-// #region context-setup-react
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  return {
-    appId,
-    env: "dev",
-    serverUrl,
-    secret,
-    ...overrides,
-  };
-}
-// #endregion context-setup-react
+import { sessionConfig } from "./account.js";
 
 type AppProps = {
   config?: Partial<DbConfig>;
@@ -25,20 +11,31 @@ type AppProps = {
 };
 
 // #region context-setup-react
-export function App({ config, fallback, children }: AppProps = {}) {
-  const { secret, isLoading } = useLocalFirstAuth();
-
-  if (isLoading || !secret) {
-    return <>{fallback ?? <p>Loading...</p>}</>;
-  }
-
-  const resolvedConfig = defaultConfig(secret, config);
+function LocalFirstApp({ config, fallback, children }: AppProps) {
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzSessionProvider config={sessionConfig(config)} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
       {children}
-    </JazzProvider>
+    </JazzSessionProvider>
   );
 }
 // #endregion context-setup-react
+
+export function App(props: AppProps = {}) {
+  // Advanced callers can still supply a fixed opaque handle, for example to
+  // exercise two independent replicas in the browser integration tests.
+  const { config, fallback, children } = props;
+  if (config?.account)
+    return (
+      <JazzProvider
+        config={{ appId: config.appId!, env: "dev", ...config, account: config.account }}
+        fallback={fallback ?? <p>Loading...</p>}
+      >
+        <h1>Todos</h1>
+        <TodoList />
+        {children}
+      </JazzProvider>
+    );
+  return <LocalFirstApp {...props} />;
+}

@@ -162,7 +162,7 @@ async fn close_is_idempotent_without_an_exclusive_wasm_receiver() {
 }
 
 #[wasm_bindgen_test]
-fn self_signed_subscriber_admission_requires_the_exact_proof() {
+async fn self_signed_subscriber_admission_requires_the_exact_proof() {
     let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let app_id = "wasm-subscriber-proof";
     let now_seconds = (js_sys::Date::now() / 1_000.0) as u64;
@@ -200,13 +200,16 @@ fn self_signed_subscriber_admission_requires_the_exact_proof() {
         .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL)
         .is_err());
 
-    db.accept_subscriber_with_self_signed_proof(
-        JsValue::NULL,
-        token.clone(),
-        app_id.to_owned(),
-        claimed_author.clone(),
+    await_promise(
+        db.accept_subscriber_with_self_signed_proof(
+            JsValue::NULL,
+            token.clone(),
+            app_id.to_owned(),
+            claimed_author.clone(),
+        )
+        .expect("the exact verified proof admits the local worker follower"),
     )
-    .expect("the exact verified proof admits the local worker follower");
+    .await;
     assert!(db
         .accept_subscriber_with_self_signed_proof(
             JsValue::NULL,
@@ -390,7 +393,7 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     );
 
     let synchronous_error = db
-        .all(&query, JsValue::NULL)
+        .all(&query, JsValue::NULL, None, None)
         .expect_err("synchronous public read must reject an indirect scalar");
     assert!(
         synchronous_error
@@ -400,7 +403,7 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
     );
 
     let relation = await_promise(
-        db.all_relation_snapshot(&query, JsValue::NULL)
+        db.all_relation_snapshot(&query, JsValue::NULL, None, None)
             .expect("start public relation snapshot"),
     )
     .await;

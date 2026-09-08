@@ -18,13 +18,13 @@ const prose = (text) => text.replace(/[`*]/g, "").replace(/\s+/g, " ").trim();
 function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   assert.match(
     packageReadme,
-    /narrow alpha rather than general React Native support/,
-    "the package must not claim broad RN support",
+    /supported React Native alpha/,
+    "the package must describe the supported alpha client",
   );
   assert.match(
     packageReadme,
-    /matching native development or release build.*capability issued by trusted platform admission/i,
-    "persistent foreground use must retain both native-build and trusted-admission requirements",
+    /AccountHandle.*createJazzClient.*matching native development or release build/i,
+    "persistent clients must retain account-handle admission and native-build requirements",
   );
   assert.match(
     packageReadme,
@@ -33,8 +33,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     installGuide,
-    /narrow, capability-gated foreground alpha.*matching native development\/release build.*trusted platform admission/i,
-    "the public install guide must describe the same constrained boundary",
+    /supported as an alpha.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
+    "the public install guide must retain the alpha native-build boundary",
   );
   assert.match(
     spec,
@@ -391,8 +391,8 @@ function assertPublicClientRelayReadback(source) {
       ts.isCallExpression(create.arguments[0]) &&
       isIdentifier(create.arguments[0].expression, "clientConfig") &&
       create.arguments[0].arguments.length === 1 &&
-      isIdentifier(create.arguments[0].arguments[0], "capability"),
-    "relay readback must await createJazzClient(clientConfig(capability))",
+      isIdentifier(create.arguments[0].arguments[0], "admitted"),
+    "relay readback must await createJazzClient(clientConfig(admitted))",
   );
   assert.ok(
     ts.isVariableStatement(unsubscribeStatement) &&
@@ -555,32 +555,24 @@ test("Android fixture BuildConfig fields and package registration remain compile
     "android/app/src/main/java/dev/jazz/rndeviceacceptance/JazzDeviceFixturePackage.kt",
   );
   const host = read("android/app/src/main/java/dev/jazz/rndeviceacceptance/MainApplication.kt");
-  for (const field of ["APP_ID", "SCHEMA_JSON"]) {
-    assert.match(gradle, new RegExp(`buildConfigField "String", "JAZZ_DEVICE_${field}"`));
-    assert.match(fixture, new RegExp(`BuildConfig\\.JAZZ_DEVICE_${field}`));
-  }
-  assert.match(gradle, /JAZZ_DEVICE_SCHEMA_JSON.*todos/);
+  assert.doesNotMatch(gradle, /JAZZ_DEVICE_SCHEMA_JSON|JAZZ_DEVICE_APP_ID/);
   assert.match(registration, /class JazzDeviceFixturePackage : ReactPackage/);
   assert.match(registration, /listOf\(JazzDeviceFixtureModule\(context\)\)/);
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
   assert.match(fixture, /Build\.FINGERPRINT/);
-  assert.match(fixture, /privateSessionInputs\(scope: String\)/);
+  assert.match(fixture, /@ReactMethod fun edgeEndpoint/);
   assert.match(fixture, /jazzDeviceEdgeEndpoint/);
-  assert.match(fixture, /jazzDeviceBearerA/);
-  assert.match(fixture, /jazzDeviceBearerB/);
-  assert.match(fixture, /import com\.jazzrn\.JazzRelayTrustedAdmission/);
-  assert.match(fixture, /val setup: ByteArray = JazzRelayTrustedAdmission\.beginPrivateSession/);
-  assert.match(fixture, /JazzRelayTrustedAdmission\.attachCanonicalSchema/);
-  assert.match(fixture, /JazzRelayTrustedAdmission::revoke/);
-  assert.doesNotMatch(fixture, /JazzRelayBridge|TrustedRelayScopeConfig|admitTrustedScope/);
+  assert.match(
+    fixture,
+    /uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null/,
+  );
+  const forbidden =
+    /JazzRelayBridge|TrustedRelayScopeConfig|admitTrustedScope|JazzRelayTrustedAdmission|jazzDeviceBearer/;
+  assert.doesNotMatch(fixture, forbidden);
   assert.throws(
-    () =>
-      assert.doesNotMatch(
-        fixture.replace("JazzRelayTrustedAdmission", "JazzRelayBridge"),
-        /JazzRelayBridge|TrustedRelayScopeConfig|admitTrustedScope/,
-      ),
+    () => assert.doesNotMatch(fixture + "JazzRelayTrustedAdmission", forbidden),
     /expected to not match/,
-    "an external fixture must not regain access to the internal relay bridge",
+    "host must not regain a second account admission implementation",
   );
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
@@ -642,12 +634,15 @@ test("both platform session wrappers delegate one authenticated socket owner to 
     assert.match(wrapper, /shared Rust socket worker/);
     assert.doesNotMatch(wrapper, /WebSocketTransport|NativeWebSocketConnector/);
   }
-  assert.match(relay, /NativeRelaySocketWorker::start\(/);
+  // Account handoff prepares replacement resources before stopping the old
+  // worker, then activates the same Rust-owned worker after publication.
+  assert.match(relay, /NativeRelaySocketWorker::prepare_with_connector\(/);
+  assert.match(relay, /worker\._worker\.activate\(\)/);
   assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
   assert.match(relay, /private_socket_sessions\.remove/);
 });
 
-test("iOS fixture imports the public JazzRn pod header, not its private relay framework", () => {
+test("iOS receipt fixture needs no separate Jazz native admission header", () => {
   const podspec = fs.readFileSync(
     path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"),
     "utf8",
@@ -655,7 +650,7 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
   const fixture = read("native/ios/JazzDeviceFixture.mm");
   assert.match(podspec, /s\.name\s+=\s+"JazzRn"/);
   assert.match(podspec, /s\.source_files\s+=\s+"ios\/\*\*\/\*\.\{h,m,mm,swift\}"/);
-  assert.match(fixture, /#import <JazzRn\/JazzRelay\.h>/);
+  assert.doesNotMatch(fixture, /#import <JazzRn\/JazzRelay\.h>/);
   assert.doesNotMatch(fixture, /JazzNativeRelay\/JazzRelay\.h/);
   assert.equal(
     fixture,
@@ -687,7 +682,7 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   assert.match(harness, /rn_edge_session_harness/);
   assert.match(driver, /host: "10\.0\.2\.2"/);
   assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.edge_port\}/);
-  for (const input of ["jazzDeviceEdgeEndpoint", "jazzDeviceBearerA", "jazzDeviceBearerB"]) {
+  for (const input of ["jazzDeviceEdgeEndpoint"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
   }
@@ -720,7 +715,10 @@ test("each native JSI runtime owns an independent foreground lease", () => {
   // fails if JNI silently drops it and returns to one host-global lease.
   assert.match(androidBridge, /ForegroundRuntimeKey = std::pair<jazz_native_relay_host \*, jlong>/);
   assert.match(androidBridge, /nativeForegroundBindingsInstaller\([\s\S]*jlong runtime_token\)/);
-  assert.match(androidBridge, /foregroundInstallation\(relay_host, runtime_token, callInvoker\)/);
+  assert.match(
+    androidBridge,
+    /foregroundInstallation\(relay_host, runtime_token, callInvoker, storageRoot\)/,
+  );
   assert.match(androidBridge, /foreground_installations\.find\(\{relay_host, runtime_token\}\)/);
   assert.doesNotMatch(
     androidBridge,
@@ -764,9 +762,39 @@ test("foreground wake lifecycle clears native callbacks before close or runtime 
   assert.match(foregroundRuntime, /wake_->removeCallback\(runtime\);/);
 });
 
+test("post-commit wake tracing is private, default-off, and enabled only for B", () => {
+  const foregroundRuntime = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/native/foreground-runtime.cpp"),
+    "utf8",
+  );
+  const relayAdapter = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/src/relay.ts"),
+    "utf8",
+  );
+  const receipt = read("src/foreground-byte-abi.ts");
+
+  assert.match(foregroundRuntime, /bool traceEnabled_\{false\};/);
+  assert.match(foregroundRuntime, /void setTraceEnabled\(bool enabled\) noexcept/);
+  assert.match(foregroundRuntime, /if \(enabled\) traceForegroundWake\("enabled"\);/);
+  assert.match(foregroundRuntime, /traceRejected = "foreground-mismatch"/);
+  assert.match(foregroundRuntime, /traceRejected = "inactive"/);
+  assert.match(foregroundRuntime, /if \(property == "setWakeTrace"\)/);
+  assert.match(relayAdapter, /setWakeTrace\?\(enabled: boolean\): void;/);
+  assert.match(relayAdapter, /typeof foreground\.setWakeTrace === "function"/);
+  assert.match(
+    receipt,
+    /onPostCommitWakeArmed[\s\S]*openScopeForeground\(factory, capability\)[\s\S]*while \(openedB\.consumeWake\(\)\)[\s\S]*setWakeTraceBestEffort\(openedB, true\);[\s\S]*markFailure\("same-runtime-write-failed"\)/,
+  );
+  assert.match(
+    receipt,
+    /finally \{\s+try \{\s+setWakeTraceBestEffort\(openedB, false\);[\s\S]*a\.close\(\);[\s\S]*b\.close\(\);/,
+  );
+  assert.doesNotMatch(receipt, /openedA\.setWakeTrace/);
+});
+
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
   const plugin = read("plugins/with-jazz-device-fixture.cjs");
-  assert.match(plugin, /JAZZ_DEVICE_SCHEMA_JSON.*todos/);
+  assert.doesNotMatch(plugin, /JAZZ_DEVICE_SCHEMA_JSON/);
   assert.match(plugin, /label-gated iOS simulator workflow/);
   assert.match(plugin, /requires its linked/);
   assert.match(plugin, /ABI\/admission receipt/);
@@ -966,22 +994,19 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   // after re-admission only proves the host transport; it does not prove a
   // fresh application can start, select its foreground runtime, and decode a
   // persisted row through `createJazzClient`.
+  assert.match(app, /await proveHighLevelForegroundRestart\(reopened, receipt\.runNonce\)/);
   assert.match(
     app,
-    /await proveHighLevelForegroundRestart\(reopened\.capability, receipt\.runNonce\)/,
-  );
-  assert.match(
-    app,
-    /seedHighLevelForegroundRuntime\(\s*scopeA\.capability,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim
   // from depending solely on the writer's in-memory foreground preview.
   assert.match(
     app,
-    /markFailure\("public-client-relay-readback-failed"\);\s*await proveHighLevelForegroundRelayReadback\(scopeA\.capability, receipt\.runNonce\)/,
+    /markFailure\("public-client-relay-readback-failed"\);\s*await proveHighLevelForegroundRelayReadback\(scopeA, receipt\.runNonce\)/,
   );
-  assert.match(highLevelForeground, /createJazzClient\(clientConfig\(capability\)\)/);
+  assert.match(highLevelForeground, /createJazzClient\(clientConfig\(admitted\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
   assert.match(highLevelForeground, /assertPersistedTitleForRun/);
   assertPublicClientRelayReadback(highLevelForeground);
@@ -1370,26 +1395,18 @@ test("checksum pin rejects a planted corrupt cache archive", () => {
 test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", () => {
   const fixture = read("native/ios/JazzDeviceFixture.mm");
   const checkedInFixture = read("ios/JazzDeviceFixture.mm");
-  assert.match(fixture, /JazzRelayTrustedAdmission beginPrivateSessionWithServerURL:endpoint/);
-  assert.match(fixture, /JazzRelayTrustedAdmission attachCanonicalSchemaJSON/);
-  assert.match(fixture, /sessionCapability:session error:error/);
-  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(NO, &error\)/);
-  assert.match(fixture, /JazzDeviceAdmitPrivateSession\(YES, &error\)/);
-  assert.match(fixture, /appID:@"jazz-device-acceptance" jwt:bearer/);
+  assert.match(fixture, /RCT_REMAP_METHOD\(edgeEndpoint/);
+  assert.match(
+    fixture,
+    /url.user != nil \|\| url.password != nil \|\| url.query != nil \|\| url.fragment != nil/,
+  );
   assert.match(fixture, /RCT_REMAP_METHOD\(receiptContext/);
-  assert.doesNotMatch(fixture, /admitScopeJSON|withScopeJSON|sqlite_path|@"claims"/);
-  for (const input of ["-JazzDeviceEdgeEndpoint", "-JazzDeviceBearerA", "-JazzDeviceBearerB"]) {
-    assert.ok(fixture.includes(input));
-    assert.ok(read("scripts/run-ios.mjs").includes(input));
-  }
-  const switchBody = fixture.slice(
-    fixture.indexOf("RCT_REMAP_METHOD(switchAuthScope"),
-    fixture.indexOf("RCT_REMAP_METHOD(receiptContext"),
+  assert.doesNotMatch(
+    fixture,
+    /JazzRelayTrustedAdmission|JazzDeviceAdmitPrivateSession|JazzDeviceBearer|admitScopeJSON|withScopeJSON|sqlite_path|@"claims"/,
   );
-  assert.ok(
-    switchBody.indexOf("revokeCapability:self.capability") <
-      switchBody.indexOf("JazzDeviceAdmitPrivateSession(YES"),
-  );
+  assert.ok(fixture.includes("-JazzDeviceEdgeEndpoint"));
+  assert.ok(read("scripts/run-ios.mjs").includes("-JazzDeviceEdgeEndpoint"));
   for (const key of ["-JazzDeviceRunNonce", "-JazzDeviceDeviceIdentifier"]) {
     assert.match(fixture, new RegExp(key));
   }
@@ -1452,7 +1469,7 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.match(app, /await proveLogoutRevocation/);
   assert.match(app, /await proveAuthScopeSwitch/);
   assert.match(app, /switchNativeRelayAuthScope/);
-  assert.match(app, /logoutNativeRelay/);
+  assert.match(app, /closeNativeRelay/);
   assert.match(app, /oldScopeForeground = foregroundFactory\.openAttached\(scopeA\.capability\)/);
   assert.match(
     app,
@@ -1492,20 +1509,46 @@ test("Android validates the synchronous boundary sink before awaiting native Cor
   assert.match(android, /setOf\("js-before-core-await"/);
 });
 
-test("both native platforms admit the Rust-generated owner-policy schema", () => {
+test("both platforms use the shared Rust-generated schema through account admission", () => {
   const fixture = JSON.parse(read("native/device-fixture.json"));
-  for (const file of ["native/ios/JazzDeviceFixture.mm", "ios/JazzDeviceFixture.mm"]) {
-    const literal = /NSString \*schema = @(.*);/.exec(read(file))?.[1];
-    assert.ok(literal);
-    assert.deepEqual(JSON.parse(JSON.parse(literal)), fixture.schema);
-  }
-  const literal = /buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", (.*)/.exec(
-    read("android/app/build.gradle"),
-  )?.[1];
-  assert.ok(literal);
-  assert.deepEqual(JSON.parse(JSON.parse(JSON.parse(literal))), fixture.schema);
-  assert.match(
-    read("plugins/with-jazz-device-fixture.cjs"),
-    /require\("\.\.\/native\/device-fixture.json"\)\.schema/,
+  const source = ts.createSourceFile(
+    "scope-fixture.ts",
+    read("src/scope-fixture.ts"),
+    ts.ScriptTarget.Latest,
+    true,
   );
+  const declaration = source.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .find((declaration) => declaration.name.getText(source) === "schemaSource");
+  assert.ok(declaration?.initializer && ts.isStringLiteral(declaration.initializer));
+  assert.deepEqual(JSON.parse(declaration.initializer.text), fixture.schema);
+  const adapter = read("src/native-fixture.ts");
+  assert.match(adapter, /createNativeAccountTestSession/);
+  assert.match(adapter, /schemaSource/);
+  assert.match(adapter, /manager.getLoggedIn\(\)/);
+  assert.match(adapter, /accounts.phase === "verify"/);
+  for (const file of [
+    "native/ios/JazzDeviceFixture.mm",
+    "ios/JazzDeviceFixture.mm",
+    "android/app/build.gradle",
+    "plugins/with-jazz-device-fixture.cjs",
+  ])
+    assert.doesNotMatch(read(file), /JAZZ_DEVICE_SCHEMA_JSON|NSString \*schema/);
+});
+
+test("Android metadata diagnostics survive host filtering and generated source copies", () => {
+  const fixture = read("native/android/JazzDeviceFixtureModule.kt");
+  assert.equal(
+    fixture,
+    read("android/app/src/main/java/dev/jazz/rndeviceacceptance/JazzDeviceFixtureModule.kt"),
+  );
+  assert.match(read("scripts/run-android.mjs"), /"JazzFixtureMetadata:E"/);
+  const metadata = fixture.slice(
+    fixture.indexOf("@ReactMethod fun receiptContext"),
+    fixture.indexOf("private fun sha256File"),
+  );
+  assert.doesNotMatch(metadata, /Log\.e\([^\n]*(?:error|nonce|intent|buildFingerprint)/);
+  assert.doesNotMatch(metadata, /promise\.reject\([^\n]*error/);
+  assert.match(metadata, /receipt-failed-\$stage/);
 });

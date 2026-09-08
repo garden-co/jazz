@@ -58,6 +58,10 @@ pub fn unverified_jwt_scope_subject(jwt: &str) -> Option<(String, String)> {
 /// expressions to check row access permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Registry-admitted account for public sessions. Explicit trusted backend
+    /// impersonation may supply an account; provider claims never populate it.
+    #[serde(default, alias = "accountId", skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<crate::account_registry::AccountId>,
     /// Validated JWT issuer (`iss`).
     pub issuer: String,
     /// Required user identifier.
@@ -74,7 +78,7 @@ impl Session {
     /// Return the canonical author subject admitted by this session's auth mode.
     /// Reserved issuers are valid only for their matching first-party modes.
     pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
-        match self.auth_mode {
+        let principal = match self.auth_mode {
             AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
             AuthMode::LocalFirst if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
                 AuthorSubject::reserved(&self.issuer, self.get_user_id())
@@ -85,6 +89,13 @@ impl Session {
             _ => Err(crate::ids::AuthorSubjectError::ReservedIssuer(
                 self.issuer.clone(),
             )),
+        }?;
+        match self.account_id {
+            Some(account) if account.is_system() => {
+                Err(crate::ids::AuthorSubjectError::ReservedAccount)
+            }
+            Some(account) => Ok(principal.with_account(account)),
+            None => Ok(principal),
         }
     }
 
@@ -95,6 +106,7 @@ impl Session {
     /// Create a session from a validated issuer and subject.
     pub fn new(issuer: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
+            account_id: None,
             issuer: issuer.into(),
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),
@@ -283,6 +295,8 @@ impl WriteContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account_registry::SYSTEM_ACCOUNT_ID;
+    use crate::ids::AuthorSubjectError;
     use serde_json::json;
 
     #[test]
@@ -293,6 +307,16 @@ mod tests {
         assert_eq!(session.get_string(&["userId".into()]), None);
         assert!(!session.has_path(&["user_id".into()]));
         assert!(!session.has_path(&["userId".into()]));
+    }
+
+    #[test]
+    fn session_rejects_reserved_system_account_before_author_construction() {
+        let mut session = Session::new("https://issuer.example", "user123");
+        session.account_id = Some(SYSTEM_ACCOUNT_ID);
+        assert_eq!(
+            session.author_subject(),
+            Err(AuthorSubjectError::ReservedAccount)
+        );
     }
 
     #[test]

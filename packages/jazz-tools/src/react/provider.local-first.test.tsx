@@ -12,7 +12,8 @@ const mock = vi.hoisted(() => ({ createJazzClient: vi.fn() }));
 vi.mock("./create-jazz-client.js", () => ({ createJazzClient: mock.createJazzClient }));
 
 import { JazzProvider } from "./provider.js";
-import { useLocalFirstAuth } from "./use-local-first-auth.js";
+import { useSession } from "./provider.js";
+import { makeFakeAccount } from "../react-core/test-utils.js";
 
 const SESSION: Session = {
   user_id: "local-user",
@@ -21,7 +22,10 @@ const SESSION: Session = {
   authMode: "local-first",
 };
 const PUBLIC_SESSION: PublicSession = {
-  user: '["urn:jazz:local-first","local-user"]',
+  user: {
+    account: "00000000-0000-4000-8000-000000000002",
+    identity: { issuer: SESSION.issuer, subject: SESSION.user_id },
+  },
   claims: { iss: SESSION.issuer, sub: SESSION.user_id },
   authMode: "local-first",
 };
@@ -45,16 +49,9 @@ function makeClient() {
   };
 }
 
-function IdentityProbe({ appId }: { appId: string }) {
-  const inherited = useLocalFirstAuth();
-  const scoped = useLocalFirstAuth({ appId });
-  return (
-    <output
-      data-testid="identity"
-      data-inherited={inherited.secret ?? ""}
-      data-scoped={scoped.secret ?? ""}
-    />
-  );
+function IdentityProbe() {
+  const session = useSession();
+  return <output data-testid="identity" data-account={session?.user.account ?? ""} />;
 }
 
 describe("JazzProvider local-first auth", () => {
@@ -71,20 +68,19 @@ describe("JazzProvider local-first auth", () => {
 
   it("uses one canonical app-scoped identity for the provider and descendants", async () => {
     const appId = "react-local-first";
-    const secret = generateAuthSecret();
-    localStorage.setItem(authSecretStorageKey({ appId }), secret);
-
+    const account = makeFakeAccount(appId);
     const view = render(
-      <JazzProvider config={{ appId, serverUrl: "https://jazz.example.com" }} auth="local-first">
-        <IdentityProbe appId={appId} />
+      <JazzProvider
+        config={{ appId, serverUrl: "https://jazz.example.com", account }}
+        autoAttachDevTools={false}
+      >
+        <IdentityProbe />
       </JazzProvider>,
     );
-
     await waitFor(() => {
-      expect(view.getByTestId("identity").dataset.inherited).toBe(secret);
-      expect(view.getByTestId("identity").dataset.scoped).toBe(secret);
+      expect(view.getByTestId("identity").dataset.account).toBe(account.id);
       expect(mock.createJazzClient).toHaveBeenCalledWith(
-        expect.objectContaining({ appId, secret }),
+        expect.objectContaining({ appId, account }),
       );
     });
   });

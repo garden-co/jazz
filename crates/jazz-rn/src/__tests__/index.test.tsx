@@ -48,6 +48,7 @@ type RelayExports = {
     openAttached(capability: Uint8Array): {
       execute(command: Uint8Array): Uint8Array;
       tick(): void;
+      setWakeTrace?(enabled: boolean): void;
       close(): boolean;
     };
   };
@@ -150,6 +151,45 @@ it('accepts only the matching capability-only JSI foreground factory', () => {
   });
   expect(openAttached).toHaveBeenCalledWith(capability);
   expect(nativeRelay.execute).not.toHaveBeenCalled();
+});
+
+it('forwards the private wake trace switch only when the native handle provides it', () => {
+  const setWakeTrace = jest.fn();
+  const foreground = { ...foregroundFixture(), setWakeTrace };
+  const nativeRelay: FixtureNativeRelay = {
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    execute: jest.fn(),
+  };
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: NATIVE_RELAY_ABI_V1,
+    openAttached: jest.fn(() => foreground),
+  };
+  const runtime = loadRelay(nativeRelay)
+    .installNativeForegroundRuntime()
+    .openAttached(new Uint8Array(32));
+
+  runtime.setWakeTrace?.(true);
+  runtime.setWakeTrace?.(false);
+
+  expect(setWakeTrace).toHaveBeenNthCalledWith(1, true);
+  expect(setWakeTrace).toHaveBeenNthCalledWith(2, false);
+});
+
+it('keeps wake tracing absent for an older private native handle', () => {
+  const nativeRelay: FixtureNativeRelay = {
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    execute: jest.fn(),
+  };
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: NATIVE_RELAY_ABI_V1,
+    openAttached: jest.fn(foregroundFixture),
+  };
+
+  const runtime = loadRelay(nativeRelay)
+    .installNativeForegroundRuntime()
+    .openAttached(new Uint8Array(32));
+
+  expect(runtime.setWakeTrace).toBeUndefined();
 });
 
 it('rejects a missing, malformed, or ABI-incompatible bindings-installed JSI foreground factory', () => {

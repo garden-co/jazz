@@ -1,3 +1,4 @@
+import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -29,6 +30,7 @@ function cloneAndFreezeClaim(value: unknown): unknown {
 }
 
 export type CanonicalAuthorSubject = {
+  account_id?: string;
   issuer: string;
   user_id: string;
   canonical: string;
@@ -64,11 +66,17 @@ export function isUsableSubject(subject: string): boolean {
 }
 
 /** Portable logical author identity. Rust interns this canonical string only internally. */
-export function canonicalAuthorSubject(issuer: string, subject: string): string {
+export function canonicalAuthorSubject(issuer: string, subject: string, account?: string): string {
   if (!isPortableAuthorComponent(issuer) || !isPortableAuthorComponent(subject)) {
     throw new Error("Author issuer and subject must be portable and nonempty");
   }
-  return JSON.stringify([issuer, subject]);
+  if (
+    account !== undefined &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(account)
+  ) {
+    throw new Error("Author account must be a canonical UUID");
+  }
+  return JSON.stringify(account === undefined ? [issuer, subject] : [account, issuer, subject]);
 }
 
 /**
@@ -98,7 +106,11 @@ export function attachPublicSessionClaims<T extends Session>(
 export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
-  const user = canonicalAuthorSubject(session.issuer, session.user_id);
+  canonicalAuthorSubject(session.issuer, session.user_id, session.account_id);
+  const user = Object.freeze({
+    account: session.account_id ?? null,
+    identity: Object.freeze({ issuer: session.issuer, subject: session.user_id }),
+  });
   const claims = cloneAndFreezeClaim(
     publicSessionClaims.get(session) ?? session.claims,
   ) as Readonly<Record<string, unknown>>;
@@ -114,12 +126,19 @@ export function withCanonicalUser(session: Session): PublicSession {
 export function parseCanonicalAuthorSubject(value: string): CanonicalAuthorSubject | null {
   try {
     const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
-    const [issuer, userId] = parsed;
+    if (!Array.isArray(parsed) || (parsed.length !== 2 && parsed.length !== 3)) return null;
+    const account = parsed.length === 3 ? parsed[0] : undefined;
+    if (account !== undefined && typeof account !== "string") return null;
+    const [issuer, userId] = parsed.slice(parsed.length === 3 ? 1 : 0);
     if (typeof issuer !== "string" || typeof userId !== "string") return null;
-    const canonical = canonicalAuthorSubject(issuer, userId);
+    const canonical = canonicalAuthorSubject(issuer, userId, account);
     if (value !== canonical) return null;
-    return { issuer, user_id: userId, canonical };
+    return {
+      ...(account === undefined ? {} : { account_id: account }),
+      issuer,
+      user_id: userId,
+      canonical,
+    };
   } catch {
     return null;
   }
@@ -148,6 +167,24 @@ export function decodeCanonicalAuthorSubjectBytes(bytes: Uint8Array): string {
   return parsed.canonical;
 }
 
-export function authorBytesForSession(session: Pick<Session, "issuer" | "user_id">): Uint8Array {
-  return new TextEncoder().encode(canonicalAuthorSubject(session.issuer, session.user_id));
+export function authorBytesForSession(
+  session: Pick<Session, "issuer" | "user_id" | "account_id">,
+): Uint8Array {
+  return new TextEncoder().encode(
+    canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+  );
+}
+
+/** @internal Validate full structured provenance on native result boundaries. */
+export function validateStructuredAuthorValue(value: Value): void {
+  if (value.type !== "Row" || value.value.values.length !== 2)
+    throw new Error("invalid structured author record");
+  const [account, identity] = value.value.values;
+  if (account?.type !== "Uuid" || identity?.type !== "Row" || identity.value.values.length !== 2) {
+    throw new Error("invalid structured author record");
+  }
+  const [issuer, subject] = identity.value.values;
+  if (issuer?.type !== "Text" || subject?.type !== "Text")
+    throw new Error("invalid structured author identity");
+  canonicalAuthorSubject(issuer.value, subject.value, account.value);
 }

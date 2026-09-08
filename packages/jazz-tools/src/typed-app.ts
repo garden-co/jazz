@@ -14,6 +14,7 @@ import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
   PROVENANCE_MAGIC_COLUMNS,
+  magicColumnType,
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
@@ -366,18 +367,21 @@ export type TableWhereInput<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in ProvenanceMagicColumn]?:
-      | string
-      | Date
-      | number
-      | {
-          eq?: string | Date | number;
-          ne?: string | Date | number;
-          gt?: Date | number;
-          gte?: Date | number;
-          lt?: Date | number;
-          lte?: Date | number;
-        };
+    [TColumn in ProvenanceMagicColumn]?: ProvenanceMagicColumns[TColumn] extends Date
+      ?
+          | Date
+          | number
+          | {
+              eq?: Date | number;
+              ne?: Date | number;
+              gt?: Date | number;
+              gte?: Date | number;
+              lt?: Date | number;
+              lte?: Date | number;
+            }
+      :
+          | ProvenanceMagicColumns[TColumn]
+          | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
   }
 >;
 
@@ -518,10 +522,18 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
 };
 
 type ProvenanceMagicColumns = {
-  $createdBy: string;
+  $createdBy: import("./magic-columns.js").RowAuthor;
   $createdAt: Date;
-  $updatedBy: string;
+  $updatedBy: import("./magic-columns.js").RowAuthor;
   $updatedAt: Date;
+  "$createdBy.account": string;
+  "$createdBy.identity": import("./magic-columns.js").RowAuthor["identity"];
+  "$createdBy.identity.issuer": string;
+  "$createdBy.identity.subject": string;
+  "$updatedBy.account": string;
+  "$updatedBy.identity": import("./magic-columns.js").RowAuthor["identity"];
+  "$updatedBy.identity.issuer": string;
+  "$updatedBy.identity.subject": string;
 };
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
@@ -1287,7 +1299,19 @@ export class TypedTableQueryBuilder<
     const built: BuiltCondition[] = [];
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
-      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const magicType = magicColumnType(key);
+      const recordLiteral =
+        magicType?.type === "Row" &&
+        typeof value === "object" &&
+        value !== null &&
+        magicType.columns.some((column) => Object.hasOwn(value, column.name));
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        !(value instanceof Date) &&
+        !recordLiteral
+      ) {
         for (const [op, opValue] of Object.entries(value)) {
           if (opValue !== undefined) {
             built.push({ column: key, op, value: opValue });
@@ -1335,6 +1359,11 @@ export interface Query<
   TSchema extends SchemaLike = SchemaLike,
   TRequired extends boolean = false,
 > extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
+  /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
+  readonly _largeValueUpdateType: TableLargeValueUpdate<
+    TSchema,
+    Extract<TTable, TableName<TSchema>>
+  >;
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
@@ -1382,13 +1411,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {
-  /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
-  readonly _largeValueUpdateType: TableLargeValueUpdate<
-    TSchema,
-    Extract<TTable, TableName<TSchema>>
-  >;
-}
+> {}
 
 export type QueryHandle<
   TTable extends string,
