@@ -34,7 +34,7 @@ export interface JazzSessionProviderProps {
   fallback?: JSX.Element;
   autoAttachDevTools?: boolean;
 }
-function ActiveClient(props: {
+export function ActiveClient(props: {
   client: JazzClient;
   children: JSX.Element;
   autoAttachDevTools?: boolean;

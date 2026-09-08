@@ -44,3 +44,8 @@ export {
   type AuthProviderSnapshot,
 } from "../session/auth-provider.js";
 export { connectBetterAuth, type BetterAuthClient } from "../session/better-auth.js";
+
+export { default as JazzProvider } from "./JazzProvider.svelte";
+export { useJazzAuth, type JazzAuthState } from "./auth-state.js";
+export { betterAuth, jwtAuth, type JazzAuth, type JazzAppSnapshot } from "../session/app.js";
+export type { JazzAppConfig } from "../session/create-jazz-app.js";
