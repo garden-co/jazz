@@ -1,5 +1,5 @@
 import React, { StrictMode } from "react";
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { createAuthClient } from "better-auth/react";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";

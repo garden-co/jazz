@@ -93,10 +93,18 @@ export function connectAuthProvider<Client>(
       else
         await session.loginOrRegisterJWT({
           async getToken() {
-            if ((!established && disposed) || desired.key !== key || desired.isPending)
+            if (
+              (!established && (disposed || token !== generation)) ||
+              desired.key !== key ||
+              desired.isPending
+            )
               throw new Error("Auth provider session changed");
             const jwt = await options.getToken();
-            if ((!established && disposed) || desired.key !== key || desired.isPending)
+            if (
+              (!established && (disposed || token !== generation)) ||
+              desired.key !== key ||
+              desired.isPending
+            )
               throw new Error("Auth provider session changed while fetching a token");
             return jwt;
           },
@@ -160,13 +168,14 @@ export function connectAuthProvider<Client>(
       admitted = undefined;
       failure = undefined;
       const previous = running;
+      const leavingKey = desired.key;
       const operation = Promise.resolve().then(async () => {
         await previous;
         await session.logout();
         await action();
         signOut = undefined;
         // Providers may emit null after signOut resolves. Do not re-admit stale state.
-        attempted = desired.key;
+        attempted = desired.key === leavingKey || desired.key === null ? desired.key : undefined;
         if (desired.key === null) admitted = null;
       });
       running = operation
@@ -176,6 +185,7 @@ export function connectAuthProvider<Client>(
         .finally(() => {
           running = undefined;
           publish();
+          if (!signOut && attempted !== desired.key) void reconcile();
         });
       publish();
       await running;
