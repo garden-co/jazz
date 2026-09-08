@@ -499,7 +499,6 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
         .unwrap();
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
-        propagate_upstream: false,
         ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
