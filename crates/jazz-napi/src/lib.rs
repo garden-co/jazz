@@ -385,6 +385,7 @@ impl CoreWireTransport for NapiWireTransport {
 #[napi(js_name = "PreparedQuery")]
 pub struct PreparedQuery {
     inner: CorePreparedQuery,
+    is_relation: bool,
 }
 
 #[napi(js_name = "Write")]
@@ -2445,6 +2446,7 @@ impl NapiDb {
                 ));
             }
         };
+        let is_relation = kind == "relation";
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -2464,7 +2466,7 @@ impl NapiDb {
                             Some((author, claims)) => inner.with_identity_claims(author, claims),
                             None => inner,
                         };
-                        Ok(PreparedQuery { inner })
+                        Ok(PreparedQuery { inner, is_relation })
                     }))),
                 };
                 match pending.poll()? {
@@ -2517,6 +2519,7 @@ impl NapiDb {
         macro_rules! read {
             ($db:expr) => {{
                 let db = Rc::clone($db);
+                let is_relation = query.is_relation;
                 let query = query.inner.clone();
                 let attachment = Rc::new(RefCell::new(None::<CoreQueryAttachment>));
                 let cleanup_attachment = Rc::clone(&attachment);
@@ -2550,7 +2553,7 @@ impl NapiDb {
                     }
 
                     let result = async {
-                        if query.shape().query().array_subqueries.is_empty() {
+                        if !is_relation && query.shape().query().array_subqueries.is_empty() {
                             let mut rows = match open_tx {
                                 Some(open_tx) => {
                                     db.all_in_open_transaction(open_tx, &query, opts, author)
@@ -6447,6 +6450,7 @@ mod tests {
             .unwrap();
         let query = PreparedQuery {
             inner: owner.prepare_query(&owner.table("items")).unwrap(),
+            is_relation: false,
         };
         assert!(
             binding
@@ -6465,6 +6469,7 @@ mod tests {
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
+            is_relation: false,
         };
         assert!(
             view_binding
