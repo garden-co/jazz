@@ -100,6 +100,180 @@ async fn prepared_binding_source_reuse_validates_descriptor() {
 }
 
 #[futures_test::test]
+async fn failed_multisink_prepare_rolls_back_new_binding_source() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let u64_descriptor = RecordDescriptor::new([("route", ColumnType::U64.clone())]);
+    let invalid_terminal = GraphBuilder::collect_by(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [CollectByField::named("id")],
+        [CollectByField::named("title")],
+        "children",
+        [TopByOrder::asc("title")],
+        ["title"],
+        0,
+        TopByLimit::Finite(1),
+    )
+    .filter(PredicateExpr::gt("id", Value::U64(0)));
+
+    let error = database
+        .prepare(
+            [
+                RoutedMultisinkTerminal::new(
+                    "rows",
+                    GraphBuilder::binding_source("retry_source", u64_descriptor),
+                    ["route"],
+                    ["route"],
+                ),
+                RoutedMultisinkTerminal::new(
+                    "invalid",
+                    invalid_terminal,
+                    [] as [&str; 0],
+                    [] as [&str; 0],
+                ),
+            ],
+            "retry_source",
+            u64_descriptor,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal)
+    ));
+
+    let string_descriptor = RecordDescriptor::new([("route", ColumnType::String.clone())]);
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                GraphBuilder::binding_source("retry_source", string_descriptor),
+                ["route"],
+                ["route"],
+            )],
+            "retry_source",
+            string_descriptor,
+        )
+        .await
+        .expect("failed preparation must not reserve the binding source descriptor");
+    let subscription = database
+        .bind_shape(shape.id(), &[Value::String("retry".to_owned())])
+        .await
+        .unwrap();
+    database.drive_progress().await.unwrap();
+
+    let deltas = subscription.try_recv().unwrap();
+    assert_eq!(
+        deltas.get("rows").unwrap().to_values().unwrap(),
+        [(vec![Value::String("retry".to_owned())], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn failed_multisink_prepare_preserves_active_shared_binding_source() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let baseline_graph_nodes = database.runtime_stats().graph_nodes;
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("shared_source", binding_descriptor),
+        GraphBuilder::table("albums"),
+        ["wanted"],
+        ["title"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("left.wanted", "wanted"),
+    ]);
+    let shape = database
+        .prepare_one_sink(
+            graph.clone(),
+            "shared_source",
+            binding_descriptor,
+            ["wanted"],
+        )
+        .await
+        .unwrap();
+    let active = database
+        .bind_shape_one_sink(shape.id(), &[Value::String("Blue Train".to_owned())])
+        .await
+        .unwrap();
+    assert!(active.recv().unwrap().is_empty());
+
+    let invalid_terminal = GraphBuilder::collect_by(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [CollectByField::named("id")],
+        [CollectByField::named("title")],
+        "children",
+        [TopByOrder::asc("title")],
+        ["title"],
+        0,
+        TopByLimit::Finite(1),
+    )
+    .filter(PredicateExpr::gt("id", Value::U64(0)));
+    let error = database
+        .prepare(
+            [
+                RoutedMultisinkTerminal::new("rows", graph, ["wanted"], ["id", "title", "wanted"]),
+                RoutedMultisinkTerminal::new(
+                    "invalid",
+                    invalid_terminal,
+                    [] as [&str; 0],
+                    [] as [&str; 0],
+                ),
+            ],
+            "shared_source",
+            binding_descriptor,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal)
+    ));
+
+    let sibling = database
+        .bind_shape_one_sink(shape.id(), &[Value::String("Giant Steps".to_owned())])
+        .await
+        .expect("failed sibling preparation must preserve the registered binding source");
+    assert!(sibling.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(11), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&active),
+        [(
+            vec![7_u64.into(), "Blue Train".into(), "Blue Train".into()],
+            1
+        )]
+    );
+    assert_eq!(
+        expect_recv_vals(&sibling),
+        [(
+            vec![11_u64.into(), "Giant Steps".into(), "Giant Steps".into()],
+            1
+        )]
+    );
+
+    database.unsubscribe(active.id());
+    database.unsubscribe(sibling.id());
+    database.retire_prepared_shape(shape.id()).unwrap();
+    assert_eq!(database.runtime_stats().graph_nodes, baseline_graph_nodes);
+}
+
+#[futures_test::test]
 async fn graph_prepared_subscription_can_hide_internal_routing_fields() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();

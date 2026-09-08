@@ -3284,34 +3284,51 @@ impl IvmRuntime {
         let shape = binding_source_shape.into();
         let shape_id = self.next_shape_id();
         let source_key = BindingSourceKey::prepared(shape.clone());
-        match self.binding_sources.entry(source_key) {
+        let inserted_source = match self.binding_sources.entry(source_key) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get().descriptor != binding_descriptor =>
             {
                 return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
             }
-            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Occupied(_) => false,
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert(BindingSourceState {
                     descriptor: binding_descriptor,
                     refcounts: HashMap::default(),
                     initialized: true,
                 });
+                true
             }
-        }
+        };
+        let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+        let runtime = install.runtime();
         let mut terminal_states = BTreeMap::new();
         for terminal in terminals {
-            let output = self.add_dedup_graph(&terminal.graph)?;
-            self.add_retainer(
-                output.node,
-                Retainer::PreparedShape(shape_id.retainer_key()),
-            );
+            let output = match runtime.add_dedup_graph(&terminal.graph) {
+                Ok(output) => output,
+                Err(error) => {
+                    if inserted_source {
+                        runtime
+                            .binding_sources
+                            .remove(&BindingSourceKey::prepared(shape));
+                    }
+                    return Err(error);
+                }
+            };
             terminal_states.insert(
                 terminal.sink.clone(),
                 RoutedMultisinkTerminalState { terminal, output },
             );
         }
-        self.prepared_shapes.insert(
+        // Publish retainers only after every terminal compiles, so the guard
+        // can collect failed additions without disturbing existing shapes.
+        for terminal in terminal_states.values() {
+            runtime.add_retainer(
+                terminal.output.node,
+                Retainer::PreparedShape(shape_id.retainer_key()),
+            );
+        }
+        runtime.prepared_shapes.insert(
             shape_id,
             RoutedMultisinkShapeState {
                 shape,
@@ -3320,6 +3337,7 @@ impl IvmRuntime {
                 auto_family_key: None,
             },
         );
+        install.commit();
         Ok(PreparedShape { id: shape_id })
     }
 
