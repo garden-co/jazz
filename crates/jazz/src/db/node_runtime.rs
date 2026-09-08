@@ -3459,7 +3459,12 @@ where
                     .map(|row| row.row_uuid())
                     .collect::<Vec<_>>()
             } else {
-                node.query_rows_for_link(
+                // This is a local candidate inventory, not a serving answer.
+                // Re-evaluating cached permission rules here can both omit
+                // stale rows needing revalidation and wait on query work that
+                // this same owner pass must drive. Core authorizes the later
+                // CurrentRows request; discovery uses ordinary client-local reads.
+                node.query_rows_for_client(
                     &request.shape,
                     &request.binding,
                     DurabilityTier::Local,

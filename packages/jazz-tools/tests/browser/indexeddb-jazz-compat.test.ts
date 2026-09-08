@@ -273,9 +273,8 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
     // The persistent replica lives in the worker. Use the public local-first
-    // read across that hop, with the worker explicitly disconnected from Core.
+    // read across that hop. With no serverUrl, the worker cannot contact Core.
     // Inspector LocalOnly reads only the foreground's in-memory rows.
-    await pinnedPhase("readonly-disconnect", () => db.disconnect());
     const rawWhileReopened = await pinnedPhase("read-open-records", () =>
       rawRecords(physicalDbName),
     );
@@ -365,7 +364,6 @@ describe("browser Jazz storage compatibility corpus", () => {
     await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
     try {
       db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
-      await pinnedPhase("offline-disconnect", () => db.disconnect());
       expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
         physicalDbName,
       );

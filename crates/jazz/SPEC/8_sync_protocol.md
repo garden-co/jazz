@@ -1166,6 +1166,13 @@ be interpreted as deletion or access loss. The initial implementation covers
 current/default scalar roots. It does not establish complete related or negative
 dependency reconciliation merely by making final result sets equal.
 
+Candidate discovery uses ordinary client-local visibility, including stale cached
+rows that need revalidation. It MUST NOT use a serving query that reevaluates
+cached permission rules: those rules can hide the very candidates needing
+revalidation, and their evaluation can wait for work owned by the same runtime
+pass. Candidate discovery does not authorize delivery; the selected authority
+checks current access before returning row versions or an unavailable outcome.
+
 For example, a cached task changes from `done=false` to `done=true` while its
 reader is offline. An empty unfinished-task scope does not update the cached
 value. Revalidating that extra task obtains its readable current native version;
