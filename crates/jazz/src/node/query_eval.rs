@@ -4126,11 +4126,11 @@ where
 
 /// Normalize a compiler aggregate record into the one application-row layout.
 ///
-/// Groove aggregate terminals use `__jazz_aggregate_*` names so an aggregate
-/// alias can never collide with a grouped source field.  That is an internal
-/// graph representation, not a second public record format.  Both a fresh
-/// collector reset and later aggregate deltas pass through this conversion so
-/// they expose the same synthetic `CurrentRow` descriptor.
+/// Groove aggregate terminals use `__jazz_aggregate_*` names to keep aggregate
+/// values separate from source fields. Public-name uniqueness is checked during
+/// query validation; it does not replace this internal graph representation.
+/// Both a fresh collector reset and later aggregate deltas pass through this
+/// conversion so they expose the same synthetic `CurrentRow` descriptor.
 fn aggregate_current_row_from_record(
     query: &crate::query::Query,
     output: &AppRowSchema,

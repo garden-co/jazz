@@ -713,6 +713,21 @@ maintainable and the value-level null rules
 (`groove/SPEC/3_queries_operators.md`); this section owns what Jazz delivers to
 a caller.
 
+Public aggregate output names MUST be unique across the group output name, when
+present, and all aggregate aliases, including implicit aliases. Comparison is
+exact and case-sensitive: `score` and `Score` are distinct. A source column that
+is not the group output does not reserve its name, so `sum("score").alias("score")`
+remains valid. Jazz validation MUST reject a repeated output name with
+`QueryError::AggregateOutputNameCollision(name)` before normalisation or lowering;
+it MUST NOT rename public outputs. Existing group-column, aggregate-input, type
+and reserved-prefix errors take precedence over this collision error.
+
+This validation does not change Groove descriptors or compiler carrier and role
+identities. Internal layouts and codec fixtures may retain equal names in
+distinct roles; that does not make duplicate public output names valid.
+The new public `QueryError` variant requires downstream Rust exhaustive matches
+to handle it. Query AST, wire and storage encodings are unchanged.
+
 An aggregate value crosses three boundaries. The groove `Aggregate` terminal
 emits group fields and aggregate values into a record; Jazz carries that record
 as a `ResultPayload` program fact keyed by a synthetic result member (ch. 16

@@ -2149,9 +2149,9 @@ impl CurrentRow {
             .subscription_cells()
             .map(|(name, value)| Some((name, postcard::to_allocvec(&value).ok()?)))
             .collect::<Option<Vec<_>>>()?;
-        // Logical names may legally collide (for example a group column and
-        // an aggregate alias). The canonical Value bytes preserve multiset
-        // semantics without making equality depend on descriptor order.
+        // Canonical Value bytes preserve multiset semantics for internal role
+        // layouts without making equality depend on descriptor order. Public
+        // aggregate output names are checked separately during query validation.
         cells.sort_unstable();
         Some(cells)
     }

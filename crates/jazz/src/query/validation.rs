@@ -101,6 +101,9 @@ pub enum QueryError {
     /// Aggregate aliases cannot occupy compiler-owned output names.
     #[error("aggregate alias {0} uses a reserved compiler namespace")]
     ReservedAggregateAlias(String),
+    /// Group output names and aggregate aliases must be unique.
+    #[error("aggregate output name {0} is used more than once")]
+    AggregateOutputNameCollision(String),
     /// Flat tuple output currently has a deliberately narrow executable envelope.
     #[error("flat join cannot be combined with {feature}")]
     UnsupportedFlatJoinCombination {
@@ -861,6 +864,18 @@ fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result
                     return Err(QueryError::OperandTypeMismatch);
                 }
             }
+        }
+    }
+    // Keep all existing aggregate errors ahead of output-name collisions.
+    let mut output_names = BTreeSet::new();
+    if let Some(group_by) = aggregate.group_by.as_deref() {
+        output_names.insert(group_by);
+    }
+    for aggregate in &aggregate.aggregates {
+        if !output_names.insert(aggregate.alias.as_str()) {
+            return Err(QueryError::AggregateOutputNameCollision(
+                aggregate.alias.clone(),
+            ));
         }
     }
     Ok(())

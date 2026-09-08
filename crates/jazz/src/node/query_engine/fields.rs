@@ -5,9 +5,9 @@ use groove::records::DescriptorField;
 pub(crate) use crate::schema::APP_COLUMN_PREFIX as USER_COLUMN_PREFIX;
 /// Physical namespace for aggregate result values.
 ///
-/// Aggregate aliases are public-facing names and can legally collide with a
-/// grouped source column (for example, `group_by("sum_score").sum("score")`).
-/// Keep aggregate values separate from source-row fields in compiler records.
+/// Public aggregate output names are unique, but aliases may still match
+/// non-grouped source columns. Keep aggregate values separate from source-row
+/// fields in compiler records; public-name validation does not replace carriers.
 pub(crate) const AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 pub(crate) const LEFT_JOIN_PREFIX: &str = "left.";
 pub(crate) const RIGHT_JOIN_PREFIX: &str = "right.";
