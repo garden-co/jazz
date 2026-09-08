@@ -1270,16 +1270,9 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
             options,
         )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
         panic!("authorization support must return a settled view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert_eq!(
         peer.subscription_policy_binding(subscription),
         Some((writer, BTreeMap::new())),

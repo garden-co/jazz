@@ -671,34 +671,30 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     let empty = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        input_adds: Vec::new(),
+        input_removes: Vec::new(),
     });
     assert!(view_update_is_empty(&empty));
 
     let fact_only = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![crate::protocol::ViewFactEntry::PathCorrelationCoverage(
-            crate::protocol::PathCorrelationCoverageEntry {
-                path: "owner".to_owned(),
-                source_table: "todos".to_owned().into(),
-                source_row: row(1),
-                correlation_key: vec![1],
+        input_adds: vec![crate::protocol::SupportingInput::SourceComplete(
+            crate::protocol::ProgramSourceCoverageEntry {
+                source: crate::protocol::ProgramSourceId {
+                    table: "todos".to_owned().into(),
+                    path: vec![crate::protocol::ProgramSourceRole::Root],
+                },
                 complete: true,
             },
         )],
-        program_fact_removes: Vec::new(),
+        input_removes: Vec::new(),
     });
     assert!(!view_update_is_empty(&fact_only));
 }

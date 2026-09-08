@@ -356,22 +356,18 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     let update = peer.current_rows_update(&mut core, "notes").unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("current-row subscription should produce a view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert_eq!(
         program_fact_adds
             .iter()
             .filter(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.version_table.as_str() == "notes"
                         && input.source_row == note
                         && input.version.layer == crate::protocol::ResultRowLayer::Content

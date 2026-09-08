@@ -1296,6 +1296,19 @@ these messages is promised. Unknown describes indeterminate current availability
 or unavailable authority, never missing protocol support. See SPEC 7's bounded
 current-row availability contract for authorization and receipt validation.
 
+### Supporting-input view payload
+
+`ViewUpdatePayload` carries `input_adds` and `input_removes`, each a vector of
+`SupportingInput`: `Row(CoveredInputEntry)` or
+`SourceComplete(ProgramSourceCoverageEntry)`. `reset_input_set` replaces the
+receiver's selected supporting inputs. Rendered result membership and internal
+program proofs have no wire fields or variants. The receiver evaluates its own
+query from these inputs; CurrentRows provides the separate current/unavailable
+reconciliation exchange. Source occurrences, subscription identity, authority
+cut and authorization progress retain their exact existing meanings. Native
+row-version carriers are unchanged. The named postcard semantic codec and
+byte corpus pin this mandatory pre-release layout; old layouts are unsupported.
+
 ## Open Questions
 
 - 🔶 [#2660](https://github.com/garden-co/jazz/issues/2660) — Query-driven reconciliation pilot and deferred related/negative-input completeness.

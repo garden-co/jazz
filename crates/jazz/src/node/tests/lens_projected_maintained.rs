@@ -77,20 +77,16 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        reset_result_set,
-        program_fact_adds,
+        reset_input_set,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
-    assert!(reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
+    assert!(reset_input_set);
     let inputs = program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+        crate::protocol::SupportingInput::Row(input) => Some(input),
         _ => None,
     }).collect::<Vec<_>>();
     assert_eq!(inputs.len(), 1);

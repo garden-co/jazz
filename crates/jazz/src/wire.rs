@@ -1662,13 +1662,11 @@ mod tests {
             ViewUpdate {
                 subscription: SubscriptionKey,
                 settled_through: GlobalTime,
-                reset_result_set: bool,
+                reset_input_set: bool,
                 version_carriers: Vec<VersionCarrier>,
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
-                result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
-                result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
-                program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
-                program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
+                input_adds: Vec<crate::protocol::SupportingInput>,
+                input_removes: Vec<crate::protocol::SupportingInput>,
             },
         }
 
@@ -1678,13 +1676,11 @@ mod tests {
         let flat = FlatSyncMessage::ViewUpdate {
             subscription: payload.subscription,
             settled_through: payload.settled_through,
-            reset_result_set: payload.reset_result_set,
+            reset_input_set: payload.reset_input_set,
             version_carriers: payload.version_carriers.clone(),
             peer_payload_inventory: payload.peer_payload_inventory.clone(),
-            result_member_adds: payload.result_member_adds.clone(),
-            result_member_removes: payload.result_member_removes.clone(),
-            program_fact_adds: payload.program_fact_adds.clone(),
-            program_fact_removes: payload.program_fact_removes.clone(),
+            input_adds: payload.input_adds.clone(),
+            input_removes: payload.input_removes.clone(),
         };
         let current = SyncMessage::ViewUpdate(payload);
 
@@ -1852,13 +1848,11 @@ mod tests {
                 read_view: Default::default(),
             },
             settled_through: GlobalTime(500),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            input_adds: Vec::new(),
+            input_removes: Vec::new(),
         })
     }
 
@@ -2096,11 +2090,9 @@ mod tests {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
-                    reset_result_set: false,
+                    reset_input_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: Vec::new(),
-                    result_member_removes: Vec::new(),
                     // Exercise the same sized, independently-delivered
                     // control-plane payload without smuggling authority
                     // terminal output across the peer wire.
@@ -2114,7 +2106,7 @@ mod tests {
                             },
                         ),
                     ],
-                    program_fact_removes: Vec::new(),
+                    input_removes: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2195,17 +2187,15 @@ mod tests {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+                input_adds: Vec::new(),
+                input_removes: Vec::new(),
             }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
@@ -2265,30 +2255,14 @@ mod tests {
         let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
         let entry: crate::protocol::ResultMemberEntry =
             (groove::Intern::new("todos".to_owned()), row, tx_id).into();
-        let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription: SubscriptionKey {
-                shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
-                read_view: Default::default(),
+        let fact = crate::protocol::ProgramFactEntry::ResultPayload(
+            crate::protocol::ResultMemberPayloadEntry {
+                member: entry,
+                descriptor: Vec::new(),
+                record: Vec::new(),
             },
-            settled_through: GlobalTime(7),
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: vec![tx_id],
-                authorization_progress: None,
-                opening_pending: false,
-            },
-            result_member_adds: vec![entry.into()],
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        });
-
-        assert!(
-            encode_sync_message(&message).is_err(),
-            "the wire must reject authority terminal membership before receiver ingestion"
         );
+        assert!(crate::protocol::SupportingInput::try_from(fact).is_err());
     }
 
     #[test]

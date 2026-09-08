@@ -163,8 +163,6 @@ impl PeerState {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) = update
         else {
@@ -176,8 +174,6 @@ impl PeerState {
         self.metrics.version_bundles_out += singleton_bundles.len() as u64;
         self.metrics.complete_tx_payload_refs_out +=
             peer_payload_inventory.complete_tx_payloads.len() as u64;
-        self.metrics.result_adds_out += result_member_adds.len() as u64;
-        self.metrics.result_removes_out += result_member_removes.len() as u64;
 
         self.metrics.duplicate_version_bundles_out += singleton_bundles
             .iter()
@@ -551,18 +547,30 @@ impl PeerState {
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
-            reset_result_set,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            reset_input_set,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) = update
         else {
             return;
         };
-        let state = self.publication_states.entry(*subscription).or_default();
-        if *reset_result_set {
+        let adds = program_fact_adds.iter().cloned().map(Into::into).collect::<Vec<_>>();
+        let removes = program_fact_removes.iter().cloned().map(Into::into).collect::<Vec<_>>();
+        self.apply_outgoing_view_delta(*subscription, *reset_input_set, &[], &[], &adds, &removes);
+    }
+
+    fn apply_outgoing_view_delta(
+        &mut self,
+        subscription: SubscriptionKey,
+        reset_input_set: bool,
+        result_member_adds: &[ResultMemberEntry],
+        result_member_removes: &[ResultMemberEntry],
+        program_fact_adds: &[ProgramFactEntry],
+        program_fact_removes: &[ProgramFactEntry],
+    ) {
+        let state = self.publication_states.entry(subscription).or_default();
+        if reset_input_set {
             state.result_member_set.clear();
             state.program_fact_set.clear();
             state.member_index.clear();

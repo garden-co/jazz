@@ -17,13 +17,11 @@ fn view_updates_drop_unknown_usage_site_bindings() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: unknown_usage_site,
             settled_through: GlobalTime(0),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            input_adds: Vec::new(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
 
@@ -96,10 +94,10 @@ fn covered_input_receiver_fixture() -> (
     )
     .expect("ordinary authority update");
     let initial_input = initial
-        .program_fact_adds
+        .input_adds
         .iter()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source_row == row_uuid =>
             {
                 Some(input.clone())
@@ -125,10 +123,10 @@ fn covered_input_receiver_fixture() -> (
     )
     .expect("ordinary authority update");
     assert!(
-        successor.program_fact_adds.iter().any(|fact| {
+        successor.input_adds.iter().any(|fact| {
             matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source == initial_input.source
                         && input.source_row == initial_input.source_row
                         && input.version != initial_input.version
@@ -173,15 +171,15 @@ fn payload_view_update_parts(
         subscription: payload.subscription,
         settled_through: payload.settled_through,
         defer_settlement: false,
-        reset_result_set: payload.reset_result_set,
+        reset_input_set: payload.reset_input_set,
         version_carriers: payload.version_carriers,
         peer_complete_tx_payload_refs: payload.peer_payload_inventory.complete_tx_payloads,
         authorization_progress: payload.peer_payload_inventory.authorization_progress,
         opening_pending: payload.peer_payload_inventory.opening_pending,
-        result_member_adds: payload.result_member_adds,
-        result_member_removes: payload.result_member_removes,
-        program_fact_adds: payload.program_fact_adds,
-        program_fact_removes: payload.program_fact_removes,
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: payload.input_adds.into_iter().map(Into::into).collect(),
+        program_fact_removes: payload.input_removes.into_iter().map(Into::into).collect(),
     }
 }
 
@@ -190,10 +188,10 @@ fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
         panic!("expected authority view update");
     };
     update
-        .program_fact_adds
+        .input_adds
         .iter()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source_row == row_uuid =>
             {
                 Some(input.version.tx)
@@ -208,10 +206,10 @@ fn authority_covered_input_rejects_unknown_same_table_source_role() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
     let input = successor
-        .program_fact_adds
+        .input_adds
         .iter_mut()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            crate::protocol::SupportingInput::Row(input) => Some(input),
             _ => None,
         })
         .expect("real successor has a covered input");
@@ -234,13 +232,13 @@ fn forged_source_reset(order_coverage_first: bool) -> (
 ) {
     let (_dir, receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.reset_result_set = true;
-    successor.program_fact_removes.clear();
+    successor.reset_input_set = true;
+    successor.input_removes.clear();
     let input = successor
-        .program_fact_adds
+        .input_adds
         .iter_mut()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            crate::protocol::SupportingInput::Row(input) => Some(input),
             _ => None,
         })
         .expect("successor has input");
@@ -255,7 +253,7 @@ fn forged_source_reset(order_coverage_first: bool) -> (
         .cloned()
         .collect::<Vec<_>>();
     let coverage = sources.into_iter().map(|source| {
-        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+        crate::protocol::SupportingInput::SourceComplete(
             crate::protocol::ProgramSourceCoverageEntry {
                 source: if source == original_source {
                     forged.clone()
@@ -267,9 +265,9 @@ fn forged_source_reset(order_coverage_first: bool) -> (
         )
     });
     if order_coverage_first {
-        successor.program_fact_adds.splice(0..0, coverage);
+        successor.input_adds.splice(0..0, coverage);
     } else {
-        successor.program_fact_adds.extend(coverage);
+        successor.input_adds.extend(coverage);
     }
     (receiver, authority_result, successor)
 }
@@ -307,11 +305,11 @@ fn authority_covered_input_rejects_conflicting_retained_source_version_atomicall
     // of the successor's removal set and add it to the closure so both exact
     // witnesses exist yet the same source occurrence claims two versions.
     successor
-        .program_fact_removes
-        .retain(|fact| fact != &crate::protocol::ProgramFactEntry::CoveredInput(initial.clone()));
+        .input_removes
+        .retain(|fact| fact != &crate::protocol::SupportingInput::Row(initial.clone()));
     successor
-        .program_fact_adds
-        .push(crate::protocol::ProgramFactEntry::CoveredInput(initial));
+        .input_adds
+        .push(crate::protocol::SupportingInput::Row(initial));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -320,16 +318,16 @@ fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomical
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
     let duplicate = successor
-        .program_fact_adds
+        .input_adds
         .iter()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
             _ => None,
         })
         .expect("real successor has a covered input");
     successor
-        .program_fact_adds
-        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        .input_adds
+        .push(crate::protocol::SupportingInput::Row(duplicate));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 
     let (_dir, mut receiver, authority_result, initial, mut successor) =
@@ -337,8 +335,8 @@ fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomical
     let mut impossible_remove = initial;
     impossible_remove.version.tx = TxId::new(TxTime(0x7a), node(0x7a));
     successor
-        .program_fact_removes
-        .push(crate::protocol::ProgramFactEntry::CoveredInput(impossible_remove));
+        .input_removes
+        .push(crate::protocol::SupportingInput::Row(impossible_remove));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -346,8 +344,8 @@ fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomical
 fn authority_covered_input_rejects_live_coverage_changes_atomically() {
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.program_fact_removes.push(
-        crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+    successor.input_removes.push(
+        crate::protocol::SupportingInput::SourceComplete(
             crate::protocol::ProgramSourceCoverageEntry {
                 source: initial.source,
                 complete: true,
@@ -365,16 +363,16 @@ fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     let generation = receiver.applied_authority_result_generation(&authority_result);
     let mut malformed = successor.clone();
     let duplicate = malformed
-        .program_fact_adds
+        .input_adds
         .iter()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+            crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
             _ => None,
         })
         .expect("successor has covered input");
     malformed
-        .program_fact_adds
-        .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        .input_adds
+        .push(crate::protocol::SupportingInput::Row(duplicate));
     let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor),
         payload_view_update_parts(malformed),
@@ -406,11 +404,11 @@ fn authority_covered_input_rejects_reset_with_incomplete_source_manifest_atomica
         .cloned()
         .collect::<Vec<_>>();
     assert!(sources.len() > 1, "self-join fixture has multiple source occurrences");
-    successor.reset_result_set = true;
-    successor.program_fact_removes.clear();
-    successor.program_fact_adds.extend(sources.iter().skip(1).cloned().map(
+    successor.reset_input_set = true;
+    successor.input_removes.clear();
+    successor.input_adds.extend(sources.iter().skip(1).cloned().map(
         |source| {
-            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+            crate::protocol::SupportingInput::SourceComplete(
                 crate::protocol::ProgramSourceCoverageEntry {
                     source,
                     complete: true,
@@ -1004,16 +1002,14 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 opening_pending: true,
                 ..Default::default()
             },
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            input_adds: Vec::new(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
     let authority_result_key = receiver
@@ -1025,7 +1021,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: Transaction {
@@ -1050,10 +1046,8 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                 opening_pending: false,
                 ..Default::default()
             },
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            input_adds: Vec::new(),
+            input_removes: Vec::new(),
         }))
     }));
     assert!(received.is_ok(), "a peer view must not panic the receiver");
@@ -1072,13 +1066,11 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: vec![todos_source_coverage()],
-            program_fact_removes: Vec::new(),
+            input_adds: vec![todos_source_coverage().try_into().unwrap()],
+            input_removes: Vec::new(),
         }))
         .unwrap();
     assert!(!receiver.opening_pending_for_authority_result(&authority_result_key));

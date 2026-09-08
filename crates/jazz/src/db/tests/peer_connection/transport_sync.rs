@@ -122,16 +122,16 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
             .expect("authority must send alice's opening");
         let subscription = update.subscription;
         let duplicate = update
-            .program_fact_adds
+            .input_adds
             .iter()
             .find_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+                crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
                 _ => None,
             })
             .expect("nonempty authority opening has a covered-input witness");
         update
-            .program_fact_adds
-            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+            .input_adds
+            .push(crate::protocol::SupportingInput::Row(duplicate));
         subscription
     };
     let authority_result = client
@@ -261,16 +261,16 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
             })
             .expect("authority must send the opening");
         let duplicate = update
-            .program_fact_adds
+            .input_adds
             .iter()
             .find_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
+                crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
                 _ => None,
             })
             .expect("opening must contain an input witness");
         update
-            .program_fact_adds
-            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+            .input_adds
+            .push(crate::protocol::SupportingInput::Row(duplicate));
     }
     let error = client
         .tick()

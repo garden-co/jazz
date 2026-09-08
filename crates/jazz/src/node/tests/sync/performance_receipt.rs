@@ -337,14 +337,14 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let serve_elapsed = serve_start.elapsed();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
         version_carriers,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    let result_member_count = result_member_adds.len();
+    let SyncMessage::ViewUpdate(payload) = &update else { unreachable!() };
+    let result_member_count = payload.input_adds.iter().filter(|input| matches!(input, crate::protocol::SupportingInput::Row(_))).count();
     let version_bundle_count = crate::protocol::expand_version_carriers(version_carriers)
         .expect("performance receipt carriers should expand")
         .len();

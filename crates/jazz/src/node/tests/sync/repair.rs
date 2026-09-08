@@ -766,7 +766,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &mut update
     else {
@@ -774,7 +774,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     };
     version_carriers.clear();
     assert!(program_fact_adds.iter().any(|fact| {
-        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input)
+        matches!(fact, crate::protocol::SupportingInput::Row(input)
             if input.version_table.as_str() == "todos"
                 && input.source_row == row_uuid
                 && input.version.tx == tx_id)
@@ -931,7 +931,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &mut update
     else {
@@ -939,7 +939,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     };
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
+        crate::protocol::SupportingInput::Row(input)
             if input.source.table.as_str() == "tasks"
                 && input.version_table.as_str() == "todos"
                 && input.source_row == row_uuid
@@ -1203,7 +1203,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             read_view: Default::default(),
         },
         settled_through: GlobalTime::default(),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: transaction,
@@ -1213,9 +1213,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![crate::protocol::ProgramFactEntry::CoveredInput(
+        input_adds: vec![crate::protocol::SupportingInput::Row(
             crate::protocol::CoveredInputEntry {
                 source: crate::protocol::ProgramSourceId {
                     table: "tasks".to_owned().into(),
@@ -1233,7 +1231,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                 },
             },
         )],
-        program_fact_removes: Vec::new(),
+        input_removes: Vec::new(),
     });
     assert_eq!(
         receiver.missing_known_state_row_version_refs(&update).unwrap(),

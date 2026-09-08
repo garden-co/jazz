@@ -1691,11 +1691,12 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
     }
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds, ..
+            input_adds: program_fact_adds,
+            ..
         }) => program_fact_adds
             .iter()
             .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.version_table.as_str() == SHAPES =>
                 {
                     Some(input.version.tx)
@@ -2717,11 +2718,12 @@ fn is_ancestor(
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds, ..
+            input_adds: program_fact_adds,
+            ..
         }) => program_fact_adds
             .iter()
             .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.version_table.as_str() == table =>
                 {
                     Some(input.source_row)

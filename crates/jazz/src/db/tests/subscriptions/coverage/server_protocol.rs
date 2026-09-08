@@ -439,34 +439,25 @@ fn assert_protocol_view_update_rows(
 ) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        reset_input_set,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = message
     else {
         panic!("expected ViewUpdate");
     };
     assert_eq!(subscription, expected_subscription);
-    assert_eq!(reset_result_set, expected_reset);
+    assert_eq!(reset_input_set, expected_reset);
     // A served peer subscription is now a source-closure receipt.  The
     // receiver reconstructs result membership locally, so the authority must
     // not send rendered result members as a second path.
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert!(program_fact_removes.is_empty());
-    assert!(
-        program_fact_adds
-            .iter()
-            .all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact)
-    );
     let added_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
-            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_) => None,
+            crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
+            crate::protocol::SupportingInput::SourceComplete(_) => None,
             _ => unreachable!("peer closure filter above excludes output facts"),
         })
         .collect::<BTreeSet<_>>();
@@ -1088,32 +1079,23 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
 
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };
     assert_eq!(served, subscription);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert!(program_fact_removes.is_empty());
     assert!(
         program_fact_adds.iter().any(|fact| {
             matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source.table.as_str() == "todos" && input.source_row == row(0x11)
             )
         }),
         "relation facade subscription should deliver the target as a receiver source input"
-    );
-    assert!(
-        program_fact_adds
-            .iter()
-            .all(crate::protocol::ProgramFactEntry::is_peer_source_closure_fact)
     );
 }

@@ -420,10 +420,8 @@ fn seed_multi_segment_include_fixture(
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -433,12 +431,10 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     // result set. These policy fixtures use root-row queries, so content-layer
     // covered inputs are the exact closure counterpart to their old result
     // member assertions.
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     let mut adds = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
                 Some((input.version_table.clone(), input.source_row, input.version.tx))
@@ -449,7 +445,7 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     let mut removes = program_fact_removes
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
                 Some((input.version_table.clone(), input.source_row, input.version.tx))

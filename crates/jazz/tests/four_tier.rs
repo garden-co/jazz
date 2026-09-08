@@ -1399,7 +1399,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription: common::direct_subscription(&schema, "canvases", AuthorSubject::SYSTEM),
             settled_through: jazz::time::GlobalTime(0),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx,
                 versions,
@@ -1409,10 +1409,8 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
                 durability: DurabilityTier::Edge,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            input_adds: Vec::new(),
+            input_removes: Vec::new(),
         }),
     );
 

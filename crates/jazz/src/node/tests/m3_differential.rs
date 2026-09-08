@@ -484,7 +484,7 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
         .rehydrate_query(&mut core, &shape.shape, &shape.binding)
         .expect("authority evaluates exact recursive seed closure");
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
@@ -493,7 +493,7 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
     let seed_inputs = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source.table.as_str() == "group_access_edges" =>
             {
                 Some(input)
@@ -591,10 +591,10 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
         panic!("expected source reset")
     };
     let covered_seeds = payload
-        .program_fact_adds
+        .input_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source.table.as_str() == "group_access_edges" =>
             {
                 Some(input.source_row)

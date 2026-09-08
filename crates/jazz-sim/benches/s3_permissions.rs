@@ -1012,12 +1012,12 @@ fn revoke_phase(
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let removed = match &update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_removes,
+            input_removes: program_fact_removes,
             ..
         }) => program_fact_removes
             .iter()
             .filter_map(|fact| match fact {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
                 {
                     Some(input.source_row)
@@ -2052,22 +2052,22 @@ fn deliver_update(
 
 fn apply_client_update(client: &mut Client, message: SyncMessage) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        reset_result_set,
-        program_fact_adds,
-        program_fact_removes,
+        reset_input_set,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = &message
     {
-        if *reset_result_set {
+        if *reset_input_set {
             client.covered_inputs.clear();
         }
         for fact in program_fact_removes {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+            if let jazz::protocol::SupportingInput::Row(input) = fact {
                 client.covered_inputs.remove(input);
             }
         }
         for fact in program_fact_adds {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+            if let jazz::protocol::SupportingInput::Row(input) = fact {
                 client.covered_inputs.insert(input.clone());
             }
         }
@@ -2971,14 +2971,14 @@ fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
 fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) => program_fact_adds
             .iter()
             .chain(program_fact_removes.iter())
             .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
                 {
                     Some((
@@ -2999,10 +2999,7 @@ fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_carriers,
-            result_member_adds,
-            result_member_removes,
-            ..
+            version_carriers, ..
         }) => {
             let bundles = version_bundle_refs(version_carriers)
                 .map(|bundle| {
@@ -3013,7 +3010,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                         .sum::<usize>()
                 })
                 .sum::<usize>();
-            (bundles + (result_member_adds.len() + result_member_removes.len()) * 48) as u64
+            bundles as u64
         }
         _ => 0,
     }

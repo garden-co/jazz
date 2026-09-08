@@ -243,14 +243,14 @@ fn storage_read_bucket_field(name: &str, bucket: StorageReadBucket) -> String {
     )
 }
 
-pub(super) fn view_update_reset_result_set(update: &mut SyncMessage) {
+pub(super) fn view_update_reset_input_set(update: &mut SyncMessage) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set, ..
+        reset_input_set, ..
     }) = update
     else {
         return;
     };
-    *reset_result_set = true;
+    *reset_input_set = true;
 }
 
 pub(super) fn binding_values_in_param_order(

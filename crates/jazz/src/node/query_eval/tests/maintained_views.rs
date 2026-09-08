@@ -8,14 +8,14 @@ fn covered_input_rows(update: &SyncMessage, additions: bool) -> BTreeSet<RowUuid
         panic!("expected ViewUpdate");
     };
     let facts = if additions {
-        &payload.program_fact_adds
+        &payload.input_adds
     } else {
-        &payload.program_fact_removes
+        &payload.input_removes
     };
     facts
         .iter()
         .filter_map(|fact| match fact {
-            ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
             _ => None,
         })
         .collect()

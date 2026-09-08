@@ -758,9 +758,8 @@ impl Transport for DuplexTransport {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
-            reset_result_set,
+            reset_input_set,
             version_carriers,
-            result_member_adds,
             ..
         }) = &message
         {
@@ -775,15 +774,14 @@ impl Transport for DuplexTransport {
                     ..ViewUpdateSummary::default()
                 });
             entry.messages += 1;
-            entry.resets += u64::from(*reset_result_set);
+            entry.resets += u64::from(*reset_input_set);
             let bundles = version_bundle_refs(version_carriers).count() as u64;
             entry.bundles += bundles;
-            if *reset_result_set {
+            if *reset_input_set {
                 entry.reset_bundles += bundles;
             } else {
                 entry.non_reset_bundles += bundles;
             }
-            entry.result_adds += result_member_adds.len() as u64;
         }
         if let SyncMessage::Subscribe(subscribe) = &message
             && subscribe.known_state.is_some()

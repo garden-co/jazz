@@ -29,18 +29,14 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     let covered_rows = program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
+        crate::protocol::SupportingInput::Row(input) =>
             Some((input.version_table.clone(), input.source_row, input.version.tx)),
         _ => None,
     }).collect::<Vec<_>>();

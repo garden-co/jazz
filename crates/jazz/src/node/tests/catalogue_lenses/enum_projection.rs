@@ -5,17 +5,13 @@
 /// to content-layer covered inputs for that table.
 fn covered_input_rows(update: &SyncMessage, additions: bool) -> Vec<(RowUuid, TxId)> {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected maintained view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     let facts = if additions {
         program_fact_adds
     } else {
@@ -24,7 +20,7 @@ fn covered_input_rows(update: &SyncMessage, additions: bool) -> Vec<(RowUuid, Tx
     facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version_table.as_str() == "items"
                     && input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
@@ -80,7 +76,7 @@ fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
         let SyncMessage::ViewUpdate(payload) = &initial else {
             panic!("expected maintained view update");
         };
-        assert!(!payload.program_fact_adds.is_empty(), "empty results still carry coverage");
+        assert!(!payload.input_adds.is_empty(), "empty results still carry coverage");
 
         let next = accept_global(
             &mut core,
@@ -756,10 +752,10 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &initial else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &initial else {
         panic!("expected initial maintained view update");
     };
-    assert!(reset_result_set);
+    assert!(reset_input_set);
     assert_eq!(covered_input_rows(&initial, true).len(), 1);
 
     // Recompiling exactly the same target must leave the maintained graph in
@@ -767,10 +763,10 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &unchanged else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &unchanged else {
         panic!("expected maintained view update");
     };
-    assert!(!reset_result_set, "idempotent target registration must not reset");
+    assert!(!reset_input_set, "idempotent target registration must not reset");
     assert!(covered_input_rows(&unchanged, true).is_empty());
     assert!(covered_input_rows(&unchanged, false).is_empty());
 
@@ -785,10 +781,10 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, .. }) = &update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &update else {
         panic!("expected maintained view update");
     };
-    assert!(!reset_result_set);
+    assert!(!reset_input_set);
     assert!(covered_input_rows(&update, true)
         .iter()
         .any(|&(row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx));

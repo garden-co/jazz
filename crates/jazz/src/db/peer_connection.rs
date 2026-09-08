@@ -4490,16 +4490,14 @@ where
                                 Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
                                     settled_through: self.node.borrow().committed_global_time(),
-                                    reset_result_set: true,
+                                    reset_input_set: true,
                                     version_carriers: Vec::new(),
                                     peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                                         opening_pending: true,
                                         ..Default::default()
                                     },
-                                    result_member_adds: Vec::new(),
-                                    result_member_removes: Vec::new(),
-                                    program_fact_adds: Vec::new(),
-                                    program_fact_removes: Vec::new(),
+                                    input_adds: Vec::new(),
+                                    input_removes: Vec::new(),
                                 }))
                             } else {
                                 None
@@ -5670,7 +5668,7 @@ where
                                 // successor closure: the exact upstream reset
                                 // has already been installed/forwarded. In
                                 // particular, never relabel an empty local
-                                // terminal tick as `reset_result_set`, because
+                                // terminal tick as `reset_input_set`, because
                                 // a receiver would correctly reject its absent
                                 // ProgramSourceCoverage manifest.
                                 Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
@@ -5893,26 +5891,24 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
         }) => ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
             opening_pending: peer_payload_inventory.opening_pending,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         },
         _ => unreachable!("expected view update message"),
     }
@@ -5997,7 +5993,7 @@ where
             frame_is_selected(update)
                 && !update.parts.opening_pending
                 && !update.parts.defer_settlement
-                && (update.parts.reset_result_set
+                && (update.parts.reset_input_set
                     || !update.parts.program_fact_adds.is_empty()
                     || !update.parts.program_fact_removes.is_empty())
         })
@@ -7014,24 +7010,20 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
         }) => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} input_adds={} input_removes={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
-            reset_result_set,
+            reset_input_set,
             expand_version_carriers(version_carriers)
                 .map(|bundles| bundles.len())
                 .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
-            result_member_adds.len(),
-            result_member_removes.len(),
             program_fact_adds.len(),
             program_fact_removes.len()
         ),
@@ -7091,22 +7083,17 @@ where
         && let SyncMessage::ViewUpdate(payload) = &message
     {
         let coverage = payload
-            .program_fact_adds
+            .input_adds
             .iter()
-            .filter(|fact| {
-                matches!(
-                    fact,
-                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
-                )
-            })
+            .filter(|fact| matches!(fact, crate::protocol::SupportingInput::SourceComplete(_)))
             .collect::<Vec<_>>();
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} reset={} pending={} coverage={coverage:?} facts={} carriers={}",
             node.borrow().client_relay_scope().is_some(),
             payload.subscription,
-            payload.reset_result_set,
+            payload.reset_input_set,
             payload.peer_payload_inventory.opening_pending,
-            payload.program_fact_adds.len(),
+            payload.input_adds.len(),
             payload.version_carriers.len()
         );
     }
@@ -7619,20 +7606,16 @@ fn chunk_locator_fingerprint(locator: groove::large_values::Locator) -> String {
 pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) => {
-            !reset_result_set
+            !reset_input_set
                 && version_carriers.is_empty()
                 && peer_payload_inventory.complete_tx_payloads.is_empty()
-                && result_member_adds.is_empty()
-                && result_member_removes.is_empty()
                 && program_fact_adds.is_empty()
                 && program_fact_removes.is_empty()
         }

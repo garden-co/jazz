@@ -2534,7 +2534,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,
-    pub(crate) reset_result_set: bool,
+    pub(crate) reset_input_set: bool,
     pub(crate) version_carriers: Vec<VersionCarrier>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,

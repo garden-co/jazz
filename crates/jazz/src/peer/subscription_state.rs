@@ -205,7 +205,7 @@ pub(super) struct MaintainedRehydrateRequest<'a> {
     pub(super) binding: &'a Binding,
     pub(super) subscription: SubscriptionKey,
     pub(super) previous_member_result_set: &'a BTreeSet<ResultMemberEntry>,
-    pub(super) reset_result_set: bool,
+    pub(super) reset_input_set: bool,
     pub(super) result_table_filter: Option<&'a str>,
     pub(super) tier: DurabilityTier,
     pub(super) read_view: &'a ReadViewSpec,

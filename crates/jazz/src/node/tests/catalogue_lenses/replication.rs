@@ -477,7 +477,7 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
     assert!(matches!(
         initial,
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set: true,
+            reset_input_set: true,
             ..
         })
     ));
@@ -493,18 +493,16 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(!reset_result_set, "exercise shared non-reset receiver batching");
+    assert!(!reset_input_set, "exercise shared non-reset receiver batching");
 
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x6d), base);
     let error = reader
@@ -512,16 +510,16 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set,
+            reset_input_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                 .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         }])
         .expect_err("malformed ViewUpdate must not stage a row");
     match error {
@@ -551,12 +549,10 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -568,14 +564,12 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         reader.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
+            reset_input_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                 .unwrap(),
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
         })),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
             if rejected == subscription && transition == "authority source-closure payload failed validation: row version does not carry the complete descriptor of its authored schema"
@@ -603,12 +597,10 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -622,16 +614,16 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
                 subscription,
                 settled_through,
                 defer_settlement: false,
-                reset_result_set,
+                reset_input_set,
                 version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                     .expect("malformed receipts remain representable as carriers"),
                 peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                 authorization_progress: None,
                 opening_pending: false,
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+                program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
             })
             .resolve()
     }));
@@ -699,10 +691,8 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
         subscription,
         settled_through,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -718,16 +708,16 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                 .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         }])
         .resolve(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
@@ -765,10 +755,8 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         subscription,
         settled_through,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -791,16 +779,16 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                 .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         }])
         .resolve(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })

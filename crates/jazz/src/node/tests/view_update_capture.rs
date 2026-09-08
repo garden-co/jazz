@@ -1,13 +1,11 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalViewUpdate {
     subscription: String,
-    reset_result_set: bool,
+    reset_input_set: bool,
     version_bundles: Vec<CanonicalVersionBundle>,
     peer_payload_inventory: Vec<TxId>,
     program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
     program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
-    result_member_adds: Vec<ResultRowEntry>,
-    result_member_removes: Vec<ResultRowEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,14 +72,12 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     let normalized_version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory {
             complete_tx_payloads: complete_tx_payload_refs, ..
         },
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -95,26 +91,14 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     version_bundles.sort();
     let mut complete_tx_payload_refs = complete_tx_payload_refs;
     complete_tx_payload_refs.sort();
-    let mut result_member_adds = result_member_adds
-        .into_iter()
-        .filter_map(crate::protocol::ResultMemberEntry::into_row)
-        .collect::<Vec<_>>();
-    result_member_adds.sort();
-    let mut result_member_removes = result_member_removes
-        .into_iter()
-        .filter_map(crate::protocol::ResultMemberEntry::into_row)
-        .collect::<Vec<_>>();
-    result_member_removes.sort();
 
     CanonicalViewUpdate {
         subscription: format!("{subscription:?}"),
-        reset_result_set,
+        reset_input_set,
         version_bundles,
         peer_payload_inventory: complete_tx_payload_refs,
-        program_fact_adds,
-        program_fact_removes,
-        result_member_adds,
-        result_member_removes,
+        program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+        program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
     }
 }
 
@@ -122,23 +106,13 @@ fn assert_real_peer_tick(
     mut capture: CanonicalViewUpdate,
     _expected_adds: &[ResultRowEntry],
     _expected_removes: &[ResultRowEntry],
-    expected_reset_result_set: bool,
+    expected_reset_input_set: bool,
     case: (AuthorSubject, u64, &str),
 ) {
     let (identity, seed, tick) = case;
-    capture.result_member_adds.sort();
-    capture.result_member_removes.sort();
     assert_eq!(
-        capture.reset_result_set, expected_reset_result_set,
-        "real peer maintained subscription view emitted unexpected reset_result_set for seed {seed:#x}, identity {identity:?}, tick {tick}"
-    );
-    assert_eq!(
-        capture.result_member_adds, Vec::<ResultRowEntry>::new(),
-        "authority emitted result-member adds for seed {seed:#x}, identity {identity:?}, tick {tick}; the receiver-local Groove collector owns application results"
-    );
-    assert_eq!(
-        capture.result_member_removes, Vec::<ResultRowEntry>::new(),
-        "authority emitted result-member removes for seed {seed:#x}, identity {identity:?}, tick {tick}; the receiver-local Groove collector owns application results"
+        capture.reset_input_set, expected_reset_input_set,
+        "real peer maintained subscription view emitted unexpected reset_input_set for seed {seed:#x}, identity {identity:?}, tick {tick}"
     );
     for fact in capture
         .program_fact_adds
@@ -178,7 +152,7 @@ fn assert_maintained_subscription_view_tick(
     update: SyncMessage,
     expected_adds: &[ResultRowEntry],
     expected_removes: &[ResultRowEntry],
-    expected_reset_result_set: bool,
+    expected_reset_input_set: bool,
     case: (AuthorSubject, u64, &str),
 ) -> SyncMessage {
     let (identity, seed, tick) = case;
@@ -187,7 +161,7 @@ fn assert_maintained_subscription_view_tick(
         capture,
         expected_adds,
         expected_removes,
-        expected_reset_result_set,
+        expected_reset_input_set,
         (identity, seed, tick),
     );
     maintained.assert_receiver_transition(expected_adds, expected_removes, (identity, seed, tick));
@@ -284,29 +258,9 @@ fn apply_capture_result_delta(
     result_set: &mut BTreeSet<ResultRowEntry>,
     update: &SyncMessage,
 ) {
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
-        panic!("expected view update");
-    };
-    if *reset_result_set {
-        result_set.clear();
-    }
-    for entry in result_member_removes
-        .iter()
-        .filter_map(crate::protocol::ResultMemberEntry::as_row)
-    {
-        result_set.remove(&entry);
-    }
-    result_set.extend(
-        result_member_adds
-            .iter()
-            .filter_map(crate::protocol::ResultMemberEntry::as_row),
-    );
+    let SyncMessage::ViewUpdate(payload) = update else { panic!("expected view update") };
+    // Wire updates have no result-membership delta; the receiver owns results.
+    if payload.reset_input_set { result_set.clear(); }
 }
 
 fn apply_capture_delivery_state(
@@ -575,7 +529,7 @@ impl MaintainedSubscriptionViewSubscription {
         result_member_removes: Vec<ResultRowEntry>,
         program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
         program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
-        reset_result_set: bool,
+        reset_input_set: bool,
         identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let previous_result_set = self
@@ -612,13 +566,13 @@ impl MaintainedSubscriptionViewSubscription {
         )
         .resolve()?;
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set: update_reset,
+            reset_input_set: update_reset,
             ..
         }) = &mut update
         else {
             panic!("expected view update");
         };
-        *update_reset = reset_result_set;
+        *update_reset = reset_input_set;
         Ok(update)
     }
 }
@@ -666,20 +620,16 @@ fn assert_retraction_without_replacement_leak(
     let version_bundles = version_bundles_for_update(update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert!(
         !program_fact_adds.iter().any(|fact| matches!(
             fact,
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source_row == row_uuid && input.version.tx == unreadable_tx_id
         )),
         "revocation update re-added unreadable covered input for row {row_uuid:?} at tx {unreadable_tx_id:?}"

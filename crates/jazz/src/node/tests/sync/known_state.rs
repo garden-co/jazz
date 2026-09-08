@@ -40,7 +40,7 @@ fn covered_input_for_row(
     row_uuid: RowUuid,
 ) -> crate::protocol::CoveredInputEntry {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds, ..
+        input_adds: program_fact_adds, ..
     }) = update
     else {
         panic!("expected view update");
@@ -48,7 +48,7 @@ fn covered_input_for_row(
     program_fact_adds
         .iter()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source_row == row_uuid =>
             {
                 Some(input.clone())
@@ -62,13 +62,11 @@ fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdate
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         version_carriers,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
     }) = message
     else {
         panic!("expected view update");
@@ -77,15 +75,15 @@ fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdate
         subscription,
         settled_through,
         defer_settlement,
-        reset_result_set,
+        reset_input_set,
         version_carriers,
         peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
         authorization_progress: peer_payload_inventory.authorization_progress,
         opening_pending: peer_payload_inventory.opening_pending,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+        program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
     }
 }
 
@@ -151,13 +149,11 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     let late = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: usage_subscription,
         settled_through: GlobalTime(2),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        input_adds: Vec::new(),
+        input_removes: Vec::new(),
     });
     reader.apply_sync_message_settled(late).unwrap();
 
@@ -188,13 +184,11 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
     let late = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(1),
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        input_adds: Vec::new(),
+        input_removes: Vec::new(),
     });
 
     reader.apply_sync_message_settled(late).unwrap();
@@ -246,13 +240,11 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     let removal = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(2),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: vec![crate::protocol::ProgramFactEntry::CoveredInput(covered)],
+        input_adds: Vec::new(),
+        input_removes: vec![crate::protocol::SupportingInput::Row(covered)],
     });
     assert!(
         reader
@@ -285,13 +277,11 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     let removal = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(3),
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        input_adds: Vec::new(),
+        input_removes: Vec::new(),
     });
 
     assert!(
@@ -378,13 +368,11 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             crate::protocol::ViewUpdatePayload {
                 subscription: duplicate_subscription,
                 settled_through: GlobalTime(2),
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+                input_adds: Vec::new(),
+                input_removes: Vec::new(),
             },
         ))
         .unwrap();
@@ -469,8 +457,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
-        reset_result_set,
-        result_member_adds,
+        reset_input_set,
         ..
     }) = &update
     else {
@@ -478,8 +465,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     };
     assert_eq!(*settled_through, GlobalTime::new(10, 0).unwrap());
     // A cursor deduplicates bodies, not the new usage's input manifest.
-    assert!(*reset_result_set);
-    assert!(result_member_adds.is_empty());
+    assert!(*reset_input_set);
     assert!(version_bundles.is_empty());
 
     let missing = reader
@@ -589,22 +575,18 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        reset_input_set,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
     assert_eq!(*settled_through, GlobalTime::new(20, 0).unwrap());
-    assert!(reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
+    assert!(reset_input_set);
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
+        crate::protocol::SupportingInput::Row(input)
             if input.source_row == row_b && input.version.tx == tx_b
     )));
     assert_eq!(version_bundles.len(), 1);
@@ -669,17 +651,15 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert!(result_member_adds.is_empty());
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
+        crate::protocol::SupportingInput::Row(input)
             if input.source_row == row_uuid && input.version.tx == tx_id
     )));
     assert!(version_bundles.is_empty());
@@ -735,9 +715,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
+        reset_input_set,
         ..
     }) = &update
     else {
@@ -745,9 +723,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
     };
     // Reattaching restores the full input manifest without retransmitting
     // known bodies, even when Alice still holds the previous live closure.
-    assert!(*reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
+    assert!(*reset_input_set);
     assert!(version_bundles.is_empty());
 
     reader.apply_sync_message_settled(update).unwrap();
@@ -828,9 +804,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
+        reset_input_set,
         ..
     }) = &update
     else {
@@ -838,9 +812,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     };
     // Durable payload knowledge survives reopen; it does not replace the
     // fresh attachment's complete authority input manifest.
-    assert!(*reset_result_set);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
+    assert!(*reset_input_set);
     assert!(version_bundles.is_empty());
 
     reader.apply_sync_message_settled(update).unwrap();
@@ -1069,19 +1041,17 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected declared update");
     };
-    assert!(result_member_adds.is_empty());
     assert_eq!(
         program_fact_adds
             .iter()
             .filter_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+                crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
                 _ => None,
             })
             .collect::<BTreeSet<_>>(),
@@ -1632,9 +1602,10 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
         panic!("expected authority reset");
     };
     let facts = reset_payload
-        .program_fact_adds
+        .input_adds
         .iter()
         .cloned()
+        .map(crate::protocol::ProgramFactEntry::from)
         .collect::<BTreeSet<_>>();
     assert!(
         facts
@@ -1651,14 +1622,14 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
     );
 
     let mut removal = reset_payload.clone();
-    removal.reset_result_set = false;
+    removal.reset_input_set = false;
     removal.version_carriers.clear();
-    removal.program_fact_adds.clear();
+    removal.input_adds.clear();
     // A live transition removes covered inputs, never the compiler's manifest.
     // Even an empty result retains complete coverage of its declared sources.
-    removal.program_fact_removes = facts
+    removal.input_removes = reset_payload.input_adds
         .iter()
-        .filter(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_)))
+        .filter(|fact| matches!(fact, crate::protocol::SupportingInput::Row(_)))
         .cloned()
         .collect();
     let manifest = facts
@@ -1758,9 +1729,9 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
         panic!("expected authority reset");
     };
     let fact = payload
-        .program_fact_adds
+        .input_adds
         .iter()
-        .find(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_)))
+        .find(|fact| matches!(fact, crate::protocol::SupportingInput::Row(_)))
         .cloned()
         .expect("authority closure contains a valid covered-input fact");
     reader.apply_sync_message_settled(reset).unwrap();
@@ -1778,7 +1749,7 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
     futures::executor::block_on(corrupt_store.set(
         &corrupt_key,
         &[Value::Bytes(
-            crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
+            crate::node::codec::program_fact_storage_bytes(&crate::protocol::ProgramFactEntry::from(fact)).unwrap(),
         )],
     ))
     .unwrap();
@@ -1834,17 +1805,15 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(result_member_adds.is_empty());
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
+        crate::protocol::SupportingInput::Row(input)
             if input.source_row == row_uuid && input.version.tx == tx_id
     )));
     assert_eq!(version_bundles.len(), 1);

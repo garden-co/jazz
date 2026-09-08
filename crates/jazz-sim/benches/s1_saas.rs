@@ -1642,14 +1642,15 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        program_fact_adds, ..
+        input_adds: program_fact_adds,
+        ..
     }) = update
     {
         // The receiver evaluates its result from covered inputs; authorities
         // no longer send a redundant result-member list. Count the disclosed
         // input closure, including relation support, when checking its cache.
         for entry in program_fact_adds {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = entry {
+            if let jazz::protocol::SupportingInput::Row(input) = entry {
                 rows.insert((input.version_table.to_string(), input.source_row));
             }
         }
@@ -1659,11 +1660,12 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds, ..
+            input_adds: program_fact_adds,
+            ..
         }) => program_fact_adds
             .iter()
             .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.version_table.as_str() == table =>
                 {
                     Some(input.source_row)
@@ -1681,8 +1683,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             let bundle_bytes = version_bundle_refs(version_carriers)
@@ -1690,9 +1690,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>();
             let complete_tx_refs = &peer_payload_inventory.complete_tx_payloads;
-            bundle_bytes
-                + (complete_tx_refs.len() as u64 * 24)
-                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
+            bundle_bytes + (complete_tx_refs.len() as u64 * 24)
         }
         _ => 0,
     }

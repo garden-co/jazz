@@ -543,7 +543,7 @@ where
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 version_carriers,
-                program_fact_adds,
+                input_adds: program_fact_adds,
                 ..
             }) => (*subscription, version_carriers, program_fact_adds),
             _ => return Ok(Vec::new()),
@@ -587,7 +587,7 @@ where
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter()
             .flat_map(|fact| match fact {
-                ProgramFactEntry::CoveredInput(input) => vec![Some((
+                crate::protocol::SupportingInput::Row(input) => vec![Some((
                     input.version_table.to_string(),
                     input.source_row,
                     input.version.tx,

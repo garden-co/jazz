@@ -135,7 +135,6 @@ fn current_state_history_depth_contract() {
             .len();
         // Authorities send exact inputs, not a second terminal result. The
         // receiver's ordinary IVM query must materialize the one current row.
-        assert!(payload.result_member_adds.is_empty());
         let (_receiver_dir, mut receiver) = open_node(node(3), schema.clone());
         support::register_table_receiver(&mut receiver, &schema, TABLE, peer.identity());
         support::apply_and_settle(&mut receiver, update.clone());

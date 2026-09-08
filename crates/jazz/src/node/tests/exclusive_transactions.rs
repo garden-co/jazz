@@ -1450,11 +1450,9 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        reset_input_set,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -1470,10 +1468,8 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     );
     assert_eq!(bundle.versions.len(), 1);
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert!(program_fact_adds.iter().any(|fact| {
-        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row(1))
+        matches!(fact, crate::protocol::SupportingInput::Row(input) if input.source_row == row(1))
     }));
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 
@@ -1484,13 +1480,11 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
+            reset_input_set,
             version_carriers: vec![VersionCarrier::Bundle(bundle)],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
         }))
         .unwrap();
     assert!(reader
@@ -1561,8 +1555,8 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
-        program_fact_adds,
+        reset_input_set,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
@@ -1576,7 +1570,7 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     let malformed_input = malformed_facts
         .iter_mut()
         .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
+            crate::protocol::SupportingInput::Row(input) => Some(input),
             _ => None,
         })
         .expect("rehydration must disclose its root source input");
@@ -1587,16 +1581,14 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
+            reset_input_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
             .unwrap(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: malformed_facts,
-            program_fact_removes: Vec::new(),
+            input_adds: malformed_facts,
+            input_removes: Vec::new(),
         }))
         .unwrap_err();
 
@@ -1716,8 +1708,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update_a
     else {
@@ -1732,9 +1723,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
-    assert!(result_member_adds.is_empty());
     assert_eq!(program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
+        crate::protocol::SupportingInput::Row(input) =>
             Some((input.version_table.clone(), input.source_row, input.version.tx)),
         _ => None,
     }).collect::<Vec<_>>(), vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]);

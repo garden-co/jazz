@@ -679,23 +679,18 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
         .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
         .expect("rehydrate maintained v2 flat join");
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
-        program_fact_adds,
+        reset_input_set,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
         panic!("flat join rehydrate must emit a view update");
     };
-    assert!(reset_result_set);
-    assert!(
-        result_member_adds.is_empty(),
-        "a peer receipt must never carry authority result membership"
-    );
+    assert!(reset_input_set);
     assert!(
         program_fact_adds.iter().any(|fact| matches!(
             fact,
-            ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.source_row == author
         )),
         "the renamed join contributor must cross as a compiler-owned covered input: {program_fact_adds:?}"

@@ -165,10 +165,7 @@ fn run_rung(source_rows: usize) {
 
 fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        version_carriers,
-        result_member_adds,
-        result_member_removes,
-        ..
+        version_carriers, ..
     }) = update
     else {
         panic!("expected one view update");
@@ -176,11 +173,7 @@ fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     let bundles = expand_version_carriers(version_carriers)
         .expect("expand PERF-5 version carriers")
         .len();
-    (
-        result_member_adds.len(),
-        result_member_removes.len(),
-        bundles,
-    )
+    (0, 0, bundles)
 }
 
 fn result_digest(result: &BTreeSet<TxId>) -> String {

@@ -27,10 +27,8 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -40,12 +38,10 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     // graph, rather than the authority, derives result membership; a root
     // source occurrence is therefore the peer-wire equivalent of these
     // single-table result assertions.
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     let mut result_member_adds = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
                 Some((input.version_table.clone(), input.source_row, input.version.tx))
@@ -56,7 +52,7 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     let mut result_member_removes = program_fact_removes
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
                 Some((input.version_table.clone(), input.source_row, input.version.tx))

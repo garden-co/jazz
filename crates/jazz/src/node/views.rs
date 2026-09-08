@@ -607,7 +607,7 @@ where
         // The direct cold helper represents a receiver's first receipt.  It
         // must therefore establish a replacement closure; the reusable
         // peer-rehydrate builder below deliberately remains incremental.
-        payload.reset_result_set = true;
+        payload.reset_input_set = true;
         Ok(update)
     }
 
@@ -1324,7 +1324,7 @@ where
             crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through,
-                reset_result_set: false,
+                reset_input_set: false,
                 version_carriers,
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: peer_payload_inventory_refs,
@@ -1334,10 +1334,16 @@ where
                 // Result members are local maintained-terminal state. Peer
                 // frames carry only the source closure from which another
                 // receiver derives those terminals itself.
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds,
-                program_fact_removes,
+                input_adds: program_fact_adds
+                    .into_iter()
+                    .map(crate::protocol::SupportingInput::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(Error::InvalidStoredValue)?,
+                input_removes: program_fact_removes
+                    .into_iter()
+                    .map(crate::protocol::SupportingInput::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(Error::InvalidStoredValue)?,
             },
         ))
     }
@@ -1408,12 +1414,12 @@ where
             else {
                 continue;
             };
-            if update.reset_result_set {
+            if update.reset_input_set {
                 initial_hydration_authority_results.insert(authority_result_key.clone());
             }
             let in_initial_hydration =
                 initial_hydration_authority_results.contains(&authority_result_key);
-            if update.reset_result_set
+            if update.reset_input_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
             {
@@ -1421,7 +1427,7 @@ where
             }
             if in_initial_hydration
                 && version_bundle_refs.is_empty()
-                && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
+                && (!update.reset_input_set || update.peer_complete_tx_payload_refs.is_empty())
             {
                 initial_hydration_authority_results.remove(&authority_result_key);
             }
@@ -1462,7 +1468,7 @@ where
             )
             .await?;
         let mut receiver_candidates = preflight.bundles;
-        if updates.iter().any(|update| update.reset_result_set) {
+        if updates.iter().any(|update| update.reset_input_set) {
             self.begin_initial_sync_flush_cadence().await?;
         }
         for tx_id in &bulk_loaded_tx_ids {
@@ -1634,12 +1640,12 @@ where
     /// that a previously claimed exact closure became empty. The closure
     /// state, rather than retired authority result members, owns that choice.
     fn reset_replaces_authority_source_closure(
-        reset_result_set: bool,
+        reset_input_set: bool,
         has_source_facts: bool,
         opening_pending: bool,
         state: Option<&AuthorityResultState>,
     ) -> bool {
-        reset_result_set
+        reset_input_set
             && !opening_pending
             && (has_source_facts
                 || !matches!(
@@ -1703,7 +1709,7 @@ where
                 transition,
             };
             let reset_replaces = Self::reset_replaces_authority_source_closure(
-                update.reset_result_set,
+                update.reset_input_set,
                 !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
                 update.opening_pending,
                 state,
@@ -2007,7 +2013,7 @@ where
             subscription,
             settled_through,
             defer_settlement,
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_complete_tx_payload_refs,
             authorization_progress,
@@ -2048,7 +2054,7 @@ where
         };
         let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
             preloaded.clone()
-        } else if reset_result_set && peer_complete_tx_payload_refs.is_empty() {
+        } else if reset_input_set && peer_complete_tx_payload_refs.is_empty() {
             // A reset with bundles is a snapshot for this subscription even
             // when other subscriptions already advanced the node watermark.
             // Empty reset stamps stay orthogonal below: with no bundles there
@@ -2075,7 +2081,7 @@ where
         } else {
             BTreeSet::new()
         };
-        if reset_result_set {
+        if reset_input_set {
             let state = self
                 .query
                 .authority_results
@@ -2122,7 +2128,7 @@ where
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
         let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
-            reset_result_set,
+            reset_input_set,
             !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
             opening_pending,
             self.query.authority_results.get(&authority_result_key),
@@ -2130,7 +2136,7 @@ where
         if reset_cleared_shared_state {
             self.clear_settled_result_view(authority_result_key.clone());
         }
-        if reset_result_set {
+        if reset_input_set {
             self.query
                 .authority_results
                 .entry(authority_result_key.clone())
@@ -2199,7 +2205,7 @@ where
             .get(&authority_result_key)
             .is_some_and(|state| state.initial_hydration)
             && version_bundles_is_empty
-            && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
+            && (!reset_input_set || peer_complete_tx_payload_refs.is_empty())
             && !defer_settlement
             && !opening_pending
         {
@@ -2234,7 +2240,7 @@ where
         // The receiver validates the exact compiler-owned coverage set before
         // it installs the replacement, so this marker never makes a partial
         // closure publishable.
-        if reset_result_set && !defer_settlement && !opening_pending {
+        if reset_input_set && !defer_settlement && !opening_pending {
             state.source_closure = crate::node::AuthoritySourceClosure::Claimed {
                 generation: state.applied_view_update_generation,
             };
@@ -2277,7 +2283,7 @@ where
         }
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_result_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
+                "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_input_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
                 self.node_uuid,
                 state.applied_view_update_generation,
                 state.settled_program_facts.len(),

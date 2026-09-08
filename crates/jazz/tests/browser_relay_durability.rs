@@ -551,7 +551,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     let incomplete = SyncMessage::ViewUpdate(ViewUpdatePayload {
         subscription: subscription_key,
         settled_through: GlobalTime(1),
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: VersionBundleScope::CompleteTransaction,
             tx: transaction.clone(),
@@ -561,14 +561,12 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![
-            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+        input_adds: vec![
+            jazz::protocol::SupportingInput::SourceComplete(ProgramSourceCoverageEntry {
                 source: source.clone(),
                 complete: true,
             }),
-            ProgramFactEntry::CoveredInput(CoveredInputEntry {
+            jazz::protocol::SupportingInput::Row(CoveredInputEntry {
                 source,
                 version_table: "todos".to_owned().into(),
                 source_row: row,
@@ -582,7 +580,7 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
                 },
             }),
         ],
-        program_fact_removes: Vec::new(),
+        input_removes: Vec::new(),
     });
     assert!(
         block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
@@ -2810,9 +2808,9 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     assert!(
         authority_updates.iter().any(|update| {
             update
-                .program_fact_adds
+                .input_adds
                 .iter()
-                .any(|fact| matches!(fact, jazz::protocol::ProgramFactEntry::CoveredInput(_)))
+                .any(|fact| matches!(fact, jazz::protocol::SupportingInput::Row(_)))
         }),
         "authority sent no typed covered input: {authority_updates:?}",
     );

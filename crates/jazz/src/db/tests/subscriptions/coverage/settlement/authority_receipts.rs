@@ -14,12 +14,10 @@ fn settled_todos_source_closure(
     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![ProgramFactEntry::ProgramSourceCoverage(
+        input_adds: vec![crate::protocol::SupportingInput::SourceComplete(
             crate::protocol::ProgramSourceCoverageEntry {
                 source: crate::protocol::ProgramSourceId {
                     table: "todos".to_owned().into(),
@@ -28,7 +26,7 @@ fn settled_todos_source_closure(
                 complete: true,
             },
         )],
-        program_fact_removes: Vec::new(),
+        input_removes: Vec::new(),
     })
 }
 

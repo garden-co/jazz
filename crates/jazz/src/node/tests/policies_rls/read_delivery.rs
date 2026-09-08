@@ -769,13 +769,13 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
+        reset_input_set,
         ..
     }) = &initial
     else {
         panic!("expected initial view update");
     };
-    assert!(reset_result_set);
+    assert!(reset_input_set);
     assert!(
         canonical_view_update_rows(&initial)
             .0
@@ -814,13 +814,13 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
+        reset_input_set,
         ..
     }) = &rehydrated
     else {
         panic!("expected rehydrate view update");
     };
-    assert!(reset_result_set);
+    assert!(reset_input_set);
     assert_eq!(
         canonical_view_update_rows(&rehydrated)
             .0
@@ -1529,16 +1529,14 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         .unwrap();
 
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        result_member_adds,
+        reset_input_set,
         version_carriers,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(reset_result_set);
-    assert!(result_member_adds.is_empty());
+    assert!(reset_input_set);
     assert!(version_carriers.is_empty());
 }
 

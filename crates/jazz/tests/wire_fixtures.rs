@@ -500,32 +500,41 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: Some(9),
                     opening_pending: false,
                 },
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                    source: ProgramSourceId {
-                        table: "todos".to_owned().into(),
-                        path: vec![ProgramSourceRole::Root],
-                    },
-                    version_table: "todos".to_owned().into(),
-                    source_row: row,
-                    version: RowVersionRefEntry {
-                        tx: tx_id,
-                        schema_version: Some(schema_version),
-                        layer: ResultRowLayer::Content,
-                        batch: Some(tx_id),
-                        branch_or_prefix: Some(Vec::new()),
-                        row_digest: None,
-                    },
-                })],
-                program_fact_removes: Vec::new(),
+                input_adds: vec![
+                    jazz::protocol::SupportingInput::Row(CoveredInputEntry {
+                        source: ProgramSourceId {
+                            table: "todos".to_owned().into(),
+                            path: vec![ProgramSourceRole::Root],
+                        },
+                        version_table: "todos".to_owned().into(),
+                        source_row: row,
+                        version: RowVersionRefEntry {
+                            tx: tx_id,
+                            schema_version: Some(schema_version),
+                            layer: ResultRowLayer::Content,
+                            batch: Some(tx_id),
+                            branch_or_prefix: Some(Vec::new()),
+                            row_digest: None,
+                        },
+                    }),
+                    jazz::protocol::SupportingInput::SourceComplete(
+                        jazz::protocol::ProgramSourceCoverageEntry {
+                            source: ProgramSourceId {
+                                table: "todos".to_owned().into(),
+                                path: vec![ProgramSourceRole::Root],
+                            },
+                            complete: true,
+                        },
+                    ),
+                ],
+                input_removes: Vec::new(),
             }),
         ),
         (
@@ -534,13 +543,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(8),
-                reset_result_set: false,
+                reset_input_set: false,
                 version_carriers: mixed_version_carriers(schema_version, author),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+                input_adds: Vec::new(),
+                input_removes: Vec::new(),
             }),
         ),
         (
@@ -549,12 +556,10 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(9),
-                reset_result_set: false,
+                reset_input_set: false,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: vec![ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                input_adds: vec![jazz::protocol::SupportingInput::Row(CoveredInputEntry {
                     source: ProgramSourceId {
                         table: "todos".to_owned().into(),
                         path: vec![
@@ -577,7 +582,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         row_digest: None,
                     },
                 })],
-                program_fact_removes: Vec::new(),
+                input_removes: Vec::new(),
             }),
         ),
         (
@@ -1046,25 +1051,35 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     }
 }
 
-/// An authority may send source inputs to Alice's client, never a collector
-/// result that bypasses Alice's compiled query: authority --result row--> reject.
+/// Internal facts cannot be converted into peer supporting-input variants.
 #[test]
 fn peer_wire_rejects_authority_result_members() {
+    let member = result_row_entry(TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]))).into();
+    let fact =
+        jazz::protocol::ProgramFactEntry::ResultPayload(jazz::protocol::ResultMemberPayloadEntry {
+            member,
+            descriptor: Vec::new(),
+            record: Vec::new(),
+        });
+    assert!(jazz::protocol::SupportingInput::try_from(fact).is_err());
     let (_, _, message) = wire_fixture_messages()
         .into_iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
-    let SyncMessage::ViewUpdate(mut view) = message else {
-        panic!("view fixture")
+    let SyncMessage::ViewUpdate(view) = &message else {
+        unreachable!()
     };
-    view.result_member_adds
-        .push(result_row_entry(TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]))).into());
-    let invalid = SyncMessage::ViewUpdate(view);
-    assert!(encode_sync_message(&invalid).is_err());
-    let bytes = postcard::to_allocvec(&invalid).unwrap();
+    let input_bytes = postcard::to_allocvec(&view.input_adds[0]).unwrap();
+    assert_eq!(input_bytes[0], 0, "Row is supporting-input tag zero");
+    let mut bytes = encode_sync_message(&message).unwrap();
+    let offset = bytes
+        .windows(input_bytes.len())
+        .position(|window| window == input_bytes)
+        .unwrap();
+    bytes[offset] = 2;
     assert!(
         decode_sync_message(&bytes).is_err(),
-        "raw legacy result-member payload must also fail closed"
+        "a third supporting-input variant must fail decoding"
     );
 }
 
@@ -1097,7 +1112,7 @@ fn covered_input_source_paths_require_an_exact_valid_v1_identity() {
     let SyncMessage::ViewUpdate(mut invalid) = message else {
         panic!("covered-input corpus is a view update");
     };
-    let ProgramFactEntry::CoveredInput(input) = &mut invalid.program_fact_adds[0] else {
+    let jazz::protocol::SupportingInput::Row(input) = &mut invalid.input_adds[0] else {
         panic!("covered-input corpus carries the fact");
     };
     input.source.path = vec![ProgramSourceRole::Alias(String::new())];

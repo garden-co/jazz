@@ -14,7 +14,7 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         subscription,
         settled_through: GlobalTime(0),
         defer_settlement: false,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: Vec::new(),
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
@@ -85,15 +85,13 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -103,12 +101,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         subscription,
         core.whole_table_subscription_key("todos").unwrap()
     );
-    assert!(reset_result_set);
-    assert!(
-        result_member_adds.is_empty(),
-        "peer frames carry source/version closure, never authority result membership"
-    );
-    assert!(result_member_removes.is_empty());
+    assert!(reset_input_set);
     assert_eq!(version_bundles.len(), 1);
     assert!(peer_payload_inventory_refs.is_empty());
 
@@ -117,7 +110,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set,
+            reset_input_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -125,10 +118,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         })
         .unwrap();
 
@@ -250,27 +243,25 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = initial
     else {
         panic!("expected view update");
     };
-    assert!(reset_result_set);
+    assert!(reset_input_set);
     reader
         .apply_view_update(ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set,
+            reset_input_set,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -278,10 +269,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         })
         .unwrap();
 
@@ -302,10 +293,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs, ..
             },
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = deduped
     else {
@@ -313,11 +302,9 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     };
     assert!(version_bundles.is_empty());
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
+        crate::protocol::SupportingInput::Row(input)
             if input.source_row == row && input.version.tx == tx_id
     )));
     reader
@@ -327,7 +314,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             defer_settlement: false,
             // This is another complete snapshot, using the peer's cached bodies.
             // It is not a live addition of the already-covered input.
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -335,10 +322,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
         })
         .unwrap();
 }
@@ -356,7 +343,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
             settled_through: GlobalTime(0),
             defer_settlement: false,
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
             authorization_progress: None,

@@ -452,11 +452,11 @@ fn m2_writer_core_reader_converges_against_oracle() {
             let SyncMessage::ViewUpdate(payload) = &update else {
                 panic!("expected view update");
             };
-            assert!(!payload.reset_result_set);
-            assert!(payload.program_fact_adds.iter().any(|fact| {
+            assert!(!payload.reset_input_set);
+            assert!(payload.input_adds.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::protocol::ProgramFactEntry::CoveredInput(input)
+                    crate::protocol::SupportingInput::Row(input)
                         if input.source_row == row_a
                             && input.version.tx == tx_id
                             && input.version.layer == crate::protocol::ResultRowLayer::Deletion

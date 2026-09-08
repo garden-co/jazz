@@ -1785,7 +1785,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = message
     else {
@@ -1795,9 +1795,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let tables = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                Some(input.version_table.as_str())
-            }
+            crate::protocol::SupportingInput::Row(input) => Some(input.version_table.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1827,7 +1825,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = message
     else {
@@ -1837,9 +1835,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let tables = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                Some(input.version_table.as_str())
-            }
+            crate::protocol::SupportingInput::Row(input) => Some(input.version_table.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();

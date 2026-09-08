@@ -936,13 +936,11 @@ impl PerNodeKnowledge {
 
     fn record_view_delivery(&mut self, message: &SyncMessage) {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set,
+            reset_input_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) = message
         else {
@@ -953,22 +951,22 @@ impl PerNodeKnowledge {
         // node/views.rs: empty resets against non-empty shared state are
         // coverage stamps, not replacement snapshots. Sanctioned by reviewer
         // instruction for the Plan 5 close-out seed 2210401 diagnosis.
-        let empty_reset = *reset_result_set
+        let empty_reset = *reset_input_set
             && version_carriers.is_empty()
             && peer_payload_inventory.complete_tx_payloads.is_empty()
-            && result_member_adds.is_empty()
-            && result_member_removes.is_empty()
+
+
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty();
         let preserve_existing_shared_state =
             empty_reset && !self.subscription_entries.is_empty();
-        if *reset_result_set && !preserve_existing_shared_state {
+        if *reset_input_set && !preserve_existing_shared_state {
             self.subscription_entries.clear();
         }
         let result_add_keys = program_fact_adds
             .iter()
             .filter_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => {
+                crate::protocol::SupportingInput::Row(input) => {
                     Some((input.version.tx, input.source_row))
                 }
                 _ => None,
@@ -987,13 +985,13 @@ impl PerNodeKnowledge {
             }
         }
         for fact in program_fact_adds {
-            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+            if let crate::protocol::SupportingInput::Row(input) = fact {
                 self.subscription_entries
                     .insert((input.version.tx, input.source_row));
             }
         }
         for fact in program_fact_removes {
-            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
+            if let crate::protocol::SupportingInput::Row(input) = fact {
                 self.subscription_entries
                     .remove(&(input.version.tx, input.source_row));
             }
@@ -1062,9 +1060,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
-        program_fact_adds,
-        result_member_adds,
-        result_member_removes,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
@@ -1074,14 +1070,10 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         complete_tx_payload_refs.is_empty(),
         "full view recomputation should carry bundles for every visible member"
     );
-    assert!(
-        result_member_adds.is_empty() && result_member_removes.is_empty(),
-        "peer current-row updates carry receiver source closure, never authority result members"
-    );
     let result_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
+            crate::protocol::SupportingInput::Row(input)
                 if input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
                 Some(input.source_row)
@@ -1443,7 +1435,7 @@ fn commit_core_owner_fixture(
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = update
     else {
@@ -1457,7 +1449,7 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     let covered_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
             _ => None,
         })
         .collect::<BTreeSet<_>>();

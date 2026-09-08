@@ -339,24 +339,20 @@ pub struct CurrentRowsReceipt {
 /// authorization-scope wrappers impossible to construct and decode.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ViewUpdatePayload {
-    /// Target subscription whose result set this update changes.
+    /// Target subscription whose supporting input set this update changes.
     pub subscription: SubscriptionKey,
     /// Authority cut through which this view has settled.
     pub settled_through: GlobalTime,
-    /// Whether the receiver must replace its current result membership.
-    pub reset_result_set: bool,
+    /// Whether the receiver must replace its current supporting input set.
+    pub reset_input_set: bool,
     /// Compact carriers for versions referenced by this update.
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Result members added by the update.
-    pub result_member_adds: Vec<ResultMemberEntry>,
-    /// Result members removed by the update.
-    pub result_member_removes: Vec<ResultMemberEntry>,
-    /// Program facts added by this update.
-    pub program_fact_adds: Vec<ProgramFactEntry>,
-    /// Program facts removed by this update.
-    pub program_fact_removes: Vec<ProgramFactEntry>,
+    /// Supporting source inputs added by this update.
+    pub input_adds: Vec<SupportingInput>,
+    /// Supporting source inputs removed by this update.
+    pub input_removes: Vec<SupportingInput>,
 }
 
 impl ViewUpdatePayload {
@@ -743,36 +739,22 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
-        // Peer view frames carry only the authority-selected source closure.
-        // Result membership and materialized result payloads are authority
-        // output, never receiver input: accepting either would bypass the
-        // receiver-local maintained graph and its exact coverage receipt.
-        if !view.result_member_adds.is_empty()
-            || !view.result_member_removes.is_empty()
-            || view
-                .program_fact_adds
-                .iter()
-                .chain(&view.program_fact_removes)
-                .any(|fact| !fact.is_peer_source_closure_fact())
-        {
-            return Err(WireContractError::NonClosurePeerViewFact);
-        }
         if view
-            .program_fact_adds
+            .input_adds
             .iter()
-            .chain(&view.program_fact_removes)
-            .any(|fact| matches!(fact, ProgramFactEntry::CoveredInput(input) if !input.is_wire_valid()))
+            .chain(&view.input_removes)
+            .any(|fact| matches!(fact, SupportingInput::Row(input) if !input.is_wire_valid()))
         {
             return Err(WireContractError::InvalidCoveredInput);
         }
         if view
-            .program_fact_adds
+            .input_adds
             .iter()
-            .chain(&view.program_fact_removes)
+            .chain(&view.input_removes)
             .any(|fact| {
                 matches!(
                     fact,
-                    ProgramFactEntry::ProgramSourceCoverage(coverage)
+                    SupportingInput::SourceComplete(coverage)
                         if !coverage.complete || !coverage.source.is_wire_valid()
                 )
             })
@@ -784,11 +766,11 @@ impl SyncMessage {
         // a receiver depend on arbitrary application order), so only the
         // authority may collapse terminal batches into a disjoint transition.
         let added_facts = view
-            .program_fact_adds
+            .input_adds
             .iter()
             .collect::<std::collections::BTreeSet<_>>();
         if view
-            .program_fact_removes
+            .input_removes
             .iter()
             .any(|fact| added_facts.contains(fact))
         {
@@ -799,8 +781,8 @@ impl SyncMessage {
         // between one empty source and two competing receipts before the
         // receiver's durable fact set can coalesce them.
         let mut coverage_sources = std::collections::BTreeSet::new();
-        if view.program_fact_adds.iter().any(|fact| {
-            let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
+        if view.input_adds.iter().any(|fact| {
+            let SupportingInput::SourceComplete(coverage) = fact else {
                 return false;
             };
             !coverage_sources.insert(coverage.source.clone())
@@ -827,9 +809,6 @@ pub enum WireContractError {
     InvalidCoveredInput,
     /// A program-source closure receipt is incomplete or noncanonical.
     InvalidProgramSourceCoverage,
-    /// A peer frame attempted to carry authority terminal output, an internal
-    /// proof, or another fact outside the receiver source-closure contract.
-    NonClosurePeerViewFact,
     /// One unordered peer source-closure frame attempted to both add and
     /// remove the same fact rather than naming a canonical net transition.
     OverlappingPeerSourceClosureDelta,
@@ -842,9 +821,6 @@ impl std::fmt::Display for WireContractError {
             Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
             Self::InvalidProgramSourceCoverage => {
                 write!(f, "program-source coverage receipt is invalid")
-            }
-            Self::NonClosurePeerViewFact => {
-                write!(f, "peer view update carries a non-closure program fact")
             }
             Self::OverlappingPeerSourceClosureDelta => {
                 write!(
@@ -3989,6 +3965,38 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
     }
 }
 
+/// One authority-selected supporting input for a receiver-local query.
+///
+/// Rendered results and internal policy facts are deliberately unrepresentable.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum SupportingInput {
+    /// Exact source occurrence and row-version identity, including self-joins and lenses.
+    Row(CoveredInputEntry),
+    /// Completeness for one normalized source occurrence.
+    SourceComplete(ProgramSourceCoverageEntry),
+}
+
+impl TryFrom<ProgramFactEntry> for SupportingInput {
+    type Error = &'static str;
+
+    fn try_from(fact: ProgramFactEntry) -> Result<Self, Self::Error> {
+        match fact {
+            ProgramFactEntry::CoveredInput(row) => Ok(Self::Row(row)),
+            ProgramFactEntry::ProgramSourceCoverage(source) => Ok(Self::SourceComplete(source)),
+            _ => Err("internal program fact is not a supporting input"),
+        }
+    }
+}
+
+impl From<SupportingInput> for ProgramFactEntry {
+    fn from(input: SupportingInput) -> Self {
+        match input {
+            SupportingInput::Row(row) => Self::CoveredInput(row),
+            SupportingInput::SourceComplete(source) => Self::ProgramSourceCoverage(source),
+        }
+    }
+}
+
 /// One typed non-row fact emitted by a maintained view.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub enum ProgramFactEntry {
@@ -6023,7 +6031,7 @@ mod tests {
 
     #[test]
     fn peer_view_rejects_overlapping_source_closure_delta() {
-        let fact = ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+        let fact = SupportingInput::SourceComplete(ProgramSourceCoverageEntry {
             source: ProgramSourceId {
                 table: "todos".to_owned().into(),
                 path: vec![ProgramSourceRole::Root],
@@ -6037,13 +6045,11 @@ mod tests {
                 read_view: ReadViewKey::default(),
             },
             settled_through: GlobalTime(0),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: vec![fact.clone()],
-            program_fact_removes: vec![fact],
+            input_adds: vec![fact.clone()],
+            input_removes: vec![fact],
         });
 
         assert!(matches!(

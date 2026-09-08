@@ -542,8 +542,8 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
     relay
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
-    let update = |subscription, reset_result_set: bool, opening_pending: bool, defer_settlement| {
-        let program_fact_adds = (reset_result_set && !opening_pending)
+    let update = |subscription, reset_input_set: bool, opening_pending: bool, defer_settlement| {
+        let program_fact_adds = (reset_input_set && !opening_pending)
             .then(|| {
                 vec![
                     crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
@@ -576,7 +576,7 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
             subscription,
             settled_through: crate::time::GlobalTime(7),
             defer_settlement,
-            reset_result_set,
+            reset_input_set,
             version_carriers: Vec::new(),
             peer_complete_tx_payload_refs: Vec::new(),
             authorization_progress: Some(3),
@@ -1126,8 +1126,14 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                     panic!("Edge scalar subscription must produce a view update");
                 };
                 assert!(
-                    payload.result_member_adds.is_empty()
-                        && payload.result_member_removes.is_empty(),
+                    payload
+                        .input_adds
+                        .iter()
+                        .chain(&payload.input_removes)
+                        .all(|input| matches!(
+                            input,
+                            crate::protocol::SupportingInput::SourceComplete(_)
+                        )),
                     "a Local-only deletion must not change Edge result membership"
                 );
                 reader
@@ -1493,10 +1499,10 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let initial = peer.rehydrate_query(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_adds, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_adds: program_fact_adds, .. })
             if program_fact_adds.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source_row == target && input.version.tx == initial_tx
             ))
     ));
@@ -1515,10 +1521,10 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let transfer_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         transfer_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_removes, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_removes: program_fact_removes, .. })
             if program_fact_removes.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source_row == target && input.version.tx == initial_tx
             ))
     ));
@@ -1538,10 +1544,10 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let regrant = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         regrant,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_adds, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_adds: program_fact_adds, .. })
             if program_fact_adds.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source_row == target && input.version.tx == restored_tx
             ))
     ));
@@ -1549,10 +1555,10 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let delete_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         delete_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { program_fact_removes, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_removes: program_fact_removes, .. })
             if program_fact_removes.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                crate::protocol::SupportingInput::Row(input)
                     if input.source_row == target && input.version.tx == restored_tx
             ))
     ));
@@ -1648,12 +1654,12 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .rehydrate_query(&mut server, &shape, &alice_binding)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set, ..
+        reset_input_set, ..
     }) = &reset
     else {
         panic!("expected view update");
     };
-    assert!(reset_result_set);
+    assert!(reset_input_set);
     reader.apply_sync_message_settled(reset).unwrap();
     assert_eq!(
         receiver_rows(&mut reader, &shape, &alice_binding, DurabilityTier::Global).len(),
@@ -1847,23 +1853,16 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        input_adds: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    assert!(
-        result_member_adds.is_empty(),
-        "peer receipts must not carry authority-rendered result members"
-    );
     let covered_source_tables = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                Some(input.version_table.to_string())
-            }
+            crate::protocol::SupportingInput::Row(input) => Some(input.version_table.to_string()),
             _ => None,
         })
         .collect::<BTreeSet<_>>();

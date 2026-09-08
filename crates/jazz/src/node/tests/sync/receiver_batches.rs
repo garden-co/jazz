@@ -58,7 +58,7 @@ fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
         subscription,
         settled_through: GlobalTime(0),
         defer_settlement: false,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: Vec::new(),
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
@@ -97,19 +97,19 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     let mut incremental_update = update.clone();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
-        program_fact_adds,
+        reset_input_set,
+        input_adds: program_fact_adds,
         ..
     }) = &mut incremental_update
     else {
         panic!("expected view update");
     };
-    *reset_result_set = false;
+    *reset_input_set = false;
     // The explicit predecessor reset above already installed this source's
     // coverage. A live transition carries only the row facts that follow it;
     // source coverage is reset-only under the receiver contract.
     program_fact_adds.retain(|fact| {
-        !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_))
+        !matches!(fact, crate::protocol::SupportingInput::SourceComplete(_))
     });
 
     register_whole_table_receiver(&mut bulk_reader, "todos");
@@ -174,11 +174,11 @@ fn snapshot_ingestion_advances_clock_before_a_local_edit() {
             let SyncMessage::ViewUpdate(payload) = &mut update else {
                 panic!("expected view update");
             };
-            payload.reset_result_set = false;
-            payload.program_fact_adds.retain(|fact| {
+            payload.reset_input_set = false;
+            payload.input_adds.retain(|fact| {
                 !matches!(
                     fact,
-                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
+                    crate::protocol::SupportingInput::SourceComplete(_)
                 )
             });
         }
@@ -224,10 +224,8 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
         subscription,
         settled_through,
         peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = update
     else {
@@ -239,7 +237,8 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     // Its following live transition must carry only row facts.
     let program_fact_adds = program_fact_adds
         .into_iter()
-        .filter(|fact| !matches!(fact, crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)))
+        .filter(|fact| !matches!(fact, crate::protocol::SupportingInput::SourceComplete(_)))
+        .map(Into::into)
         .collect();
 
     reader
@@ -249,7 +248,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -257,10 +256,10 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
-            result_member_adds,
-            result_member_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
             program_fact_adds,
-            program_fact_removes,
+            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
             },
         ])
         .unwrap();
@@ -286,10 +285,10 @@ fn complete_parent_receiver_update(
     subscription: SubscriptionKey,
     tx: Transaction,
     version: VersionRecord,
-    reset_result_set: bool,
+    reset_input_set: bool,
 ) -> ViewUpdateParts {
     let tx_id = tx.tx_id;
-    let program_fact_adds = if reset_result_set {
+    let program_fact_adds = if reset_input_set {
         todos_source_closure(tx_id, std::slice::from_ref(&version))
     } else {
         vec![todos_covered_input(tx_id, &version)]
@@ -298,7 +297,7 @@ fn complete_parent_receiver_update(
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
-        reset_result_set,
+        reset_input_set,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx,
@@ -527,7 +526,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 subscription,
                 settled_through: global_time,
                 defer_settlement: false,
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: Vec::new(),
                 peer_complete_tx_payload_refs: Vec::new(),
                 authorization_progress: None,
@@ -541,7 +540,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 subscription,
                 settled_through: global_time,
                 defer_settlement: false,
-                reset_result_set: false,
+                reset_input_set: false,
                 version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                     scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                     tx,
@@ -608,7 +607,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 subscription,
                 settled_through: GlobalTime(1),
                 defer_settlement: false,
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                     scope: crate::protocol::VersionBundleScope::ViewScoped,
                     tx: redacted_tx.clone(),
@@ -629,7 +628,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 subscription,
                 settled_through: GlobalTime(1),
                 defer_settlement: false,
-                reset_result_set: true,
+                reset_input_set: true,
                 version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                     scope: crate::protocol::VersionBundleScope::ViewScoped,
                     tx: redacted_tx,
@@ -734,7 +733,7 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::ViewScoped,
             tx: tx.clone(),
@@ -822,7 +821,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: false,
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::ViewScoped,
                 tx,
@@ -918,7 +917,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         defer_settlement: false,
         // Repeated body delivery is valid across fresh complete snapshots,
         // not as a duplicate live covered-input addition.
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: tx.clone(),
@@ -1081,7 +1080,7 @@ fn reset_accepts_identical_annotated_duplicates() {
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: false,
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
                 .unwrap(),
             peer_complete_tx_payload_refs: Vec::new(),
@@ -1104,7 +1103,7 @@ fn reset_accepts_identical_annotated_duplicates() {
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: true,
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: tx.clone(),
@@ -1443,7 +1442,7 @@ fn reset_scope_update(
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: true,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
@@ -1526,7 +1525,7 @@ fn assert_reset_authored_columns_conflict(
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: true,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers,
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
@@ -1708,7 +1707,7 @@ fn partial_exclusive_view_update(
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
-        reset_result_set: false,
+        reset_input_set: false,
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::ViewScoped,
             tx,
@@ -1800,7 +1799,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             subscription,
             settled_through: new_seq,
             defer_settlement: false,
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(vec![
                 VersionBundle {
                     scope: crate::protocol::VersionBundleScope::CompleteTransaction,
@@ -1872,7 +1871,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::ViewScoped,
                 tx: redacted_tx.clone(),
@@ -1882,10 +1881,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: first_closure,
-            program_fact_removes: Vec::new(),
+            input_adds: first_closure.into_iter().map(|fact| fact.try_into().unwrap()).collect(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
     assert_eq!(
@@ -1906,7 +1903,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::ViewScoped,
                 tx: redacted_tx,
@@ -1916,10 +1913,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: second_closure,
-            program_fact_removes: Vec::new(),
+            input_adds: second_closure.into_iter().map(|fact| fact.try_into().unwrap()).collect(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
     assert_eq!(
@@ -1960,7 +1955,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::ViewScoped,
                 tx: redacted_tx,
@@ -1970,10 +1965,8 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: first_closure,
-            program_fact_removes: Vec::new(),
+            input_adds: first_closure.into_iter().map(|fact| fact.try_into().unwrap()).collect(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
@@ -1987,7 +1980,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
         .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
-            reset_result_set: false,
+            reset_input_set: false,
             version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx,
@@ -1997,10 +1990,8 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: complete_closure,
-            program_fact_removes: Vec::new(),
+            input_adds: complete_closure.into_iter().map(|fact| fact.try_into().unwrap()).collect(),
+            input_removes: Vec::new(),
         }))
         .unwrap();
     let stored = reader.query_transaction(tx_id).unwrap().unwrap();

@@ -533,14 +533,10 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
                         "never-accepted version carriers must not leak after policy revocation"
                     );
                     assert!(
-                        update.result_member_adds.is_empty(),
-                        "forbidden result members must not be published after revocation"
-                    );
-                    assert!(
-                        !update.program_fact_adds.iter().any(|fact| matches!(
-                            fact,
-                            crate::protocol::ProgramFactEntry::CoveredInput(_)
-                        )),
+                        !update
+                            .input_adds
+                            .iter()
+                            .any(|fact| matches!(fact, crate::protocol::SupportingInput::Row(_))),
                         "forbidden CoveredInput additions must not survive in the saved envelope"
                     );
                     self.after_revocation.borrow_mut().push(message.clone());
@@ -617,9 +613,9 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
         );
         assert!(
             update
-                .program_fact_adds
+                .input_adds
                 .iter()
-                .any(|fact| matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_))),
+                .any(|fact| matches!(fact, crate::protocol::SupportingInput::Row(_))),
             "blocked publication must contain an authorized input fact"
         );
     }
@@ -678,9 +674,9 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
             .is_empty()
     );
     assert!(after_revocation.borrow().iter().any(|message| matches!(message,
-        SyncMessage::ViewUpdate(update) if update.reset_result_set && !update.peer_payload_inventory.opening_pending
-            && update.program_fact_adds.iter().any(|fact| matches!(fact,
-                crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete)))),
+        SyncMessage::ViewUpdate(update) if update.reset_input_set && !update.peer_payload_inventory.opening_pending
+            && update.input_adds.iter().any(|fact| matches!(fact,
+                crate::protocol::SupportingInput::SourceComplete(coverage) if coverage.complete)))),
         "replacement must carry a complete, truthful empty coverage opening");
     foreground.detach_query(attachment);
 }
@@ -1077,9 +1073,10 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
             for message in inbound.borrow().iter() {
                 if let SyncMessage::ViewUpdate(payload) = message
                     && !payload.peer_payload_inventory.opening_pending
-                    && payload.program_fact_adds.iter().any(|fact| {
-                        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(_))
-                    })
+                    && payload
+                        .input_adds
+                        .iter()
+                        .any(|fact| matches!(fact, crate::protocol::SupportingInput::Row(_)))
                 {
                     opening = Some(payload.clone());
                 }
@@ -1092,7 +1089,7 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
         let failure = if malformed_closure {
             // A duplicate addition is impossible in the ordered predecessor
             // sequence. The relay must reject it and expose that error below.
-            opening.reset_result_set = false;
+            opening.reset_input_set = false;
             SyncMessage::ViewUpdate(opening)
         } else {
             SyncMessage::SubscribeRejected {
@@ -1159,11 +1156,11 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
 /// Peer updates disclose the exact authority-approved source closure. A client
 /// derives result membership locally, so protocol-facing tests inspect source
 /// inputs rather than the retired authority-rendered member payload.
-fn covered_input_rows(facts: &[crate::protocol::ProgramFactEntry]) -> Vec<RowUuid> {
+fn covered_input_rows(facts: &[crate::protocol::SupportingInput]) -> Vec<RowUuid> {
     facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
+            crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
             _ => None,
         })
         .collect()
@@ -1297,16 +1294,16 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         })
         .expect("duplicate usage site must receive its own ViewUpdate");
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_result_set,
+        reset_input_set,
         peer_payload_inventory,
-        program_fact_adds,
-        program_fact_removes,
+        input_adds: program_fact_adds,
+        input_removes: program_fact_removes,
         ..
     }) = &second_update
     else {
         unreachable!();
     };
-    assert!(*reset_result_set);
+    assert!(*reset_input_set);
     assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
     assert_eq!(
         covered_input_rows(program_fact_adds).len(),
@@ -2046,18 +2043,16 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(settled_through),
-            reset_result_set: true,
+            reset_input_set: true,
             version_carriers: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 opening_pending,
                 ..Default::default()
             },
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: if opening_pending {
+            input_adds: if opening_pending {
                 Vec::new()
             } else {
-                vec![crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
+                vec![crate::protocol::SupportingInput::SourceComplete(
                     crate::protocol::ProgramSourceCoverageEntry {
                         source: crate::protocol::ProgramSourceId {
                             table: "todos".to_owned().into(),
@@ -2067,7 +2062,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
                     },
                 )]
             },
-            program_fact_removes: Vec::new(),
+            input_removes: Vec::new(),
         })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
@@ -2481,15 +2476,9 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
             1,
             "refresh has one shared successor, not one per listener"
         );
-        assert_eq!(
-            covered_input_rows(&updates[0].program_fact_adds),
-            vec![fresh]
-        );
-        if !updates[0].reset_result_set {
-            assert_eq!(
-                covered_input_rows(&updates[0].program_fact_removes),
-                vec![stale]
-            );
+        assert_eq!(covered_input_rows(&updates[0].input_adds), vec![fresh]);
+        if !updates[0].reset_input_set {
+            assert_eq!(covered_input_rows(&updates[0].input_removes), vec![stale]);
         }
     }
     client.tick().unwrap();
@@ -2520,9 +2509,7 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
         .borrow()
         .iter()
         .filter_map(|message| match message {
-            SyncMessage::ViewUpdate(update) => {
-                Some(covered_input_rows(&update.program_fact_removes))
-            }
+            SyncMessage::ViewUpdate(update) => Some(covered_input_rows(&update.input_removes)),
             _ => None,
         })
         .flatten()
@@ -3030,11 +3017,8 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         );
         let (update_index, update) = updates[0];
         assert!(update_index < rejection_index);
-        assert_eq!(covered_input_rows(&update.program_fact_adds), vec![fresh]);
-        assert_eq!(
-            covered_input_rows(&update.program_fact_removes),
-            vec![stale]
-        );
+        assert_eq!(covered_input_rows(&update.input_adds), vec![fresh]);
+        assert_eq!(covered_input_rows(&update.input_removes), vec![stale]);
         sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
     }
     assert_eq!(

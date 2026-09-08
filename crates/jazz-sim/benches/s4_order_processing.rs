@@ -2216,8 +2216,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             version_bundle_refs(version_carriers)
@@ -2225,7 +2223,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
@@ -2234,14 +2231,14 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) => program_fact_adds
             .iter()
             .chain(program_fact_removes)
             .filter_map(|fact| match fact {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
+                jazz::protocol::SupportingInput::Row(input)
                     if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
                 {
                     Some((&input.version_table, input.source_row, input.version.tx))

@@ -69,10 +69,8 @@ fn main() {
         let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            input_adds: program_fact_adds,
+            input_removes: program_fact_removes,
             ..
         }) = &update
         else {
@@ -83,9 +81,25 @@ fn main() {
         let emitted_bundles = expanded_bundles.len();
         let expected_bundles = rows - known_count;
         assert_eq!(emitted_bundles, expected_bundles);
+        let result_member_adds = program_fact_adds
+            .iter()
+            .filter_map(|input| match input {
+                jazz::protocol::SupportingInput::Row(input) => {
+                    Some(jazz::protocol::ResultMemberEntry::from((
+                        input.version_table.clone(),
+                        input.source_row,
+                        input.version.tx,
+                    )))
+                }
+                jazz::protocol::SupportingInput::SourceComplete(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let result_member_removes = program_fact_removes
+            .iter()
+            .filter(|input| matches!(input, jazz::protocol::SupportingInput::Row(_)))
+            .collect::<Vec<_>>();
         assert_eq!(result_member_adds.len(), rows);
         assert!(result_member_removes.is_empty());
-        assert!(program_fact_adds.is_empty());
         assert!(program_fact_removes.is_empty());
         let expected_versions = versions
             .iter()
@@ -102,7 +116,7 @@ fn main() {
             .collect::<BTreeSet<_>>();
         assert_eq!(covered_versions, expected_versions);
 
-        let digest = membership_digest(result_member_adds);
+        let digest = membership_digest(&result_member_adds);
         match &expected_digest {
             Some(expected) => assert_eq!(&digest, expected, "known-state changed membership"),
             None => expected_digest = Some(digest.clone()),
