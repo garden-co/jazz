@@ -543,7 +543,69 @@ function isMainModule(): boolean {
   return realpathOrSelf(entry) === realpathOrSelf(fileURLToPath(import.meta.url));
 }
 
+function printHelp(): void {
+  console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
+  console.log("\nCommands:");
+  console.log("  validate              Validate root schema.ts and optional permissions.ts");
+  console.log("  schema hash           Print the short hash of the current schema.ts");
+  console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
+  console.log("  permissions status <appId> Show the current server permissions head for this app");
+  console.log(
+    "  migrations create     Generate a typed structural migration stub between two schema versions",
+  );
+  console.log(
+    "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
+  );
+  console.log("\nValidation options:");
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
+  console.log("\nSchema hash options:");
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log("\nSchema export options:");
+  console.log(
+    "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+  );
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
+  console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
+  console.log(
+    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
+  );
+  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
+  console.log("\nPermissions options:");
+  console.log(
+    "  <appId>               Required (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+  );
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log(
+    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
+  );
+  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
+  console.log("\nMigration options:");
+  console.log(
+    "  <appId>               Required for remote create/push commands (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+  );
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log(
+    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
+  );
+  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
+  console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
+  console.log("  --fromHash <hash>     Optional source schema hash (defaults to latest snapshot)");
+  console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
+  console.log("  --name <name>         Optional migration filename label (default: unnamed)");
+  console.log("\nGlobal options:");
+  console.log(
+    "  --env-file <path>     Load env vars from this file (repeatable; first file wins per key). Defaults to .env in cwd.",
+  );
+}
+
 if (isMainModule()) {
+  if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
+    printHelp();
+    process.exit(0);
+  }
   const envFiles = readEnvFiles(process.argv.slice(2));
   if (envFiles.length > 0) {
     for (const file of envFiles) {
@@ -663,65 +725,7 @@ if (isMainModule()) {
       process.exit(1);
     });
   } else {
-    console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
-    console.log("\nCommands:");
-    console.log("  validate              Validate root schema.ts and optional permissions.ts");
-    console.log("  schema hash           Print the short hash of the current schema.ts");
-    console.log("  schema export         Print the compiled structural schema as JSON");
-    console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
-    console.log(
-      "  permissions status <appId> Show the current server permissions head for this app",
-    );
-    console.log(
-      "  migrations create     Generate a typed structural migration stub between two schema versions",
-    );
-    console.log(
-      "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
-    );
-    console.log("\nValidation options:");
-    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-    console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
-    console.log("\nSchema hash options:");
-    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-    console.log("\nSchema export options:");
-    console.log(
-      "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-    );
-    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-    console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
-    console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
-    console.log(
-      "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-    );
-    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-    console.log("\nPermissions options:");
-    console.log(
-      "  <appId>               Required (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-    );
-    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-    console.log(
-      "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-    );
-    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-    console.log("\nMigration options:");
-    console.log(
-      "  <appId>               Required for remote create/push commands (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-    );
-    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-    console.log(
-      "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-    );
-    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-    console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
-    console.log(
-      "  --fromHash <hash>     Optional source schema hash (defaults to latest snapshot)",
-    );
-    console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
-    console.log("  --name <name>         Optional migration filename label (default: unnamed)");
-    console.log("\nGlobal options:");
-    console.log(
-      "  --env-file <path>     Load env vars from this file (repeatable; first file wins per key). Defaults to .env in cwd.",
-    );
+    printHelp();
     process.exit(command ? 1 : 0);
   }
 }
