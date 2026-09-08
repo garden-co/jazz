@@ -77,6 +77,7 @@ import {
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   type WebSocketNegotiation,
+  type WireError,
   wireAuthFailureReason,
 } from "./websocket.js";
 import {
@@ -102,6 +103,7 @@ import {
 export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
+const NETWORK_RETRY_LIMIT = 10;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
@@ -584,6 +586,7 @@ type ServerConnectionAttempt = {
   outcome: Error | null;
   transport: Transport | null;
   retirement: Promise<void> | null;
+  recovery?: Promise<WebSocketCarrier>;
 };
 
 type AuxiliaryRelayTrace = {
@@ -797,6 +800,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private serverReconnectReject: ((error: Error) => void) | null = null;
   private preHelloRetryCount = 0;
+  private networkRetryCount = 0;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
@@ -2428,6 +2432,7 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onError: (error) => {
         if (error.code === "not_ready" && error.retry === "later") return;
+        if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
         this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
@@ -2435,6 +2440,10 @@ export class NativeRuntimeAdapter implements Runtime {
       onTerminal: (error) => {
         if (!attempt) return;
         if (error.code === "not_ready" && error.retry === "later") return;
+        if (this.canRetryNetworkConnection(attempt, error)) {
+          const recovery = this.retryNetworkConnection(attempt, error);
+          if (recovery) return;
+        }
         this.finishServerConnectionAttempt(attempt, new Error(error.message));
       },
     });
@@ -2487,6 +2496,7 @@ export class NativeRuntimeAdapter implements Runtime {
           await this.retirePeerTransport(transport);
           return carrier;
         }
+        this.networkRetryCount = 0;
         attempt.transport = transport;
         this.serverTransport = transport;
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
@@ -2497,6 +2507,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return carrier;
       })
       .catch((error) => {
+        if (attempt.recovery) return attempt.recovery;
         if (isRetryablePreHelloWireError(error)) {
           const retry = this.retryPreHelloConnection(attempt);
           if (retry) return retry;
@@ -2557,7 +2568,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverConnectionGeneration += 1;
     this.clearServerReconnectTimer();
-    if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;
+    if (!options.preservePreHelloRetry) {
+      this.preHelloRetryCount = 0;
+      this.networkRetryCount = 0;
+    }
     const attempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (attempt) {
@@ -4196,6 +4210,59 @@ export class NativeRuntimeAdapter implements Runtime {
     this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
+  }
+
+  private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
+    return (
+      !this.closed &&
+      attempt === this.serverConnectionAttempt &&
+      attempt.generation === this.serverConnectionGeneration &&
+      error.retry === "later" &&
+      (error.code === "websocket_closed" || error.code === "websocket_error") &&
+      (attempt.transport !== null || this.networkRetryCount > 0) &&
+      this.networkRetryCount < NETWORK_RETRY_LIMIT
+    );
+  }
+
+  /** Retry an established upstream without turning a temporary outage into a query failure. */
+  private retryNetworkConnection(
+    attempt: ServerConnectionAttempt,
+    error: WireError,
+  ): Promise<WebSocketCarrier> | null {
+    if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
+    const url = this.serverEndpointUrl;
+    const authJson = this.serverAuthJson;
+    const delay = Math.min(100 * 2 ** this.networkRetryCount++, 1_000);
+    // Retire this generation before any suspended pump or handshake can report
+    // its close as a terminal failure. Native subscriptions survive the detach.
+    this.serverConnectionGeneration += 1;
+    this.serverConnectionAttempt = null;
+    this.serverCarrier = null;
+    this.finishServerConnectionAttempt(attempt, new Error(error.message));
+    this.resolveServerTransportWorkWaiters();
+    const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
+      this.serverReconnectReject = reject;
+      this.serverReconnectTimer = setTimeout(() => {
+        this.serverReconnectTimer = null;
+        this.serverReconnectReject = null;
+        void (async () => {
+          await attempt.retirement;
+          if (this.closed || this.serverEndpointUrl !== url || this.serverAuthJson !== authJson) {
+            throw new Error("server transport disconnected");
+          }
+          this.connect(url, authJson);
+          if (!this.serverCarrierPromise)
+            throw new Error("server transport reconnect was not started");
+          return await this.serverCarrierPromise;
+        })().then(resolve, reject);
+      }, delay);
+    });
+    attempt.recovery = recovery;
+    this.serverCarrierPromise = recovery;
+    // Each attempt's catch already reports terminal failures. Cancellation by
+    // explicit disconnect/close must not publish a historical transport error.
+    void recovery.catch(() => undefined);
+    return recovery;
   }
 
   /**
