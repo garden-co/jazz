@@ -3,6 +3,13 @@ import { createAccountManager, createDb } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 
+// Exercise the public native entry point, including its provider exports. Metro
+// transforms React Native's Flow source; this Node runner needs host UI stubs.
+vi.mock("react-native", () => ({
+  View: "native-view",
+  Text: "native-text",
+  Pressable: "native-pressable",
+}));
 const mocks = vi.hoisted(() => ({ install: vi.fn() }));
 vi.mock("jazz-rn/relay", () => ({ installNativeForegroundRuntime: mocks.install }));
 vi.mock("../runtime/default-runtime-source.js", () => {
