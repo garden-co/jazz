@@ -9,7 +9,12 @@ if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
 export default defineConfig({
   plugins: [svelte()],
   resolve: {
-    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+    alias: [
+      { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
+      ...(sealedWasmPackage
+        ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]
+        : []),
+    ],
   },
   test: {
     environment: "node",

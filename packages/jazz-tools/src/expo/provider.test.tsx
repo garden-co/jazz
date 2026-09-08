@@ -3,11 +3,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("./create-jazz-session.js", () => ({ createJazzSession: host.create }));
-vi.mock("react-native", () => ({
-  View: "native-view",
-  Text: "native-text",
-  Pressable: "native-pressable",
-}));
+
 import { JazzProvider } from "./provider.js";
 afterEach(cleanup);
 it("uses the Expo host factory and native loading/recovery controls", async () => {

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 export default defineConfig({
   resolve: {
     alias: [
+      { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
       {
         find: "jazz-rn/relay",
         replacement: resolve(__dirname, "../../crates/jazz-rn/src/relay.ts"),

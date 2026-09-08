@@ -11,11 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./create-jazz-session.js", () => ({ createJazzSession: mocks.createJazzSession }));
-vi.mock("react-native", () => ({
-  View: "native-view",
-  Text: "native-text",
-  Pressable: "native-pressable",
-}));
+
 vi.mock("./create-jazz-client.js", () => ({
   createJazzClient: mocks.createJazzClient,
 }));
