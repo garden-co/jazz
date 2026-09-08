@@ -530,7 +530,10 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .unwrap();
-    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (temp_dir, node)
 }
 

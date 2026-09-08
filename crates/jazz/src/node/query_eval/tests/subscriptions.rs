@@ -573,6 +573,7 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
             })
             .unwrap_or_default();
         crate::node::ViewUpdateParts {
+            wire_rows: None,
             subscription,
             settled_through: crate::time::GlobalTime(7),
             defer_settlement,
@@ -1125,17 +1126,7 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                 let SyncMessage::ViewUpdate(payload) = &edge_after_local else {
                     panic!("Edge scalar subscription must produce a view update");
                 };
-                assert!(
-                    payload
-                        .input_adds
-                        .iter()
-                        .chain(&payload.input_removes)
-                        .all(|input| matches!(
-                            input,
-                            crate::protocol::SupportingInput::SourceComplete(_)
-                        )),
-                    "a Local-only deletion must not change Edge result membership"
-                );
+                assert!(!payload.peer_payload_inventory.opening_pending);
                 reader
                     .apply_sync_message_settled(edge_after_local)
                     .expect("reader applies no-op Edge update");
@@ -1499,11 +1490,11 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let initial = peer.rehydrate_query(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_adds: program_fact_adds, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_adds, .. })
             if program_fact_adds.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source_row == target && input.version.tx == initial_tx
+                input
+                    if input.row == target && input.version.tx == initial_tx
             ))
     ));
     commit_global_cells(
@@ -1521,11 +1512,11 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let transfer_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         transfer_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_removes: program_fact_removes, .. })
-            if program_fact_removes.iter().any(|fact| matches!(
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_removes, .. })
+            if !program_fact_removes.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source_row == target && input.version.tx == initial_tx
+                input
+                    if input.row == target && input.version.tx == initial_tx
             ))
     ));
 
@@ -1544,22 +1535,22 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     let regrant = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         regrant,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_adds: program_fact_adds, .. })
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_adds, .. })
             if program_fact_adds.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source_row == target && input.version.tx == restored_tx
+                input
+                    if input.row == target && input.version.tx == restored_tx
             ))
     ));
     delete_global(&mut node, "issues", target, 4, 4);
     let delete_update = peer.query_update(&mut node, &shape, &binding).unwrap();
     assert!(matches!(
         delete_update,
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { input_removes: program_fact_removes, .. })
-            if program_fact_removes.iter().any(|fact| matches!(
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_removes, .. })
+            if !program_fact_removes.iter().any(|fact| matches!(
                 fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source_row == target && input.version.tx == restored_tx
+                input
+                    if input.row == target && input.version.tx == restored_tx
             ))
     ));
 }
@@ -1654,12 +1645,13 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .rehydrate_query(&mut server, &shape, &alice_binding)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_input_set, ..
+        peer_payload_inventory,
+        ..
     }) = &reset
     else {
         panic!("expected view update");
     };
-    assert!(reset_input_set);
+    assert!(!peer_payload_inventory.opening_pending);
     reader.apply_sync_message_settled(reset).unwrap();
     assert_eq!(
         receiver_rows(&mut reader, &shape, &alice_binding, DurabilityTier::Global).len(),
@@ -1853,7 +1845,7 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        input_adds: program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &update
     else {
@@ -1861,10 +1853,7 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     };
     let covered_source_tables = program_fact_adds
         .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input.version_table.to_string()),
-            _ => None,
-        })
+        .map(|input| input.version_table.to_string())
         .collect::<BTreeSet<_>>();
     assert_eq!(
         covered_source_tables,

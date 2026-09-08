@@ -5637,7 +5637,7 @@ impl RelayWorker {
         client: u64,
         query: u64,
     ) -> Result<ForegroundOperationPoll, RelayError> {
-        // Preserve request 3's established immediate local materialization.
+        // Preserve request 3's established local materialization semantics.
         // Request 18/19 separately opt into owner/authority coverage receipts.
         let (db, prepared) = {
             let client = self.foreground_client(client)?;
@@ -14230,8 +14230,22 @@ mod tests {
         else {
             panic!("prepare must return an opaque query handle");
         };
-        let (status, response) = execute(ForegroundDbCommandRequest::All { query });
+        let (status, mut response) = execute(ForegroundDbCommandRequest::All { query });
         assert_eq!(status, JazzNativeRelayStatus::Ok);
+        for _ in 0..32 {
+            let ForegroundDbCommandResponse::Pending { operation } =
+                postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
+            else {
+                break;
+            };
+            assert_eq!(
+                execute(ForegroundDbCommandRequest::Tick).0,
+                JazzNativeRelayStatus::Ok
+            );
+            let (status, polled) = execute(ForegroundDbCommandRequest::Poll { operation });
+            assert_eq!(status, JazzNativeRelayStatus::Ok);
+            response = polled;
+        }
         let ForegroundDbCommandResponse::Rows { rows } =
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
         else {

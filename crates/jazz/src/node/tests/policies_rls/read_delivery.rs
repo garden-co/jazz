@@ -71,10 +71,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
                     .column("title", PublicColumnType::Text)
                     .column("visibility", PublicColumnType::Text)
                     .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_literal_eq(
-                            "visibility",
-                            PublicValue::Text("public".to_owned()),
-                        ),
+                        public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
                         member_exists("id"),
                     ]))),
             )
@@ -131,21 +128,30 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         &mut core,
         MergeableCommit::new("messages", public_message, 12).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(public_chat.0)),
-            ("text".to_owned(), Value::String("public message".to_owned())),
+            (
+                "text".to_owned(),
+                Value::String("public message".to_owned()),
+            ),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("messages", private_message, 13).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("text".to_owned(), Value::String("private message".to_owned())),
+            (
+                "text".to_owned(),
+                Value::String("private message".to_owned()),
+            ),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(member.test_uuid().to_string())),
+            (
+                "user_id".to_owned(),
+                Value::String(member.test_uuid().to_string()),
+            ),
         ])),
     );
 
@@ -206,16 +212,16 @@ fn read_policy_compares_indirect_text_by_its_logical_value() {
     let reader = user(0xa1);
     let allowed = "policy-visible/".repeat(6_000);
     let denied = format!("{}x", &allowed[..allowed.len() - 1]);
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("documents")
-            .column("classification", PublicColumnType::Text)
-            .policies(
-                public_all_policies().with_select(public_literal_eq(
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("classification", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(public_literal_eq(
                     "classification",
                     PublicValue::Text(allowed.clone()),
-                )),
-            ),
-    ));
+                ))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(0x6c), schema);
     let visible = row(0x6c);
     let hidden = row(0x6d);
@@ -236,7 +242,10 @@ fn read_policy_compares_indirect_text_by_its_logical_value() {
 
     let table = core.table("documents").unwrap().clone();
     let physical = core.query_table_versions("documents").unwrap();
-    assert!(matches!(physical[0].cell(&table, "classification"), Ok(Some(Value::Large(_)))));
+    assert!(matches!(
+        physical[0].cell(&table, "classification"),
+        Ok(Some(Value::Large(_)))
+    ));
     assert_eq!(
         core.current_rows("documents", DurabilityTier::Local)
             .unwrap()
@@ -344,14 +353,20 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         &mut core,
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(true)),
-            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "createdBy".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
     );
     accept_global(
@@ -366,14 +381,20 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     accept_global(
         &mut core,
         MergeableCommit::new("profiles", alice_profile, 15).cells(BTreeMap::from([
-            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
             ("name".to_owned(), Value::String("Alice".to_owned())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("profiles", bob_profile, 16).cells(BTreeMap::from([
-            ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(bob.test_uuid().to_string()),
+            ),
             ("name".to_owned(), Value::String("Bob".to_owned())),
         ])),
     );
@@ -394,7 +415,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         &mut core,
         MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(bob.test_uuid().to_string()),
+            ),
         ])),
     );
     let bob_message_tx = accept_global(
@@ -407,13 +431,19 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         ])),
     );
 
-    let update = alice_peer.query_update(&mut core, &shape, &binding).unwrap();
-    assert_view_update_only_references_rows(&update, BTreeSet::from([bob_message, bob_profile]));
+    let update = alice_peer
+        .query_update(&mut core, &shape, &binding)
+        .unwrap();
+    let SyncMessage::ViewUpdate(payload) = &update else { panic!("expected snapshot"); };
+    assert_eq!(payload.supporting_rows.iter().map(|input| input.row).collect::<BTreeSet<_>>(),
+        BTreeSet::from([chat, alice_message, alice_profile, bob_message, bob_profile]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(
-        canonical_view_update_rows(&update)
-            .0
-            .contains(&("messages".to_owned().into(), bob_message, bob_message_tx)),
+        canonical_view_update_rows(&update).contains(&(
+            "messages".to_owned().into(),
+            bob_message,
+            bob_message_tx
+        )),
         "the covered closure must include the newly visible message source"
     );
     let _ = bob_membership_tx;
@@ -463,10 +493,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
                     .column("title", PublicColumnType::Text)
                     .column("visibility", PublicColumnType::Text)
                     .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_literal_eq(
-                            "visibility",
-                            PublicValue::Text("public".to_owned()),
-                        ),
+                        public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
                         member_exists("id"),
                     ]))),
             )
@@ -501,23 +528,38 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         ])),
         MergeableCommit::new("messages", public_message, 12).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(public_chat.0)),
-            ("text".to_owned(), Value::String("public message".to_owned())),
+            (
+                "text".to_owned(),
+                Value::String("public message".to_owned()),
+            ),
         ])),
         MergeableCommit::new("messages", private_message, 13).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("text".to_owned(), Value::String("private message".to_owned())),
+            (
+                "text".to_owned(),
+                Value::String("private message".to_owned()),
+            ),
         ])),
         MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(member.test_uuid().to_string())),
+            (
+                "user_id".to_owned(),
+                Value::String(member.test_uuid().to_string()),
+            ),
         ])),
         MergeableCommit::new("chat_members", bob_membership, 15).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(bob.test_uuid().to_string())),
+            (
+                "user_id".to_owned(),
+                Value::String(bob.test_uuid().to_string()),
+            ),
         ])),
         MergeableCommit::new("messages", bob_private_message, 16).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("text".to_owned(), Value::String("bob private message".to_owned())),
+            (
+                "text".to_owned(),
+                Value::String("bob private message".to_owned()),
+            ),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -623,11 +665,17 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
-            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "createdBy".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -638,7 +686,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", seed_message, 12).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("text".to_owned(), Value::String("invite-only seed".to_owned())),
+                (
+                    "text".to_owned(),
+                    Value::String("invite-only seed".to_owned()),
+                ),
                 ("createdAt".to_owned(), Value::U64(12)),
             ])),
         ])
@@ -673,7 +724,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(bob.test_uuid().to_string()),
+                ),
             ])),
         ])
         .unwrap();
@@ -699,9 +753,11 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .unwrap()
         .expect("membership insertion must publish newly covered message input");
     assert!(
-        canonical_view_update_rows(&update)
-            .0
-            .contains(&("messages".to_owned().into(), seed_message, seed_tx)),
+        canonical_view_update_rows(&update).contains(&(
+            "messages".to_owned().into(),
+            seed_message,
+            seed_tx
+        )),
         "the covered closure must include the edge-visible message source"
     );
 }
@@ -729,11 +785,17 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
-            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "createdBy".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -744,7 +806,10 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", seed_message, 12).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("text".to_owned(), Value::String("invite-only seed".to_owned())),
+                (
+                    "text".to_owned(),
+                    Value::String("invite-only seed".to_owned()),
+                ),
                 ("createdAt".to_owned(), Value::U64(12)),
             ])),
         ])
@@ -769,17 +834,19 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_input_set,
+        peer_payload_inventory,
         ..
     }) = &initial
     else {
         panic!("expected initial view update");
     };
-    assert!(reset_input_set);
+    assert!(!peer_payload_inventory.opening_pending);
     assert!(
-        canonical_view_update_rows(&initial)
-            .0
-            .contains(&("messages".to_owned().into(), seed_message, seed_tx)),
+        canonical_view_update_rows(&initial).contains(&(
+            "messages".to_owned().into(),
+            seed_message,
+            seed_tx
+        )),
         "the reset closure must include the initially visible message source"
     );
 
@@ -787,7 +854,10 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(bob.test_uuid().to_string()),
+                ),
             ])),
         ])
         .unwrap();
@@ -802,28 +872,35 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("messages", bob_message, 14).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("text".to_owned(), Value::String("bob accepted invite".to_owned())),
+                (
+                    "text".to_owned(),
+                    Value::String("bob accepted invite".to_owned()),
+                ),
                 ("createdAt".to_owned(), Value::U64(14)),
             ])),
         ])
         .unwrap();
-    core.apply_fate_update(bob_message_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
-        .unwrap();
+    core.apply_fate_update(
+        bob_message_tx,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    )
+    .unwrap();
 
     let rehydrated = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_input_set,
+        peer_payload_inventory,
         ..
     }) = &rehydrated
     else {
         panic!("expected rehydrate view update");
     };
-    assert!(reset_input_set);
+    assert!(!peer_payload_inventory.opening_pending);
     assert_eq!(
         canonical_view_update_rows(&rehydrated)
-            .0
             .into_iter()
             .filter(|(table, _, _)| table.as_str() == "messages")
             .collect::<BTreeSet<_>>(),
@@ -840,30 +917,35 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
     let bob = user(0xb2);
     let private_chat = row(0x18);
     let public_chat = row(0x19);
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("chats")
-            .column("title", PublicColumnType::Text)
-            .column("visibility", PublicColumnType::Text)
-            .column("owner_id", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                public_literal_eq(
-                    "visibility",
-                    PublicValue::Text("public".to_owned()),
-                ),
-                public_claim_eq("owner_id", "user_id"),
-            ]))),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .column("visibility", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                    public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
+                    public_claim_eq("owner_id", "user_id"),
+                ]))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for commit in [
         MergeableCommit::new("chats", private_chat, 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("private".to_owned())),
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "owner_id".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
         MergeableCommit::new("chats", public_chat, 11).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("public".to_owned())),
             ("visibility".to_owned(), Value::String("public".to_owned())),
-            ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
+            (
+                "owner_id".to_owned(),
+                Value::String(alice.test_uuid().to_string()),
+            ),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -907,8 +989,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("canvases")
-                    .column("title", PublicColumnType::Text),
+                PublicTableSchemaBuilder::new("canvases").column("title", PublicColumnType::Text),
             )
             .table(
                 PublicTableSchemaBuilder::new("shapes")
@@ -932,11 +1013,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let subscription = crate::protocol::SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
+        read_view: Default::default(),
+    };
 
-    let canvas_tx =
-        core.commit_mergeable_settled(MergeableCommit::new("canvases", canvas_row, 10).cells(
+    let canvas_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("canvases", canvas_row, 10).cells(
             BTreeMap::from([("title".to_owned(), Value::String("policy-row".to_owned()))]),
         ))
         .unwrap();
@@ -948,12 +1029,12 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     )
     .unwrap();
     let shape_tx = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("shapes", shape_row, 11).cells(BTreeMap::from([
+        .commit_mergeable_settled(MergeableCommit::new("shapes", shape_row, 11).cells(
+            BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
                 ("title".to_owned(), Value::String("policy-row".to_owned())),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     core.apply_fate_update(
         shape_tx,
@@ -971,8 +1052,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let spy_initial = spy_link
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    assert!(canonical_view_update_rows(&invited_initial).0.is_empty());
-    assert!(canonical_view_update_rows(&spy_initial).0.is_empty());
+    assert!(canonical_view_update_rows(&invited_initial).is_empty());
+    assert!(canonical_view_update_rows(&spy_initial).is_empty());
     assert_eq!(
         core.query
             .query_shape_cache
@@ -1002,7 +1083,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let (result_member_adds, result_member_removes) = canonical_view_update_rows(&grant_update);
+    let result_member_adds = canonical_view_update_rows(&grant_update);
     assert_eq!(
         result_member_adds,
         vec![
@@ -1010,12 +1091,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
             ("shapes".to_owned().into(), shape_row, shape_tx),
         ]
     );
-    assert!(result_member_removes.is_empty());
     assert_eq!(invited_link.metrics.view_updates_out, 2);
 
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
-    let (spy_adds, spy_removes) = canonical_view_update_rows(&spy_update);
-    assert!(spy_adds.is_empty() && spy_removes.is_empty());
+    let spy_adds = canonical_view_update_rows(&spy_update);
+    assert!(spy_adds.is_empty());
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
 
@@ -1034,15 +1114,9 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let (result_member_adds, result_member_removes) = canonical_view_update_rows(&revoke_update);
+    let result_member_adds = canonical_view_update_rows(&revoke_update);
     assert!(result_member_adds.is_empty());
-    assert_eq!(
-        result_member_removes,
-        vec![
-            ("canvases".to_owned().into(), canvas_row, canvas_tx),
-            ("shapes".to_owned().into(), shape_row, shape_tx),
-        ]
-    );
+
     assert_eq!(invited_link.metrics.view_updates_out, 3);
     assert_eq!(
         invited_link.subscription_result_sets(subscription),
@@ -1117,10 +1191,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                     .column("visibility", PublicColumnType::Text)
                     .column("owner_id", PublicColumnType::Text)
                     .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_literal_eq(
-                            "visibility",
-                            PublicValue::Text("public".to_owned()),
-                        ),
+                        public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
                         public_claim_eq("owner_id", "user_id"),
                     ]))),
             )
@@ -1131,8 +1202,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                     .column("author_id", PublicColumnType::Text)
                     .column("owner_id", PublicColumnType::Text)
                     .policies(
-                        public_all_policies()
-                            .with_select(public_claim_eq("owner_id", "user_id")),
+                        public_all_policies().with_select(public_claim_eq("owner_id", "user_id")),
                     ),
             ),
     );
@@ -1175,8 +1245,13 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(alice_user_id.clone())),
             ])),
     );
-    core.apply_fate_update(public_chat_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
-        .unwrap();
+    core.apply_fate_update(
+        public_chat_tx,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    )
+    .unwrap();
     let alice_private_message_tx = commit_mergeable_global(
         &mut alice,
         &mut core,
@@ -1208,8 +1283,13 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("owner_id".to_owned(), v(bob_user_id)),
             ])),
     );
-    core.apply_fate_update(bob_message_tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
-        .unwrap();
+    core.apply_fate_update(
+        bob_message_tx,
+        Fate::Accepted,
+        None,
+        Some(DurabilityTier::Edge),
+    )
+    .unwrap();
 
     let mut bob = PeerState::edge_client(bob_id);
     let chat_shape = Query::from("chats")
@@ -1265,10 +1345,7 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
                     .column("title", PublicColumnType::Text)
                     .column("visibility", PublicColumnType::Text)
                     .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_literal_eq(
-                            "visibility",
-                            PublicValue::Text("public".to_owned()),
-                        ),
+                        public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
                         member_exists,
                     ]))),
             )
@@ -1324,15 +1401,17 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
 /// complete canonical row version. `select` shapes terminal output only.
 #[test]
 fn public_chat_projections_ship_identical_complete_row_versions() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("chats")
-            .column("title", PublicColumnType::Text)
-            .column("visibility", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(public_literal_eq(
-                "visibility",
-                PublicValue::Text("public".to_owned()),
-            ))),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .column("visibility", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(public_literal_eq(
+                    "visibility",
+                    PublicValue::Text("public".to_owned()),
+                ))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(0x62), schema.clone());
     let reader = user(0x63);
     let public_chat = row(0x64);
@@ -1359,7 +1438,11 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
         .unwrap();
     let mut full_link = PeerState::edge_client(reader);
     let full_update = full_link
-        .rehydrate_query(&mut core, &full_shape, &full_shape.bind(BTreeMap::new()).unwrap())
+        .rehydrate_query(
+            &mut core,
+            &full_shape,
+            &full_shape.bind(BTreeMap::new()).unwrap(),
+        )
         .unwrap();
     let mut title_link = PeerState::edge_client(reader);
     let title_update = title_link
@@ -1403,7 +1486,10 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
         )
         .unwrap();
     assert_eq!(title_rows.len(), 1);
-    assert_eq!(title_rows[0].cell(&schema.tables[0], "title"), Some(v("public title")));
+    assert_eq!(
+        title_rows[0].cell(&schema.tables[0], "title"),
+        Some(v("public title"))
+    );
     assert_eq!(
         title_rows[0].cell(&schema.tables[0], "visibility"),
         None,
@@ -1413,14 +1499,16 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
 
 #[test]
 fn nullable_join_code_claim_branch_allows_edge_chat_read() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("chats")
-            .column("title", PublicColumnType::Text)
-            .nullable_column("joinCode", PublicColumnType::Text)
-            .policies(
-                public_all_policies().with_select(public_claim_eq("joinCode", "join_code")),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .nullable_column("joinCode", PublicColumnType::Text)
+                .policies(
+                    public_all_policies().with_select(public_claim_eq("joinCode", "join_code")),
+                ),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let reader = user(0xb2);
@@ -1479,19 +1567,18 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
 
 #[test]
 fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("chats")
-            .column("title", PublicColumnType::Text)
-            .column("visibility", PublicColumnType::Text)
-            .column("owner_id", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                public_literal_eq(
-                    "visibility",
-                    PublicValue::Text("public".to_owned()),
-                ),
-                public_claim_eq("owner_id", "user_id"),
-            ]))),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("chats")
+                .column("title", PublicColumnType::Text)
+                .column("visibility", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                    public_literal_eq("visibility", PublicValue::Text("public".to_owned())),
+                    public_claim_eq("owner_id", "user_id"),
+                ]))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -1529,27 +1616,27 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         .unwrap();
 
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_input_set,
+        peer_payload_inventory,
         version_carriers,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(reset_input_set);
+    assert!(!peer_payload_inventory.opening_pending);
     assert!(version_carriers.is_empty());
 }
 
 #[test]
 fn deletion_read_policy_requires_visible_global_content_winner() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);
@@ -1580,7 +1667,9 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let owner_rows = core
         .query_rows_including_deleted_in_authorization_mode(

@@ -11,10 +11,9 @@ use jazz::ids::{
     PhysicalColumnId, RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
-    CatalogueAck, CatalogueSnapshot, CoveredInputEntry, CurrentWriteSchema,
-    DelegatedSessionBinding, LensOp, MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity,
-    PhysicalIdentityManifest, PhysicalTableIdentity, ProgramFactEntry, ProgramSourceId,
-    ProgramSourceRole, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
+    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
+    MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowEntry, ResultRowLayer, RowVersionRef,
     RowVersionRefEntry, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
     SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
     VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
@@ -500,41 +499,28 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
-                reset_input_set: true,
+
                 version_carriers: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: Some(9),
                     opening_pending: false,
                 },
-                input_adds: vec![
-                    jazz::protocol::SupportingInput::Row(CoveredInputEntry {
-                        source: ProgramSourceId {
-                            table: "todos".to_owned().into(),
-                            path: vec![ProgramSourceRole::Root],
-                        },
-                        version_table: "todos".to_owned().into(),
-                        source_row: row,
-                        version: RowVersionRefEntry {
-                            tx: tx_id,
-                            schema_version: Some(schema_version),
-                            layer: ResultRowLayer::Content,
-                            batch: Some(tx_id),
-                            branch_or_prefix: Some(Vec::new()),
-                            row_digest: None,
-                        },
-                    }),
-                    jazz::protocol::SupportingInput::SourceComplete(
-                        jazz::protocol::ProgramSourceCoverageEntry {
-                            source: ProgramSourceId {
-                                table: "todos".to_owned().into(),
-                                path: vec![ProgramSourceRole::Root],
-                            },
-                            complete: true,
-                        },
-                    ),
-                ],
-                input_removes: Vec::new(),
+                supporting_rows: vec![jazz::protocol::SupportingRow {
+                    physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [0x71; 16],
+                    )),
+                    version_table: "todos".to_owned().into(),
+                    row,
+                    version: RowVersionRefEntry {
+                        tx: tx_id,
+                        schema_version: Some(schema_version),
+                        layer: ResultRowLayer::Content,
+                        batch: Some(tx_id),
+                        branch_or_prefix: Some(Vec::new()),
+                        row_digest: None,
+                    },
+                }],
             }),
         ),
         (
@@ -543,36 +529,27 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(8),
-                reset_input_set: false,
+
                 version_carriers: mixed_version_carriers(schema_version, author),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                input_adds: Vec::new(),
-                input_removes: Vec::new(),
+                supporting_rows: Vec::new(),
             }),
         ),
         (
-            "view_update_covered_input_all_source_roles",
+            "view_update_supporting_row_branch",
             "ViewUpdate",
             SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(9),
-                reset_input_set: false,
+
                 version_carriers: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                input_adds: vec![jazz::protocol::SupportingInput::Row(CoveredInputEntry {
-                    source: ProgramSourceId {
-                        table: "todos".to_owned().into(),
-                        path: vec![
-                            ProgramSourceRole::Root,
-                            ProgramSourceRole::Alias("self".to_owned()),
-                            ProgramSourceRole::RecursiveSeed("seed".to_owned()),
-                            ProgramSourceRole::RecursiveStep("step".to_owned()),
-                            ProgramSourceRole::CorrelatedChild("items".to_owned()),
-                            ProgramSourceRole::Policy("read".to_owned()),
-                        ],
-                    },
+                supporting_rows: vec![jazz::protocol::SupportingRow {
+                    physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [0x71; 16],
+                    )),
                     version_table: "todos".to_owned().into(),
-                    source_row: RowUuid::from_bytes([0x79; 16]),
+                    row: RowUuid::from_bytes([0x79; 16]),
                     version: RowVersionRefEntry {
                         tx: tx_id,
                         schema_version: Some(schema_version),
@@ -581,8 +558,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         branch_or_prefix: Some(vec![0x01]),
                         row_digest: None,
                     },
-                })],
-                input_removes: Vec::new(),
+                }],
             }),
         ),
         (
@@ -1051,80 +1027,25 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     }
 }
 
-/// Internal facts cannot be converted into peer supporting-input variants.
+/// Snapshots have only exact native row references; duplicate references are malformed.
 #[test]
-fn peer_wire_rejects_authority_result_members() {
-    let member = result_row_entry(TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]))).into();
-    let fact =
-        jazz::protocol::ProgramFactEntry::ResultPayload(jazz::protocol::ResultMemberPayloadEntry {
-            member,
-            descriptor: Vec::new(),
-            record: Vec::new(),
-        });
-    assert!(jazz::protocol::SupportingInput::try_from(fact).is_err());
+fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     let (_, _, message) = wire_fixture_messages()
         .into_iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
-    let SyncMessage::ViewUpdate(view) = &message else {
+    let SyncMessage::ViewUpdate(mut view) = message else {
         unreachable!()
     };
-    let input_bytes = postcard::to_allocvec(&view.input_adds[0]).unwrap();
-    assert_eq!(input_bytes[0], 0, "Row is supporting-input tag zero");
-    let mut bytes = encode_sync_message(&message).unwrap();
-    let offset = bytes
-        .windows(input_bytes.len())
-        .position(|window| window == input_bytes)
-        .unwrap();
-    bytes[offset] = 2;
-    assert!(
-        decode_sync_message(&bytes).is_err(),
-        "a third supporting-input variant must fail decoding"
-    );
-}
-
-#[test]
-fn covered_input_source_paths_require_an_exact_valid_v1_identity() {
-    let (_, _, message) = wire_fixture_messages()
-        .into_iter()
-        .find(|(name, _, _)| *name == "view_update_covered_input_all_source_roles")
-        .expect("covered-input source-role corpus exists");
-    let encoded = encode_sync_message(&message).expect("frozen source-role message encodes");
-    assert_eq!(
-        decode_sync_message(&encoded).expect("frozen source-role message decodes"),
-        message
-    );
-
-    // Alias is postcard enum tag 1 followed by the uniquely named `self`
-    // component. A future role can never silently decode as an existing one.
-    let alias_marker = [1, 4, b's', b'e', b'l', b'f'];
-    let alias_offset = encoded
-        .windows(alias_marker.len())
-        .position(|window| window == alias_marker)
-        .expect("frozen source-role corpus contains its alias tag");
-    let mut unknown_role = encoded.clone();
-    unknown_role[alias_offset] = 6;
-    assert!(
-        decode_sync_message(&unknown_role).is_err(),
-        "an unknown source role cannot fall back to the same-table or collector source"
-    );
-
-    let SyncMessage::ViewUpdate(mut invalid) = message else {
-        panic!("covered-input corpus is a view update");
-    };
-    let jazz::protocol::SupportingInput::Row(input) = &mut invalid.input_adds[0] else {
-        panic!("covered-input corpus carries the fact");
-    };
-    input.source.path = vec![ProgramSourceRole::Alias(String::new())];
-    assert!(
-        encode_sync_message(&SyncMessage::ViewUpdate(invalid.clone())).is_err(),
-        "the producer rejects malformed source paths rather than encoding a default"
-    );
-    let noncanonical_invalid = postcard::to_allocvec(&SyncMessage::ViewUpdate(invalid)).unwrap();
-    assert!(
-        decode_sync_message(&noncanonical_invalid).is_err(),
-        "the decoder rejects a syntactically complete but malformed source path"
-    );
+    view.supporting_rows.push(view.supporting_rows[0].clone());
+    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
+    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view.clone())).unwrap();
+    assert!(decode_sync_message(&bytes).is_err());
+    view.supporting_rows.pop();
+    view.supporting_rows[0].version_table = String::new().into();
+    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
+    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view)).unwrap();
+    assert!(decode_sync_message(&bytes).is_err());
 }
 
 #[test]

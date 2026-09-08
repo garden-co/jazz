@@ -2714,23 +2714,121 @@ where
         .project(fields))
     }
 
-    pub(crate) async fn projected_content_current_source_graph(
-        &mut self,
-        request: &SourceRequest,
-        read_table: &TableSchema,
+    pub(crate) fn projected_content_current_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        read_table: &'a TableSchema,
         tier: DurabilityTier,
         include_global_time: bool,
         exclude_deleted: bool,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        let fields = global_current_storage_fields(read_table, true, include_global_time);
-        // Global current storage has already selected the physical winner.  Apply
-        // the ordinary lens-aware projection directly so added-column defaults
-        // survive instead of being replaced with physical nulls by the raw
-        // winner projection.  Local and Edge reads still need to choose between
-        // Global and Ahead candidates before their compatibility boundary.
-        if tier == DurabilityTier::Global {
-            let projection_target = self.current_projection_target(request, read_table)?;
-            let content = match self.access_paths.get(&request.source).cloned() {
+    ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
+        Box::pin(async move {
+            let fields = global_current_storage_fields(read_table, true, include_global_time);
+            // Global current storage has already selected the physical winner.  Apply
+            // the ordinary lens-aware projection directly so added-column defaults
+            // survive instead of being replaced with physical nulls by the raw
+            // winner projection.  Local and Edge reads still need to choose between
+            // Global and Ahead candidates before their compatibility boundary.
+            if tier == DurabilityTier::Global {
+                let projection_target = self.current_projection_target(request, read_table)?;
+                let content = match self.access_paths.get(&request.source).cloned() {
+                    Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                        if self.count_access_path_metrics {
+                            self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                        }
+                        self.node
+                            .physical_current_source_scan_graph_with_projection_target(
+                                self.read_view.read_schema,
+                                &request.source.table,
+                                PhysicalCurrentClass::Global,
+                                projection_target,
+                                static_scan_for_prefix(prefix, 1),
+                            )
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::SchemaProjection)
+                            })?
+                    }
+                    Some(CurrentAccessPath::Index {
+                        column,
+                        prefix,
+                        intersections,
+                        source_limit,
+                        maintained,
+                    }) => {
+                        let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                        self.node.query_engine_read_metrics.source_index_probes +=
+                            1 + intersections.len() as u64;
+                        self.node
+                            .physical_global_current_source_for_index_scan(
+                                read_table,
+                                self.read_view.read_schema,
+                                &column,
+                                &prefix,
+                                &intersections,
+                                maintained,
+                                source_limit,
+                                &projection_target,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                    }
+                    None => {
+                        self.node.query_engine_read_metrics.source_full_scans += 1;
+                        self.node
+                            .physical_current_source_graph_with_projection_target(
+                                self.read_view.read_schema,
+                                &request.source.table,
+                                PhysicalCurrentClass::Global,
+                                projection_target,
+                            )
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::SchemaProjection)
+                            })?
+                    }
+                };
+                if !exclude_deleted {
+                    return Ok(content.project(fields));
+                }
+                let deleted_winners = self
+                    .projected_deletion_register_current_source_graph(request, tier)?
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                return Ok(GraphBuilder::anti_join(
+                    content,
+                    deleted_winners,
+                    ["row_uuid"],
+                    ["row_uuid"],
+                ));
+            }
+            let required_fields = self.current_projection_required_fields(request, read_table);
+            let (projection_target, physical_fields) = self
+                .node
+                .ensure_physical_current_winner_projection(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                )
+                .await
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let post_winner_fields = self
+                .node
+                .physical_current_post_winner_projection_fields(
+                    self.read_view.read_schema,
+                    &request.source.table,
+                    &required_fields,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let raw_global_output = self
+                .node
+                .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+                .and_then(|table_id| {
+                    self.node
+                        .database
+                        .table_schema(&physical_global_current_table_name(table_id))
+                        .map(|schema| schema.record_schema())
+                        .map_err(Error::Groove)
+                })
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+            let access_path = self.access_paths.get(&request.source).cloned();
+            let global = match &access_path {
                 Some(CurrentAccessPath::PrimaryKey(prefix)) => {
                     if self.count_access_path_metrics {
                         self.node.query_engine_read_metrics.source_primary_key_scans += 1;
@@ -2740,8 +2838,8 @@ where
                             self.read_view.read_schema,
                             &request.source.table,
                             PhysicalCurrentClass::Global,
-                            projection_target,
-                            static_scan_for_prefix(prefix, 1),
+                            projection_target.clone(),
+                            static_scan_for_prefix(prefix.clone(), 1),
                         )
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::SchemaProjection)
@@ -2754,36 +2852,94 @@ where
                     source_limit,
                     maintained,
                 }) => {
-                    let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                    // Select settled candidates before combining them with the
+                    // corresponding Local ahead candidates below.
+                    let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
                     self.node.query_engine_read_metrics.source_index_probes +=
                         1 + intersections.len() as u64;
                     self.node
-                        .physical_global_current_source_for_index_scan(
+                        .physical_global_current_source_for_index_scan_with_output(
                             read_table,
                             self.read_view.read_schema,
-                            &column,
-                            &prefix,
-                            &intersections,
-                            maintained,
+                            column,
+                            prefix,
+                            intersections,
+                            *maintained,
                             source_limit,
                             &projection_target,
+                            raw_global_output.clone(),
                         )
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
                 }
-                None => {
+                _ => {
                     self.node.query_engine_read_metrics.source_full_scans += 1;
                     self.node
                         .physical_current_source_graph_with_projection_target(
                             self.read_view.read_schema,
                             &request.source.table,
                             PhysicalCurrentClass::Global,
-                            projection_target,
+                            projection_target.clone(),
                         )
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
             };
+            let global = self.exclude_settled_arm(request, global, false).await?;
+            let content = if tier == DurabilityTier::Global {
+                global
+            } else {
+                let global = global.project(physical_fields.clone());
+                let ahead = match &access_path {
+                    Some(CurrentAccessPath::PrimaryKey(prefix)) => self
+                        .node
+                        .physical_current_source_scan_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target.clone(),
+                            static_scan_for_prefix(prefix.clone(), 3),
+                        ),
+                    Some(CurrentAccessPath::Index { .. }) => {
+                        // A Local-ahead winner can change the indexed column and
+                        // therefore no longer be present under the settled
+                        // candidate's prefix.  Scan the ahead current table in
+                        // full before arg-max so that every possible dominating
+                        // row participates.  The settled side remains safely
+                        // index-bounded through this same access-path mechanism.
+                        self.node.query_engine_read_metrics.source_full_scans += 1;
+                        self.node
+                            .physical_current_source_graph_with_projection_target(
+                                self.read_view.read_schema,
+                                &request.source.table,
+                                PhysicalCurrentClass::Ahead,
+                                projection_target,
+                            )
+                    }
+                    _ => self
+                        .node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target,
+                        ),
+                }
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                let ahead = self.exclude_settled_arm(request, ahead, true).await?;
+                let ahead = if tier == DurabilityTier::Edge {
+                    edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
+                } else {
+                    ahead.project(physical_fields.clone())
+                };
+                GraphBuilder::arg_max_by(
+                    GraphBuilder::union([global, ahead]),
+                    ["row_uuid"],
+                    ["tx_time", "tx_node_id"],
+                )
+                .project(physical_fields)
+            };
+            let content = content.project_fields(post_winner_fields);
             if !exclude_deleted {
                 return Ok(content.project(fields));
             }
@@ -2791,163 +2947,13 @@ where
                 .projected_deletion_register_current_source_graph(request, tier)?
                 .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                 .project(["row_uuid"]);
-            return Ok(GraphBuilder::anti_join(
+            Ok(GraphBuilder::anti_join(
                 content,
                 deleted_winners,
                 ["row_uuid"],
                 ["row_uuid"],
-            ));
-        }
-        let required_fields = self.current_projection_required_fields(request, read_table);
-        let (projection_target, physical_fields) = self
-            .node
-            .ensure_physical_current_winner_projection(
-                self.read_view.read_schema,
-                &request.source.table,
-            )
-            .await
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let post_winner_fields = self
-            .node
-            .physical_current_post_winner_projection_fields(
-                self.read_view.read_schema,
-                &request.source.table,
-                &required_fields,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let raw_global_output = self
-            .node
-            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
-            .and_then(|table_id| {
-                self.node
-                    .database
-                    .table_schema(&physical_global_current_table_name(table_id))
-                    .map(|schema| schema.record_schema())
-                    .map_err(Error::Groove)
-            })
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let access_path = self.access_paths.get(&request.source).cloned();
-        let global = match &access_path {
-            Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                if self.count_access_path_metrics {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                }
-                self.node
-                    .physical_current_source_scan_graph_with_projection_target(
-                        self.read_view.read_schema,
-                        &request.source.table,
-                        PhysicalCurrentClass::Global,
-                        projection_target.clone(),
-                        static_scan_for_prefix(prefix.clone(), 1),
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            }
-            Some(CurrentAccessPath::Index {
-                column,
-                prefix,
-                intersections,
-                source_limit,
-                maintained,
-            }) => {
-                // Select settled candidates before combining them with the
-                // corresponding Local ahead candidates below.
-                let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
-                self.node.query_engine_read_metrics.source_index_probes +=
-                    1 + intersections.len() as u64;
-                self.node
-                    .physical_global_current_source_for_index_scan_with_output(
-                        read_table,
-                        self.read_view.read_schema,
-                        column,
-                        prefix,
-                        intersections,
-                        *maintained,
-                        source_limit,
-                        &projection_target,
-                        raw_global_output.clone(),
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-            }
-            _ => {
-                self.node.query_engine_read_metrics.source_full_scans += 1;
-                self.node
-                    .physical_current_source_graph_with_projection_target(
-                        self.read_view.read_schema,
-                        &request.source.table,
-                        PhysicalCurrentClass::Global,
-                        projection_target.clone(),
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
-            }
-        };
-        let global = self.exclude_settled_arm(request, global, false).await?;
-        let content = if tier == DurabilityTier::Global {
-            global
-        } else {
-            let global = global.project(physical_fields.clone());
-            let ahead = match &access_path {
-                Some(CurrentAccessPath::PrimaryKey(prefix)) => self
-                    .node
-                    .physical_current_source_scan_graph_with_projection_target(
-                        self.read_view.read_schema,
-                        &request.source.table,
-                        PhysicalCurrentClass::Ahead,
-                        projection_target.clone(),
-                        static_scan_for_prefix(prefix.clone(), 3),
-                    ),
-                Some(CurrentAccessPath::Index { .. }) => {
-                    // A Local-ahead winner can change the indexed column and
-                    // therefore no longer be present under the settled
-                    // candidate's prefix.  Scan the ahead current table in
-                    // full before arg-max so that every possible dominating
-                    // row participates.  The settled side remains safely
-                    // index-bounded through this same access-path mechanism.
-                    self.node.query_engine_read_metrics.source_full_scans += 1;
-                    self.node
-                        .physical_current_source_graph_with_projection_target(
-                            self.read_view.read_schema,
-                            &request.source.table,
-                            PhysicalCurrentClass::Ahead,
-                            projection_target,
-                        )
-                }
-                _ => self
-                    .node
-                    .physical_current_source_graph_with_projection_target(
-                        self.read_view.read_schema,
-                        &request.source.table,
-                        PhysicalCurrentClass::Ahead,
-                        projection_target,
-                    ),
-            }
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let ahead = self.exclude_settled_arm(request, ahead, true).await?;
-            let ahead = if tier == DurabilityTier::Edge {
-                edge_visible_ahead_current_source_graph(ahead, physical_fields.clone())
-            } else {
-                ahead.project(physical_fields.clone())
-            };
-            GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            )
-            .project(physical_fields)
-        };
-        let content = content.project_fields(post_winner_fields);
-        if !exclude_deleted {
-            return Ok(content.project(fields));
-        }
-        let deleted_winners = self
-            .projected_deletion_register_current_source_graph(request, tier)?
-            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
-            .project(["row_uuid"]);
-        Ok(GraphBuilder::anti_join(
-            content,
-            deleted_winners,
-            ["row_uuid"],
-            ["row_uuid"],
-        ))
+            ))
+        })
     }
 
     pub(crate) fn projected_deletion_register_current_source_graph(

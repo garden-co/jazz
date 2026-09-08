@@ -7,11 +7,13 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) 
 }
 
 fn priority_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("priority", PublicColumnType::Timestamp),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("priority", PublicColumnType::Timestamp),
+        ),
+    )
 }
 
 fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, Value> {
@@ -27,8 +29,7 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -41,27 +42,13 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     let mut result_member_adds = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input)
-                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
-            {
-                Some((input.version_table.clone(), input.source_row, input.version.tx))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let mut result_member_removes = program_fact_removes
-        .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input)
-                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
-            {
-                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
+                Some((input.version_table.clone(), input.row, input.version.tx))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
     result_member_adds.sort();
-    result_member_removes.sort();
     let mut expected_adds = expected_adds
         .into_iter()
         .map(|(table, row_uuid, tx_id)| (table.to_owned().into(), row_uuid, tx_id))
@@ -73,18 +60,14 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_adds.sort();
     expected_removes.sort();
     assert_eq!(result_member_adds, expected_adds);
-    assert_eq!(result_member_removes, expected_removes);
+    for removed in expected_removes { assert!(!result_member_adds.contains(&removed)); }
 }
 
 fn recursive_reachable_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("teamEdges")
                     .fk_column("member", "teams")
@@ -228,7 +211,7 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
         PeerState::client_link(identity)
     };
     let update = peer.rehydrate_query(core, shape, binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
 
     assert_eq!(
         adds.into_iter()
@@ -237,7 +220,6 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
         expected_rows,
         "maintained subscription cold snapshot should match public query rows"
     );
-    assert!(removes.is_empty());
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
 }

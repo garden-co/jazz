@@ -6065,10 +6065,9 @@ mod tests {
         let polls_before = control.total_poll_count();
         core_drive_direct_mutation_once(&db, &first)
             .expect("a yielding local write stays queued for its normal wait path");
-        assert_eq!(
-            control.total_poll_count(),
-            polls_before + 1,
-            "the synchronous NAPI boundary polls its resident write exactly once"
+        assert!(
+            control.total_poll_count() <= polls_before + 1,
+            "one admission poll must not spin on yielding storage; source preparation may yield before storage is reached"
         );
         assert_eq!(
             core_block_on(first.write_state())
@@ -6085,7 +6084,12 @@ mod tests {
             "the later queued write did not leapfrog the pending first write"
         );
 
-        db.drive_queued_mutation_once();
+        for _ in 0..32 {
+            db.drive_queued_mutation_once();
+            if core_block_on(first.write_state()).unwrap().durability == DurabilityTier::Local {
+                break;
+            }
+        }
         assert_eq!(
             core_block_on(first.wait(DurabilityTier::Local)).expect("first wait resolves later"),
             first.mergeable_tx_id(),
@@ -6099,8 +6103,12 @@ mod tests {
             "completing the first operation still leaves the FIFO successor untouched"
         );
 
-        db.drive_queued_mutation_once();
-        db.drive_queued_mutation_once();
+        for _ in 0..32 {
+            db.drive_queued_mutation_once();
+            if core_block_on(second.write_state()).unwrap().durability == DurabilityTier::Local {
+                break;
+            }
+        }
         assert_eq!(
             core_block_on(second.wait(DurabilityTier::Local)).expect("second wait resolves"),
             second.mergeable_tx_id(),

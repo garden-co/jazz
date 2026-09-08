@@ -91,22 +91,27 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 [[bench]]
 name = "validation"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "sync"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "known_state_scaling"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "maintained_rehydrate_scaling"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "cold_subscription"
 harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "relation_include_delivery"
@@ -190,3 +195,7 @@ required-features = ["runtime"]
 [[test]]
 name = "auth_admission"
 required-features = ["runtime"]
+
+[[test]]
+name = "fate_replay"
+required-features = ["testing"]

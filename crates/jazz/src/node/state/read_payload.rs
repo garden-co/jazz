@@ -540,6 +540,12 @@ where
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
         let (subscription, version_carriers, program_fact_adds) = match message {
+            SyncMessage::ViewUpdate(payload) if payload.peer_payload_inventory.opening_pending => {
+                // Pending is not a row snapshot. Let normal admission reject
+                // any attached rows immediately, rather than trying to repair
+                // their bytes and postponing the protocol error indefinitely.
+                return Ok(Vec::new());
+            }
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 version_carriers,
@@ -568,22 +574,8 @@ where
         };
         let result_schema_version = registered_shape.schema_version();
         let mut missing = BTreeSet::new();
-        let mut visited_text_ancestors = BTreeSet::new();
-        for bundle in &normalized_bundles {
-            for version in &bundle.versions {
-                self.collect_missing_text_ancestor_refs(
-                    version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
-            }
-        }
-        // Only an added CoveredInput may require a body repair.  A removed
-        // input is self-sufficient: its successor closure retracts the old
-        // receiver record, and its body may now be policy-invisible.  Result
-        // members and relation/contribution facts are authority output or
-        // proof and are intentionally never a repair source under
-        // INV-SYNC-36.
+        // Every referenced native body must be available, including retained rows
+        // whose bytes may have been evicted since the previous complete snapshot.
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter().map(|row| (row.version_table.to_string(), row.row, row.version.tx))
         {
@@ -595,16 +587,10 @@ where
             )? {
                 continue;
             }
-            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
-                && self.query_transaction(tx_id).await?.is_some();
-            if !has_body {
+            if self.local_version_row_for_ref(&version_ref).await?.is_none()
+                || self.query_transaction(tx_id).await?.is_none()
+            {
                 missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
-                self.collect_missing_text_ancestor_refs(
-                    &version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
             }
         }
         Ok(missing.into_iter().collect())
@@ -659,25 +645,6 @@ where
                     .physical_table_id_for_schema(version.schema_version(), version.table())
                     .is_ok_and(|table_id| table_id == requested_table_id)
         }))
-    }
-
-    fn collect_missing_text_ancestor_refs(
-        &mut self,
-        _version: &VersionRecord,
-        _missing: &mut BTreeSet<RowVersionRef>,
-        _visited: &mut BTreeSet<RowVersionRef>,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn local_version_record_for_ref(
-        &mut self,
-        version_ref: &RowVersionRef,
-    ) -> Result<Option<VersionRecord>, Error> {
-        let Some(version) = self.local_version_row_for_ref(version_ref).await? else {
-            return Ok(None);
-        };
-        self.version_record_from_row(&version).map(Some)
     }
 
     async fn local_version_row_for_ref(

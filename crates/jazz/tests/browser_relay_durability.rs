@@ -15,10 +15,9 @@ use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    BranchSelector, CoveredInputEntry, ProgramFactEntry, ProgramSourceCoverageEntry,
-    ProgramSourceId, ProgramSourceRole, RegisterShapeOptions, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
-    VersionBundle, VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
+    BranchSelector, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -544,14 +543,13 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     // INV-SYNC-36: an authority never sends result membership. It declares a
     // complete source closure and ships the exact source witness, from which
     // the receiver derives its own terminal.
-    let source = ProgramSourceId {
-        table: "todos".to_owned().into(),
-        path: vec![ProgramSourceRole::Root],
-    };
+    let physical_table = worker
+        .physical_table_identity_for_test(schema.version_id(), "todos")
+        .unwrap();
     let incomplete = SyncMessage::ViewUpdate(ViewUpdatePayload {
         subscription: subscription_key,
         settled_through: GlobalTime(1),
-        reset_input_set: true,
+
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: VersionBundleScope::CompleteTransaction,
             tx: transaction.clone(),
@@ -561,26 +559,19 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        input_adds: vec![
-            jazz::protocol::SupportingInput::SourceComplete(ProgramSourceCoverageEntry {
-                source: source.clone(),
-                complete: true,
-            }),
-            jazz::protocol::SupportingInput::Row(CoveredInputEntry {
-                source,
-                version_table: "todos".to_owned().into(),
-                source_row: row,
-                version: RowVersionRefEntry {
-                    tx: tx_id,
-                    schema_version: Some(schema.version_id()),
-                    layer: ResultRowLayer::Content,
-                    batch: Some(tx_id),
-                    branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
-                    row_digest: None,
-                },
-            }),
-        ],
-        input_removes: Vec::new(),
+        supporting_rows: vec![jazz::protocol::SupportingRow {
+            physical_table,
+            version_table: "todos".to_owned().into(),
+            row,
+            version: RowVersionRefEntry {
+                tx: tx_id,
+                schema_version: Some(schema.version_id()),
+                layer: ResultRowLayer::Content,
+                batch: Some(tx_id),
+                branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
+                row_digest: None,
+            },
+        }],
     });
     assert!(
         block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
@@ -2806,12 +2797,9 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
         "authority sent no covered input closure"
     );
     assert!(
-        authority_updates.iter().any(|update| {
-            update
-                .input_adds
-                .iter()
-                .any(|fact| matches!(fact, jazz::protocol::SupportingInput::Row(_)))
-        }),
+        authority_updates
+            .iter()
+            .any(|update| { !update.supporting_rows.is_empty() }),
         "authority sent no typed covered input: {authority_updates:?}",
     );
 

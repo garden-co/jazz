@@ -80,7 +80,7 @@ use super::peer_connection::{
     aggregate_authorization_scope_bounds, authorization_progress_for_view_receipt,
     authorization_scope_receipt_matches_transport_context,
     authorization_scope_support_options_match, remove_scope_aggregate_member,
-    send_subscriber_with_sync_context, view_update_is_empty,
+    send_subscriber_with_sync_context,
 };
 
 #[test]

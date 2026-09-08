@@ -434,31 +434,26 @@ enum ActiveSubscriptionKeyReuse {
 fn assert_protocol_view_update_rows(
     message: SyncMessage,
     expected_subscription: SubscriptionKey,
-    expected_reset: bool,
+    _expected_reset: bool,
     expected_rows: BTreeSet<RowUuid>,
 ) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
-        reset_input_set,
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected ViewUpdate");
     };
     assert_eq!(subscription, expected_subscription);
-    assert_eq!(reset_input_set, expected_reset);
     // A served peer subscription is now a source-closure receipt.  The
     // receiver reconstructs result membership locally, so the authority must
     // not send rendered result members as a second path.
-    assert!(program_fact_removes.is_empty());
     let added_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input.source_row),
-            crate::protocol::SupportingInput::SourceComplete(_) => None,
-            _ => unreachable!("peer closure filter above excludes output facts"),
+            input => Some(input.row),
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(added_rows, expected_rows);
@@ -655,7 +650,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
         drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
         false,
-        BTreeSet::from([original_row]),
+        BTreeSet::from([initial_a, original_row]),
     );
     assert_ne!(original_row, conflicting_row);
     for _ in 0..2 {
@@ -1079,21 +1074,19 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
 
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };
     assert_eq!(served, subscription);
-    assert!(program_fact_removes.is_empty());
     assert!(
         program_fact_adds.iter().any(|fact| {
             matches!(
                 fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source.table.as_str() == "todos" && input.source_row == row(0x11)
+                input
+                    if input.version_table.as_str() == "todos" && input.row == row(0x11)
             )
         }),
         "relation facade subscription should deliver the target as a receiver source input"

@@ -8,23 +8,17 @@ fn view_updates_drop_unknown_usage_site_bindings() {
         binding_id: BindingId(uuid::uuid!("77777777-7777-4777-9777-777777777777")),
         ..canonical
     };
-
-    // Public APIs should never be able to create this packet; this is receiver
-    // hardening for malformed or late wire updates. Subscription teardown races
-    // in-flight traffic by design, so unknown per-subscription packets are
-    // benign drops, not protocol corruption.
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription: unknown_usage_site,
-            settled_through: GlobalTime(0),
-            reset_input_set: false,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
-        }))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription: unknown_usage_site,
+                settled_through: GlobalTime(0),
+                version_carriers: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                supporting_rows: Vec::new(),
+            },
+        ))
         .unwrap();
-
     assert_eq!(
         reader.sync_metrics().dropped_detached_subscription_messages,
         1
@@ -32,22 +26,17 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     assert!(reader.query.authority_results.is_empty());
 }
 
-/// Build receipts only from a real authority maintained program. The empty
-/// rehydration is the planted positive: it supplies whatever completeness and
-/// frontier facts the authority currently defines, rather than a hand-built
-/// approximation. The returned successor frame likewise supplies frozen
-/// source identities and version carriers from the authority itself.
+/// Build snapshots from an actual authority self-join. Both local scan roles
+/// consume the same physical row; the wire must carry that version only once.
 fn covered_input_receiver_fixture() -> (
     tempfile::TempDir,
     NodeState<RocksDbStorage>,
     crate::protocol::AuthorityResultKey,
-    crate::protocol::CoveredInputEntry,
+    crate::protocol::SupportingRow,
     crate::protocol::ViewUpdatePayload,
 ) {
     let (_core_dir, mut core) = open_node_with_uuid(node(0x36));
     let (receiver_dir, mut receiver) = open_node_with_uuid(node(0x37));
-    // The two sources deliberately scan the same table. A receiver must not
-    // route an authority fact by table name or result member.
     let shape = Query::from(crate::query::table("todos").alias("root"))
         .flat_join(
             crate::query::table("todos").alias("peer"),
@@ -55,8 +44,8 @@ fn covered_input_receiver_fixture() -> (
             "peer.title",
         )
         .validate(&schema())
-        .expect("validated same-table self join");
-    let binding = shape.bind(BTreeMap::new()).expect("empty binding");
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut receiver, &shape, &binding);
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
@@ -65,18 +54,20 @@ fn covered_input_receiver_fixture() -> (
     };
     let authority_result = receiver
         .authority_result_key_for_subscription(subscription)
-        .expect("registered remote usage has an authority receipt key");
+        .unwrap();
     let mut authority = PeerState::new();
-
     let empty = authority
         .rehydrate_query(&mut core, &shape, &binding)
-        .expect("authority builds empty exact closure");
-    receiver
-        .apply_sync_message_settled(empty)
-        .expect("receiver accepts the authority's empty exact closure");
+        .unwrap();
+    let SyncMessage::ViewUpdate(empty_payload) = &empty else {
+        panic!("expected snapshot")
+    };
+    assert!(empty_payload.supporting_rows.is_empty());
+    assert!(!empty_payload.peer_payload_inventory.opening_pending);
+    receiver.apply_sync_message_settled(empty).unwrap();
     assert!(
         receiver.has_settled_authority_result(&authority_result),
-        "the real authority empty closure establishes a live receipt"
+        "complete empty set settles"
     );
 
     let row_uuid = row(0x38);
@@ -84,62 +75,51 @@ fn covered_input_receiver_fixture() -> (
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("initial")),
         )
-        .expect("author initial source version");
-    core.accept_global_for_test(initial_tx)
-        .expect("settle initial source version globally");
+        .unwrap();
+    core.accept_global_for_test(initial_tx).unwrap();
     let initial = crate::protocol::ViewUpdatePayload::from_view_update(
-        authority
-            .query_update(&mut core, &shape, &binding)
-            .expect("authority builds first populated closure"),
+        authority.query_update(&mut core, &shape, &binding).unwrap(),
     )
-    .expect("ordinary authority update");
-    let initial_input = initial
-        .input_adds
-        .iter()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input)
-                if input.source_row == row_uuid =>
-            {
-                Some(input.clone())
-            }
-            _ => None,
-        })
-        .expect("real self-join closure names a frozen source occurrence");
+    .unwrap();
+    assert_eq!(
+        initial.supporting_rows.len(),
+        1,
+        "repeated table roles share one native version"
+    );
+    let initial_input = initial.supporting_rows[0].clone();
+    assert_eq!(initial_input.row, row_uuid);
     receiver
         .apply_sync_message_settled(initial.into_view_update())
-        .expect("receiver accepts complete populated closure");
+        .unwrap();
 
     let successor_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("successor")),
         )
-        .expect("author successor source version");
-    core.accept_global_for_test(successor_tx)
-        .expect("settle successor source version globally");
+        .unwrap();
+    core.accept_global_for_test(successor_tx).unwrap();
     let successor = crate::protocol::ViewUpdatePayload::from_view_update(
-        authority
-            .query_update(&mut core, &shape, &binding)
-            .expect("authority builds successor closure"),
+        authority.query_update(&mut core, &shape, &binding).unwrap(),
     )
-    .expect("ordinary authority update");
-    assert!(
-        successor.input_adds.iter().any(|fact| {
-            matches!(
-                fact,
-                crate::protocol::SupportingInput::Row(input)
-                    if input.source == initial_input.source
-                        && input.source_row == initial_input.source_row
-                        && input.version != initial_input.version
-            )
-        }),
-        "the real successor must advance the same exact source occurrence"
+    .unwrap();
+    assert_eq!(successor.supporting_rows.len(), 1);
+    assert_eq!(
+        successor.supporting_rows[0].physical_table,
+        initial_input.physical_table
     );
-    (receiver_dir, receiver, authority_result, initial_input, successor)
+    assert_eq!(successor.supporting_rows[0].row, initial_input.row);
+    assert_ne!(successor.supporting_rows[0].version, initial_input.version);
+    (
+        receiver_dir,
+        receiver,
+        authority_result,
+        initial_input,
+        successor,
+    )
 }
 
-// Receiver-side covered-input validation has no public call boundary: malformed
-// authority frames normally appear only as subscriptions that never settle.
-// These ingress receipts intentionally assert the atomic protocol behavior.
+// Malformed ingress has no public construction boundary; assert the complete
+// receiver update is rejected before either its inputs or receipt advance.
 fn assert_covered_input_rejected_atomically(
     receiver: &mut NodeState<RocksDbStorage>,
     authority_result: &crate::protocol::AuthorityResultKey,
@@ -150,208 +130,97 @@ fn assert_covered_input_rejected_atomically(
     assert!(
         receiver
             .apply_sync_message_settled(update.into_view_update())
-            .is_err(),
-        "malformed covered-input closure must reject before settlement"
+            .is_err()
     );
     assert_eq!(
         receiver.applied_authority_result_generation(authority_result),
-        generation,
-        "rejected closure must not advance the authority receipt"
+        generation
     );
-    assert!(
-        receiver.has_settled_authority_result(authority_result),
-        "rejected closure must not clear or replace the prior live receipt"
-    );
+    assert!(receiver.has_settled_authority_result(authority_result));
 }
 
 fn payload_view_update_parts(
     payload: crate::protocol::ViewUpdatePayload,
 ) -> crate::node::ViewUpdateParts {
     crate::node::ViewUpdateParts {
+        wire_rows: Some(payload.supporting_rows),
         subscription: payload.subscription,
         settled_through: payload.settled_through,
         defer_settlement: false,
-        reset_input_set: payload.reset_input_set,
+        reset_input_set: true,
         version_carriers: payload.version_carriers,
         peer_complete_tx_payload_refs: payload.peer_payload_inventory.complete_tx_payloads,
         authorization_progress: payload.peer_payload_inventory.authorization_progress,
         opening_pending: payload.peer_payload_inventory.opening_pending,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: payload.input_adds.into_iter().map(Into::into).collect(),
-        program_fact_removes: payload.input_removes.into_iter().map(Into::into).collect(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
     }
 }
 
 fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
     let SyncMessage::ViewUpdate(update) = message else {
-        panic!("expected authority view update");
+        panic!("expected snapshot")
     };
     update
-        .input_adds
+        .supporting_rows
         .iter()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input)
-                if input.source_row == row_uuid =>
-            {
-                Some(input.version.tx)
-            }
-            _ => None,
-        })
-        .expect("authority update must add an exact source witness for the changed row")
+        .find(|input| input.row == row_uuid)
+        .unwrap()
+        .version
+        .tx
 }
 
 #[test]
-fn authority_covered_input_rejects_unknown_same_table_source_role() {
+fn authority_supporting_snapshot_rejects_unknown_physical_table_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    let input = successor
-        .input_adds
-        .iter_mut()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input),
-            _ => None,
-        })
-        .expect("real successor has a covered input");
-    // Derive the malformed role from an authority-produced exact id; appending
-    // a valid alias makes it syntactically valid but impossible for this fixed
-    // compiled self-join program to resolve by complete equality.
-    input
-        .source
-        .path
-        .push(crate::protocol::ProgramSourceRole::Alias(
-            "unrecognized-same-table-role".to_owned(),
-        ));
+    successor.supporting_rows[0].physical_table =
+        crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x7a; 16]));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
-fn forged_source_reset(order_coverage_first: bool) -> (
-    NodeState<RocksDbStorage>,
-    crate::protocol::AuthorityResultKey,
-    crate::protocol::ViewUpdatePayload,
-) {
-    let (_dir, receiver, authority_result, _initial, mut successor) =
+#[test]
+fn authority_supporting_snapshot_rejects_wrong_native_table_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.reset_input_set = true;
-    successor.input_removes.clear();
-    let input = successor
-        .input_adds
-        .iter_mut()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input),
-            _ => None,
-        })
-        .expect("successor has input");
-    let original_source = input.source.clone();
-    input.source.path.push(crate::protocol::ProgramSourceRole::Alias(
-        "forged-source-role".to_owned(),
-    ));
-    let forged = input.source.clone();
-    let sources = receiver.query.authority_results[&authority_result]
-        .covered_input_sources
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let coverage = sources.into_iter().map(|source| {
-        crate::protocol::SupportingInput::SourceComplete(
-            crate::protocol::ProgramSourceCoverageEntry {
-                source: if source == original_source {
-                    forged.clone()
-                } else {
-                    source
-                },
-                complete: true,
-            },
-        )
-    });
-    if order_coverage_first {
-        successor.input_adds.splice(0..0, coverage);
-    } else {
-        successor.input_adds.extend(coverage);
-    }
-    (receiver, authority_result, successor)
-}
-
-#[test]
-fn authority_rejects_forged_source_coverage_before_matching_input() {
-    let (mut receiver, authority_result, update) = forged_source_reset(true);
-    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
-}
-
-#[test]
-fn authority_rejects_forged_source_coverage_after_matching_input() {
-    let (mut receiver, authority_result, update) = forged_source_reset(false);
-    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, update);
+    successor.supporting_rows[0].version_table = "unknown_table".to_owned().into();
+    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
 #[test]
 fn authority_covered_input_rejects_missing_carrier_before_settlement() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    assert!(
-        !successor.version_carriers.is_empty(),
-        "real successor closure carries its referenced immutable versions"
-    );
+    assert!(!successor.version_carriers.is_empty());
     successor.version_carriers.clear();
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
 #[test]
-fn authority_covered_input_rejects_conflicting_retained_source_version_atomically() {
+fn authority_supporting_snapshot_rejects_conflicting_native_versions_atomically() {
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
-    // The first closure already carried and installed `initial`, while this
-    // real successor carries the replacement version. Keep the old fact out
-    // of the successor's removal set and add it to the closure so both exact
-    // witnesses exist yet the same source occurrence claims two versions.
-    successor
-        .input_removes
-        .retain(|fact| fact != &crate::protocol::SupportingInput::Row(initial.clone()));
-    successor
-        .input_adds
-        .push(crate::protocol::SupportingInput::Row(initial));
+    successor.supporting_rows.push(initial);
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
 #[test]
-fn authority_covered_input_rejects_duplicate_and_impossible_live_deltas_atomically() {
+fn authority_supporting_snapshot_rejects_duplicate_coordinate_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    let duplicate = successor
-        .input_adds
-        .iter()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
-            _ => None,
-        })
-        .expect("real successor has a covered input");
     successor
-        .input_adds
-        .push(crate::protocol::SupportingInput::Row(duplicate));
-    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
-
-    let (_dir, mut receiver, authority_result, initial, mut successor) =
-        covered_input_receiver_fixture();
-    let mut impossible_remove = initial;
-    impossible_remove.version.tx = TxId::new(TxTime(0x7a), node(0x7a));
-    successor
-        .input_removes
-        .push(crate::protocol::SupportingInput::Row(impossible_remove));
+        .supporting_rows
+        .push(successor.supporting_rows[0].clone());
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
 #[test]
-fn authority_covered_input_rejects_live_coverage_changes_atomically() {
-    let (_dir, mut receiver, authority_result, initial, mut successor) =
+fn authority_supporting_snapshot_rejects_missing_version_atomically() {
+    let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.input_removes.push(
-        crate::protocol::SupportingInput::SourceComplete(
-            crate::protocol::ProgramSourceCoverageEntry {
-                source: initial.source,
-                complete: true,
-            },
-        ),
-    );
+    successor.supporting_rows[0].version.tx = TxId::new(TxTime(0x7a), node(0x7a));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -362,61 +231,44 @@ fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     let subscription = successor.subscription;
     let generation = receiver.applied_authority_result_generation(&authority_result);
     let mut malformed = successor.clone();
-    let duplicate = malformed
-        .input_adds
-        .iter()
-        .find_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
-            _ => None,
-        })
-        .expect("successor has covered input");
     malformed
-        .input_adds
-        .push(crate::protocol::SupportingInput::Row(duplicate));
+        .supporting_rows
+        .push(malformed.supporting_rows[0].clone());
     let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor),
         payload_view_update_parts(malformed),
     ]))
-    .expect_err("later malformed closure rejects the entire receiver batch");
-    assert!(matches!(
-        error,
-        Error::InvalidAuthoritySourceClosure { subscription: rejected, .. }
-            if rejected == subscription
-    ));
+    .expect_err("the entire batch validates before installation");
+    assert!(
+        matches!(error, Error::InvalidAuthoritySourceClosure { subscription: rejected, .. } if rejected == subscription)
+    );
     assert_eq!(
         receiver.applied_authority_result_generation(&authority_result),
-        generation,
-        "the preceding valid frame must not advance before the batch validates"
+        generation
     );
 }
 
 #[test]
-fn authority_covered_input_rejects_reset_with_incomplete_source_manifest_atomically() {
+fn authority_complete_empty_snapshot_replaces_prior_inputs() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    let sources = receiver
-        .query
-        .authority_results
-        .get(&authority_result)
-        .expect("fixture installed authority closure")
-        .covered_input_sources
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(sources.len() > 1, "self-join fixture has multiple source occurrences");
-    successor.reset_input_set = true;
-    successor.input_removes.clear();
-    successor.input_adds.extend(sources.iter().skip(1).cloned().map(
-        |source| {
-            crate::protocol::SupportingInput::SourceComplete(
-                crate::protocol::ProgramSourceCoverageEntry {
-                    source,
-                    complete: true,
-                },
-            )
-        },
-    ));
-    assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
+    let generation = receiver.applied_authority_result_generation(&authority_result);
+    successor.supporting_rows.clear();
+    successor.version_carriers.clear();
+    receiver
+        .apply_sync_message_settled(successor.into_view_update())
+        .unwrap();
+    assert!(receiver.has_settled_authority_result(&authority_result));
+    assert_ne!(
+        receiver.applied_authority_result_generation(&authority_result),
+        generation
+    );
+    assert!(
+        receiver
+            .scalar_authority_input_rows(&authority_result, "todos")
+            .is_empty(),
+        "empty snapshot clears both self-join scan inputs"
+    );
 }
 
 /// This is an internal ingress receipt because the public API intentionally
@@ -479,9 +331,7 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         .settled_program_facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.source_row == row_uuid =>
-            {
+            crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row_uuid => {
                 Some(input.version.tx)
             }
             _ => None,
@@ -606,7 +456,9 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
 
     let (_replacement_dir, mut replacement) = open_node_with_schema(node(2), schema);
     let (kept, kept_unit) = replacement
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(3), 12).cells(title_cells("kept")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(3), 12).cells(title_cells("kept")),
+        )
         .unwrap();
     let fates = core.apply_sync_message_settled(kept_unit).unwrap();
     assert_eq!(fates.len(), 1);
@@ -622,7 +474,11 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
     }
     assert_eq!(
         replacement.transaction_state_settled(kept),
-        Some((Fate::Accepted, Some(GlobalTime::new(12, 0).unwrap()), DurabilityTier::Global))
+        Some((
+            Fate::Accepted,
+            Some(GlobalTime::new(12, 0).unwrap()),
+            DurabilityTier::Global
+        ))
     );
     assert_eq!(
         core.current_rows("todos", DurabilityTier::Global).unwrap(),
@@ -641,7 +497,9 @@ fn accepted_fates_maintain_global_current_tables() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let row = row(7);
     let (first, first_message) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("first")),
+        )
         .unwrap();
     let (second, second_message) = writer
         .commit_mergeable_unit_settled(
@@ -681,19 +539,21 @@ fn reopened_core_continues_sync_after_restart() {
         .1;
     {
         let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-        let mut core = NodeState::new(node(9), schema.clone(), storage).unwrap();
+        let mut core = NodeState::new_with_shared_test_catalogue(node(9), schema.clone(), storage).unwrap();
         core.apply_sync_message_settled(first_unit).unwrap();
     }
 
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-    let mut reopened_core = NodeState::new(node(9), schema, storage).unwrap();
+    let mut reopened_core = NodeState::new_with_shared_test_catalogue(node(9), schema, storage).unwrap();
     let second_unit = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("after")),
         )
         .unwrap()
         .1;
-    reopened_core.apply_sync_message_settled(second_unit).unwrap();
+    reopened_core
+        .apply_sync_message_settled(second_unit)
+        .unwrap();
     let update = peer
         .current_rows_update(&mut reopened_core, "todos")
         .unwrap();
@@ -837,7 +697,9 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
     let row = row(7);
 
     let (tx_id, message) = client
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("sync me")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("sync me")),
+        )
         .unwrap();
 
     assert_eq!(
@@ -885,7 +747,11 @@ fn commit_units_sync_upstream_and_fates_flow_back() {
         .unwrap();
     assert_eq!(
         client.transaction_state_settled(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
+        (
+            Fate::Accepted,
+            Some(GlobalTime::new(10, 0).unwrap()),
+            DurabilityTier::Global
+        )
     );
 }
 #[test]
@@ -894,7 +760,9 @@ fn duplicate_commit_units_must_match_original_payload() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (_, message) = client
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("first")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("first")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("commit_mergeable_unit must emit a commit unit");
@@ -915,7 +783,9 @@ fn duplicate_commit_units_must_match_original_payload() {
 fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(7), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(7), 10).cells(title_cells("base")),
+        )
         .unwrap();
     node.apply_fate_update(
         tx_id,
@@ -931,7 +801,8 @@ fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
             Fate::Accepted,
             Some(GlobalTime(4)),
             Some(DurabilityTier::Global),
-        ).resolve(),
+        )
+        .resolve(),
         Err(Error::NonMonotoneState("global seq cannot move backwards"))
     ));
     assert_eq!(
@@ -956,7 +827,9 @@ fn fate_update_rejects_backward_global_time_and_keeps_durability_monotone() {
 fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(8), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(8), 10).cells(title_cells("base")),
+        )
         .unwrap();
 
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -967,7 +840,10 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
             durability: Some(DurabilityTier::Edge),
         })
     }));
-    assert!(received.is_ok(), "a peer message must not panic the receiver");
+    assert!(
+        received.is_ok(),
+        "a peer message must not panic the receiver"
+    );
     assert!(matches!(
         received.unwrap(),
         Err(Error::UnsupportedSyncMessage(
@@ -999,18 +875,19 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let bad_tx = TxId::new(TxTime::from(10), node(8));
     let subscription = receiver.whole_table_subscription_key("todos").unwrap();
     receiver
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through: GlobalTime(0),
-            reset_input_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-                opening_pending: true,
-                ..Default::default()
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: GlobalTime(0),
+
+                version_carriers: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    opening_pending: true,
+                    ..Default::default()
+                },
+                supporting_rows: Vec::new(),
             },
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
-        }))
+        ))
         .unwrap();
     let authority_result_key = receiver
         .authority_result_key_for_subscription(subscription)
@@ -1018,37 +895,38 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let before_generation = receiver.applied_authority_result_generation(&authority_result_key);
     assert!(receiver.opening_pending_for_authority_result(&authority_result_key));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through: GlobalTime(0),
-            reset_input_set: true,
-            version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
-                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
-                tx: Transaction {
-                    tx_id: bad_tx,
-                    kind: TxKind::Mergeable,
-                    n_total_writes: 0,
-                    made_by: AuthorSubject::system_at(bad_tx.node),
-                    permission_subject: None,
-                    base_snapshot: None,
-                    row_read_set: None,
-                    absent_read_set: None,
-                    predicate_read_set: None,
-                    user_metadata_json: None,
-                    contribution_merge: None,
+        receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: GlobalTime(0),
+
+                version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                    tx: Transaction {
+                        tx_id: bad_tx,
+                        kind: TxKind::Mergeable,
+                        n_total_writes: 0,
+                        made_by: AuthorSubject::system_at(bad_tx.node),
+                        permission_subject: None,
+                        base_snapshot: None,
+                        row_read_set: None,
+                        absent_read_set: None,
+                        predicate_read_set: None,
+                        user_metadata_json: None,
+                        contribution_merge: None,
+                    },
+                    versions: Vec::new(),
+                    fate: Fate::Accepted,
+                    global_time: Some(GlobalTime(7)),
+                    durability: DurabilityTier::Edge,
+                })],
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    opening_pending: false,
+                    ..Default::default()
                 },
-                versions: Vec::new(),
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime(7)),
-                durability: DurabilityTier::Edge,
-            })],
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-                opening_pending: false,
-                ..Default::default()
+                supporting_rows: Vec::new(),
             },
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
-        }))
+        ))
     }));
     assert!(received.is_ok(), "a peer view must not panic the receiver");
     assert!(matches!(
@@ -1063,24 +941,29 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         before_generation
     );
     receiver
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through: GlobalTime(1),
-            reset_input_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            input_adds: vec![todos_source_coverage().try_into().unwrap()],
-            input_removes: Vec::new(),
-        }))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: GlobalTime(1),
+
+                version_carriers: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                supporting_rows: Vec::new(),
+            },
+        ))
         .unwrap();
     assert!(!receiver.opening_pending_for_authority_result(&authority_result_key));
     assert_eq!(
         receiver.applied_authority_result_generation(&authority_result_key),
         before_generation + 1
     );
-    assert!(receiver
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive")))
-        .is_ok());
+    assert!(
+        receiver
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive"))
+            )
+            .is_ok()
+    );
 }
 
 // This is necessarily an internal mechanism test: the public sync boundary
@@ -1091,7 +974,9 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
 fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
     let (_temp_dir, mut node) = open_node();
     let tx_id = node
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(10), 10).cells(title_cells("base")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(10), 10).cells(title_cells("base")),
+        )
         .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         node.apply_fate_update(

@@ -122,7 +122,10 @@ fn open_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (temp_dir, node)
 }
 
@@ -134,7 +137,10 @@ fn reopen_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
+    block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap()
 }
 
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
@@ -1399,7 +1405,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription: common::direct_subscription(&schema, "canvases", AuthorSubject::SYSTEM),
             settled_through: jazz::time::GlobalTime(0),
-            reset_input_set: false,
+
             version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx,
                 versions,
@@ -1409,8 +1415,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
                 durability: DurabilityTier::Edge,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         }),
     );
 

@@ -755,7 +755,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         panic!("expected view update");
     };
     assert_eq!(
-        canonical_view_update_rows(&update).0,
+        canonical_view_update_rows(&update),
         vec![(
             groove::Intern::new("announcements".to_owned()),
             announcement_row,
@@ -832,7 +832,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(
         canonical_view_update_rows(&update),
-        (vec![], vec![("todos".to_owned().into(), row_uuid, tx_a)])
+        Vec::<ResultRowEntry>::new()
     );
     reader_a.apply_sync_message_settled(update).unwrap();
     assert!(
@@ -1036,7 +1036,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .unwrap();
     assert_eq!(
         canonical_view_update_rows(&revoked_update),
-        (vec![], vec![("canvases".to_owned().into(), canvas_row, accepted_id)])
+        Vec::<ResultRowEntry>::new()
     );
     invited_reader.apply_sync_message_settled(revoked_update).unwrap();
     assert!(

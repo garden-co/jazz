@@ -999,6 +999,21 @@ where
         }
     }
 
+    /// Exact catalogue coordinate for synthetic upstream wire fixtures.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn physical_table_identity_for_test(
+        &self,
+        schema: crate::ids::SchemaVersionId,
+        table: &str,
+    ) -> Result<crate::ids::GlobalPhysicalTableId, String> {
+        self.node
+            .node()
+            .borrow()
+            .local_availability_table_id(schema, table)
+            .map_err(|error| error.to_string())
+    }
+
     /// Stage one protocol frame on the exactly selected test upstream.
     ///
     /// The frame is consumed by the normal `PeerConnection::tick` inbound

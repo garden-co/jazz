@@ -1662,11 +1662,9 @@ mod tests {
             ViewUpdate {
                 subscription: SubscriptionKey,
                 settled_through: GlobalTime,
-                reset_input_set: bool,
                 version_carriers: Vec<VersionCarrier>,
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
-                input_adds: Vec<crate::protocol::SupportingInput>,
-                input_removes: Vec<crate::protocol::SupportingInput>,
+                supporting_rows: Vec<crate::protocol::SupportingRow>,
             },
         }
 
@@ -1676,11 +1674,9 @@ mod tests {
         let flat = FlatSyncMessage::ViewUpdate {
             subscription: payload.subscription,
             settled_through: payload.settled_through,
-            reset_input_set: payload.reset_input_set,
             version_carriers: payload.version_carriers.clone(),
             peer_payload_inventory: payload.peer_payload_inventory.clone(),
-            input_adds: payload.input_adds.clone(),
-            input_removes: payload.input_removes.clone(),
+            supporting_rows: payload.supporting_rows.clone(),
         };
         let current = SyncMessage::ViewUpdate(payload);
 
@@ -1848,11 +1844,9 @@ mod tests {
                 read_view: Default::default(),
             },
             settled_through: GlobalTime(500),
-            reset_input_set: false,
             version_carriers,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            input_adds: Vec::new(),
-            input_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         })
     }
 
@@ -2090,7 +2084,6 @@ mod tests {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
-                    reset_input_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     // Exercise the same sized, independently-delivered
@@ -2106,7 +2099,6 @@ mod tests {
                             },
                         ),
                     ],
-                    input_removes: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2187,15 +2179,13 @@ mod tests {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
-                reset_input_set: true,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                input_adds: Vec::new(),
-                input_removes: Vec::new(),
+                supporting_rows: Vec::new(),
             }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
@@ -2250,19 +2240,31 @@ mod tests {
     }
 
     #[test]
-    fn view_update_rejects_authority_result_entries() {
-        let row = RowUuid::from_bytes([0x22; 16]);
-        let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
-        let entry: crate::protocol::ResultMemberEntry =
-            (groove::Intern::new("todos".to_owned()), row, tx_id).into();
-        let fact = crate::protocol::ProgramFactEntry::ResultPayload(
-            crate::protocol::ResultMemberPayloadEntry {
-                member: entry,
-                descriptor: Vec::new(),
-                record: Vec::new(),
-            },
+    fn view_update_rejects_invalid_supporting_row_reference() {
+        let SyncMessage::ViewUpdate(mut payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        payload
+            .supporting_rows
+            .push(crate::protocol::SupportingRow {
+                physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                    [0x21; 16],
+                )),
+                version_table: "todos".to_owned().into(),
+                row: RowUuid::from_bytes([0x22; 16]),
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16])),
+                    schema_version: None,
+                    layer: crate::protocol::ResultRowLayer::ContentOrDeletion,
+                    batch: None,
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            });
+        assert!(
+            encode_sync_message(&SyncMessage::ViewUpdate(payload)).is_err(),
+            "an exact snapshot reference must name one native register layer"
         );
-        assert!(crate::protocol::SupportingInput::try_from(fact).is_err());
     }
 
     #[test]

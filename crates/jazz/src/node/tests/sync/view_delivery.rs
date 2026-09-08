@@ -11,6 +11,7 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         TxId::new(TxTime::from(1), node(0x63)),
     ));
     let base = || ViewUpdateParts {
+        wire_rows: None,
         subscription,
         settled_through: GlobalTime(0),
         defer_settlement: false,
@@ -50,10 +51,12 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         Err(Error::InvalidAuthoritySourceClosure { transition, .. })
             if transition == "authority view update carries a non-source closure fact"
     ));
-    assert!(reader
-        .subscription_current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -64,12 +67,9 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let row = row(7);
 
     let (_, commit_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
-                "title".to_owned(),
-                "replicate me".to_owned(),
-            )])),
-        )
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(
+            BTreeMap::from([("title".to_owned(), "replicate me".to_owned())]),
+        ))
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
@@ -85,13 +85,14 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_input_set,
+
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs, ..
+                complete_tx_payloads: peer_payload_inventory_refs,
+                opening_pending,
+                ..
             },
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -101,16 +102,17 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         subscription,
         core.whole_table_subscription_key("todos").unwrap()
     );
-    assert!(reset_input_set);
+    assert!(!opening_pending);
     assert_eq!(version_bundles.len(), 1);
     assert!(peer_payload_inventory_refs.is_empty());
 
     reader
         .apply_view_update(ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_input_set,
+            reset_input_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -120,8 +122,8 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
-            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -153,8 +155,7 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
 
     let (_, authoritative_unit) = other
         .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", target, 20)
-                .cells(title_cells("authoritative remote")),
+            MergeableCommit::new("todos", target, 20).cells(title_cells("authoritative remote")),
         )
         .unwrap();
     let [authoritative_fate] = core
@@ -227,7 +228,9 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     let row = row(7);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("known")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("known")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
@@ -243,25 +246,27 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_input_set,
+
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs, ..
+                complete_tx_payloads: peer_payload_inventory_refs,
+                opening_pending,
+                ..
             },
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = initial
     else {
         panic!("expected view update");
     };
-    assert!(reset_input_set);
+    assert!(!opening_pending);
     reader
         .apply_view_update(ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_input_set,
+            reset_input_set: true,
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -271,8 +276,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
-            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -291,10 +296,11 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs, ..
+                complete_tx_payloads: peer_payload_inventory_refs,
+                opening_pending,
+                ..
             },
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = deduped
     else {
@@ -304,11 +310,12 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
     assert!(program_fact_adds.iter().any(|fact| matches!(
         fact,
-        crate::protocol::SupportingInput::Row(input)
-            if input.source_row == row && input.version.tx == tx_id
+        input
+            if input.row == row && input.version.tx == tx_id
     )));
     reader
         .apply_view_update(ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
             subscription: core.whole_table_subscription_key("todos").unwrap(),
             settled_through,
             defer_settlement: false,
@@ -324,8 +331,8 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
-            program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
 }
@@ -340,6 +347,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
 
     reader
         .apply_view_update(ViewUpdateParts {
+            wire_rows: None,
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
             settled_through: GlobalTime(0),
             defer_settlement: false,
@@ -369,7 +377,9 @@ fn wire_record_round_trips_through_history_bytes() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let (_tx_id, message) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("wire")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row, 10).cells(title_cells("wire")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
@@ -394,19 +404,18 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
     let row = row(7);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
-                "title".to_owned(),
-                "dispatch".to_owned(),
-            )])),
-        )
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(
+            BTreeMap::from([("title".to_owned(), "dispatch".to_owned())]),
+        ))
         .unwrap();
 
     let out = core.apply_sync_message_settled(commit_unit).unwrap();
     let [fate_update] = out.as_slice() else {
         panic!("expected one fate update");
     };
-    writer.apply_sync_message_settled(fate_update.clone()).unwrap();
+    writer
+        .apply_sync_message_settled(fate_update.clone())
+        .unwrap();
     let (fate, _, _) = writer.transaction_state_settled(tx_id).unwrap();
     assert_eq!(fate, Fate::Accepted);
 
@@ -414,7 +423,12 @@ fn sync_message_dispatches_commit_fate_and_view_updates() {
     register_shape_binding(&mut reader, &shape, &binding);
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let view_update = system_authority_reset(&mut core, &shape, &binding, subscription);
-    assert!(reader.apply_sync_message_settled(view_update).unwrap().is_empty());
+    assert!(
+        reader
+            .apply_sync_message_settled(view_update)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Local)
             .into_iter()
@@ -467,26 +481,31 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
 /// authored on the rebuilt wire unit and this test fails.
 #[test]
 fn reopened_pending_partial_update_upload_preserves_authored_columns() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("completed", PublicColumnType::Boolean),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("completed", PublicColumnType::Boolean),
+        ),
+    );
     let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
     let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
-    let (_core_dir, mut core) =
-        open_history_complete_node_with_schema(node(0x93), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(0x93), schema.clone());
     let row_uuid = row(0x91);
 
     let (base, base_unit) = bob
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row_uuid, 10).cells(
+            BTreeMap::from([
                 ("title".to_owned(), Value::String("base".to_owned())),
                 ("completed".to_owned(), Value::Bool(false)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
-    let [base_fate] = core.apply_sync_message_settled(base_unit).unwrap().try_into().unwrap();
+    let [base_fate] = core
+        .apply_sync_message_settled(base_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     bob.apply_sync_message_settled(base_fate).unwrap();
 
     let (_alice_tx, alice_unit) = alice

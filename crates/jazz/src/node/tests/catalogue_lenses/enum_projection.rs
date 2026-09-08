@@ -3,28 +3,23 @@
 /// Peer maintained updates disclose the exact source closure. These enum
 /// fixtures query one root table, so their old membership checks map directly
 /// to content-layer covered inputs for that table.
-fn covered_input_rows(update: &SyncMessage, additions: bool) -> Vec<(RowUuid, TxId)> {
+fn covered_input_rows(update: &SyncMessage) -> Vec<(RowUuid, TxId)> {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected maintained view update");
     };
-    let facts = if additions {
-        program_fact_adds
-    } else {
-        program_fact_removes
-    };
+    let facts = program_fact_adds;
     facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::SupportingInput::Row(input)
+            input
                 if input.version_table.as_str() == "items"
                     && input.version.layer == crate::protocol::ResultRowLayer::Content =>
             {
-                Some((input.source_row, input.version.tx))
+                Some((input.row, input.version.tx))
             }
             _ => None,
         })
@@ -32,25 +27,29 @@ fn covered_input_rows(update: &SyncMessage, additions: bool) -> Vec<(RowUuid, Tx
 }
 
 fn independent_enum_schema(a: &[&str], b: &[&str]) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("a", public_scalar_enum("a", a))
-            .column("b", public_scalar_enum("b", b)),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("a", public_scalar_enum("a", a))
+                .column("b", public_scalar_enum("b", b)),
+        ),
+    )
 }
 
 fn enum_projection_schema(statuses: &[&str]) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column("status", public_scalar_enum("status", statuses)),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column("status", public_scalar_enum("status", statuses)),
+        ),
+    )
 }
 
 #[test]
 fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
-    // Inspect the public peer update here because an empty result must still
-    // encode its coverage terminal, not just return an empty application row set.
+    // Empty and populated snapshots must both preserve the typed binding.
+    // An empty supporting set is itself the complete authority response.
     let schema = enum_projection_schema(&["open", "active", "closed"]);
     let query = Query::from("items")
         .filter(eq(col("status"), param("wanted")))
@@ -67,16 +66,24 @@ fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
             ])),
         );
         let binding = query
-            .bind(BTreeMap::from([("wanted".to_owned(), Value::EnumTag(wanted))]))
+            .bind(BTreeMap::from([(
+                "wanted".to_owned(),
+                Value::EnumTag(wanted),
+            )]))
             .unwrap();
         let mut peer = PeerState::new();
         let initial = peer.rehydrate_query(&mut core, &query, &binding).unwrap();
-        let expected = if wanted == 0 { vec![(item, first)] } else { vec![] };
-        assert_eq!(covered_input_rows(&initial, true), expected);
+        let expected = if wanted == 0 {
+            vec![(item, first)]
+        } else {
+            vec![]
+        };
+        assert_eq!(covered_input_rows(&initial), expected);
         let SyncMessage::ViewUpdate(payload) = &initial else {
             panic!("expected maintained view update");
         };
-        assert!(!payload.input_adds.is_empty(), "empty results still carry coverage");
+        assert_eq!(payload.supporting_rows.len(), usize::from(wanted == 0));
+        assert!(!payload.peer_payload_inventory.opening_pending);
 
         let next = accept_global(
             &mut core,
@@ -86,8 +93,8 @@ fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
             ])),
         );
         let update = peer.query_update(&mut core, &query, &binding).unwrap();
-        assert_eq!(covered_input_rows(&update, true), vec![(item, next)]);
-        assert_eq!(covered_input_rows(&update, false), expected);
+        assert_eq!(covered_input_rows(&update), vec![(item, next)]);
+        assert!(expected.iter().all(|old| !covered_input_rows(&update).contains(old)));
     }
 }
 
@@ -126,7 +133,8 @@ fn enum_identity_lens(source: SchemaVersionId, target: SchemaVersionId) -> Migra
                 transform: "jazz.identity".to_owned(),
             }],
         }],
-    ).expect("valid migration lens")
+    )
+    .expect("valid migration lens")
 }
 
 /// Earlier catalogue introductions retain their physical scalar-enum tags
@@ -183,12 +191,12 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         (base_row, "base", 0, 2),
         (a_row, "a", 1, 3),
     ] {
-        core.commit_mergeable_settled(
-            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+        core.commit_mergeable_settled(MergeableCommit::new("items", row_uuid, tx_time).cells(
+            BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 ("status".to_owned(), Value::EnumTag(status)),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     }
     // `b` has local ordinal 1, but it is catalogue-later than A2's ordinal
@@ -207,8 +215,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         .physical_scalar_enum_cases(b_mapping.table_id, b_mapping.columns["status"])
         .unwrap();
     let case = |schema, ordinal| GlobalScalarEnumCaseId {
-        id: core.catalogue.physical_mappings[&schema].identities.tables["items"].columns
-            ["status"]
+        id: core.catalogue.physical_mappings[&schema].identities.tables["items"].columns["status"]
             .enum_variants["root"][ordinal],
         introducing_schema: schema,
         introducing_ordinal: ordinal as u8,
@@ -239,7 +246,10 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
     drop(core);
 
     let mut reopened = reopen_node_at(&dir, node(0x78), base.clone());
-    let titles = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let titles = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     assert_eq!(
         reopened
             .query_rows(
@@ -256,37 +266,43 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
 }
 
 fn payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column("status", public_payload_enum("status", cases, "note")),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column("status", public_payload_enum("status", cases, "note")),
+        ),
+    )
 }
 
 fn nested_scalar_enum_projection_schema(statuses: &[&str]) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column(
-                "statuses",
-                PublicColumnType::Array {
-                    element: Box::new(public_scalar_enum("status", statuses)),
-                },
-            ),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column(
+                    "statuses",
+                    PublicColumnType::Array {
+                        element: Box::new(public_scalar_enum("status", statuses)),
+                    },
+                ),
+        ),
+    )
 }
 
 fn nested_payload_enum_projection_schema(cases: &[&str]) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column(
-                "statuses",
-                PublicColumnType::Array {
-                    element: Box::new(public_payload_enum("status", cases, "note")),
-                },
-            ),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column(
+                    "statuses",
+                    PublicColumnType::Array {
+                        element: Box::new(public_payload_enum("status", cases, "note")),
+                    },
+                ),
+        ),
+    )
 }
 
 /// This is an internal physical-activation regression: public clients cannot
@@ -312,7 +328,8 @@ fn direct_payload_enum_append_activates_and_recovers() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -325,21 +342,21 @@ fn direct_payload_enum_append_activates_and_recovers() {
         },
     })
     .unwrap();
-    let published_payload = groove::records::RecordDescriptor::new([(
-        "note",
-        groove::records::ValueType::String,
-    )]);
+    let published_payload =
+        groove::records::RecordDescriptor::new([("note", groove::records::ValueType::String)]);
     core.commit_mergeable_settled(
         MergeableCommit::new("items", row(0x76), 1).cells(BTreeMap::from([
             ("title".to_owned(), v("new-case")),
             (
                 "status".to_owned(),
-                Value::Enum(groove::records::EnumValue::create(
-                    1,
-                    published_payload,
-                    &[v("written after activation")],
-                )
-                .unwrap()),
+                Value::Enum(
+                    groove::records::EnumValue::create(
+                        1,
+                        published_payload,
+                        &[v("written after activation")],
+                    )
+                    .unwrap(),
+                ),
             ),
         ])),
     )
@@ -367,18 +384,20 @@ fn direct_payload_enum_append_activates_and_recovers() {
 #[test]
 fn incompatible_scalar_enum_epoch_activates_and_recovers() {
     let base = enum_projection_schema(&["draft", "published"]);
-    let evolved_schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column(
-                "status_replacement",
-                public_scalar_enum("status", &["archived"]),
-            ),
-    ));
+    let evolved_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column(
+                    "status_replacement",
+                    public_scalar_enum("status", &["archived"]),
+                ),
+        ),
+    );
     let evolved = SchemaVersion::new(evolved_schema);
     let (dir, mut core) = open_node_with_schema(node(0x7b), base.clone());
-    let source_column = core.catalogue.physical_mappings[&base.version_id()].tables["items"]
-        .columns["status"];
+    let source_column =
+        core.catalogue.physical_mappings[&base.version_id()].tables["items"].columns["status"];
     publish_schema_lineage(
         &mut core,
         evolved.clone(),
@@ -399,7 +418,8 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -412,15 +432,18 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
         },
     })
     .unwrap();
-    let target_column = core.catalogue.physical_mappings[&evolved.id].tables["items"].columns
-        ["status_replacement"];
-    assert_ne!(target_column, source_column, "replacement gets a fresh epoch");
-    core.commit_mergeable_settled(
-        MergeableCommit::new("items", row(0x7b), 1).cells(BTreeMap::from([
+    let target_column =
+        core.catalogue.physical_mappings[&evolved.id].tables["items"].columns["status_replacement"];
+    assert_ne!(
+        target_column, source_column,
+        "replacement gets a fresh epoch"
+    );
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x7b), 1).cells(
+        BTreeMap::from([
             ("title".to_owned(), v("fresh enum epoch")),
             ("status_replacement".to_owned(), Value::EnumTag(0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     drop(core);
 
@@ -428,8 +451,7 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
     assert_eq!(reopened.current_write_schema().unwrap().schema, evolved.id);
     assert_eq!(reopened.query_table_versions("items").unwrap().len(), 1);
     assert_eq!(
-        reopened.catalogue.physical_mappings[&evolved.id].tables["items"].columns
-            ["status_replacement"],
+        reopened.catalogue.physical_mappings[&evolved.id].tables["items"].columns["status_replacement"],
         target_column,
         "the activated fresh epoch remains stable across reopen"
     );
@@ -441,14 +463,16 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
 #[test]
 fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
     let base = enum_projection_schema(&["draft", "published"]);
-    let evolved = SchemaVersion::new(build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("items")
-            .column("title", PublicColumnType::Text)
-            .column(
-                "status_replacement",
-                public_scalar_enum("status", &["archived"]),
-            ),
-    )));
+    let evolved = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("title", PublicColumnType::Text)
+                .column(
+                    "status_replacement",
+                    public_scalar_enum("status", &["archived"]),
+                ),
+        ),
+    ));
     let lens = MigrationLens::new(
         base.version_id(),
         evolved.id,
@@ -466,10 +490,12 @@ fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
                 },
             ],
         }],
-    ).expect("valid migration lens");
+    )
+    .expect("valid migration lens");
     let (dir, mut core) = open_node_with_schema(node(0x7c), base.clone());
-    let source_variant = core.catalogue.physical_mappings[&base.version_id()].identities.tables
-        ["items"]
+    let source_variant = core.catalogue.physical_mappings[&base.version_id()]
+        .identities
+        .tables["items"]
         .columns["status"]
         .enum_variants["root"][0];
     let mut forged = core
@@ -480,9 +506,17 @@ fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
             Vec::<String>::new(),
         )
         .unwrap();
-    forged.physical_identities.tables.get_mut("items").unwrap().columns.get_mut(
-        "status_replacement",
-    ).unwrap().enum_variants.get_mut("root").unwrap()[0] = source_variant;
+    forged
+        .physical_identities
+        .tables
+        .get_mut("items")
+        .unwrap()
+        .columns
+        .get_mut("status_replacement")
+        .unwrap()
+        .enum_variants
+        .get_mut("root")
+        .unwrap()[0] = source_variant;
     forged.id = forged.content_id();
 
     assert!(matches!(
@@ -491,7 +525,9 @@ fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
             catalogue_seq: 1,
             publication: Box::new(forged),
         }),
-        Err(Error::InvalidCatalogueUpdate("physical retired identity reused across lineage"))
+        Err(Error::InvalidCatalogueUpdate(
+            "physical retired identity reused across lineage"
+        ))
     ));
     assert_eq!(core.active_catalogue_seq(), 0);
     assert!(!core.catalogue_schemas().contains_key(&evolved.id));
@@ -510,35 +546,98 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
         } else {
             vec!["open"]
         };
-        build_public_test_schema(PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("items")
-                .column("title", PublicColumnType::Text)
-                .column("status", public_payload_enum("status", &cases, "x")),
-        ))
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("items")
+                    .column("title", PublicColumnType::Text)
+                    .column("status", public_payload_enum("status", &cases, "x")),
+            ),
+        )
     };
-    let base = schema(false); let evolved = SchemaVersion::new(schema(true));
+    let base = schema(false);
+    let evolved = SchemaVersion::new(schema(true));
     let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
-    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]).expect("valid migration lens"), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
-    let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".into(),
+                target_table: "items".into(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".into(),
+                    transform: "jazz.identity".into(),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let payload =
+        groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
     let unknown = row(0x76);
-    core.commit_mergeable_settled(MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
-        ("title".into(), v("ok")), ("status".into(), Value::Enum(groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap()))
-    ]))).unwrap();
+    core.commit_mergeable_settled(
+        MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
+            ("title".into(), v("ok")),
+            (
+                "status".into(),
+                Value::Enum(
+                    groove::records::EnumValue::create(1, payload, &[v("closed")]).unwrap(),
+                ),
+            ),
+        ])),
+    )
+    .unwrap();
     let known = row(0x77);
-    let known_payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
-    core.commit_mergeable_settled(MergeableCommit::new("items", known, 2).cells(BTreeMap::from([
-        ("title".into(), v("known")), ("status".into(), Value::Enum(groove::records::EnumValue::create(0, known_payload, &[v("open")]).unwrap()))
-    ]))).unwrap();
-    let title = Query::from("items").select(["title"]).validate(&base).unwrap();
-    assert!(core.query_rows(&title, &title.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+    let known_payload =
+        groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
+    core.commit_mergeable_settled(
+        MergeableCommit::new("items", known, 2).cells(BTreeMap::from([
+            ("title".into(), v("known")),
+            (
+                "status".into(),
+                Value::Enum(
+                    groove::records::EnumValue::create(0, known_payload, &[v("open")]).unwrap(),
+                ),
+            ),
+        ])),
+    )
+    .unwrap();
+    let title = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
+    assert!(
+        core.query_rows(
+            &title,
+            &title.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .is_ok()
+    );
     let all = Query::from("items").validate(&base).unwrap();
     assert_eq!(
-        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
+        core.query_rows(
+            &all,
+            &all.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
         BTreeSet::from([known]),
     );
 }
@@ -570,7 +669,8 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -589,19 +689,22 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
         (unknown, "new nested case", 1, 1),
         (known, "known nested case", 0, 2),
     ] {
-        core.commit_mergeable_settled(
-            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+        core.commit_mergeable_settled(MergeableCommit::new("items", row_uuid, tx_time).cells(
+            BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 (
                     "statuses".to_owned(),
                     Value::Array(vec![Value::EnumTag(status)]),
                 ),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     }
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     assert_eq!(
         core.query_rows(
             &title_only,
@@ -614,11 +717,15 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
     );
     let all = Query::from("items").validate(&base).unwrap();
     assert_eq!(
-        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
+        core.query_rows(
+            &all,
+            &all.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
         BTreeSet::from([known]),
     );
 }
@@ -645,7 +752,8 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -658,18 +766,16 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
         },
     })
     .unwrap();
-    let payload = groove::records::RecordDescriptor::new([(
-        "note",
-        groove::records::ValueType::String,
-    )]);
+    let payload =
+        groove::records::RecordDescriptor::new([("note", groove::records::ValueType::String)]);
     let unknown = row(0x7a);
     let known = row(0x7b);
     for (row_uuid, title, status, note, tx_time) in [
         (unknown, "new nested case", 1, "closed", 1),
         (known, "known nested case", 0, "open", 2),
     ] {
-        core.commit_mergeable_settled(
-            MergeableCommit::new("items", row_uuid, tx_time).cells(BTreeMap::from([
+        core.commit_mergeable_settled(MergeableCommit::new("items", row_uuid, tx_time).cells(
+            BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 (
                     "statuses".to_owned(),
@@ -677,12 +783,15 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
                         groove::records::EnumValue::create(status, payload, &[v(note)]).unwrap(),
                     )]),
                 ),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     }
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     assert_eq!(
         core.query_rows(
             &title_only,
@@ -695,11 +804,15 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
     );
     let all = Query::from("items").validate(&base).unwrap();
     assert_eq!(
-        core.query_rows(&all, &all.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
+        core.query_rows(
+            &all,
+            &all.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>(),
         BTreeSet::from([known]),
     );
 }
@@ -726,14 +839,18 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
     })
     .unwrap();
 
@@ -746,48 +863,64 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         ])),
     );
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     let title_binding = title_only.bind(BTreeMap::new()).unwrap();
     let mut title_peer = PeerState::new();
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &initial else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        peer_payload_inventory, ..
+    }) = &initial
+    else {
         panic!("expected initial maintained view update");
     };
-    assert!(reset_input_set);
-    assert_eq!(covered_input_rows(&initial, true).len(), 1);
+    assert!(!peer_payload_inventory.opening_pending);
+    assert_eq!(covered_input_rows(&initial).len(), 1);
 
     // Recompiling exactly the same target must leave the maintained graph in
     // place: target registration is idempotent, not a hidden reset mechanism.
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &unchanged else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        peer_payload_inventory, ..
+    }) = &unchanged
+    else {
         panic!("expected maintained view update");
     };
-    assert!(!reset_input_set, "idempotent target registration must not reset");
-    assert!(covered_input_rows(&unchanged, true).is_empty());
-    assert!(covered_input_rows(&unchanged, false).is_empty());
+    assert!(!peer_payload_inventory.opening_pending);
+    assert_eq!(covered_input_rows(&unchanged), covered_input_rows(&initial));
 
     let unknown = row(0x7c);
     let unknown_tx = accept_global(
         &mut core,
         MergeableCommit::new("items", unknown, 2).cells(BTreeMap::from([
-            ("title".to_owned(), v("new case is harmless when unselected")),
+            (
+                "title".to_owned(),
+                v("new case is harmless when unselected"),
+            ),
             ("status".to_owned(), Value::EnumTag(1)),
         ])),
     );
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_input_set, .. }) = &update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        peer_payload_inventory, ..
+    }) = &update
+    else {
         panic!("expected maintained view update");
     };
-    assert!(!reset_input_set);
-    assert!(covered_input_rows(&update, true)
-        .iter()
-        .any(|&(row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx));
+    assert!(!peer_payload_inventory.opening_pending);
+    assert!(
+        covered_input_rows(&update)
+            .iter()
+            .any(|&(row_uuid, tx_id)| row_uuid == unknown && tx_id == unknown_tx)
+    );
 
     // A separate old-schema subscription that semantically consumes status
     // must omit the same physical row. In particular, it may not reinterpret
@@ -805,10 +938,12 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         binding_id: status_binding.binding_id(),
         read_view: status_options.read_view_key(),
     };
-    let whole_rows = core.query_rows(&status_required, &status_binding, DurabilityTier::Local)
+    let whole_rows = core
+        .query_rows(&status_required, &status_binding, DurabilityTier::Local)
         .expect("one-shot whole-row read omits only the unknown row");
     assert_eq!(
-        whole_rows.into_iter()
+        whole_rows
+            .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([known]),
@@ -822,10 +957,12 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             status_options.clone(),
         )
         .expect("required unknown enum case is a row exclusion");
-    assert_eq!(covered_input_rows(&update, true).len(), 1);
-    assert!(covered_input_rows(&update, true)
-        .iter()
-        .all(|&(row_uuid, _)| row_uuid == known));
+    assert_eq!(covered_input_rows(&update).len(), 1);
+    assert!(
+        covered_input_rows(&update)
+            .iter()
+            .all(|&(row_uuid, _)| row_uuid == known)
+    );
 
     // Maintained membership follows the same compatibility boundary on every
     // delta: a newer local/Ahead unknown winner retracts the older Global row,
@@ -847,9 +984,11 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly incompatible delta removes the row")
         .expect("expected view update");
-    assert!(covered_input_rows(&update, false)
-        .iter()
-        .any(|&(row_uuid, _)| row_uuid == known));
+    assert!(
+        !covered_input_rows(&update)
+            .iter()
+            .any(|&(row_uuid, _)| row_uuid == known)
+    );
     core.commit_mergeable_settled(
         MergeableCommit::new("items", known, 4).cells(BTreeMap::from([
             ("title".to_owned(), v("compatible again")),
@@ -867,9 +1006,11 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly compatible delta re-adds the row")
         .expect("expected view update");
-    assert!(covered_input_rows(&update, true)
-        .iter()
-        .any(|&(row_uuid, _)| row_uuid == known));
+    assert!(
+        covered_input_rows(&update)
+            .iter()
+            .any(|&(row_uuid, _)| row_uuid == known)
+    );
 }
 
 #[test]
@@ -891,20 +1032,22 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
     })
     .unwrap();
-    let payload = groove::records::RecordDescriptor::new([(
-        "note",
-        groove::records::ValueType::String,
-    )]);
+    let payload =
+        groove::records::RecordDescriptor::new([("note", groove::records::ValueType::String)]);
     accept_global(
         &mut core,
         MergeableCommit::new("items", row(0x7d), 1).cells(BTreeMap::from([
@@ -918,10 +1061,17 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
         ])),
     );
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     let binding = title_only.bind(BTreeMap::new()).unwrap();
     let mut title_peer = PeerState::new();
-    assert!(title_peer.rehydrate_query(&mut core, &title_only, &binding).is_ok());
+    assert!(
+        title_peer
+            .rehydrate_query(&mut core, &title_only, &binding)
+            .is_ok()
+    );
 
     let required = Query::from("items").validate(&base).unwrap();
     let binding = required.bind(BTreeMap::new()).unwrap();
@@ -929,7 +1079,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     let update = required_peer
         .rehydrate_query(&mut core, &required, &binding)
         .expect("unknown payload case is a row exclusion");
-    assert!(covered_input_rows(&update, true).is_empty());
+    assert!(covered_input_rows(&update).is_empty());
 }
 
 #[test]
@@ -943,13 +1093,14 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     let (_dir, mut core) = open_node_with_schema(node(0x75), base.clone());
     // Requirement-none auxiliary sources still need a physical row shape for
     // relation closure, but their unrequested enum cell must be typed-null.
-    assert!(core
-        .ensure_physical_current_projection_for_enum_columns(
+    assert!(
+        core.ensure_physical_current_projection_for_enum_columns(
             base.version_id(),
             "items",
             &BTreeSet::new(),
         )
-        .is_ok());
+        .is_ok()
+    );
     let enum_lens = MigrationLens::new(
         base.version_id(),
         evolved.id,
@@ -961,7 +1112,8 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
                 transform: "jazz.identity".to_owned(),
             }],
         }],
-    ).expect("valid migration lens");
+    )
+    .expect("valid migration lens");
     publish_schema_lineage(
         &mut core,
         evolved.clone(),
@@ -995,7 +1147,10 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     )
     .unwrap();
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     assert_eq!(
         core.query_rows(
             &title_only,
@@ -1007,8 +1162,14 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         .map(current_row_pair)
         .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([
-            (closed, BTreeMap::from([("title".to_owned(), v("still-readable"))])),
-            (open, BTreeMap::from([("title".to_owned(), v("still-compatible"))])),
+            (
+                closed,
+                BTreeMap::from([("title".to_owned(), v("still-readable"))])
+            ),
+            (
+                open,
+                BTreeMap::from([("title".to_owned(), v("still-compatible"))])
+            ),
         ])
     );
 
@@ -1016,8 +1177,8 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     // omits this incompatible row rather than inventing an old value or
     // turning an additive schema change into an old-client query failure.
     let whole_row = Query::from("items").validate(&base).unwrap();
-    assert_eq!(core
-        .query_rows(
+    assert_eq!(
+        core.query_rows(
             &whole_row,
             &whole_row.bind(BTreeMap::new()).unwrap(),
             DurabilityTier::Local,
@@ -1026,7 +1187,8 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         .into_iter()
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>(),
-        BTreeSet::from([open]));
+        BTreeSet::from([open])
+    );
 
     // The closure is semantic rather than merely output-shaped: a hidden
     // predicate or order key must force the same source-local exclusion before
@@ -1043,8 +1205,8 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
             .validate(&base)
             .unwrap(),
     ] {
-        assert_eq!(core
-            .query_rows(
+        assert_eq!(
+            core.query_rows(
                 &query,
                 &query.bind(BTreeMap::new()).unwrap(),
                 DurabilityTier::Local,
@@ -1055,9 +1217,17 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
             "known row survives a semantic enum boundary",
         );
     }
-    let grouped = Query::from("items").count().group_by("status").validate(&base).unwrap();
-    assert_eq!(core
-        .query_rows(&grouped, &grouped.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local)
+    let grouped = Query::from("items")
+        .count()
+        .group_by("status")
+        .validate(&base)
+        .unwrap();
+    assert_eq!(
+        core.query_rows(
+            &grouped,
+            &grouped.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
         .unwrap()
         .len(),
         1,
@@ -1070,15 +1240,17 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
     // whether the row exists. It therefore excludes an incompatible row
     // fail-closed rather than being treated like an unused cell.
     let schema = |statuses: &[&str]| {
-        build_public_test_schema(PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("items")
-                .column("title", PublicColumnType::Text)
-                .column("status", public_scalar_enum("status", statuses))
-                .policies(PublicTablePolicies::new().with_select(public_literal_eq(
-                    "status",
-                    PublicValue::Text("open".to_owned()),
-                ))),
-        ))
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("items")
+                    .column("title", PublicColumnType::Text)
+                    .column("status", public_scalar_enum("status", statuses))
+                    .policies(PublicTablePolicies::new().with_select(public_literal_eq(
+                        "status",
+                        PublicValue::Text("open".to_owned()),
+                    ))),
+            ),
+        )
     };
     let base = schema(&["open"]);
     let evolved_schema = schema(&["open", "closed"]);
@@ -1098,14 +1270,18 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
     })
     .unwrap();
     let item = row(0x77);
@@ -1124,28 +1300,30 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
     )
     .unwrap();
 
-    let title_only = Query::from("items").select(["title"]).validate(&base).unwrap();
+    let title_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
     let binding = title_only.bind(BTreeMap::new()).unwrap();
-    let result = core.query_rows_for_link(
-        &title_only,
-        &binding,
-        DurabilityTier::Local,
-        user(0x77),
+    let result = core.query_rows_for_link(&title_only, &binding, DurabilityTier::Local, user(0x77));
+    assert!(
+        result.unwrap().is_empty(),
+        "policy must hide incompatible row"
     );
-    assert!(result.unwrap().is_empty(), "policy must hide incompatible row");
 
     // The same post-winner boundary applies before windowing and aggregation:
     // an unknown newer local version cannot leak the older global winner into
     // a page or count.
     let whole = Query::from("items").validate(&base).unwrap();
-    assert!(core
-        .query_rows(
+    assert!(
+        core.query_rows(
             &whole,
             &whole.bind(BTreeMap::new()).unwrap(),
             DurabilityTier::Local,
         )
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
     let page = Query::from("items")
         .select(["title"])
         .order_by("status", crate::query::OrderDirection::Asc)
@@ -1153,27 +1331,29 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         .limit(1)
         .validate(&base)
         .unwrap();
-    assert!(core
-        .query_rows(
+    assert!(
+        core.query_rows(
             &page,
             &page.bind(BTreeMap::new()).unwrap(),
             DurabilityTier::Local,
         )
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
     let count = Query::from("items")
         .count()
         .group_by("status")
         .validate(&base)
         .unwrap();
-    assert!(core
-        .query_rows(
+    assert!(
+        core.query_rows(
             &count,
             &count.bind(BTreeMap::new()).unwrap(),
             DurabilityTier::Local,
         )
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
 
     core.commit_mergeable_settled(
         MergeableCommit::new("items", item, 3).cells(BTreeMap::from([
@@ -1223,7 +1403,10 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
     })
     .unwrap();
 
@@ -1238,22 +1421,24 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
         ])),
     );
 
-    assert!(core
-        .projected_historical_current_rows("items", base.version_id(), GlobalTime(0))
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.projected_historical_current_rows("items", base.version_id(), GlobalTime(0))
+            .unwrap()
+            .is_empty()
+    );
 
-    assert!(core
-        .query_rows_at(&old_shape, &old_binding, GlobalTime(0))
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.query_rows_at(&old_shape, &old_binding, GlobalTime(0))
+            .unwrap()
+            .is_empty()
+    );
 
     core.commit_mergeable_settled(
         MergeableCommit::new("items", global_row, 2).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    assert!(core
-        .query_rows_including_deleted_in_authorization_mode(
+    assert!(
+        core.query_rows_including_deleted_in_authorization_mode(
             &old_shape,
             &old_binding,
             DurabilityTier::Local,
@@ -1262,7 +1447,8 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap()
-        .is_empty());
+        .is_empty()
+    );
 }
 
 #[test]
@@ -1292,7 +1478,10 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: middle.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: middle.id,
+        },
     })
     .unwrap();
 
@@ -1323,7 +1512,10 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 2, schema: latest.id },
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: latest.id,
+        },
     })
     .unwrap();
     core.commit_mergeable_settled(
@@ -1334,10 +1526,11 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
     )
     .unwrap();
 
-    assert!(core
-        .query_rows(&old_shape, &old_binding, DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.query_rows(&old_shape, &old_binding, DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1346,12 +1539,14 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
     // while the old-schema compatibility boundary still runs after the chosen
     // winner. The unknown row must be omitted, not force a full table scan.
     let schema = |statuses: &[&str]| {
-        build_public_test_schema(PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("items")
-                .column("title", PublicColumnType::Text)
-                .column("status", public_scalar_enum("status", statuses))
-                .index_only(["title"]),
-        ))
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("items")
+                    .column("title", PublicColumnType::Text)
+                    .column("status", public_scalar_enum("status", statuses))
+                    .index_only(["title"]),
+            ),
+        )
     };
     let base = schema(&["open"]);
     let evolved = SchemaVersion::new(schema(&["open", "closed"]));
@@ -1366,7 +1561,10 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
     })
     .unwrap();
     accept_global(
@@ -1383,10 +1581,11 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
         .unwrap();
     let binding = query.bind(BTreeMap::new()).unwrap();
     core.reset_query_engine_read_metrics();
-    assert!(core
-        .query_rows(&query, &binding, DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.query_rows(&query, &binding, DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
     let metrics = core.query_engine_read_metrics();
     assert_eq!(metrics.source_index_probes, 1);
     assert_eq!(metrics.source_full_scans, 0);
@@ -1411,25 +1610,82 @@ fn enum_projection_requirement_none_allows_unused_relation_enum() {
     let base = schema(&["open"]);
     let evolved = SchemaVersion::new(schema(&["open", "closed"]));
     let (_dir, mut core) = open_node_with_schema(node(0x78), base.clone());
-    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(
-        base.version_id(), evolved.id, vec![
-            TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![] },
-            TableLens { source_table: "states".into(), target_table: "states".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] },
-        ],
-    ).expect("valid migration lens"), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![
+                TableLens {
+                    source_table: "items".into(),
+                    target_table: "items".into(),
+                    ops: vec![],
+                },
+                TableLens {
+                    source_table: "states".into(),
+                    target_table: "states".into(),
+                    ops: vec![LensOp::TransformColumn {
+                        column: "status".into(),
+                        transform: "jazz.identity".into(),
+                    }],
+                },
+            ],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
     let state = row(0x79);
-    core.commit_mergeable_settled(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
-    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x7a), 2).cells(BTreeMap::from([
-        ("title".into(), v("root remains readable")), ("state".into(), Value::Uuid(state.0)),
-    ]))).unwrap();
+    core.commit_mergeable_settled(
+        MergeableCommit::new("states", state, 1)
+            .cells(BTreeMap::from([("status".into(), Value::EnumTag(1))])),
+    )
+    .unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x7a), 2).cells(
+        BTreeMap::from([
+            ("title".into(), v("root remains readable")),
+            ("state".into(), Value::Uuid(state.0)),
+        ]),
+    ))
+    .unwrap();
 
-    let root_only = Query::from("items").select(["title"]).validate(&base).unwrap();
-    assert!(core.query_rows(&root_only, &root_only.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+    let root_only = Query::from("items")
+        .select(["title"])
+        .validate(&base)
+        .unwrap();
+    assert!(
+        core.query_rows(
+            &root_only,
+            &root_only.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .is_ok()
+    );
     // Includes are hydrated by a separate path; this compilation path still
     // proves the implicit relation source has no accidental enum dependency.
-    let included = Query::from("items").select(["title"]).include("state").validate(&base).unwrap();
-    assert!(core.query_rows(&included, &included.bind(BTreeMap::new()).unwrap(), DurabilityTier::Local).is_ok());
+    let included = Query::from("items")
+        .select(["title"])
+        .include("state")
+        .validate(&base)
+        .unwrap();
+    assert!(
+        core.query_rows(
+            &included,
+            &included.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Local
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1440,12 +1696,12 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     let a_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0"]));
     let b_evolved = SchemaVersion::new(independent_enum_schema(&["a0", "a1"], &["b0", "b1"]));
     let (dir, mut core) = open_node_with_schema(node(0x72), base.clone());
-    core.commit_mergeable_settled(
-        MergeableCommit::new("items", row(0x72), 1).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x72), 1).cells(
+        BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(0)),
             ("b".to_owned(), Value::EnumTag(0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     let enum_lens = |source, target, column: &str| {
         MigrationLens::new(
@@ -1459,7 +1715,8 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens")
+        )
+        .expect("valid migration lens")
     };
     publish_schema_lineage(
         &mut core,
@@ -1477,12 +1734,12 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         },
     })
     .unwrap();
-    core.commit_mergeable_settled(
-        MergeableCommit::new("items", row(0x73), 2).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x73), 2).cells(
+        BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(1)),
             ("b".to_owned(), Value::EnumTag(0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     let table_id = core.catalogue.physical_mappings[&a_evolved.id].tables["items"].table_id;
     let enum_registry_ids = core.catalogue.physical_mappings[&a_evolved.id].tables["items"]
@@ -1523,12 +1780,12 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         },
     })
     .unwrap();
-    core.commit_mergeable_settled(
-        MergeableCommit::new("items", row(0x74), 3).cells(BTreeMap::from([
+    core.commit_mergeable_settled(MergeableCommit::new("items", row(0x74), 3).cells(
+        BTreeMap::from([
             ("a".to_owned(), Value::EnumTag(1)),
             ("b".to_owned(), Value::EnumTag(1)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     assert_eq!(core.query_table_versions("items").unwrap().len(), 3);
 

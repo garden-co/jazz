@@ -44,6 +44,29 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
 
+    /// Direct-message test peers share one authority catalogue for each fixture
+    /// schema, just as network peers exchange the catalogue before row versions.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn new_with_shared_test_catalogue(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where S: ReopenableStorage + 'static,
+    {
+        static CATALOGUES: std::sync::OnceLock<std::sync::Mutex<BTreeMap<SchemaVersionId, PhysicalIdentityManifest>>> = std::sync::OnceLock::new();
+        let schema_id = schema.version_id();
+        let identities = CATALOGUES.get_or_init(Default::default).lock().unwrap()
+            .entry(schema_id).or_insert_with(|| PhysicalIdentityManifest::allocate(&schema)).clone();
+        Self::new_with_options_inner(
+            node_uuid, schema, storage, false, CatalogueBootstrapState::Ready,
+            #[cfg(feature = "testing")]
+            None,
+            Some(identities),
+        ).await
+    }
+
     /// Open an edge-local runtime before it has received an authenticated
     /// authority catalogue.
     ///
@@ -73,6 +96,8 @@ where
                 CatalogueBootstrapState::Ready,
                 #[cfg(feature = "testing")]
                 None,
+                #[cfg(any(test, feature = "testing"))]
+                None,
             )
             .await;
         }
@@ -83,6 +108,8 @@ where
             false,
             CatalogueBootstrapState::Uninitialized,
             #[cfg(feature = "testing")]
+            None,
+            #[cfg(any(test, feature = "testing"))]
             None,
         )
         .await
@@ -404,6 +431,8 @@ where
             CatalogueBootstrapState::Ready,
             #[cfg(feature = "testing")]
             None,
+            #[cfg(any(test, feature = "testing"))]
+            None,
         )
         .await
     }
@@ -427,6 +456,8 @@ where
             history_complete,
             CatalogueBootstrapState::Ready,
             Some(&mut receipt),
+            #[cfg(any(test, feature = "testing"))]
+            None,
         )
         .await?;
         Ok((node, receipt))
@@ -439,6 +470,7 @@ where
         history_complete: bool,
         catalogue_bootstrap_state: CatalogueBootstrapState,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+        #[cfg(any(test, feature = "testing"))] genesis_identities: Option<PhysicalIdentityManifest>,
     ) -> Result<Self, Error>
     where
         T: ReopenableStorage + 'static,
@@ -462,7 +494,11 @@ where
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker,
-        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state).await?;
+        } = Self::open_catalogue_stage(
+            schema.clone(), storage, catalogue_bootstrap_state,
+            #[cfg(any(test, feature = "testing"))]
+            genesis_identities,
+        ).await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -1641,6 +1677,7 @@ where
         schema: JazzSchema,
         storage: T,
         catalogue_bootstrap_state: CatalogueBootstrapState,
+        #[cfg(any(test, feature = "testing"))] genesis_identities: Option<PhysicalIdentityManifest>,
     ) -> Result<CatalogueOpenState, Error>
     where
         T: ReopenableStorage + 'static,
@@ -1978,7 +2015,13 @@ where
                 Some(mapping) => mapping.clone(),
                 None => allocate_provisional_physical_mapping(
                     &schema,
-                    PhysicalIdentityManifest::allocate(&schema),
+                    {
+                        #[cfg(any(test, feature = "testing"))]
+                        let identities = genesis_identities.unwrap_or_else(|| PhysicalIdentityManifest::allocate(&schema));
+                        #[cfg(not(any(test, feature = "testing")))]
+                        let identities = PhysicalIdentityManifest::allocate(&schema);
+                        identities
+                    },
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?,

@@ -972,6 +972,9 @@ pub(super) struct PendingRowVersionRepair {
     pub(super) requests: Vec<crate::protocol::RowVersionRef>,
     pub(super) update: SyncMessage,
     pub(super) authority_receipt_eligible: bool,
+    /// A later complete set has arrived for this exact usage. Its immutable
+    /// bodies may still be useful, but this older set must never be installed.
+    pub(super) superseded: bool,
 }
 
 /// One repair request remains bound to the exact policy snapshot that made
@@ -2773,6 +2776,9 @@ where
                                     )
                                     .await?;
                                 }
+                                if repair.superseded {
+                                    continue;
+                                }
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                         subscription,
@@ -2800,6 +2806,17 @@ where
                                 settled_through,
                                 ..
                             }) => {
+                                if matches!(&message, SyncMessage::ViewUpdate(payload)
+                                    if !payload.peer_payload_inventory.opening_pending)
+                                {
+                                    for repair in pending_row_version_repairs.iter_mut() {
+                                        if matches!(&repair.update, SyncMessage::ViewUpdate(payload)
+                                            if payload.subscription == subscription)
+                                        {
+                                            repair.superseded = true;
+                                        }
+                                    }
+                                }
                                 scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
@@ -2837,10 +2854,37 @@ where
                                         .iter()
                                         .find(|((candidate, _, _), _)| *candidate == subscription)
                                         .map(|(_, owner)| owner.policy_binding.clone())
-                                        .ok_or_else(|| Error::new(
-                                            ErrorCode::Protocol,
-                                            "row-version repair lost its subscription policy binding",
-                                        ))?;
+                                        .or_else(|| {
+                                            let registrations = self.query_coverage_registrations.borrow();
+                                            let registration = registrations.get(&subscription)?;
+                                            if registration.ref_count == 0 { return None; }
+                                            let request = &registration.subscription;
+                                            Some(request.policy_binding.clone().unwrap_or_else(|| (
+                                                request.identity,
+                                                self.node.borrow().session_claims_for(request.identity),
+                                            )))
+                                        })
+                                        .or_else(|| {
+                                            self.upstream_subscription_owners.borrow()
+                                                .get(&subscription)?
+                                                .iter()
+                                                .filter_map(Weak::upgrade)
+                                                .find_map(|owner| {
+                                                    let state = owner.borrow();
+                                                    if state.closed.get() { return None; }
+                                                    Some(state.request_identity_claims.clone().unwrap_or_else(|| (
+                                                        state.author,
+                                                        self.node.borrow().session_claims_for(state.author),
+                                                    )))
+                                                })
+                                        });
+                                    let Some(policy_binding) = policy_binding else {
+                                        // A queued complete snapshot may arrive after its
+                                        // last reader has closed. Do not fetch bytes for a
+                                        // retired subscription or borrow another reader's
+                                        // authorization to repair it.
+                                        continue;
+                                    };
                                     pending_row_version_fetches.push_back(PendingRowVersionFetch {
                                         requests: missing.clone(),
                                         policy_binding,
@@ -2850,6 +2894,7 @@ where
                                             requests: missing,
                                             update: message,
                                             authority_receipt_eligible,
+                                            superseded: false,
                                         },
                                     );
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
@@ -5726,7 +5771,8 @@ where
                                 false,
                             );
                         }
-                        if settled_handoff || !view_update_is_empty(&update) {
+                        {
+                            // Producer-local change tracking suppresses no-ops; an empty snapshot is meaningful.
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "subscriber generated group delta group={} update={}",
@@ -7266,7 +7312,10 @@ where
                     pending.pop_front();
                     continue;
                 };
-                transport.send(response).map_err(transport_error)
+                // Scope hydration carries native physical row identities just
+                // like ordinary subscriptions. Install the authority catalogue
+                // before delivering those rows to a newly connected client.
+                send_with_sync_context(node, peer, transport, response)
             }
         };
         match send_result {
@@ -7586,11 +7635,4 @@ fn large_value_upload_chunk_context(
 
 fn chunk_locator_fingerprint(locator: groove::large_values::Locator) -> String {
     blake3::hash(locator.as_bytes()).to_hex()[..16].to_owned()
-}
-
-/// A `ViewUpdate` that carries no version, result-set, or program-fact change —
-/// nothing to ship to the subscriber this tick.
-pub(super) fn view_update_is_empty(_message: &SyncMessage) -> bool {
-    // An empty supporting set is a meaningful replacement snapshot.
-    false
 }

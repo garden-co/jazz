@@ -1174,7 +1174,10 @@ fn open_node_with_history_class(
     let node = if history_complete {
         block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap()
     } else {
-        block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
+        block_on(NodeState::new_with_shared_test_catalogue(
+            node_uuid, schema, storage,
+        ))
+        .unwrap()
     };
     (dir, node)
 }

@@ -650,7 +650,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
-            reset_input_set: true,
+
             version_carriers: crate::protocol::build_version_carriers_from_singletons(
                 version_bundles,
             )
@@ -660,16 +660,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             // of row cardinality. This fixture isolates the intentionally
             // malformed version carrier below rather than relying on an
             // obsolete empty-fact authority result path.
-            input_adds: vec![crate::protocol::SupportingInput::SourceComplete(
-                crate::protocol::ProgramSourceCoverageEntry {
-                    source: crate::protocol::ProgramSourceId {
-                        table: "todos".to_owned().into(),
-                        path: vec![crate::protocol::ProgramSourceRole::Root],
-                    },
-                    complete: true,
-                },
-            )],
-            input_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         })
     };
     authority_transport

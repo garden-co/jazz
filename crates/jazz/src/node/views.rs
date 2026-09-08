@@ -601,7 +601,7 @@ where
                 AuthorSubject::SYSTEM,
             )
             .await?;
-        let SyncMessage::ViewUpdate(payload) = &mut update else {
+        let SyncMessage::ViewUpdate(_) = &mut update else {
             unreachable!("current-row view builder always returns ViewUpdate");
         };
         // The direct cold helper represents a receiver's first receipt.  It
@@ -792,7 +792,11 @@ where
     // The wire supplies one ordinary physical dataset. Query scan occurrences
     // are compiler-owned: every local occurrence scans the same supplied table.
     // Internal source records are graph bookkeeping, not per-role peer evidence.
-    fn normalize_supporting_snapshot(&mut self, update: &mut ViewUpdateParts) -> Result<(), Error> {
+    fn normalize_supporting_snapshot(
+        &mut self,
+        update: &mut ViewUpdateParts,
+        prior_snapshots: &mut BTreeMap<AuthorityResultKey, BTreeSet<ProgramFactEntry>>,
+    ) -> Result<(), Error> {
         let Some(rows) = update.wire_rows.take() else {
             return Ok(());
         };
@@ -810,6 +814,14 @@ where
             return Ok(());
         };
         let schema = shape.schema_version();
+        let key = match self.authority_result_key_for_subscription(update.subscription) {
+            Ok(key) => key,
+            Err(Error::InvalidStoredValue(
+                "subscription referenced unregistered shape"
+                | "subscription referenced unregistered binding",
+            )) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
         let mut facts = BTreeSet::new();
         for source in &sources {
@@ -859,9 +871,30 @@ where
                 });
             }
         }
-        update.reset_input_set = true;
-        update.program_fact_adds = facts.into_iter().collect();
-        update.program_fact_removes.clear();
+        let previous = prior_snapshots.get(&key).cloned().or_else(|| {
+            self.query.authority_results.get(&key).and_then(|state| {
+                matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }).then(|| {
+                    state
+                        .settled_program_facts
+                        .iter()
+                        .filter(|fact| fact.is_peer_source_closure_fact())
+                        .cloned()
+                        .collect()
+                })
+            })
+        });
+        if let Some(previous) = previous {
+            // Complete wire snapshots become one atomic local input transition.
+            // Replacing the dataset does not reopen the application's subscription.
+            update.reset_input_set = false;
+            update.program_fact_adds = facts.difference(&previous).cloned().collect();
+            update.program_fact_removes = previous.difference(&facts).cloned().collect();
+        } else {
+            update.reset_input_set = true;
+            update.program_fact_adds = facts.iter().cloned().collect();
+            update.program_fact_removes.clear();
+        }
+        prior_snapshots.insert(key, facts);
         Ok(())
     }
 
@@ -1447,7 +1480,7 @@ where
         &mut self,
         mut update: ViewUpdateParts,
     ) -> Result<(), Error> {
-        self.normalize_supporting_snapshot(&mut update)?;
+        self.normalize_supporting_snapshot(&mut update, &mut BTreeMap::new())?;
         self.validate_received_view_update_global_time_durability(&update)
             .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))
@@ -1476,8 +1509,9 @@ where
         &mut self,
         mut updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
+        let mut prior_snapshots = BTreeMap::new();
         for update in &mut updates {
-            self.normalize_supporting_snapshot(update)?;
+            self.normalize_supporting_snapshot(update, &mut prior_snapshots)?;
         }
         if updates.is_empty() {
             return Ok(());

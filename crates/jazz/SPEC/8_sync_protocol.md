@@ -57,6 +57,11 @@ Invariant digest:
 - `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
 - `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
 
+- `INV-SYNC-44`: Every non-pending query update MUST describe one complete supporting physical row/version set, including the empty set. The wire MUST NOT assign query-input roles or carry separate source-completeness facts. Receivers MUST validate and install the set atomically before deriving results locally. Encoding, validating and comparing a complete set may take linear work in its size. Local query maintenance after comparison MUST still apply only the changed inputs; receiving a complete set does not authorize rebuilding every local result.
+- `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Missing-version repair MUST use the live subscription or query attachment's admitted policy binding; retired usages MUST NOT initiate repair.
+
+- `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field.
+
 ## Details
 
 ### 8.1 One protocol, roles not code
@@ -1310,7 +1315,14 @@ set. The receiver installs it atomically only after all referenced versions are
 available and validated, then evaluates its ordinary local query over that
 physical dataset. Repeated scans of a table consume the same local dataset.
 Compiled source slots and graph bookkeeping are receiver-local implementation
-details; they are not authority claims transported by the peer. The existing
+details; they are not authority claims transported by the peer. An established
+listener still receives ordinary local result deltas: replacing the supporting
+snapshot does not reopen the listener or force an application-level reset.
+Permission-advice hydration obeys the same catalogue-before-row ordering as an
+ordinary subscription. Opening-pending markers contain no supporting rows and
+must not initiate missing-version repair. Repair may retain immutable bytes
+from an older update, but must not reinstall its supporting set after a later
+complete set for the same subscription has arrived. The existing
 subscription, authenticated authority, cut, epoch and ordering boundaries remain.
 CurrentRows is the separate current/unavailable reconciliation exchange; query
 exclusion alone is not global unavailability. This transport simplification does

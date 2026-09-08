@@ -4711,7 +4711,13 @@ mod dynamic_schema_view_tests {
             #[cfg(target_arch = "wasm32")]
             WasmWriteInner::BrowserTx { .. } => panic!("memory write retained wrong backend"),
         }
-        block_on(db.tick()).expect("scheduled WASM wait receives no-op completion");
+        for _ in 0..32 {
+            block_on(db.tick()).expect("scheduled WASM wait advances no-op completion");
+            if waited.borrow().is_some() {
+                break;
+            }
+        }
+        assert!(waited.borrow().is_some(), "scheduled WASM wait completes");
 
         match wasm_write.inner.as_ref().expect("WASM write remains live") {
             WasmWriteInner::MemoryTx { write, .. } => assert_eq!(

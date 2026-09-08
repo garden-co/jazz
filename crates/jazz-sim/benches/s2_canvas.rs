@@ -2054,7 +2054,12 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
             let storage =
                 RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
                     .unwrap();
-            core = block_on(NodeState::new(node(250), schema.clone(), storage)).unwrap();
+            core = block_on(NodeState::new_with_shared_test_catalogue(
+                node(250),
+                schema.clone(),
+                storage,
+            ))
+            .unwrap();
             install_participant_claims(&mut core, config);
         }
     }
@@ -2473,7 +2478,10 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (dir, node)
 }
 
@@ -2486,7 +2494,10 @@ fn reopen_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
+    block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap()
 }
 
 fn open_db(

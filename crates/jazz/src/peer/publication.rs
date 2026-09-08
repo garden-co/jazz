@@ -76,7 +76,8 @@ pub(crate) struct ReconciledMaintainedSubscriptionClone {
     allow_storage_witness_fallback: bool,
 }
 
-struct MaintainedCanonicalUpdate {    changed: bool,
+struct MaintainedCanonicalUpdate {
+    changed: bool,
     update: SyncMessage,
     allow_storage_witness_fallback: bool,
 }
@@ -965,7 +966,8 @@ impl PeerState {
         )?;
         let Some(_) = self.publication_states.get(&subscription) else {
             return Ok(Some(MaintainedCanonicalUpdate {
-                changed: true,                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                changed: true,
+                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
@@ -1042,7 +1044,8 @@ impl PeerState {
         .await
         .map(|update| {
             update.map(|update| MaintainedCanonicalUpdate {
-                changed: true,                update,
+                changed: true,
+                update,
                 allow_storage_witness_fallback: false,
             })
         })
@@ -1235,7 +1238,10 @@ impl PeerState {
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: node.supporting_rows_for_facts(shape.schema_version(), current_program_fact_set.clone())?,
+                    supporting_rows: node.supporting_rows_for_facts(
+                        shape.schema_version(),
+                        current_program_fact_set.clone(),
+                    )?,
                 }),
                 allow_storage_witness_fallback: false,
             }));

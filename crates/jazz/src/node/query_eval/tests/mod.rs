@@ -437,7 +437,7 @@ fn open_node_with_uuid(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = NodeState::new(node_uuid, schema, storage).expect("node");
+    let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).expect("node");
     (temp_dir, node)
 }
 

@@ -5969,14 +5969,23 @@ mod tests {
     use groove::schema::{ColumnSchema, ColumnType};
 
     #[test]
-    fn peer_view_rejects_overlapping_source_closure_delta() {
-        let fact = SupportingInput::SourceComplete(ProgramSourceCoverageEntry {
-            source: ProgramSourceId {
-                table: "todos".to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
+    fn peer_view_rejects_duplicate_exact_supporting_row() {
+        let row = SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([3; 16])),
+            version_table: "todos".to_owned().into(),
+            row: RowUuid::from_bytes([4; 16]),
+            version: RowVersionRefEntry {
+                tx: TxId::new(
+                    crate::time::TxTime(1),
+                    crate::ids::NodeUuid::from_bytes([5; 16]),
+                ),
+                schema_version: None,
+                layer: ResultRowLayer::Content,
+                batch: None,
+                branch_or_prefix: None,
+                row_digest: None,
             },
-            complete: true,
-        });
+        };
         let message = SyncMessage::ViewUpdate(ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
@@ -5984,16 +5993,13 @@ mod tests {
                 read_view: ReadViewKey::default(),
             },
             settled_through: GlobalTime(0),
-            reset_input_set: false,
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            input_adds: vec![fact.clone()],
-            input_removes: vec![fact],
+            supporting_rows: vec![row.clone(), row],
         });
-
         assert!(matches!(
             message.validate_wire_contract(),
-            Err(WireContractError::OverlappingPeerSourceClosureDelta)
+            Err(WireContractError::DuplicateSupportingRow)
         ));
     }
 

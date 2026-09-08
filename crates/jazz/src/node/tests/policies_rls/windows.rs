@@ -59,10 +59,8 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
 
-    let (adds_a, removes_a) = canonical_view_update_rows(&update_a);
-    let (adds_b, removes_b) = canonical_view_update_rows(&update_b);
-    assert!(removes_a.is_empty());
-    assert!(removes_b.is_empty());
+    let adds_a = canonical_view_update_rows(&update_a);
+    let adds_b = canonical_view_update_rows(&update_b);
     assert_eq!(adds_a.len(), 100, "owner A should receive its own full window");
     assert_eq!(adds_b.len(), 100, "owner B should receive its own full window");
 }
@@ -141,9 +139,8 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
 
     let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (initial_adds, initial_removes) =
+    let initial_adds =
         canonical_view_update_rows_for_table(&initial, "documents");
-    assert!(initial_removes.is_empty());
     assert_eq!(
         initial_adds
             .iter()
@@ -163,7 +160,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     let duplicate = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&duplicate, "documents"),
-        (Vec::new(), Vec::new())
+        initial_adds
     );
     assert_eq!(query_rows(&mut core).len(), 100);
 
@@ -175,7 +172,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     let partial_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&partial_revoke, "documents"),
-        (Vec::new(), Vec::new())
+        initial_adds
     );
     assert_eq!(query_rows(&mut core).len(), 100);
 
@@ -187,7 +184,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     let overlapping_branch = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&overlapping_branch, "documents"),
-        (Vec::new(), Vec::new())
+        initial_adds
     );
     assert_eq!(query_rows(&mut core).len(), 100);
 
@@ -203,10 +200,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     let final_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&final_revoke, "documents"),
-        (
-            Vec::new(),
-            vec![("documents".to_owned().into(), row(99), document_txs[99])]
-        )
+        initial_adds.into_iter().filter(|(_, row_id, _)| *row_id != row(99)).collect::<Vec<_>>()
     );
     assert_eq!(
         query_rows(&mut core),

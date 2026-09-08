@@ -7,9 +7,10 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let shared_row = row(0x4e);
 
     let old_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
-            ("title".to_owned(), v("old-title")),
-        ])))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared_row, 10)
+                .cells(BTreeMap::from([("title".to_owned(), v("old-title"))])),
+        )
         .unwrap();
     core.accept_global_for_test(old_tx).unwrap();
     publish_schema_lineage(
@@ -32,7 +33,8 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -47,10 +49,12 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     .unwrap();
 
     let new_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 11).cells(BTreeMap::from([
-            ("name".to_owned(), v("new-name")),
-            ("body".to_owned(), v("new-body")),
-        ])))
+        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 11).cells(
+            BTreeMap::from([
+                ("name".to_owned(), v("new-name")),
+                ("body".to_owned(), v("new-body")),
+            ]),
+        ))
         .unwrap();
     core.accept_global_for_test(new_tx).unwrap();
 
@@ -77,20 +81,20 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        reset_input_set,
-        input_adds: program_fact_adds,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
-    assert!(reset_input_set);
-    let inputs = program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::SupportingInput::Row(input) => Some(input),
-        _ => None,
-    }).collect::<Vec<_>>();
+    assert!(!peer_payload_inventory.opening_pending);
+    let inputs = program_fact_adds
+        .iter()
+        .map(|input| input)
+        .collect::<Vec<_>>();
     assert_eq!(inputs.len(), 1);
-    assert_eq!(inputs[0].source_row, shared_row);
+    assert_eq!(inputs[0].row, shared_row);
     assert_eq!(inputs[0].version.tx, new_tx);
     assert_eq!(bundles.len(), 1);
     assert_eq!(bundles[0].versions.len(), 1);
@@ -118,18 +122,18 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
 fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     let base = schema();
     let evolved = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text)),
     );
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x5d), base.clone());
     let shared_row = row(0x5e);
 
     let old_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
-            ("title".to_owned(), v("old-title")),
-        ])))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared_row, 10)
+                .cells(BTreeMap::from([("title".to_owned(), v("old-title"))])),
+        )
         .unwrap();
     core.accept_global_for_test(old_tx).unwrap();
     publish_schema_lineage(
@@ -146,7 +150,8 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -191,7 +196,9 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
             shared_row,
         )
         .unwrap()
-        .expect("the tasks result member recognizes its authored todos witness by physical identity");
+        .expect(
+            "the tasks result member recognizes its authored todos witness by physical identity",
+        );
     assert_eq!(materialization_witness.table(), "todos");
     assert_eq!(
         core.physical_table_id_for_version(materialization_witness)
@@ -209,19 +216,12 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
 fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     let base = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("tasks")
-                    .column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     );
     let evolved = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text)),
     );
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_dir, mut core) = open_node_with_schema(node(0x5f), base.clone());
@@ -229,8 +229,14 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
 
     let open = OpenTransactionId::new();
     core.open_exclusive(open).unwrap();
-    core.tx_write(open, "tasks", shared_row, title_cells("old physical task"), None)
-        .unwrap();
+    core.tx_write(
+        open,
+        "tasks",
+        shared_row,
+        title_cells("old physical task"),
+        None,
+    )
+    .unwrap();
     core.tx_write(
         open,
         "todos",
@@ -239,7 +245,9 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         None,
     )
     .unwrap();
-    let (collision_tx, _) = core.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
+    let (collision_tx, _) = core
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .unwrap();
     core.accept_global_for_test(collision_tx).unwrap();
 
     publish_schema_lineage(
@@ -256,7 +264,8 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         ["tasks"],
     )

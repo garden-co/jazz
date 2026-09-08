@@ -13,10 +13,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
-import { createAccountManager, schema as s, type DbConfig } from "../../src/index.js";
+import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
-import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { type Db } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
@@ -200,11 +199,12 @@ describe("browser Jazz storage compatibility corpus", () => {
     await blockJazzServerNetwork(server.serverUrl);
     try {
       db = await openPersistentDb(config);
+      await db.disconnect();
       expect(
-        await db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" })),
+        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
       ).toMatchObject([{ branch: "main", title: "current title", body }]);
       expect(
-        await db.all(app.documents, inspectorLocalQueryOptions({ branch: "draft" })),
+        await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
       ).toMatchObject([{ branch: "draft", title: "draft override", body }]);
       await db.shutdown();
       openDbs.splice(openDbs.indexOf(db), 1);
@@ -272,6 +272,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     );
 
     let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
+    // The persistent replica lives in the worker. Use the public local-first
+    // read across that hop, with the worker explicitly disconnected from Core.
+    // Inspector LocalOnly reads only the foreground's in-memory rows.
+    await pinnedPhase("readonly-disconnect", () => db.disconnect());
     const rawWhileReopened = await pinnedPhase("read-open-records", () =>
       rawRecords(physicalDbName),
     );
@@ -279,10 +283,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     // a fresh remote-coverage round trip. The earlier edge read proves the
     // synced fixture; this is specifically the offline persistence boundary.
     const reopenedMain = await pinnedPhase("readonly-main-query", () =>
-      db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" })),
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
     );
     const reopenedDraft = await pinnedPhase("readonly-draft-query", () =>
-      db.all(app.documents, inspectorLocalQueryOptions({ branch: "draft" })),
+      db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
     );
     expect(reopenedMain).toHaveLength(1);
     expect(reopenedDraft).toHaveLength(1);
@@ -320,7 +324,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     // this same authenticated principal root.
     db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
     const historicalProjects = await pinnedPhase("writer-projects-query", () =>
-      db.all(app.projects, inspectorLocalQueryOptions({})),
+      db.all(app.projects, { tier: ReadTier.LocalFirst }),
     );
     const currentBody = "current writer large value ".repeat(12_000);
     const currentWrite = await pinnedPhase("writer-transaction", () =>
@@ -361,17 +365,18 @@ describe("browser Jazz storage compatibility corpus", () => {
     await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
     try {
       db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
+      await pinnedPhase("offline-disconnect", () => db.disconnect());
       expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
         physicalDbName,
       );
       const mixedMain = await pinnedPhase("offline-main-query", () =>
-        db.all(app.documents, inspectorLocalQueryOptions({ branch: "main" })),
+        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
       );
       const mixedDraft = await pinnedPhase("offline-draft-query", () =>
-        db.all(app.documents, inspectorLocalQueryOptions({ branch: "draft" })),
+        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
       );
       const mixedProjects = await pinnedPhase("offline-projects-query", () =>
-        db.all(app.projects, inspectorLocalQueryOptions({})),
+        db.all(app.projects, { tier: ReadTier.LocalFirst }),
       );
       expect(mixedMain).toHaveLength(2);
       expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));

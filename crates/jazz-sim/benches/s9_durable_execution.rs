@@ -1205,7 +1205,10 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (dir, node)
 }
 
@@ -1217,6 +1220,18 @@ fn open_db(
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    // These direct-message simulations bypass the transport catalogue handshake.
+    // Seed the same physical catalogue before reopening through the public Db API.
+    drop(
+        block_on(NodeState::new_with_shared_test_catalogue(
+            node_uuid,
+            schema.clone(),
+            storage,
+        ))
+        .unwrap(),
+    );
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
     let db = block_on(Db::open(DbConfig {

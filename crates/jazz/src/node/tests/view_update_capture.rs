@@ -1,11 +1,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalViewUpdate {
     subscription: String,
-    reset_input_set: bool,
     version_bundles: Vec<CanonicalVersionBundle>,
     peer_payload_inventory: Vec<TxId>,
-    program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
-    program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
+    supporting_rows: Vec<crate::protocol::SupportingRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,12 +70,13 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     let normalized_version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
-        reset_input_set,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-            complete_tx_payloads: complete_tx_payload_refs, ..
-        },
-        input_adds: program_fact_adds,
-        input_removes: program_fact_removes,
+
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -94,11 +93,9 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
 
     CanonicalViewUpdate {
         subscription: format!("{subscription:?}"),
-        reset_input_set,
         version_bundles,
         peer_payload_inventory: complete_tx_payload_refs,
-        program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
-        program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
+        supporting_rows: program_fact_adds,
     }
 }
 
@@ -110,29 +107,8 @@ fn assert_real_peer_tick(
     case: (AuthorSubject, u64, &str),
 ) {
     let (identity, seed, tick) = case;
-    assert_eq!(
-        capture.reset_input_set, expected_reset_input_set,
-        "real peer maintained subscription view emitted unexpected reset_input_set for seed {seed:#x}, identity {identity:?}, tick {tick}"
-    );
-    for fact in capture
-        .program_fact_adds
-        .iter()
-        .chain(&capture.program_fact_removes)
-    {
-        match fact {
-            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage) => assert!(
-                coverage.source.is_wire_valid(),
-                "authority emitted a non-wire-valid source scope for seed {seed:#x}, identity {identity:?}, tick {tick}"
-            ),
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => assert!(
-                input.source.is_wire_valid(),
-                "authority emitted a CoveredInput with a non-wire-valid source scope for seed {seed:#x}, identity {identity:?}, tick {tick}"
-            ),
-            other => panic!(
-                "authority emitted non-source program fact {other:?} for seed {seed:#x}, identity {identity:?}, tick {tick}"
-            ),
-        }
-    }
+    assert!(capture.supporting_rows.iter().all(|row| row.is_wire_valid()),
+        "invalid supporting row for seed {seed:#x}, identity {identity:?}, tick {tick}");
 }
 
 fn result_row(table: &str, row_uuid: RowUuid, tx_id: TxId) -> ResultRowEntry {
@@ -170,43 +146,70 @@ fn assert_maintained_subscription_view_tick(
 
 fn capture_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
     let column_families = schema.column_families();
-    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut receiver = NodeState::new(
-        node(receiver_id), schema.clone(), MemoryStorage::new(&refs).unwrap(),
-    ).unwrap();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut receiver = NodeState::new_with_shared_test_catalogue(
+        node(receiver_id),
+        schema.clone(),
+        MemoryStorage::new(&refs).unwrap(),
+    )
+    .unwrap();
     receiver.set_non_durable_client();
     receiver
 }
 
 fn register_capture_receiver(
-    receiver: &mut NodeState<MemoryStorage>, shape: &ValidatedQuery, binding: &Binding,
+    receiver: &mut NodeState<MemoryStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
     identity: AuthorSubject,
 ) {
-    receiver.apply_sync_message_settled(SyncMessage::RegisterShape {
-        shape_id: shape.shape_id(), ast: crate::protocol::ShapeAst::from_validated(shape),
-        opts: crate::protocol::RegisterShapeOptions::default(),
-    }).unwrap();
-    let values = shape.params().keys().map(|name| binding.values()[name].clone()).collect();
-    receiver.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: SubscriptionKey { shape_id: shape.shape_id(), binding_id: binding.binding_id(), read_view: Default::default() },
-        values, known_state: None,
-        delegated_session: Some(crate::protocol::DelegatedSessionBinding { identity, claims: BTreeMap::new() }),
-    })).unwrap();
+    receiver
+        .apply_sync_message_settled(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    let values = shape
+        .params()
+        .keys()
+        .map(|name| binding.values()[name].clone())
+        .collect();
+    receiver
+        .apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            values,
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity,
+                claims: BTreeMap::new(),
+            }),
+        }))
+        .unwrap();
 }
 
 fn maintained_view_capture_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
-                    "owner",
-                    vec!["claims".to_owned(), "sub".to_owned()],
-                )),
-            ),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                        "owner",
+                        vec!["claims".to_owned(), "sub".to_owned()],
+                    )),
+                ),
+        ),
+    )
 }
 
 fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
@@ -245,8 +248,8 @@ fn accept_capture_delete(
     row_uuid: RowUuid,
     made_at: u64,
 ) {
-    let mut commit = MergeableCommit::new("todos", row_uuid, made_at)
-        .deletion(DeletionEvent::Deleted);
+    let mut commit =
+        MergeableCommit::new("todos", row_uuid, made_at).deletion(DeletionEvent::Deleted);
     if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
         commit = commit.parents(vec![parent]);
     }
@@ -254,13 +257,12 @@ fn accept_capture_delete(
     parents.entry(row_uuid).or_default().1 = Some(tx_id);
 }
 
-fn apply_capture_result_delta(
-    result_set: &mut BTreeSet<ResultRowEntry>,
-    update: &SyncMessage,
-) {
-    let SyncMessage::ViewUpdate(payload) = update else { panic!("expected view update") };
+fn apply_capture_result_delta(result_set: &mut BTreeSet<ResultRowEntry>, update: &SyncMessage) {
+    let SyncMessage::ViewUpdate(payload) = update else {
+        panic!("expected view update")
+    };
     // Wire updates have no result-membership delta; the receiver owns results.
-    if payload.reset_input_set { result_set.clear(); }
+    result_set.clear();
 }
 
 fn apply_capture_delivery_state(
@@ -270,7 +272,11 @@ fn apply_capture_delivery_state(
 ) {
     apply_capture_result_delta(result_set, update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = update
     else {
@@ -393,13 +399,15 @@ impl MaintainedSubscriptionViewSubscription {
         loop {
             match self.subscription.try_recv() {
                 Ok(deltas) => {
-                    let transitions = self.maintained.apply_multisink_deltas(
-                        deltas,
-                        &self.terminal_schemas,
-                        &self.tables,
-                        &core.node_aliases,
-                    )
-                    .unwrap();
+                    let transitions = self
+                        .maintained
+                        .apply_multisink_deltas(
+                            deltas,
+                            &self.terminal_schemas,
+                            &self.tables,
+                            &core.node_aliases,
+                        )
+                        .unwrap();
                     program_fact_adds.extend(transitions.program_fact_adds.clone());
                     program_fact_removes.extend(transitions.program_fact_removes.clone());
                     for member in transitions.adds {
@@ -476,18 +484,32 @@ impl MaintainedSubscriptionViewSubscription {
             binding_id: binding.binding_id(),
             read_view: Default::default(),
         };
-        let authority_result_key = self.receiver
+        let authority_result_key = self
+            .receiver
             .authority_result_key_for_subscription(subscription)
             .unwrap();
-        assert!(self.receiver.has_settled_authority_result(&authority_result_key));
-        let (_subscription, maintained, _schemas, _transitions, _tables, received, _inputs) = self.receiver
+        assert!(
+            self.receiver
+                .has_settled_authority_result(&authority_result_key)
+        );
+        let (_subscription, maintained, _schemas, _transitions, _tables, received, _inputs) = self
+            .receiver
             .open_seeded_relay_edge_subscription_view(
-                shape, binding, identity, &crate::protocol::ReadViewSpec::default(), authority_result_key,
+                shape,
+                binding,
+                identity,
+                &crate::protocol::ReadViewSpec::default(),
+                authority_result_key,
             )
             .resolve()
             .unwrap();
-        assert!(received, "registered receiver did not install its settled exact source closure");
-        self.receiver_result_set = maintained.active_result_members().iter()
+        assert!(
+            received,
+            "registered receiver did not install its settled exact source closure"
+        );
+        self.receiver_result_set = maintained
+            .active_result_members()
+            .iter()
             .filter_map(crate::protocol::ResultMemberEntry::as_row)
             .collect();
     }
@@ -505,18 +527,16 @@ impl MaintainedSubscriptionViewSubscription {
             .expect("receiver assertion must follow sender update");
         let receiver_shape = self.receiver_shape.clone();
         let receiver_binding = self.receiver_binding.clone();
-        self.apply_receiver_update(
-            update,
-            &receiver_shape,
-            &receiver_binding,
-            identity,
-        );
+        self.apply_receiver_update(update, &receiver_shape, &receiver_binding, identity);
         let mut expected = self.receiver_previous_result_set.clone();
         for entry in expected_removes {
             expected.remove(entry);
         }
         expected.extend(expected_adds.iter().cloned());
-        assert_eq!(self.receiver_result_set, expected, "receiver collector mismatch seed {seed:#x}, identity {identity:?}, tick {tick}");
+        assert_eq!(
+            self.receiver_result_set, expected,
+            "receiver collector mismatch seed {seed:#x}, identity {identity:?}, tick {tick}"
+        );
         self.receiver_previous_result_set = self.receiver_result_set.clone();
     }
 
@@ -529,7 +549,7 @@ impl MaintainedSubscriptionViewSubscription {
         result_member_removes: Vec<ResultRowEntry>,
         program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
         program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
-        reset_input_set: bool,
+        _reset_input_set: bool,
         identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let previous_result_set = self
@@ -537,8 +557,8 @@ impl MaintainedSubscriptionViewSubscription {
             .iter()
             .map(|(_, _, tx_id)| *tx_id)
             .collect::<BTreeSet<_>>();
-        let mut update = core.view_update_for_maintained_result_members(
-            crate::node::MaintainedViewBundleInputs {
+        let mut update = core
+            .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
                 shape: _shape,
                 has_default_read_view: true,
                 allow_authoritative_scalar_exit_refresh: true,
@@ -562,17 +582,11 @@ impl MaintainedSubscriptionViewSubscription {
                 tier: DurabilityTier::Global,
                 maintained_facts: &self.maintained,
                 allow_storage_witness_fallback: false,
-            },
-        )
-        .resolve()?;
-        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_input_set: update_reset,
-            ..
-        }) = &mut update
-        else {
+            })
+            .resolve()?;
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = &mut update else {
             panic!("expected view update");
         };
-        *update_reset = reset_input_set;
         Ok(update)
     }
 }
@@ -619,8 +633,12 @@ fn assert_retraction_without_replacement_leak(
 ) {
     let version_bundles = version_bundles_for_update(update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
-        input_adds: program_fact_adds,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -629,8 +647,8 @@ fn assert_retraction_without_replacement_leak(
     assert!(
         !program_fact_adds.iter().any(|fact| matches!(
             fact,
-            crate::protocol::SupportingInput::Row(input)
-                if input.source_row == row_uuid && input.version.tx == unreadable_tx_id
+            input
+                if input.row == row_uuid && input.version.tx == unreadable_tx_id
         )),
         "revocation update re-added unreadable covered input for row {row_uuid:?} at tx {unreadable_tx_id:?}"
     );
@@ -677,7 +695,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         (never_match, alice, "other", 1_004),
         (rls_revoked, alice, "match", 1_005),
     ] {
-        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        let tx_id =
+            accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
     let rls_revoked_initial_tx = txs[&rls_revoked];
@@ -690,8 +709,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
+        read_view: Default::default(),
+    };
 
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
         &mut core,
@@ -729,7 +748,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         (added, alice, "match", 2_000),
         (hidden_added, bob, "match", 2_001),
     ] {
-        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        let tx_id =
+            accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
     let add_rows = if identity == AuthorSubject::SYSTEM {
@@ -752,12 +772,10 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
 
     let sibling_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", sibling_match, 2_100)
-                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", sibling_match, 2_100).cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", sibling_nonmatch, 2_100)
                 .cells(owner_cells(alice, "other")),
-            MergeableCommit::new("todos", sibling_hidden, 2_100)
-                .cells(owner_cells(bob, "match")),
+            MergeableCommit::new("todos", sibling_hidden, 2_100).cells(owner_cells(bob, "match")),
         ])
         .unwrap();
     core.apply_fate_update(
@@ -798,10 +816,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
 
     let multi_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", multi_match_a, 2_200)
-                .cells(owner_cells(alice, "match")),
-            MergeableCommit::new("todos", multi_match_b, 2_200)
-                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", multi_match_a, 2_200).cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", multi_match_b, 2_200).cells(owner_cells(alice, "match")),
         ])
         .unwrap();
     core.apply_fate_update(
@@ -894,7 +910,8 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         (identity, seed, "delete"),
     );
 
-    let deleted_tx = accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
+    let deleted_tx =
+        accept_owner_capture_row(&mut core, &mut parents, deleted, alice, "match", 5_000);
     txs.insert(deleted, deleted_tx);
     let update = maintained.update(&mut core, &shape, subscription, identity);
     let _ = assert_maintained_subscription_view_tick(
@@ -1054,8 +1071,8 @@ fn delete_recursive_row(
     row_uuid: RowUuid,
     made_at: u64,
 ) -> TxId {
-    let mut commit = MergeableCommit::new(table, row_uuid, made_at)
-        .deletion(DeletionEvent::Deleted);
+    let mut commit =
+        MergeableCommit::new(table, row_uuid, made_at).deletion(DeletionEvent::Deleted);
     if let Some(parent) = parents
         .get(&(table, row_uuid))
         .and_then(|(_, deletion)| *deletion)
@@ -1174,13 +1191,16 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         .validate(&schema)
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(alice.test_uuid()))]))
+        .bind(BTreeMap::from([(
+            "team".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
+        read_view: Default::default(),
+    };
     let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
         &mut core,
         &shape,
@@ -1213,12 +1233,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         doc_access_cells(added_doc, alice),
         2_001,
     );
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let _ = assert_maintained_subscription_view_tick(
         &mut maintained,
         update,
@@ -1236,12 +1251,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         team_edge_cells(alice, parent_team),
         3_000,
     );
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let _ = assert_maintained_subscription_view_tick(
         &mut maintained,
         update,
@@ -1252,12 +1262,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
     );
 
     delete_recursive_row(&mut core, &mut parents, "team_edges", edge, 4_000);
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let _ = assert_maintained_subscription_view_tick(
         &mut maintained,
         update,
@@ -1422,10 +1427,9 @@ fn seeded_maintained_subscription_view_multitable_capture(
         identity,
     );
     let expected_initial_rows = match (capture_shape, identity == AuthorSubject::SYSTEM) {
-        (MultiTableCaptureShape::JoinVia, _) => vec![
-            ("roots", root_visible),
-            ("targets", target_visible),
-        ],
+        (MultiTableCaptureShape::JoinVia, _) => {
+            vec![("roots", root_visible), ("targets", target_visible)]
+        }
         (MultiTableCaptureShape::IncludeInner, false) => {
             vec![
                 ("roots", root_visible),
@@ -1481,12 +1485,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
         2_001,
         member_cells(alice, "member", root_added),
     );
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let _ = assert_maintained_subscription_view_tick(
         &mut maintained,
         update,
@@ -1506,37 +1505,28 @@ fn seeded_maintained_subscription_view_multitable_capture(
         3_000,
         owner_cells(alice, "became visible"),
     );
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let mut update_adds = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
         Vec::new()
     } else {
-        vec![result_row_from(
-            &txs,
-            "targets",
-            target_hidden_then_visible,
-        )]
+        vec![result_row_from(&txs, "targets", target_hidden_then_visible)]
     };
     if matches!(capture_shape, MultiTableCaptureShape::IncludeInner)
         && identity != AuthorSubject::SYSTEM
     {
         update_adds.push(result_row_from(&txs, "roots", root_hidden_target));
     }
-    let update_removes =
-        if !matches!(capture_shape, MultiTableCaptureShape::JoinVia) && identity == AuthorSubject::SYSTEM
-        {
-            vec![result_row(
-                "targets",
-                target_hidden_then_visible,
-                target_hidden_initial_tx,
-            )]
-        } else {
-            Vec::new()
-        };
+    let update_removes = if !matches!(capture_shape, MultiTableCaptureShape::JoinVia)
+        && identity == AuthorSubject::SYSTEM
+    {
+        vec![result_row(
+            "targets",
+            target_hidden_then_visible,
+            target_hidden_initial_tx,
+        )]
+    } else {
+        Vec::new()
+    };
     let _ = assert_maintained_subscription_view_tick(
         &mut maintained,
         update,
@@ -1556,12 +1546,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
         4_000,
         root_cells(alice, "other", target_visible),
     );
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let remove_removes = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
         Vec::new()
     } else {
@@ -1579,17 +1564,11 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let root_deleted_initial_tx = txs[&("roots", root_deleted)];
     let delete_tx = accept_global(
         &mut core,
-        MergeableCommit::new("roots", root_deleted, 5_000)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("roots", root_deleted, 5_000).deletion(DeletionEvent::Deleted),
     );
     parents.entry(("roots", root_deleted)).or_default().1 = Some(delete_tx);
     txs.insert(("roots", root_deleted), delete_tx);
-    let update = maintained.update(
-        &mut core,
-        &shape,
-        subscription,
-        identity,
-    );
+    let update = maintained.update(&mut core, &shape, subscription, identity);
     let delete_removes = if matches!(capture_shape, MultiTableCaptureShape::JoinVia) {
         Vec::new()
     } else {
@@ -1636,7 +1615,8 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         (never_match, alice, "other", 1_004),
         (rls_revoked, alice, "match", 1_005),
     ] {
-        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        let tx_id =
+            accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
 
@@ -1651,7 +1631,13 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         PeerState::client_link(identity)
     };
 
-    let todo_entry = |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);
+    let todo_entry = |row_uuid| {
+        (
+            groove::Intern::new("todos".to_owned()),
+            row_uuid,
+            txs[&row_uuid],
+        )
+    };
     let expected_initial = if identity == AuthorSubject::SYSTEM {
         vec![
             todo_entry(initial_alice),
@@ -1678,40 +1664,45 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         (identity, seed, "initial"),
     );
 
-    let assert_tick =
-        |core: &mut NodeState<RocksDbStorage>,
-         peer: &mut PeerState,
-         txs: &BTreeMap<RowUuid, TxId>,
-         expected_add_rows: &[RowUuid],
-         expected_remove_rows: &[RowUuid],
-         tick: &str| {
-            let on = peer.query_update(core, &shape, &binding).unwrap();
-            let entry =
-                |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);
-            let expected_adds = expected_add_rows
-                .iter()
-                .copied()
-                .map(entry)
-                .collect::<Vec<_>>();
-            let expected_removes = expected_remove_rows
-                .iter()
-                .copied()
-                .map(entry)
-                .collect::<Vec<_>>();
-            assert_real_peer_tick(
-                capture_view_update(on),
-                &expected_adds,
-                &expected_removes,
-                false,
-                (identity, seed, tick),
-            );
+    let assert_tick = |core: &mut NodeState<RocksDbStorage>,
+                       peer: &mut PeerState,
+                       txs: &BTreeMap<RowUuid, TxId>,
+                       expected_add_rows: &[RowUuid],
+                       expected_remove_rows: &[RowUuid],
+                       tick: &str| {
+        let on = peer.query_update(core, &shape, &binding).unwrap();
+        let entry = |row_uuid| {
+            (
+                groove::Intern::new("todos".to_owned()),
+                row_uuid,
+                txs[&row_uuid],
+            )
         };
+        let expected_adds = expected_add_rows
+            .iter()
+            .copied()
+            .map(entry)
+            .collect::<Vec<_>>();
+        let expected_removes = expected_remove_rows
+            .iter()
+            .copied()
+            .map(entry)
+            .collect::<Vec<_>>();
+        assert_real_peer_tick(
+            capture_view_update(on),
+            &expected_adds,
+            &expected_removes,
+            false,
+            (identity, seed, tick),
+        );
+    };
 
     for (row_uuid, owner, title, made_at) in [
         (added, alice, "match", 2_000),
         (hidden_added, bob, "match", 2_001),
     ] {
-        let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
+        let tx_id =
+            accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
     let add_rows = if identity == AuthorSubject::SYSTEM {
@@ -1723,12 +1714,10 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
 
     let sibling_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", sibling_match, 2_100)
-                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", sibling_match, 2_100).cells(owner_cells(alice, "match")),
             MergeableCommit::new("todos", sibling_nonmatch, 2_100)
                 .cells(owner_cells(alice, "other")),
-            MergeableCommit::new("todos", sibling_hidden, 2_100)
-                .cells(owner_cells(bob, "match")),
+            MergeableCommit::new("todos", sibling_hidden, 2_100).cells(owner_cells(bob, "match")),
         ])
         .unwrap();
     core.apply_fate_update(
@@ -1746,14 +1735,19 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     } else {
         vec![sibling_match]
     };
-    assert_tick(&mut core, &mut peer, &txs, &sibling_add_rows, &[], "sibling-add");
+    assert_tick(
+        &mut core,
+        &mut peer,
+        &txs,
+        &sibling_add_rows,
+        &[],
+        "sibling-add",
+    );
 
     let multi_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", multi_match_a, 2_200)
-                .cells(owner_cells(alice, "match")),
-            MergeableCommit::new("todos", multi_match_b, 2_200)
-                .cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", multi_match_a, 2_200).cells(owner_cells(alice, "match")),
+            MergeableCommit::new("todos", multi_match_b, 2_200).cells(owner_cells(alice, "match")),
         ])
         .unwrap();
     core.apply_fate_update(
@@ -1828,7 +1822,8 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
 }
 
 #[test]
-fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerialization_and_by_tx_scans() {
+fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerialization_and_by_tx_scans()
+ {
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
@@ -1849,11 +1844,16 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
-    read_view: Default::default(),
-};
+        read_view: Default::default(),
+    };
 
-    let (mut maintained, maintained_initial) =
-        MaintainedSubscriptionViewSubscription::new(&mut core, &shape, &binding, subscription, alice);
+    let (mut maintained, maintained_initial) = MaintainedSubscriptionViewSubscription::new(
+        &mut core,
+        &shape,
+        &binding,
+        subscription,
+        alice,
+    );
     assert_maintained_subscription_view_tick(
         &mut maintained,
         maintained_initial,
@@ -1863,7 +1863,8 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
         (alice, 0, "read-cost-initial"),
     );
 
-    let added_tx = accept_owner_capture_row(&mut core, &mut parents, row(0x14), alice, "match", 2_000);
+    let added_tx =
+        accept_owner_capture_row(&mut core, &mut parents, row(0x14), alice, "match", 2_000);
     accept_owner_capture_row(&mut core, &mut parents, row(0x15), bob, "match", 2_001);
 
     reset_query_versions_for_tx_call_count();
@@ -1947,7 +1948,11 @@ fn maintained_subscription_view_multitable_emits_expected_updates() {
             MultiTableCaptureShape::IncludeHoles,
             MultiTableCaptureShape::JoinVia,
         ] {
-            seeded_maintained_subscription_view_multitable_capture(seed, AuthorSubject::SYSTEM, shape);
+            seeded_maintained_subscription_view_multitable_capture(
+                seed,
+                AuthorSubject::SYSTEM,
+                shape,
+            );
             seeded_maintained_subscription_view_multitable_capture(seed, user(0xa1), shape);
         }
     }

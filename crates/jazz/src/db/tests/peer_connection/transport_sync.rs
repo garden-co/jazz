@@ -122,16 +122,11 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
             .expect("authority must send alice's opening");
         let subscription = update.subscription;
         let duplicate = update
-            .input_adds
-            .iter()
-            .find_map(|fact| match fact {
-                crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
-                _ => None,
-            })
+            .supporting_rows
+            .first()
+            .cloned()
             .expect("nonempty authority opening has a covered-input witness");
-        update
-            .input_adds
-            .push(crate::protocol::SupportingInput::Row(duplicate));
+        update.supporting_rows.push(duplicate);
         subscription
     };
     let authority_result = client
@@ -153,7 +148,7 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
         block_on(alice_subscription.next_raw()),
         Some(SubscriptionEvent::Rejected {
             reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
-                transition: "duplicate source-closure addition".to_owned(),
+                transition: "invalid or duplicate supporting physical row version".to_owned(),
             },
         }),
         "the client receives the exact safe closure-transition error without waiting"
@@ -261,16 +256,11 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
             })
             .expect("authority must send the opening");
         let duplicate = update
-            .input_adds
-            .iter()
-            .find_map(|fact| match fact {
-                crate::protocol::SupportingInput::Row(input) => Some(input.clone()),
-                _ => None,
-            })
+            .supporting_rows
+            .first()
+            .cloned()
             .expect("opening must contain an input witness");
-        update
-            .input_adds
-            .push(crate::protocol::SupportingInput::Row(duplicate));
+        update.supporting_rows.push(duplicate);
     }
     let error = client
         .tick()
@@ -278,7 +268,7 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
     assert!(
         error
             .to_string()
-            .contains("duplicate source-closure addition"),
+            .contains("invalid or duplicate supporting physical row version"),
         "{error}"
     );
     assert!(!client.query_attachment_is_covered(&attachment));
@@ -1160,4 +1150,81 @@ fn default_current_subscription_reconciles_deletion_witness_without_reset() {
     );
     let fresh = serving_rows_in_read_view(&server, &schema, &query, client_author, &current_view);
     assert_eq!(row_ids(&snapshot.rows), row_ids(&fresh));
+}
+
+#[test]
+fn delayed_row_repair_does_not_replace_a_newer_supporting_snapshot() {
+    // INV-SYNC-46: exercise the complete-snapshot receiver contract.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0xe1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xe2, author, &schema);
+    let old = row(0xe3);
+    let new = row(0xe4);
+    server
+        .insert_with_id("todos", old, cells("live", false, author))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let mut stream = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    client.tick().unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        if responses
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    // Model payload dedup followed by cache eviction: the older snapshot's
+    // reference is valid, but its body must be fetched in another round trip.
+    let mut stripped = false;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message {
+            payload.version_carriers.clear();
+            stripped = true;
+        }
+    }
+    assert!(stripped);
+    server
+        .update(
+            "todos",
+            old,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id("todos", new, cells("live", false, author))
+        .unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..8 {
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        row_ids(&snapshot.rows),
+        vec![new],
+        "the newer complete snapshot is usable before the old repair returns"
+    );
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        row_ids(&snapshot.rows),
+        vec![new],
+        "late immutable bytes must not reinstall an older supporting set"
+    );
 }

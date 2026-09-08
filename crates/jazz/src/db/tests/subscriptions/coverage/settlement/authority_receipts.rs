@@ -1,7 +1,6 @@
 //! Authority selection, receipt freshness, fallback cuts, and reconnect continuity.
 
 use super::*;
-use crate::protocol::ProgramFactEntry;
 
 /// These receipt-ordering controls emulate the authority only for the exact
 /// one-source `todos` program used below. A reset that claims settlement must
@@ -14,19 +13,10 @@ fn settled_todos_source_closure(
     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_input_set: true,
+
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        input_adds: vec![crate::protocol::SupportingInput::SourceComplete(
-            crate::protocol::ProgramSourceCoverageEntry {
-                source: crate::protocol::ProgramSourceId {
-                    table: "todos".to_owned().into(),
-                    path: vec![crate::protocol::ProgramSourceRole::Root],
-                },
-                complete: true,
-            },
-        )],
-        input_removes: Vec::new(),
+        supporting_rows: Vec::new(),
     })
 }
 
@@ -428,6 +418,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
         unreachable!("expected old upstream")
     };
     pending_row_version_repairs.push_back(PendingRowVersionRepair {
+        superseded: false,
         requests: Vec::new(),
         update: view_update(old_subscription, GlobalTime(3)),
         authority_receipt_eligible: true,

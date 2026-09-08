@@ -1620,7 +1620,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
     let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(0),
-        reset_input_set: false,
+
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             tx,
             versions: Vec::new(),
@@ -1630,8 +1630,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
             durability: DurabilityTier::Local,
         })],
         peer_payload_inventory: PeerPayloadInventory::default(),
-        input_adds: Vec::new(),
-        input_removes: Vec::new(),
+        supporting_rows: Vec::new(),
     });
 
     send_subscriber_with_sync_context(
@@ -1986,6 +1985,7 @@ fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
 
 #[test]
 fn permission_advice_uses_authenticated_link_identity_without_mutating() {
+    // INV-SYNC-45: exercise the complete-snapshot receiver contract.
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let mallory = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -2466,10 +2466,8 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     );
     for update in refreshed {
         assert_eq!(update.subscription, attachment.subscription());
-        assert!(update.reset_input_set);
         assert!(update.version_carriers.is_empty());
 
-        assert!(update.input_removes.is_empty());
         assert!(
             update
                 .peer_payload_inventory
@@ -2478,15 +2476,7 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
                 && !update.peer_payload_inventory.opening_pending,
             "the empty reset must carry its settled authorization receipt"
         );
-        assert_eq!(
-            update.input_adds.len(),
-            1,
-            "the empty reset must carry exactly its complete source manifest"
-        );
-        assert!(matches!(
-            update.input_adds.as_slice(),
-            [crate::protocol::SupportingInput::SourceComplete(coverage)] if coverage.complete
-        ));
+        assert!(update.supporting_rows.is_empty());
     }
     drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
@@ -2649,13 +2639,11 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
         progress_by_subscription[&second_subscription][0],
         "the newer claim revision reaches every current member"
     );
-    assert!(refreshed.iter().all(|update| {
-        update.reset_input_set
-            && matches!(
-                update.input_adds.as_slice(),
-                [crate::protocol::SupportingInput::SourceComplete(coverage)] if coverage.complete
-            )
-    }));
+    assert!(
+        refreshed
+            .iter()
+            .all(|update| { update.supporting_rows.is_empty() })
+    );
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
     };
@@ -3058,7 +3046,6 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
                 message,
                 SyncMessage::ViewUpdate(update)
                     if update.subscription == downstream_subscription
-                        && update.reset_input_set
 
             )
         });

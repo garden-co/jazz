@@ -51,7 +51,9 @@ async fn open_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).await.unwrap();
+    let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage)
+        .await
+        .unwrap();
     (temp_dir, node)
 }
 
@@ -63,7 +65,9 @@ async fn reopen_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    NodeState::new(node_uuid, schema, storage).await.unwrap()
+    NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage)
+        .await
+        .unwrap()
 }
 
 fn task_cells(title: &str, count: i32) -> BTreeMap<String, Value> {
