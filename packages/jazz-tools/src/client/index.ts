@@ -47,3 +47,11 @@ export {
   type AuthProviderSnapshot,
 } from "../session/auth-provider.js";
 export { connectBetterAuth, type BetterAuthClient } from "../session/better-auth.js";
+export { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
+export {
+  betterAuth,
+  jwtAuth,
+  type JazzAuth,
+  type JazzApp,
+  type JazzAppSnapshot,
+} from "../session/app.js";

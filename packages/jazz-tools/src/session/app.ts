@@ -1,0 +1,266 @@
+import {
+  connectAuthProvider,
+  type AuthProviderConnection,
+  type AuthProviderState,
+} from "./auth-provider.js";
+import { connectBetterAuth, type BetterAuthClient } from "./better-auth.js";
+import {
+  attachJazzSessionConsumer,
+  type JazzSession,
+  type JazzSessionActions,
+  type JazzSessionSnapshot,
+  type JazzSessionConsumer,
+} from "./state.js";
+
+export type JazzAuth =
+  | { readonly kind: "better-auth"; readonly client: BetterAuthClient }
+  | ({ readonly kind: "jwt"; getToken(): Promise<string>; logout?(): unknown } & AuthProviderState);
+export const betterAuth = (client: BetterAuthClient): JazzAuth => ({ kind: "better-auth", client });
+export const jwtAuth = (options: Omit<Extract<JazzAuth, { kind: "jwt" }>, "kind">): JazzAuth => ({
+  kind: "jwt",
+  ...options,
+});
+export interface JazzAppSnapshot<Client> {
+  readonly status: "starting" | "signed-out" | "transitioning" | "ready" | "error";
+  readonly client?: Client;
+  readonly account?: JazzSessionSnapshot<Client>["account"];
+  readonly error?: Error;
+}
+export interface JazzApp<Client> {
+  getSnapshot(): JazzAppSnapshot<Client>;
+  subscribe(listener: () => void): () => void;
+  start(): Promise<void>;
+  updateAuth(auth: JazzAuth | undefined): void;
+  retry(): Promise<void>;
+  logout(): Promise<void>;
+  dispose(): Promise<void>;
+  readonly sessionActions: JazzSessionActions;
+  /** Acknowledge only after the rendered view has detached its old subscriptions. */
+  attachConsumer(): { acknowledge(snapshot: JazzAppSnapshot<Client>): void; release(): void };
+}
+const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
+
+/** Host-independent owner. Configuration is captured once; auth state may update in place. */
+export function createJazzAppOwner<Config, Client>(
+  config: Config & { auth?: JazzAuth },
+  factory: (config: Config) => Promise<JazzSession<Client>>,
+  options: { start?: boolean } = {},
+): JazzApp<Client> {
+  let auth = config.auth;
+  let session: JazzSession<Client> | undefined;
+  let connection:
+    | (Omit<AuthProviderConnection, "update" | "logout"> & {
+        logout(action?: () => unknown): Promise<void>;
+      })
+    | undefined;
+  let jwtConnection: AuthProviderConnection | undefined;
+  let unsubscribeSession: (() => void) | undefined;
+  let unsubscribeConnection: (() => void) | undefined;
+  let pending: Promise<void> | undefined;
+  let disposal: Promise<void> | undefined;
+  let disposed = false;
+  let failure: Error | undefined;
+  let snapshot: JazzAppSnapshot<Client> = Object.freeze({ status: "starting" });
+  const versions = new WeakMap<object, JazzSessionSnapshot<Client>>();
+  const listeners = new Set<() => void>();
+  const consumers = new Set<{ lease?: JazzSessionConsumer<Client> }>();
+  function publish() {
+    if (disposed) return;
+    const current = session?.getSnapshot();
+    const provider = connection?.getSnapshot();
+    const error = failure ?? provider?.error ?? current?.error;
+    const ready = current?.status === "ready" && (!auth || provider?.ready);
+    const status: JazzAppSnapshot<Client>["status"] = error
+      ? "error"
+      : !current
+        ? "starting"
+        : ready
+          ? "ready"
+          : current.status === "signed-out" && (!auth || provider?.ready)
+            ? "signed-out"
+            : "transitioning";
+    const next = {
+      status,
+      client: status === "ready" ? current?.client : undefined,
+      account: current?.account,
+      error,
+    };
+    // Keep the raw snapshot version even when a provider hides a still-ready client.
+    if (
+      snapshot.status === next.status &&
+      snapshot.client === next.client &&
+      snapshot.account === next.account &&
+      snapshot.error === next.error &&
+      (!current || versions.get(snapshot) === current)
+    )
+      return;
+    snapshot = Object.freeze(next);
+    if (current) versions.set(snapshot, current);
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch (cause) {
+        console.error("Jazz app observer failed", cause);
+      }
+    }
+  }
+  function disconnect() {
+    unsubscribeConnection?.();
+    unsubscribeConnection = undefined;
+    connection?.dispose();
+    connection = undefined;
+    jwtConnection = undefined;
+  }
+  function connect() {
+    if (!session || !auth || disposed) return;
+    if (auth.kind === "better-auth") connection = connectBetterAuth(session, auth.client);
+    else {
+      jwtConnection = connectAuthProvider(session, {
+        getToken: () => {
+          if (auth?.kind !== "jwt") return Promise.reject(new Error("Jazz auth provider changed"));
+          return auth.getToken();
+        },
+      });
+      connection = jwtConnection;
+      jwtConnection.update(auth);
+    }
+    unsubscribeConnection = connection.subscribe(publish);
+  }
+  const requireSession = () => {
+    if (disposed) throw new Error("Jazz app is disposed");
+    if (!session) throw new Error("Jazz app is starting; retry initialization first");
+    return session;
+  };
+  const sessionActions = {} as JazzSessionActions;
+  for (const name of [
+    "createLocalFirst",
+    "restoreLocalFirst",
+    "becomeBackend",
+    "registerJWT",
+    "loginJWT",
+    "loginOrRegisterJWT",
+    "linkJWT",
+  ] as const) {
+    (sessionActions as any)[name] = async (...args: unknown[]) => {
+      if (auth) throw new Error("Manual session actions require an app without managed auth");
+      return (requireSession()[name] as (...args: unknown[]) => Promise<void>)(...args);
+    };
+  }
+  const app: JazzApp<Client> = {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    start() {
+      if (disposed) return Promise.reject(new Error("Jazz app is disposed"));
+      if (pending) return pending;
+      if (session) return Promise.resolve();
+      failure = undefined;
+      publish();
+      const task = Promise.resolve()
+        .then(() => factory(config))
+        .then(async (created) => {
+          if (disposed) {
+            await created.close();
+            return;
+          }
+          session = created;
+          for (const consumer of consumers) consumer.lease = attachJazzSessionConsumer(created);
+          unsubscribeSession = created.subscribe(publish);
+          connect();
+          publish();
+        })
+        .catch((cause) => {
+          failure = asError(cause);
+          publish();
+          throw cause;
+        })
+        .finally(() => {
+          if (pending === task) pending = undefined;
+        });
+      pending = task;
+      return task;
+    },
+    updateAuth(next) {
+      if (disposed) return;
+      const same =
+        auth?.kind === next?.kind &&
+        (auth?.kind !== "better-auth" ||
+          (next?.kind === "better-auth" && auth.client === next.client));
+      auth = next;
+      if (same && next?.kind === "jwt") jwtConnection?.update(next);
+      else if (!same) {
+        disconnect();
+        connect();
+      }
+      publish();
+    },
+    async retry() {
+      if (!session) return app.start();
+      requireSession();
+      failure = undefined;
+      try {
+        if (connection) await connection.retry();
+        else await session.retry();
+      } catch (cause) {
+        failure = asError(cause);
+        throw cause;
+      } finally {
+        publish();
+      }
+    },
+    async logout() {
+      const current = requireSession();
+      failure = undefined;
+      try {
+        if (jwtConnection)
+          await jwtConnection.logout(() => (auth?.kind === "jwt" ? auth.logout?.() : undefined));
+        else if (connection) await connection.logout();
+        else await current.logout();
+      } catch (cause) {
+        failure = asError(cause);
+        throw cause;
+      } finally {
+        publish();
+      }
+    },
+    dispose() {
+      if (disposal) return disposal;
+      disposed = true;
+      disconnect();
+      unsubscribeSession?.();
+      for (const consumer of consumers) consumer.lease?.release();
+      consumers.clear();
+      listeners.clear();
+      disposal = (async () => {
+        await pending?.catch(() => {});
+        await session?.close();
+      })();
+      return disposal;
+    },
+    sessionActions,
+    attachConsumer() {
+      if (disposed) throw new Error("Jazz app is disposed");
+      const consumer = { lease: session ? attachJazzSessionConsumer(session) : undefined };
+      consumers.add(consumer);
+      return {
+        acknowledge(value) {
+          const raw = versions.get(value);
+          if (raw) consumer.lease?.acknowledge(raw);
+        },
+        release() {
+          consumer.lease?.release();
+          consumers.delete(consumer);
+        },
+      };
+    },
+  };
+  sessionActions.retry = app.retry;
+  sessionActions.logout = app.logout;
+  sessionActions.close = app.dispose;
+  if (options.start !== false) void app.start().catch(() => {});
+  return app;
+}
