@@ -13,7 +13,12 @@ export interface AccountHandle {
   readonly identity: AccountIdentity;
 }
 
-export type AccountOperation = "registerJWT" | "loginJWT" | "linkJWT" | "becomeBackend";
+export type AccountOperation =
+  | "registerJWT"
+  | "loginJWT"
+  | "loginOrRegisterJWT"
+  | "linkJWT"
+  | "becomeBackend";
 export interface AccountSnapshot {
   readonly account: AccountHandle | undefined;
   readonly pending: AccountOperation | undefined;
@@ -28,6 +33,7 @@ export interface AccountEnrollment<Auth> {
   becomeBackend?(auth: BackendAuth): Promise<AccountHandle>;
   registerJWT(auth: Auth): Promise<AccountHandle>;
   loginJWT(auth: Auth): Promise<AccountHandle>;
+  loginOrRegisterJWT(auth: Auth): Promise<AccountHandle>;
   linkJWT(account: AccountHandle, auth: Auth): Promise<AccountHandle>;
 }
 
@@ -110,6 +116,10 @@ export class AccountManager<Auth> {
 
   loginJWT(auth: Auth): Promise<AccountHandle> {
     return this.run("loginJWT", () => this.enrollment.loginJWT(auth));
+  }
+
+  loginOrRegisterJWT(auth: Auth): Promise<AccountHandle> {
+    return this.run("loginOrRegisterJWT", () => this.enrollment.loginOrRegisterJWT(auth));
   }
 
   linkJWT(auth: Auth): Promise<AccountHandle> {

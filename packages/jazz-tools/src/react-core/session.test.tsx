@@ -22,6 +22,7 @@ async function setup() {
     restoreLocalFirst: () => makeFakeAccount(),
     registerJWT: vi.fn(async () => makeFakeAccount()),
     loginJWT: vi.fn(async () => makeFakeAccount()),
+    loginOrRegisterJWT: vi.fn(async () => makeFakeAccount()),
     linkJWT: vi.fn(async () => makeFakeAccount()),
     logout: vi.fn(),
   };

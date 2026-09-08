@@ -66,6 +66,7 @@ async fn forward_account_request(
         "links/accept",
         "found-local-first",
         "register",
+        "login-or-register",
         "login",
         "revoke",
     ]
@@ -320,6 +321,22 @@ pub(super) async fn register(
     let AccountCommandResult::Assignment(assignment) = result else {
         unreachable!("register result")
     };
+    Ok(response(principal, assignment))
+}
+
+/// Resolve or create an external account in one ordered core decision.
+pub(super) async fn login_or_register(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Json<AccountResponse>, Failure> {
+    let principal = authenticate(&state, &headers).await?;
+    if principal.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        return Err((StatusCode::BAD_REQUEST, "use_local_first_founding"));
+    }
+    let assignment = owner(&state)?
+        .login_or_register(principal.clone())
+        .await
+        .map_err(failure)?;
     Ok(response(principal, assignment))
 }
 

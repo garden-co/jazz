@@ -84,6 +84,32 @@ impl<S: OrderedKvStorage> StoredAccountRegistry<S> {
         Ok(self.state.login(principal)?.clone())
     }
 
+    /// Atomically resolve an external identity or durably create its first assignment.
+    /// The exclusive mutable owner keeps lookup and append in one decision order.
+    /// Only an unassigned identity may register; revocation is never undone.
+    pub async fn login_or_register(
+        &mut self,
+        principal: &Principal,
+    ) -> Result<Assignment, RegistryError> {
+        principal.validate(false)?;
+        match self.login(principal).await {
+            Ok(assignment) => Ok(assignment),
+            Err(RegistryError::Decision(AccountError::NotAssigned)) => {
+                let result = self
+                    .execute(&AccountCommand::Register {
+                        principal: principal.clone(),
+                        account: super::AccountId(uuid::Uuid::new_v4()),
+                    })
+                    .await?;
+                let AccountCommandResult::Assignment(assignment) = result else {
+                    unreachable!("registration returns an assignment")
+                };
+                Ok(assignment)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Persist before publishing. Any ambiguous storage error poisons this
     /// owner: continuing from its older in-memory state could reuse a nonce.
     pub async fn execute(

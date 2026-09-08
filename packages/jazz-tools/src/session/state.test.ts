@@ -23,6 +23,7 @@ async function setup() {
     logout: vi.fn(),
     registerJWT: vi.fn(async (_auth: JWTAuth) => next),
     loginJWT: vi.fn(async (_auth: JWTAuth) => next),
+    loginOrRegisterJWT: vi.fn(async (_auth: JWTAuth) => next),
     linkJWT: vi.fn(async (_account: AccountHandle, _auth: JWTAuth) => next),
   };
   const accounts = new AccountManager(enrollment, old);
@@ -180,6 +181,7 @@ describe("Jazz session lifecycle", () => {
       createLocalFirst: create,
       registerJWT: async () => account,
       loginJWT: async () => account,
+      loginOrRegisterJWT: async () => account,
       linkJWT: async () => account,
     });
     const session = await createJazzSessionOwner({

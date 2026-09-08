@@ -21,6 +21,7 @@ async function setup(events: string[]) {
       logout: () => {},
       registerJWT: async () => next,
       loginJWT: async () => next,
+      loginOrRegisterJWT: async () => next,
       linkJWT: async () => {
         events.push("link");
         return next;

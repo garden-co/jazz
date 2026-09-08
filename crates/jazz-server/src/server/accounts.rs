@@ -17,6 +17,10 @@ enum Request {
         Principal,
         oneshot::Sender<Result<Assignment, RegistryError>>,
     ),
+    LoginOrRegister(
+        Principal,
+        oneshot::Sender<Result<Assignment, RegistryError>>,
+    ),
     Close(mpsc::Sender<Result<(), String>>),
 }
 
@@ -85,6 +89,13 @@ impl AccountRegistryOwner {
                             }
                             let _ = response.send(result);
                         }
+                        Request::LoginOrRegister(principal, response) => {
+                            let result = jazz::db::block_on(registry.login_or_register(&principal));
+                            if result.is_ok() {
+                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            }
+                            let _ = response.send(result);
+                        }
                         Request::Login(principal, response) => {
                             let _ = response.send(jazz::db::block_on(registry.login(&principal)));
                         }
@@ -133,6 +144,17 @@ impl AccountRegistryOwner {
         let (reply, response) = oneshot::channel();
         self.sender
             .send(Request::Execute(command, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    pub(crate) async fn login_or_register(
+        &self,
+        principal: Principal,
+    ) -> Result<Assignment, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::LoginOrRegister(principal, reply))
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
     }

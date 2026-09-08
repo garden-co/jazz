@@ -15,6 +15,7 @@ export type JazzSessionOperation =
   | "becomeBackend"
   | "registerJWT"
   | "loginJWT"
+  | "loginOrRegisterJWT"
   | "linkJWT"
   | "logout"
   | "retry";
@@ -31,6 +32,7 @@ export interface JazzSessionActions {
   becomeBackend(auth: BackendAuth): Promise<void>;
   registerJWT(auth: JWTAuth): Promise<void>;
   loginJWT(auth: JWTAuth): Promise<void>;
+  loginOrRegisterJWT(auth: JWTAuth): Promise<void>;
   linkJWT(auth: JWTAuth): Promise<void>;
   logout(): Promise<void>;
   retry(): Promise<void>;
@@ -207,6 +209,8 @@ export async function createJazzSessionOwner<Client extends SessionClient>(optio
     becomeBackend: (auth) => run("becomeBackend", () => accounts.becomeBackend(auth)),
     registerJWT: (auth) => run("registerJWT", () => accounts.registerJWT(auth)),
     loginJWT: (auth) => run("loginJWT", () => accounts.loginJWT(auth)),
+    loginOrRegisterJWT: (auth) =>
+      run("loginOrRegisterJWT", () => accounts.loginOrRegisterJWT(auth)),
     linkJWT: (auth) => run("linkJWT", () => accounts.linkJWT(auth)),
     retry: () => run("retry", () => selected),
     logout: () => {

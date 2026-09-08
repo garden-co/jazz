@@ -19,6 +19,7 @@ async function fixture() {
       createLocalFirst: () => account,
       registerJWT: async () => account,
       loginJWT: async () => account,
+      loginOrRegisterJWT: async () => account,
       linkJWT: async () => account,
     },
     account,

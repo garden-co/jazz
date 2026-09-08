@@ -111,6 +111,7 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
       becomeBackend: unavailable,
       registerJWT: unavailable,
       loginJWT: unavailable,
+      loginOrRegisterJWT: unavailable,
       linkJWT: unavailable,
       logout: unavailable,
       close: unavailable,

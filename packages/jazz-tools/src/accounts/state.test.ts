@@ -25,6 +25,7 @@ function setup() {
     createLocalFirst: () => local,
     registerJWT: () => pending.promise,
     loginJWT: () => pending.promise,
+    loginOrRegisterJWT: () => pending.promise,
     linkJWT: () => pending.promise,
   });
   return { manager, pending, local };
@@ -72,6 +73,7 @@ it("does not start remote linking when a pending-state subscriber logs out", asy
     createLocalFirst: () => local,
     registerJWT: async () => local,
     loginJWT: async () => local,
+    loginOrRegisterJWT: async () => local,
     linkJWT: async () => {
       calls++;
       return local;
