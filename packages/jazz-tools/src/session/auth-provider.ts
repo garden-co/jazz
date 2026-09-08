@@ -89,8 +89,11 @@ export function connectAuthProvider<Client>(
     const operation = Promise.resolve().then(async () => {
       await predecessor;
       if (disposed || token !== generation) return;
-      if (key === null) await session.logout();
-      else
+      if (key === null) {
+        // A delayed provider notification can acknowledge an already completed logout.
+        const current = session.getSnapshot();
+        if (current.status !== "signed-out" || current.error) await session.logout();
+      } else
         await session.loginOrRegisterJWT({
           async getToken() {
             if (
@@ -151,7 +154,10 @@ export function connectAuthProvider<Client>(
         await connection.logout(signOut);
         return;
       }
-      await running;
+      const pending = running;
+      await pending;
+      // Refetching a provider error may already have started (or completed) admission.
+      if (pending || snapshot.ready) return;
       attempted = undefined;
       failure = undefined;
       await reconcile();
