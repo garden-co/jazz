@@ -368,6 +368,7 @@ where
                         request.row_uuid,
                         request_schema,
                         identity,
+                        true,
                     )
                     .await?
                     {

@@ -1016,6 +1016,28 @@ impl RetainedRootWindowSource {
     }
 }
 
+/// Receiver-local replacement key. Content and deletion registers, and
+/// different branches, are independent inputs even when they share a row UUID.
+/// This index is rebuilt from existing facts; it has no storage or wire codec.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CoveredInputCoordinate {
+    source: ProgramSourceId,
+    row: RowUuid,
+    layer: crate::protocol::ResultRowLayer,
+    branch: Vec<u8>,
+}
+
+impl From<&CoveredInputEntry> for CoveredInputCoordinate {
+    fn from(input: &CoveredInputEntry) -> Self {
+        Self {
+            source: input.source.clone(),
+            row: input.source_row,
+            layer: input.version.layer,
+            branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
+        }
+    }
+}
+
 /// One authority-owned result stream, including every receipt that makes its
 /// membership meaningful after a reconnect or durable reopen.  Nothing in
 /// this aggregate is an ordinary local maintained-view cache.
@@ -1053,7 +1075,7 @@ pub(crate) struct AuthorityResultState {
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
     covered_input_sources: BTreeSet<ProgramSourceId>,
-    covered_input_versions: BTreeMap<(ProgramSourceId, RowUuid), CoveredInputEntry>,
+    covered_input_versions: BTreeMap<CoveredInputCoordinate, CoveredInputEntry>,
     compiled_covered_input_sources: Option<BTreeSet<ProgramSourceId>>,
     /// Optional fast cursor and authorization receipt. The cursor is durable
     /// cache metadata; only `live_settled` permits a new known-state claim.

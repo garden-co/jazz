@@ -34,7 +34,7 @@ fn apply_covered_input_closure_admission_delta(
                 state.covered_input_sources.remove(&coverage.source);
             }
             ProgramFactEntry::CoveredInput(input) => {
-                let key = (input.source.clone(), input.source_row);
+                let key = CoveredInputCoordinate::from(input);
                 if state.covered_input_versions.get(&key) == Some(input) {
                     state.covered_input_versions.remove(&key);
                 }
@@ -50,7 +50,7 @@ fn apply_covered_input_closure_admission_delta(
             ProgramFactEntry::CoveredInput(input) => {
                 state
                     .covered_input_versions
-                    .insert((input.source.clone(), input.source_row), input.clone());
+                    .insert(CoveredInputCoordinate::from(input), input.clone());
             }
             _ => {}
         }
@@ -1803,10 +1803,7 @@ where
             (
                 bool,
                 BTreeMap<crate::protocol::ProgramSourceId, bool>,
-                BTreeMap<
-                    (crate::protocol::ProgramSourceId, RowUuid),
-                    Option<crate::protocol::CoveredInputEntry>,
-                >,
+                BTreeMap<CoveredInputCoordinate, Option<crate::protocol::CoveredInputEntry>>,
             ),
         >::new();
         for update in updates {
@@ -1864,7 +1861,7 @@ where
                         )));
                     }
                     ProgramFactEntry::CoveredInput(input) => {
-                        let key = (input.source.clone(), input.source_row);
+                        let key = CoveredInputCoordinate::from(input);
                         let current = match overlay.2.get(&key) {
                             Some(current) => current.clone(),
                             None if overlay.0 => None,
@@ -1937,7 +1934,7 @@ where
                             input.source
                         )));
                     }
-                    let key = (input.source.clone(), input.source_row);
+                    let key = CoveredInputCoordinate::from(input);
                     let current = match overlay.2.get(&key) {
                         Some(current) => current.clone(),
                         None if overlay.0 => None,

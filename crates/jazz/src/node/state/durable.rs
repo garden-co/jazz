@@ -996,7 +996,7 @@ where
                     ProgramFactEntry::CoveredInput(input) => {
                         state
                             .covered_input_versions
-                            .insert((input.source.clone(), input.source_row), input.clone());
+                            .insert(CoveredInputCoordinate::from(input), input.clone());
                     }
                     _ => {}
                 }

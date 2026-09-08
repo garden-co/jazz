@@ -1290,7 +1290,8 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(payload) = &mut update else { panic!("expected supporting snapshot") };
     // A complete input set may retain both independently stored layers.
-    let mut restore = payload.supporting_rows.iter().find(|row| row.version.tx == tx_id).unwrap().clone();
+    let content = payload.supporting_rows.iter().find(|row| row.version.tx == tx_id).unwrap().clone();
+    let mut restore = content.clone();
     restore.version.layer = crate::protocol::ResultRowLayer::Deletion;
     payload.supporting_rows = vec![restore];
     let mut bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
@@ -1314,6 +1315,48 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
         "repair must return every layer of the requested physical row/transaction");
     reader.apply_row_version_payloads_for_requests(&expected, repaired).unwrap();
     assert!(reader.missing_known_state_row_version_refs(&update).unwrap().is_empty());
+    let mut both_layers = update.clone();
+    let SyncMessage::ViewUpdate(payload) = &mut both_layers else { unreachable!() };
+    payload.supporting_rows.push(content);
     reader.apply_sync_message_settled(update).unwrap();
+    reader.apply_sync_message_settled(both_layers).expect("content and deletion are independent supporting versions");
     assert_eq!(reader.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+}
+
+/// Alice may repair a deleted row's witness when its read policy still permits
+/// her to read the row through includeDeleted. Bob must learn no row bytes.
+///
+/// Alice ──create, delete──► Core
+/// Alice ──repair deletion──► Core ──authorized witness──► Alice
+/// Bob   ──same request─────► Core ──empty response──────► Bob
+#[test]
+fn deleted_row_repair_checks_read_permission_without_current_membership() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, alice);
+    install_test_uuid_sub_claim(&mut core, bob);
+    let row_uuid = row(0xc8);
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row_uuid, 10).made_by(alice).cells(owner_cells(alice, "deleted but readable")));
+    let deletion = commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row_uuid, 11).made_by(alice).deletion(DeletionEvent::Deleted));
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, deletion);
+    for (identity, allowed) in [(alice, true), (bob, false)] {
+        let mut peer = PeerState::client_link(identity);
+        let messages = peer.handle_row_versions_fetch(&mut core, SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()], delegated_session: None,
+        }).unwrap();
+        let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+            panic!("expected repair response");
+        };
+        assert_eq!(!version_bundles.is_empty(), allowed,
+            "deletion changes query membership, not the row's read permission");
+        if allowed {
+            assert!(version_bundles.iter().flat_map(|bundle| &bundle.versions)
+                .any(|version| version.deletion() == Some(DeletionEvent::Deleted)));
+        }
+    }
 }
