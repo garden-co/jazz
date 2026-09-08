@@ -2531,6 +2531,7 @@ fn version_indirect_descriptors(
 }
 
 pub(crate) struct ViewUpdateParts {
+    pub(crate) wire_rows: Option<Vec<crate::protocol::SupportingRow>>,
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,

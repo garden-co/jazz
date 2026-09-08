@@ -1296,18 +1296,28 @@ these messages is promised. Unknown describes indeterminate current availability
 or unavailable authority, never missing protocol support. See SPEC 7's bounded
 current-row availability contract for authorization and receipt validation.
 
-### Supporting-input view payload
+### Atomic supporting-row view payload
 
-`ViewUpdatePayload` carries `input_adds` and `input_removes`, each a vector of
-`SupportingInput`: `Row(CoveredInputEntry)` or
-`SourceComplete(ProgramSourceCoverageEntry)`. `reset_input_set` replaces the
-receiver's selected supporting inputs. Rendered result membership and internal
-program proofs have no wire fields or variants. The receiver evaluates its own
-query from these inputs; CurrentRows provides the separate current/unavailable
-reconciliation exchange. Source occurrences, subscription identity, authority
-cut and authorization progress retain their exact existing meanings. Native
-row-version carriers are unchanged. The named postcard semantic codec and
-byte corpus pin this mandatory pre-release layout; old layouts are unsupported.
+`ViewUpdatePayload.supporting_rows` is the complete supporting physical
+row/version set for one subscription. There are no per-query source IDs, role
+labels, completeness facts, result members, or input-delta fields on the wire.
+A row reference names its permanent physical table UUID, row UUID and exact
+native version; the authored table name remains lookup metadata required by the
+existing native version-repair API, never a query occurrence identity.
+
+Every non-opening-pending payload is a replacement snapshot, including an empty
+set. The receiver installs it atomically only after all referenced versions are
+available and validated, then evaluates its ordinary local query over that
+physical dataset. Repeated scans of a table consume the same local dataset.
+Compiled source slots and graph bookkeeping are receiver-local implementation
+details; they are not authority claims transported by the peer. The existing
+subscription, authenticated authority, cut, epoch and ordering boundaries remain.
+CurrentRows is the separate current/unavailable reconciliation exchange; query
+exclusion alone is not global unavailability. This transport simplification does
+not claim complete negative-query evidence or add shallow aggregate transport.
+
+Native row-version carriers are unchanged. The named postcard semantic codec
+and byte corpus pin this mandatory pre-release layout; old layouts are unsupported.
 
 ## Open Questions
 

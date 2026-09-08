@@ -607,7 +607,6 @@ where
         // The direct cold helper represents a receiver's first receipt.  It
         // must therefore establish a replacement closure; the reusable
         // peer-rehydrate builder below deliberately remains incremental.
-        payload.reset_input_set = true;
         Ok(update)
     }
 
@@ -759,6 +758,111 @@ where
             .await;
         self.unsubscribe_groove_subscription(receiver.id());
         update
+    }
+
+    pub(crate) fn supporting_rows_for_facts(
+        &self,
+        read_schema: SchemaVersionId,
+        facts: impl IntoIterator<Item = ProgramFactEntry>,
+    ) -> Result<Vec<crate::protocol::SupportingRow>, Error> {
+        let mut rows = BTreeSet::new();
+        for fact in facts {
+            let ProgramFactEntry::CoveredInput(input) = fact else {
+                continue;
+            };
+            let physical_table = self
+                .catalogue
+                .physical_mappings
+                .get(&read_schema)
+                .and_then(|mapping| mapping.identities.tables.get(input.source.table.as_str()))
+                .ok_or(Error::InvalidStoredValue(
+                    "supporting row physical table mapping missing",
+                ))?
+                .id;
+            rows.insert(crate::protocol::SupportingRow {
+                physical_table,
+                version_table: input.version_table,
+                row: input.source_row,
+                version: input.version,
+            });
+        }
+        Ok(rows.into_iter().collect())
+    }
+
+    // The wire supplies one ordinary physical dataset. Query scan occurrences
+    // are compiler-owned: every local occurrence scans the same supplied table.
+    // Internal source records are graph bookkeeping, not per-role peer evidence.
+    fn normalize_supporting_snapshot(&mut self, update: &mut ViewUpdateParts) -> Result<(), Error> {
+        let Some(rows) = update.wire_rows.take() else {
+            return Ok(());
+        };
+        if update.opening_pending {
+            if !rows.is_empty() {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "opening-pending marker carries supporting rows".to_owned(),
+                });
+            }
+            update.reset_input_set = false;
+            return Ok(());
+        }
+        let Some(shape) = self.registered_shape(update.subscription.shape_id) else {
+            return Ok(());
+        };
+        let schema = shape.schema_version();
+        let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
+        let mut facts = BTreeSet::new();
+        for source in &sources {
+            facts.insert(ProgramFactEntry::ProgramSourceCoverage(
+                crate::protocol::ProgramSourceCoverageEntry {
+                    source: source.clone(),
+                    complete: true,
+                },
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        for row in rows {
+            if !row.is_wire_valid() || !identities.insert(row.clone()) {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "invalid or duplicate supporting physical row version".to_owned(),
+                });
+            }
+            let mut mapped = false;
+            for source in &sources {
+                let physical = self
+                    .catalogue
+                    .physical_mappings
+                    .get(&schema)
+                    .and_then(|mapping| mapping.identities.tables.get(source.table.as_str()))
+                    .ok_or(Error::InvalidStoredValue(
+                        "compiled source physical table mapping missing",
+                    ))?
+                    .id;
+                if physical == row.physical_table {
+                    mapped = true;
+                    facts.insert(ProgramFactEntry::CoveredInput(
+                        crate::protocol::CoveredInputEntry {
+                            source: source.clone(),
+                            version_table: row.version_table.clone(),
+                            source_row: row.row,
+                            version: row.version.clone(),
+                        },
+                    ));
+                }
+            }
+            if !mapped {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: update.subscription,
+                    transition: "supporting row physical table is outside the query dataset"
+                        .to_owned(),
+                });
+            }
+        }
+        update.reset_input_set = true;
+        update.program_fact_adds = facts.into_iter().collect();
+        update.program_fact_removes.clear();
+        Ok(())
     }
 
     pub(crate) async fn view_update_for_maintained_result_members(
@@ -1324,32 +1428,26 @@ where
             crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through,
-                reset_input_set: false,
                 version_carriers,
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: peer_payload_inventory_refs,
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                // Result members are local maintained-terminal state. Peer
-                // frames carry only the source closure from which another
-                // receiver derives those terminals itself.
-                input_adds: program_fact_adds
-                    .into_iter()
-                    .map(crate::protocol::SupportingInput::try_from)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(Error::InvalidStoredValue)?,
-                input_removes: program_fact_removes
-                    .into_iter()
-                    .map(crate::protocol::SupportingInput::try_from)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(Error::InvalidStoredValue)?,
+                supporting_rows: self.supporting_rows_for_facts(
+                    shape.schema_version(),
+                    maintained_facts.active_peer_source_closure_facts(),
+                )?,
             },
         ))
     }
 
     /// Apply a downstream current-row view update.
-    pub(super) async fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
+    pub(super) async fn apply_view_update(
+        &mut self,
+        mut update: ViewUpdateParts,
+    ) -> Result<(), Error> {
+        self.normalize_supporting_snapshot(&mut update)?;
         self.validate_received_view_update_global_time_durability(&update)
             .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))
@@ -1376,8 +1474,11 @@ where
 
     pub(crate) async fn apply_view_updates_in_batch(
         &mut self,
-        updates: Vec<ViewUpdateParts>,
+        mut updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
+        for update in &mut updates {
+            self.normalize_supporting_snapshot(update)?;
+        }
         if updates.is_empty() {
             return Ok(());
         }
@@ -2010,6 +2111,7 @@ where
         preloaded_tx_ids: Option<&BTreeSet<TxId>>,
     ) -> Result<(), Error> {
         let ViewUpdateParts {
+            wire_rows: _,
             subscription,
             settled_through,
             defer_settlement,

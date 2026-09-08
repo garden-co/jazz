@@ -531,7 +531,13 @@ impl PeerState {
 
     fn record_outgoing_view_update(&mut self, update: &SyncMessage) {
         self.record_outgoing_view_update_metadata(update);
-        self.apply_outgoing_view_update_result_set(update);
+        if let SyncMessage::ViewUpdate(view) = update {
+            let state = self.publication_states.entry(view.subscription).or_default();
+            state.supporting_rows = view.supporting_rows.clone();
+            if let Some(maintained) = &state.maintained_subscription_view {
+                state.program_fact_set = maintained.maintained.active_peer_source_closure_facts();
+            }
+        }
     }
 
     fn refresh_maintained_subscription_view_footprint(&mut self, subscription: SubscriptionKey) {
@@ -542,22 +548,6 @@ impl PeerState {
             .map(|maintained| maintained.maintained.footprint())
             .map(MaintainedSubscriptionViewMetricsFootprint::from)
             .unwrap_or_default();
-    }
-
-    fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            reset_input_set,
-            input_adds: program_fact_adds,
-            input_removes: program_fact_removes,
-            ..
-        }) = update
-        else {
-            return;
-        };
-        let adds = program_fact_adds.iter().cloned().map(Into::into).collect::<Vec<_>>();
-        let removes = program_fact_removes.iter().cloned().map(Into::into).collect::<Vec<_>>();
-        self.apply_outgoing_view_delta(*subscription, *reset_input_set, &[], &[], &adds, &removes);
     }
 
     fn apply_outgoing_view_delta(

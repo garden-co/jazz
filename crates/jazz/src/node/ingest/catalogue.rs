@@ -292,25 +292,24 @@ where
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
-                    reset_input_set,
                     version_carriers,
                     peer_payload_inventory,
-                    input_adds: program_fact_adds,
-                    input_removes: program_fact_removes,
+                    supporting_rows: program_fact_adds,
                 }) => {
                     self.apply_view_update(ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
                         subscription,
                         settled_through,
                         defer_settlement: false,
-                        reset_input_set,
+                        reset_input_set: true,
                         version_carriers,
                         peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                         authorization_progress: peer_payload_inventory.authorization_progress,
                         opening_pending: peer_payload_inventory.opening_pending,
                         result_member_adds: Vec::new(),
                         result_member_removes: Vec::new(),
-                        program_fact_adds: program_fact_adds.into_iter().map(Into::into).collect(),
-                        program_fact_removes: program_fact_removes.into_iter().map(Into::into).collect(),
+                        program_fact_adds: Vec::new(),
+                        program_fact_removes: Vec::new(),
                     })
                     .await?;
                     Ok(PublicationOutcome::settled(Vec::new()))

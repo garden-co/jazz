@@ -343,16 +343,13 @@ pub struct ViewUpdatePayload {
     pub subscription: SubscriptionKey,
     /// Authority cut through which this view has settled.
     pub settled_through: GlobalTime,
-    /// Whether the receiver must replace its current supporting input set.
-    pub reset_input_set: bool,
     /// Compact carriers for versions referenced by this update.
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Supporting source inputs added by this update.
-    pub input_adds: Vec<SupportingInput>,
-    /// Supporting source inputs removed by this update.
-    pub input_removes: Vec<SupportingInput>,
+    /// Complete authorized supporting physical row/version set for this subscription.
+    /// Install atomically after every referenced native version is available.
+    pub supporting_rows: Vec<SupportingRow>,
 }
 
 impl ViewUpdatePayload {
@@ -739,55 +736,14 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
-        if view
-            .input_adds
-            .iter()
-            .chain(&view.input_removes)
-            .any(|fact| matches!(fact, SupportingInput::Row(input) if !input.is_wire_valid()))
-        {
-            return Err(WireContractError::InvalidCoveredInput);
-        }
-        if view
-            .input_adds
-            .iter()
-            .chain(&view.input_removes)
-            .any(|fact| {
-                matches!(
-                    fact,
-                    SupportingInput::SourceComplete(coverage)
-                        if !coverage.complete || !coverage.source.is_wire_valid()
-                )
-            })
-        {
-            return Err(WireContractError::InvalidProgramSourceCoverage);
-        }
-        // A peer update is an unordered predecessor→successor set delta. A
-        // fact in both sides has no stable meaning at ingress (and would make
-        // a receiver depend on arbitrary application order), so only the
-        // authority may collapse terminal batches into a disjoint transition.
-        let added_facts = view
-            .input_adds
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        if view
-            .input_removes
-            .iter()
-            .any(|fact| added_facts.contains(fact))
-        {
-            return Err(WireContractError::OverlappingPeerSourceClosureDelta);
-        }
-        // A closure is a set of exact compiled source occurrences. Rejecting
-        // duplicate entries at the wire boundary preserves the distinction
-        // between one empty source and two competing receipts before the
-        // receiver's durable fact set can coalesce them.
-        let mut coverage_sources = std::collections::BTreeSet::new();
-        if view.input_adds.iter().any(|fact| {
-            let SupportingInput::SourceComplete(coverage) = fact else {
-                return false;
-            };
-            !coverage_sources.insert(coverage.source.clone())
-        }) {
-            return Err(WireContractError::InvalidProgramSourceCoverage);
+        let mut identities = std::collections::BTreeSet::new();
+        for row in &view.supporting_rows {
+            if !row.is_wire_valid() {
+                return Err(WireContractError::InvalidSupportingRow);
+            }
+            if !identities.insert(row) {
+                return Err(WireContractError::DuplicateSupportingRow);
+            }
         }
         Ok(())
     }
@@ -805,29 +761,21 @@ impl SyncMessage {
 pub enum WireContractError {
     /// A version carrier is structurally malformed.
     VersionCarrier(VersionBundleRunError),
-    /// A covered source input has no canonical source identity.
-    InvalidCoveredInput,
-    /// A program-source closure receipt is incomplete or noncanonical.
-    InvalidProgramSourceCoverage,
-    /// One unordered peer source-closure frame attempted to both add and
-    /// remove the same fact rather than naming a canonical net transition.
-    OverlappingPeerSourceClosureDelta,
+    /// A supporting native row reference is malformed.
+    InvalidSupportingRow,
+    /// A snapshot repeats the same exact physical row version.
+    DuplicateSupportingRow,
 }
 
 impl std::fmt::Display for WireContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::VersionCarrier(error) => error.fmt(f),
-            Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
-            Self::InvalidProgramSourceCoverage => {
-                write!(f, "program-source coverage receipt is invalid")
-            }
-            Self::OverlappingPeerSourceClosureDelta => {
-                write!(
-                    f,
-                    "peer view update overlaps source-closure adds and removes"
-                )
-            }
+            Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
+            Self::DuplicateSupportingRow => write!(
+                f,
+                "supporting snapshot duplicates an exact physical row version"
+            ),
         }
     }
 }
@@ -3965,35 +3913,26 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
     }
 }
 
-/// One authority-selected supporting input for a receiver-local query.
+/// One exact native row version in a subscription's atomic supporting set.
 ///
-/// Rendered results and internal policy facts are deliberately unrepresentable.
+/// No query source occurrence, role or completeness claim crosses this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub enum SupportingInput {
-    /// Exact source occurrence and row-version identity, including self-joins and lenses.
-    Row(CoveredInputEntry),
-    /// Completeness for one normalized source occurrence.
-    SourceComplete(ProgramSourceCoverageEntry),
+pub struct SupportingRow {
+    /// Permanent physical table identity; logical scan aliases never identify a row.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Authored native-record table name used by the existing exact version repair API.
+    /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    pub version_table: groove::Intern<String>,
+    /// Physical row identity.
+    pub row: RowUuid,
+    /// Exact content or deletion-register version.
+    pub version: RowVersionRefEntry,
 }
 
-impl TryFrom<ProgramFactEntry> for SupportingInput {
-    type Error = &'static str;
-
-    fn try_from(fact: ProgramFactEntry) -> Result<Self, Self::Error> {
-        match fact {
-            ProgramFactEntry::CoveredInput(row) => Ok(Self::Row(row)),
-            ProgramFactEntry::ProgramSourceCoverage(source) => Ok(Self::SourceComplete(source)),
-            _ => Err("internal program fact is not a supporting input"),
-        }
-    }
-}
-
-impl From<SupportingInput> for ProgramFactEntry {
-    fn from(input: SupportingInput) -> Self {
-        match input {
-            SupportingInput::Row(row) => Self::CoveredInput(row),
-            SupportingInput::SourceComplete(source) => Self::ProgramSourceCoverage(source),
-        }
+impl SupportingRow {
+    /// Validate the native reference before catalogue-dependent receiver admission.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
     }
 }
 

@@ -543,7 +543,7 @@ where
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 version_carriers,
-                input_adds: program_fact_adds,
+                supporting_rows: program_fact_adds,
                 ..
             }) => (*subscription, version_carriers, program_fact_adds),
             _ => return Ok(Vec::new()),
@@ -585,16 +585,7 @@ where
         // proof and are intentionally never a repair source under
         // INV-SYNC-36.
         for (table, row_uuid, tx_id) in program_fact_adds
-            .iter()
-            .flat_map(|fact| match fact {
-                crate::protocol::SupportingInput::Row(input) => vec![Some((
-                    input.version_table.to_string(),
-                    input.source_row,
-                    input.version.tx,
-                ))],
-                _ => Vec::new(),
-            })
-            .flatten()
+            .iter().map(|row| (row.version_table.to_string(), row.row, row.version.tx))
         {
             let version_ref = RowVersionRef::new(table, row_uuid, tx_id);
             if self.inline_version_bundle_covers(
