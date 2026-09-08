@@ -106,7 +106,7 @@ Create a server-side [Jazz session](/docs/getting-started/server-setup#backend-c
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
-import { createJazzSession } from "jazz-tools/backend";
+import { createJazzSession, type JazzSessionConfig } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
 import permissions from "./permissions";
@@ -116,12 +116,13 @@ export const jazzConfig = {
   app,
   permissions,
   appId: process.env.APP_ID!,
-  driver: { type: "memory" as const },
+  driver: { type: "memory" },
   serverUrl: process.env.SYNC_SERVER_URL!,
+  env: process.env.NODE_ENV === "production" ? "prod" : "dev",
   jwksUrl: `${authOptions.baseURL}/api/auth/jwks`,
   jwtIssuer: authOptions.baseURL,
   jwtAudience: authOptions.baseURL,
-};
+} satisfies JazzSessionConfig;
 
 const session = await createJazzSession({
   ...jazzConfig,
