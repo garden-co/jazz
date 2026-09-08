@@ -159,7 +159,7 @@ export const auth = betterAuth({
 
 ### Connect Better Auth sessions to Jazz accounts
 
-The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, attach `connectBetterAuth(jazz, authClient)` (or React's `useBetterAuth`) to the app's Jazz session. Better Auth signup and login then automatically create or resolve the Jazz account; there is no second enrollment action. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
+The adapter stores Better Auth users, password credentials, and application sessions. For browser apps, pass `auth={betterAuth(authClient)}` to the framework's `JazzProvider`; import the descriptor from `jazz-tools/client`. The provider owns the Jazz session, loading and error recovery. Vanilla apps can use `createJazzApp` with the same descriptor. Better Auth signup and login then automatically create or resolve the Jazz account; there is no second enrollment action. The application session cookie is also not a Jazz bearer token: `client.forRequest()` reads an `Authorization: Bearer` header.
 
 Mount `auth.handler` using your framework's [Better Auth integration](https://www.better-auth.com/docs/installation). The [JWT plugin](https://www.better-auth.com/docs/plugins/jwt) exposes `/api/auth/token` for a signed-in user and `/api/auth/jwks` for verification. Configure the Jazz core with that reachable JWKS URL and the same issuer and audience as the backend's `jazzConfig`. For a self-hosted core, use `--jwks-url`, `--jwt-issuer`, and `--jwt-audience`; see [Server Setup](/docs/getting-started/server-setup). Set `BETTER_AUTH_URL` without a trailing slash in this example.
 

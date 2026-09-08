@@ -53,15 +53,44 @@ const { client } = jazz.getSnapshot();
 
 ## Automatic provider connections
 
-For auth-required Better Auth apps, mount `connectBetterAuth(jazz, authClient)` from `jazz-tools/client`, or use `useBetterAuth(jazz, authClient)` from `jazz-tools/react`. Forms only call Better Auth's `signUp` and `signIn`. The connection watches initial hydration and provider session changes, uses atomic login-or-register, and exposes `ready`, `isPending`, `error`, and `retry`. Same-session notifications and token refresh do not recreate the Jazz client.
+For auth-required React apps, let `JazzProvider` own the session and its provider connection:
 
-Use the connection's `logout()` to flush Jazz before Better Auth revokes credentials. Dispose the connection when its owner unmounts; the application still owns and closes the Jazz session. Generic providers can use `connectAuthProvider(jazz, { getToken })` and `update({ key, isPending, error })`, or React's `useAuthProvider`. The key identifies the provider session or exact issuer/subject; it must not be the rotating JWT string. Generic logout accepts the provider signout callback.
+```tsx
+import { betterAuth } from "jazz-tools/client";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+
+function Root() {
+  return (
+    <JazzProvider
+      appId={APP_ID}
+      serverUrl={SERVER_URL}
+      auth={betterAuth(authClient)}
+      signedOut={<SignIn />}
+    >
+      <App />
+    </JazzProvider>
+  );
+}
+
+function SignOut() {
+  const auth = useJazzAuth();
+  return <button onClick={() => void auth.logout().catch(() => {})}>Sign out</button>;
+}
+```
+
+Forms only call Better Auth's `signUp` and `signIn`. Jazz follows provider hydration and session changes, atomically logs in or registers, and renders the application only when its client is ready. The provider supplies loading and retryable error UI; `signedOut` supplies your sign-in screen. Logout flushes Jazz before revoking the provider session. Failures remain in the lifecycle state and its error UI.
+
+`useJazzAuth()` exposes the shared lifecycle and its `logout()` and `retry()` actions. React Native and Expo use their corresponding Jazz imports and native fallback controls. Svelte, Solid and Vue use the same underlying lifecycle through their framework bindings.
+
+For WorkOS or another JWT provider, use `jwtAuth({ key, isPending, getToken, logout })`. The key identifies the provider session or exact issuer/subject, never the rotating JWT string. The logout callback signs out of the provider or clears the application's token source; the source must then report `key: null`. Jazz waits for that acknowledgement before rendering signed-out content.
+
+Vanilla applications can own the same observable lifecycle with `createJazzApp({ appId, serverUrl, auth: betterAuth(authClient) })`, subscribe to its snapshot and call `dispose()` on teardown. Without managed auth, the convenience owner defaults to a local-first account. Explicit `initial` configuration takes precedence. Existing low-level `createJazzSession`, `connectBetterAuth` and `connectAuthProvider` remain available for custom ownership.
 
 ## Linking identities
 
 An exact identity can belong to only one account, permanently. Revocation prevents its use but does not free it for reassignment. Linking therefore accepts only a fresh identity. If the identity already belongs to a different account, the app must decide how to migrate data; Jazz does not merge accounts.
 
-For a hybrid app, omit the automatic connection. Signup calls the provider and then `jazz.linkJWT(auth)` on the retained guest account; ordinary login calls `loginOrRegisterJWT`. This ensures the fresh identity is linked before any automatic account creation.
+For a hybrid app, omit managed `auth` and use the framework hook’s `sessionActions`, or own a low-level session directly. Signup calls the provider and then `jazz.linkJWT(auth)` on the retained guest account; ordinary login calls `loginOrRegisterJWT`. This ensures the fresh identity is linked before any automatic account creation.
 
 `jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
 

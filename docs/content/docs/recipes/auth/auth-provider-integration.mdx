@@ -63,7 +63,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
 
     ### Connecting to Jazz
 
-    Own a Jazz session and call `useBetterAuth`. Forms only call Better Auth signup or sign-in; Jazz follows the provider session automatically. Use `auth.logout()` to flush Jazz before revoking the provider session.
+    Pass `auth={betterAuth(authClient)}` to `JazzProvider`. Forms only call Better Auth signup or sign-in; Jazz owns startup, account changes and error recovery. Use `useJazzAuth().logout()` to flush Jazz before revoking the provider session.
 
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/auth-betterauth-chat/src/docs/recipe-connect-snippet.tsx#betterauth-jazz-react
