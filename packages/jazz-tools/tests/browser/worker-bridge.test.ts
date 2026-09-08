@@ -2366,11 +2366,39 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     const txId = await insertResult.txId;
-    await waitForCondition(
-      async () => mutationErrorSpy.mock.calls.length > 0,
-      5000,
-      "onMutationError handler should be called",
-    );
+    try {
+      await waitForCondition(
+        async () => mutationErrorSpy.mock.calls.length > 0,
+        5000,
+        "onMutationError handler should be called",
+      );
+    } catch (error) {
+      console.error("[mutation notification failure]", {
+        transactionAllocated: txId !== undefined,
+        callbackCount: mutationErrorSpy.mock.calls.length,
+      });
+      // #2677: Read the existing redacted ledger only after failure. An edge wait
+      // would consume rejection handling and change the behavior under test.
+      const inspection = (async () => {
+        const port = await db.openInspectorControlPort();
+        port.start();
+        try {
+          return await withTimeout(listWorkerLifecycle(port), 1000, "worker lifecycle reply");
+        } finally {
+          port.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+          port.close();
+        }
+      })();
+      try {
+        console.error(
+          "[mutation notification worker lifecycle]",
+          await withTimeout(inspection, 1500, "worker lifecycle inspection"),
+        );
+      } catch (diagnosticError) {
+        console.error("[mutation notification inspection unavailable]", String(diagnosticError));
+      }
+      throw error;
+    }
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
       reason: "Write rejected by server authorization",

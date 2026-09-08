@@ -11,6 +11,7 @@ import {
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAllSuspense } from "../../src/react-core/use-all.js";
+import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 
 const schema: WasmSchema = {
@@ -662,11 +663,29 @@ describe("useAllSuspense browser integration", () => {
       </JazzProvider>,
     );
 
-    await waitForCondition(
-      () => hasTestId("rows"),
-      5000,
-      "expected suspense rows mount for hop query",
-    );
+    try {
+      await waitForCondition(
+        () => hasTestId("rows"),
+        5000,
+        "expected suspense rows mount for hop query",
+      );
+    } catch (error) {
+      // #2677: Inspect only after failure; do not open another read that could wake
+      // the subscription and hide the missing initial delivery.
+      const store = getSubscriptionStore(client);
+      const state = store.peekState<Org>(store.computeKey(query));
+      console.error("[hop suspense failure]", {
+        cacheStatus: state.status,
+        rowCount: state.status === "fulfilled" ? state.data.length : undefined,
+        rowsMounted: hasTestId("rows"),
+        fallbackMounted: hasTestId("rows-fallback"),
+        activeSubscriptions: client.db.getActiveQuerySubscriptions().map(({ table, tier }) => ({
+          table,
+          tier,
+        })),
+      });
+      throw error;
+    }
 
     const {
       value: { id: orgId },
