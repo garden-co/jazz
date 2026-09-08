@@ -404,11 +404,10 @@ impl RelayWorker {
                     pending.row_id,
                     pending.cells,
                     &pending.column,
-                    None,
+                    jazz::db::WriteIdentity::Database,
                     pending.options.updated_at_ms,
                     pending.options.head,
                     pending.options.base,
-                    None,
                 )
                 .await;
             uploads.borrow_mut().remove(&handle);

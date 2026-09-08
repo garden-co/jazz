@@ -155,10 +155,12 @@ async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
   it("keeps real WASM query admission pending while storage owns the node", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
-    const prepared = db.prepareQuery(queryFromTable("todos"));
+    const prepared = db.prepareQuery(queryFromTable("todos"), "query") as Parameters<
+      typeof db.subscribe
+    >[0];
     const opts = { tier: "local", propagation: "local_only" };
     const commitGate = pageStore.armCommitGate();
-    const upload = db.beginStreamingMutationEncoded(
+    const upload = db.beginStreamingMutation(
       "todos",
       uuidBytes("00000000-0000-4000-8000-000000000131"),
       encodeCellsForRow(streamingApp.wasmSchema.todos!, {
@@ -172,19 +174,19 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     let cancelSubscription: number | undefined;
     try {
       await withWatchdog(commitGate.started, "push holds the real WASM owner");
-      const preparation = db.prepareQueryAsync(queryFromTable("todos"));
-      const subscription = db.subscribeAsync(prepared, opts);
-      const attachment = db.attachQuery(prepared, opts) as {
-        poll(): boolean | undefined;
+      const preparation = db.prepareQuery(queryFromTable("todos"), "query") as {
+        poll(): unknown | undefined;
         cancel(): void;
       };
-      // wasm-bindgen encodes all three Option::None return types as undefined.
+      const subscription = db.subscribe(prepared, opts) as {
+        poll(): unknown | undefined;
+        cancel(): void;
+      };
+      // wasm-bindgen encodes both Option::None return types as undefined.
       expect(preparation.poll()).toBeUndefined();
       expect(subscription.poll()).toBeUndefined();
-      expect(attachment.poll()).toBeUndefined();
       preparation.cancel();
       subscription.cancel();
-      attachment.cancel();
 
       let cancelledCallbacks = 0;
       const cancelled = runtime.createSubscription(JSON.stringify({ table: "todos" }));
@@ -236,7 +238,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
   it("waits for an in-flight WASM push before aborting its staged upload", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
     const commitGate = pageStore.armCommitGate();
-    const upload = db.beginStreamingMutationEncoded(
+    const upload = db.beginStreamingMutation(
       "todos",
       uuidBytes("00000000-0000-4000-8000-000000000128"),
       encodeCellsForRow(streamingApp.wasmSchema.todos!, {
@@ -282,7 +284,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
   it("hands failed in-flight push ownership to abort without retaining staged chunks", async () => {
     const { db, runtime, pageStore, author } = await createBrowserWasmFixture();
     const commitGate = pageStore.armCommitGate(true);
-    const upload = db.beginStreamingMutationEncoded(
+    const upload = db.beginStreamingMutation(
       "todos",
       uuidBytes("00000000-0000-4000-8000-000000000130"),
       encodeCellsForRow(streamingApp.wasmSchema.todos!, {
@@ -314,7 +316,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
 
   it("keeps abort terminal across synchronous finish and repeated abort calls", async () => {
     const { db, runtime, author } = await createBrowserWasmFixture();
-    const upload = db.beginStreamingMutationEncoded(
+    const upload = db.beginStreamingMutation(
       "todos",
       uuidBytes("00000000-0000-4000-8000-000000000129"),
       encodeCellsForRow(streamingApp.wasmSchema.todos!, {

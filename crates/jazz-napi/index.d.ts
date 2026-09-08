@@ -20,41 +20,29 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
-  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestInsertPermissionAdvice(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
-  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   /** Admit a verified local-first account for this backend runtime only. */
   admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
-  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
+  insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  updateInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
   /**
    * Binding-only entrypoint for typed partial-value updates. The public
    * TypeScript API validates column-kind-specific descriptors before they
    * reach this encoded boundary.
    */
-  updateLargeValuesEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
-  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
-  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
-  /**
-   * Backend-only root mutation entrypoints. They deliberately do not take
-   * branch selectors: attributed branch writes fail closed until #1881's
-   * split transaction/branch representation is designed.
-   */
-  insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
-  upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
-  restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
-  /**
-   * Trusted-backend streaming counterpart: SYSTEM remains the admission
-   * identity and `attribution` is retained only for final row provenance.
-   * Branch streaming is intentionally unsupported until its split state is
-   * designed, so it fails closed rather than silently losing attribution.
-   */
-  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  updateLargeValues(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
+  upsertInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
+  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
+  deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
+  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -77,94 +65,38 @@ export declare class NapiDb {
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
-  /**
-   * Attach a schema view to an owner-wide mergeable transaction without opening,
-   * committing, or abandoning that transaction.
-   */
-  attachMergeableTx(openTransactionId: string): Tx
-  /** Attach a schema view to an existing owner-wide exclusive transaction. */
-  attachExclusiveTx(openTransactionId: string): Tx
-  /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null): void
-  /**
-   * Begin the only supported attributed transaction shape. Keeping this a
-   * distinct native ABI makes an older binding fail closed rather than
-   * silently treating provenance as ordinary SYSTEM authorship.
-   */
-  beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void
+  /** Begin one owner-wide transaction. */
+  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openTransactionId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
-  prepareQuery(query: Uint8Array): PreparedQuery
-  prepareQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
-  prepareRelationQueryAsync(query: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PendingNativePreparation
+  prepareQuery(query: Uint8Array, kind: 'query' | 'relation', author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): PreparedQuery | PendingNativePreparation
   /**
-   * Execute an ordinary prepared read. The optional transaction id selects
-   * that transaction's snapshot and staged overlay; an explicit author
-   * selects trusted-serving authorization. Backend authority is inferred
-   * only from an explicit backend open.
+   * Execute any prepared read. The prepared handle selects flat rows,
+   * relation output, or a relation snapshot; transaction and authorization
+   * context remain ordinary call options.
    */
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   /**
-   * Compatibility state for explicitly serialized low-level callers. This
-   * map is shared per author; concurrent delegated requests must instead
-   * capture claims with prepareQueryAsync/prepareRelationQueryAsync.
+   * Set ambient claims for mutation and other explicitly serialized
+   * identity operations. Prepared queries capture scoped identity and
+   * claims at preparation time, so concurrent reads do not consult this
+   * shared map.
    */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  /**
-   * Materialize a prepared relation snapshot, optionally through an open
-   * transaction and/or explicit trusted-serving identity.
-   */
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Execute relation IR directly. Relation-IR reads do not currently
-   * support transaction overlays.
-   */
-  allRelationQuery(queryBytes: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  /**
-   * Attach query coverage using one native entry point. An optional open
-   * transaction selects its frozen snapshot; an explicit author selects
-   * trusted-serving authorization. With no author, an explicit backend
-   * open uses backend authority and an ordinary open remains client-local.
-   */
-  attachQuery(query: PreparedQuery, opts?: any | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null): QueryAttachment
-  queryAttachmentIsCovered(attachment: QueryAttachment): boolean
-  detachQuery(attachment: QueryAttachment): void
-  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeAsync(query: PreparedQuery, opts?: JsonValue | undefined | null, author?: Uint8Array | undefined | null): PendingNativeSubscription
-  subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  /**
-   * Subscribe through the authority of an explicit backend open. This
-   * context is selected by the private backend capability, never by a
-   * caller-supplied identity.
-   */
-  subscribeForBackend(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeRelationQuery(queryBytes: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  subscribeRelationQueryForIdentity(queryBytes: Uint8Array, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  /**
-   * Subscribe to relation IR through the authority of an explicit backend
-   * open, without exposing that authority as a public author parameter.
-   */
-  subscribeRelationQueryForBackend(queryBytes: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
+  subscribe(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null): Subscription | PendingNativeSubscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
-  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | undefined | null | PendingNativeRead
-  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
-  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
-  mergeableTx(openTransactionId: string): Tx
-  mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   /** Return the originating node clock before a host releases its memory runtime. */
   foregroundTxTimeHighWater(): bigint
   /** Merge a checked host-retained node clock before opening new local writes. */
@@ -192,10 +124,11 @@ export declare class PendingNativePreparation {
 }
 
 /**
- * A JavaScript-thread-owned binding read which suspended on asynchronous
- * large-value storage. NAPI promises execute on a Send worker pool, whereas
- * a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
- * object after its peer transport makes progress instead of blocking Node.
+ * A JavaScript-thread-owned binding read waiting for query coverage or
+ * asynchronous large-value storage. NAPI promises execute on a Send worker
+ * pool, whereas a Jazz runtime is deliberately `Rc`/thread-affine. The
+ * adapter drives this object after its peer transport makes progress instead
+ * of blocking Node.
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
@@ -220,22 +153,8 @@ export declare class PendingNativeSubscriptionBatch {
   retryAfterMs(): number | null
 }
 
-/**
- * Thread-affine large-value mutation setup which is waiting for local or
- * routed chunks. The completed value is the ordinary write receipt.
- */
-export declare class PendingNativeWrite {
-  poll(): Write | null
-}
-
 export declare class PreparedQuery {
 
-}
-
-export declare class QueryAttachment {
-  setWake(callback: ((err: Error | null, arg: string) => void)): void
-  poll(): boolean | null
-  cancel(): void
 }
 
 /**
@@ -275,22 +194,6 @@ export declare class Transport {
   close(): boolean
 }
 
-export declare class Tx {
-  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
-  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
-  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
-  commit(): Write
-  rollback(): void
-  /**
-   * Release this transaction view's core reference. Attached views do not
-   * own the batch lifetime, while owning views abandon an uncommitted batch
-   * just as their Drop implementation does.
-   */
-  close(): boolean
-}
-
 export declare class Write {
   get txId(): string
   get payload(): Uint8Array
@@ -302,6 +205,7 @@ export declare class Write {
 
 export interface DeleteOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
@@ -310,6 +214,7 @@ export interface DeleteOptions {
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
+  attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
 }
@@ -332,6 +237,7 @@ export declare function nativeArtifactFingerprint(): string
 
 export interface RestoreOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
 }
@@ -437,6 +343,7 @@ export interface SubscriptionUnsupportedShapeCapabilityReason {
 
 export interface UpdateOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
@@ -444,6 +351,7 @@ export interface UpdateOptions {
 
 export interface UpsertOptions {
   author?: Uint8Array
+  attribution?: Uint8Array
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number

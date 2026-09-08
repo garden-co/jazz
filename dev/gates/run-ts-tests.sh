@@ -6,6 +6,14 @@
 # suites reuse the artifact build completed before this script starts.
 set -u
 
+# macOS exposes its temporary directory through the `/var` symlink. Tests that
+# deliberately reject symlinked migration paths should receive the canonical
+# location, just as they do on Linux CI.
+if [[ -n "${TMPDIR:-}" && -d "${TMPDIR}" ]]; then
+  TMPDIR="$(cd "${TMPDIR}" && pwd -P)"
+  export TMPDIR
+fi
+
 # The runner accepts small command overrides solely so its process-management
 # contract tests can use deterministic short-lived children. The shared local
 # CI partition sets this guard, matching CI's unmodified environment: an
@@ -14,7 +22,7 @@ set -u
 # an unsafe inherited control always gets its own actionable diagnostic.
 if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
   for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD; do
-    if [[ -v "${override}" ]]; then
+    if printenv "${override}" >/dev/null 2>&1; then
       echo "${override} is a test-harness override and is forbidden by the CI-equivalent partition" >&2
       exit 1
     fi
@@ -96,13 +104,18 @@ interrupt() {
 trap 'interrupt 130' INT
 trap 'interrupt 143' TERM
 
+# Job control gives each background suite its own process group on both the
+# macOS system Bash and GNU Bash. `terminate_children` can therefore still
+# terminate each complete Turbo/Vitest tree without relying on Linux `setsid`.
 echo "Node test live log: ${node_tests_log}"
 echo "Browser test live log: ${browser_tests_log}"
 
-setsid bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
+set -m
+bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
-setsid bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
+bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
 browser_tests_pid=$!
+set +m
 
 wait "${node_tests_pid}"
 node_tests_status=$?

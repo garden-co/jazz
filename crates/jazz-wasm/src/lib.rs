@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -243,6 +243,47 @@ pub struct WasmWriteResult {
 #[wasm_bindgen]
 pub struct WasmPreparedQuery {
     inner: PreparedQuery,
+    is_relation: bool,
+}
+
+type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 'static>>;
+
+#[wasm_bindgen(js_name = PendingNativeRead)]
+pub struct WasmPendingNativeRead {
+    future: Rc<RefCell<Option<WasmReadFuture>>>,
+}
+
+impl WasmPendingNativeRead {
+    fn new(future: WasmReadFuture) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(JsValue::from_str("native pending read is already complete"));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = PendingNativeRead)]
+impl WasmPendingNativeRead {
+    pub fn poll(&self) -> Result<JsValue, JsValue> {
+        match self.poll_once()? {
+            Some(bytes) => bytes_to_js(bytes),
+            None => Ok(JsValue::NULL),
+        }
+    }
 }
 
 fn pending_operation_waker(callback: js_sys::Function) -> Waker {
@@ -266,14 +307,8 @@ pub struct WasmPendingPreparation {
     wake: RefCell<Option<Waker>>,
 }
 
-#[wasm_bindgen]
 impl WasmPendingPreparation {
-    #[wasm_bindgen(js_name = setWake)]
-    pub fn set_wake(&self, callback: js_sys::Function) {
-        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
-    }
-
-    pub fn poll(&self) -> Result<Option<WasmPreparedQuery>, JsValue> {
+    fn poll_once(&self) -> Result<Option<WasmPreparedQuery>, JsValue> {
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(to_js_error("native operation is complete or cancelled"));
         };
@@ -290,6 +325,18 @@ impl WasmPendingPreparation {
                 Ok(None)
             }
         }
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPendingPreparation {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+
+    pub fn poll(&self) -> Result<Option<WasmPreparedQuery>, JsValue> {
+        self.poll_once()
     }
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
@@ -303,14 +350,8 @@ pub struct WasmPendingSubscription {
     wake: RefCell<Option<Waker>>,
 }
 
-#[wasm_bindgen]
 impl WasmPendingSubscription {
-    #[wasm_bindgen(js_name = setWake)]
-    pub fn set_wake(&self, callback: js_sys::Function) {
-        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
-    }
-
-    pub fn poll(&self) -> Result<Option<JsValue>, JsValue> {
+    fn poll_once(&self) -> Result<Option<JsValue>, JsValue> {
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(to_js_error("native operation is complete or cancelled"));
         };
@@ -328,73 +369,33 @@ impl WasmPendingSubscription {
             }
         }
     }
+}
+
+#[wasm_bindgen]
+impl WasmPendingSubscription {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+
+    pub fn poll(&self) -> Result<Option<JsValue>, JsValue> {
+        self.poll_once()
+    }
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
         self.wake.borrow_mut().take();
     }
 }
 
-#[wasm_bindgen(js_name = QueryAttachment)]
-pub struct WasmQueryAttachment {
-    wake: RefCell<Option<Waker>>,
-    state: RefCell<WasmQueryAttachmentState>,
+struct WasmQueryCoverageGuard {
+    db: WasmDbInner,
+    attachment: Option<QueryAttachment>,
 }
 
-enum WasmQueryAttachmentState {
-    Pending(Pin<Box<dyn Future<Output = Result<QueryAttachment, JsValue>>>>),
-    Ready(QueryAttachment),
-    Detached,
-}
-
-#[wasm_bindgen]
-impl WasmQueryAttachment {
-    #[wasm_bindgen(js_name = setWake)]
-    pub fn set_wake(&self, callback: js_sys::Function) {
-        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
-    }
-    pub fn poll(&self) -> Result<Option<bool>, JsValue> {
-        if matches!(*self.state.borrow(), WasmQueryAttachmentState::Detached) {
-            return Err(to_js_error("query attachment is detached"));
-        }
-        self.ready().map(|ready| ready.map(|_| true))
-    }
-    pub fn cancel(&self) {
-        if matches!(*self.state.borrow(), WasmQueryAttachmentState::Pending(_)) {
-            self.state.replace(WasmQueryAttachmentState::Detached);
-        }
-        self.wake.borrow_mut().take();
-    }
-}
-
-impl WasmQueryAttachment {
-    fn ready(&self) -> Result<Option<QueryAttachment>, JsValue> {
-        let state = self.state.replace(WasmQueryAttachmentState::Detached);
-        let WasmQueryAttachmentState::Pending(mut future) = state else {
-            let result = match &state {
-                WasmQueryAttachmentState::Ready(inner) => Some(inner.clone()),
-                _ => None,
-            };
-            self.state.replace(state);
-            return Ok(result);
-        };
-        let wake = self
-            .wake
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| Waker::noop().clone());
-        let mut context = Context::from_waker(&wake);
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => {
-                let inner = result?;
-                self.state
-                    .replace(WasmQueryAttachmentState::Ready(inner.clone()));
-                Ok(Some(inner))
-            }
-            Poll::Pending => {
-                self.state
-                    .replace(WasmQueryAttachmentState::Pending(future));
-                Ok(None)
-            }
+impl Drop for WasmQueryCoverageGuard {
+    fn drop(&mut self) {
+        if let Some(attachment) = self.attachment.take() {
+            self.db.detach_query(attachment);
         }
     }
 }
@@ -415,8 +416,7 @@ struct WasmStreamingMutationState {
     row_id: RowUuid,
     cells: RowCells,
     column: String,
-    identity: Option<AuthorSubject>,
-    attribution: Option<AuthorSubject>,
+    identity: jazz::db::WriteIdentity,
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
@@ -523,7 +523,6 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -542,7 +541,6 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -672,6 +670,7 @@ pub struct WasmDb {
     // observes `None` and fails before touching native state.
     inner: Rc<RefCell<Option<WasmDbInner>>>,
     owns_runtime: bool,
+    non_durable_client: Rc<Cell<bool>>,
     // This is set only by the explicit backend-open ABI.  Attributed writes
     // are otherwise a privilege-escalation surface, because their author is
     // provenance while admission remains the runtime's SYSTEM identity.
@@ -697,15 +696,6 @@ impl Clone for WasmDbInner {
 }
 
 impl WasmDbInner {
-    fn shares_runtime_with(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Memory(left), Self::Memory(right)) => left.shares_runtime_with(right),
-            #[cfg(target_arch = "wasm32")]
-            (Self::Browser(left), Self::Browser(right)) => left.shares_runtime_with(right),
-            _ => false,
-        }
-    }
-
     async fn hydrate_relation_snapshot_for_binding(
         &self,
         snapshot: &mut jazz::node::RelationSnapshot,
@@ -985,10 +975,6 @@ impl WasmDbInner {
         }
     }
 
-    fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.prepare_query(query))
-    }
-
     fn all(
         &self,
         query: &PreparedQuery,
@@ -1051,16 +1037,17 @@ impl WasmDbInner {
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
-                db.enqueue_begin_exclusive(id, author)?;
+                db.enqueue_begin_exclusive(id, author, attribution)?;
                 db.drive_queued_mutation_once();
                 Ok(())
             }
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => {
-                db.enqueue_begin_exclusive(id, author)?;
+                db.enqueue_begin_exclusive(id, author, attribution)?;
                 Ok(())
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -1071,15 +1058,16 @@ impl WasmDbInner {
         &self,
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
-                db.enqueue_begin_mergeable(id, author, None)?;
+                db.enqueue_begin_mergeable(id, author, attribution)?;
                 db.drive_queued_mutation_once();
                 Ok(())
             }
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.enqueue_begin_mergeable(id, author, None),
+            Self::Browser(db) => db.enqueue_begin_mergeable(id, author, attribution),
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -1207,78 +1195,20 @@ impl WasmDbInner {
             .await)
     }
 
-    async fn all_relation_query(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.all_relation_query(query, opts).await)
-    }
-
-    async fn all_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        with_wasm_db!(self, |db| db
-            .all_relation_query_for_identity(query, opts, author)
-            .await)
-    }
-
     fn set_identity_claims(&self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
         with_wasm_db!(self, |db| db.set_identity_claims(author, claims))
     }
 
-    fn subscribe(
+    async fn attach_query(
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.subscribe(query, opts)).map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
-    }
-
-    fn subscribe_for_identity(
-        &self,
-        query: &PreparedQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.subscribe_for_identity(query, opts, author)
-        )
-        .map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
-    }
-
-    fn subscribe_relation_query(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.subscribe_relation_query(query, opts)
-        )
-        .map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
-    }
-
-    fn subscribe_relation_query_for_identity(
-        &self,
-        query: &RelationQuery,
-        opts: ReadOpts,
-        author: AuthorSubject,
-    ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.subscribe_relation_query_for_identity(query, opts, author),
-        )
-        .map(
-            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
-        ))
+        open_tx: Option<OpenTransactionId>,
+        author: Option<AuthorSubject>,
+    ) -> Result<QueryAttachment, jazz::db::Error> {
+        with_wasm_db!(self, |db| db
+            .attach_query_with_opts_async(query, opts, open_tx, author)
+            .await)
     }
 
     fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
@@ -1357,32 +1287,6 @@ fn transaction_read_cancelled(_: oneshot::Canceled) -> Error {
 }
 
 #[wasm_bindgen]
-pub struct WasmTx {
-    db: WasmDbInner,
-    kind: WasmTxKind,
-    open_tx: Option<OpenTransactionId>,
-    owns_lifetime: bool,
-}
-
-impl Drop for WasmTx {
-    fn drop(&mut self) {
-        if !self.owns_lifetime {
-            return;
-        }
-        let Some(open_tx) = self.open_tx.take() else {
-            return;
-        };
-        let _ = self.db.abandon_transaction(open_tx);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum WasmTxKind {
-    Mergeable,
-    Exclusive,
-}
-
-#[wasm_bindgen]
 impl WasmDb {
     fn open_inner(&self) -> Result<WasmDbInner, JsValue> {
         self.inner
@@ -1415,8 +1319,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded_with_options(
+    #[wasm_bindgen(js_name = insert)]
+    pub fn insert_with_options(
         &self,
         table: String,
         cells: Vec<u8>,
@@ -1443,8 +1347,39 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded_with_options(
+    #[wasm_bindgen(js_name = insertInTransaction)]
+    pub fn insert_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let cells = decode_cells(&cells)?;
+        let options = insert_options_from_js(options)?;
+        let inner = self.open_inner()?;
+        let row = match &inner {
+            WasmDbInner::Memory(db) => {
+                let row = db
+                    .enqueue_transaction_insert(open_transaction_id, table, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                row
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_insert(open_transaction_id, table, cells, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        };
+        Ok(row.to_bytes().to_vec())
+    }
+
+    #[wasm_bindgen(js_name = update)]
+    pub fn update_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1473,8 +1408,39 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = updateLargeValuesEncoded)]
-    pub fn update_large_values_encoded(
+    #[wasm_bindgen(js_name = updateInTransaction)]
+    pub fn update_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let options = update_options_from_js(options)?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_update(open_transaction_id, table, row_id, patch, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_update(open_transaction_id, table, row_id, patch, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = updateLargeValues)]
+    pub fn update_large_values(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1510,8 +1476,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded_with_options(
+    #[wasm_bindgen(js_name = upsert)]
+    pub fn upsert_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1540,8 +1506,39 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = deleteEncoded)]
-    pub fn delete_encoded_with_options(
+    #[wasm_bindgen(js_name = upsertInTransaction)]
+    pub fn upsert_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let options = upsert_options_from_js(options)?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_upsert(open_transaction_id, table, row_id, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_upsert(open_transaction_id, table, row_id, cells, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = delete)]
+    pub fn delete_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1568,8 +1565,37 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded_with_options(
+    #[wasm_bindgen(js_name = deleteInTransaction)]
+    pub fn delete_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let options = delete_options_from_js(options)?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_delete(open_transaction_id, table, row_id, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_delete(open_transaction_id, table, row_id, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = restore)]
+    pub fn restore_with_options(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -1598,180 +1624,47 @@ impl WasmDb {
         }
     }
 
-    /// Backend-only root insert. Admission remains SYSTEM while `author` is
-    /// retained as row provenance; the public raw open cannot enable this.
-    #[wasm_bindgen(js_name = insertWithIdEncodedAttributed)]
-    pub fn insert_with_id_encoded_attributed(
+    #[wasm_bindgen(js_name = restoreInTransaction)]
+    pub fn restore_in_transaction(
         &self,
+        open_transaction_id: String,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::InsertOptions {
-            row_id: Some(row_id),
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
+        let options = restore_options_from_js(options)?;
         let inner = self.open_inner()?;
         match &inner {
             WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_insert(table, cells, options)
-                    .map_err(to_js_error)?;
+                db.enqueue_transaction_restore(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    Some(cells),
+                    options,
+                )
+                .map_err(to_js_error)?;
                 db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
             }
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_insert(table, cells, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_restore(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    Some(cells),
+                    options,
+                )
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedAttributed)]
-    pub fn update_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::UpdateOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_update(table, row_id, patch, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_update(table, row_id, patch, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = upsertEncodedAttributed)]
-    pub fn upsert_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::UpsertOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_upsert(table, row_id, cells, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_upsert(table, row_id, cells, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = deleteAttributed)]
-    pub fn delete_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::DeleteOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_delete(table, row_id, options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_delete(table, row_id, options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
-    }
-
-    #[wasm_bindgen(js_name = restoreEncodedAttributed)]
-    pub fn restore_encoded_attributed(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.require_trusted_backend()?;
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        let options = jazz::db::RestoreOptions {
-            identity: jazz::db::WriteIdentity::Attribution(author),
-            ..Default::default()
-        };
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let write = db
-                    .enqueue_restore(table, row_id, Some(cells), options)
-                    .map_err(to_js_error)?;
-                db.drive_queued_mutation_once();
-                wasm_write_memory(Rc::clone(db), write)
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                db.enqueue_restore(table, row_id, Some(cells), options)
-                    .map_err(to_js_error)?,
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-        }
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = openMemory)]
@@ -1791,6 +1684,7 @@ impl WasmDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         })
     }
@@ -1816,6 +1710,7 @@ impl WasmDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: true,
         })
     }
@@ -1847,6 +1742,7 @@ impl WasmDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         })
     }
@@ -1876,6 +1772,7 @@ impl WasmDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         })
     }
@@ -1909,6 +1806,7 @@ impl WasmDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         })
     }
@@ -1924,95 +1822,47 @@ impl WasmDb {
                     .map_err(to_js_error)?,
             ))),
             owns_runtime: false,
+            non_durable_client: Rc::clone(&self.non_durable_client),
             trusted_backend: self.trusted_backend,
         })
     }
 
-    /// Attach this typed view to an existing owner-wide mergeable transaction.
-    #[wasm_bindgen(js_name = attachMergeableTx)]
-    pub fn attach_mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        Ok(WasmTx {
-            db: self.open_inner()?,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: false,
-        })
-    }
-
-    /// Attach this typed view to an existing owner-wide exclusive transaction.
-    #[wasm_bindgen(js_name = attachExclusiveTx)]
-    pub fn attach_exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        Ok(WasmTx {
-            db: self.open_inner()?,
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: false,
-        })
-    }
-
-    /// Begin one owner-wide transaction without creating an owning per-schema Tx.
+    /// Begin one owner-wide transaction.
     #[wasm_bindgen(js_name = beginTransaction)]
     pub fn begin_transaction(
         &self,
         open_transaction_id: String,
         kind: String,
         author: Option<Vec<u8>>,
+        attribution: Option<Vec<u8>>,
     ) -> Result<(), JsValue> {
         let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let author = author.as_deref().map(author_id_from_bytes).transpose()?;
+        let attribution = attribution
+            .as_deref()
+            .map(author_id_from_bytes)
+            .transpose()?;
+        if author.is_some() && attribution.is_some() {
+            return Err(JsValue::from_str(
+                "transaction identity cannot contain both author and attribution",
+            ));
+        }
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+        }
         let inner = self.open_inner()?;
         match kind.as_str() {
             "mergeable" => inner
-                .begin_mergeable(open_transaction_id, author)
+                .begin_mergeable(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
             "exclusive" => inner
-                .begin_exclusive(open_transaction_id, author)
+                .begin_exclusive(open_transaction_id, author, attribution)
                 .map_err(to_js_error),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
-
-    /// Begin the only supported attributed transaction shape.  It is distinct
-    /// from `beginTransaction` so an older binding fails closed rather than
-    /// silently converting external provenance into SYSTEM authorship.
-    #[wasm_bindgen(js_name = beginTransactionAttributed)]
-    pub fn begin_transaction_attributed(
-        &self,
-        open_transaction_id: String,
-        attribution: Vec<u8>,
-    ) -> Result<(), JsValue> {
-        self.require_trusted_backend()?;
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let attribution = author_id_from_bytes(&attribution)?;
-        let inner = self.open_inner()?;
-        match &inner {
-            WasmDbInner::Memory(db) => {
-                let result =
-                    db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution));
-                if result.is_ok() {
-                    db.drive_queued_mutation_once();
-                }
-                result
-            }
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => {
-                db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution))
-            }
-            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-        }
-        .map_err(to_js_error)
-    }
-
     /// Commit an owner-wide mergeable transaction by id.
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(
@@ -2043,45 +1893,57 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = prepareQuery)]
-    pub fn prepare_query(&self, query: Vec<u8>) -> Result<WasmPreparedQuery, JsValue> {
-        let query: Query = jazz::wire::decode_postcard_exact(&query)
-            .map_err(|err| to_js_error(format!("decode query: {err}")))?;
-        Ok(WasmPreparedQuery {
-            inner: self
-                .open_inner()?
-                .prepare_query(&query)
-                .map_err(to_js_error)?,
-        })
-    }
-
-    #[wasm_bindgen(js_name = prepareQueryAsync)]
-    pub fn prepare_query_async(
+    pub fn prepare_query(
         &self,
         query: Vec<u8>,
+        kind: String,
         author: Option<Vec<u8>>,
         claims: JsValue,
-    ) -> Result<WasmPendingPreparation, JsValue> {
+    ) -> Result<JsValue, JsValue> {
+        enum Input {
+            Query(Box<Query>),
+            Relation(RelationQuery),
+        }
+
         let admission = author
             .map(|author| {
                 let author = author_id_from_bytes(&author)?;
                 Ok::<_, JsValue>((author, claims_from_js(author, claims)?))
             })
             .transpose()?;
-        let query: Query = jazz::wire::decode_postcard_exact(&query)
-            .map_err(|err| to_js_error(format!("decode query: {err}")))?;
+        let input = match kind.as_str() {
+            "query" => Input::Query(Box::new(
+                jazz::wire::decode_postcard_exact(&query)
+                    .map_err(|err| to_js_error(format!("decode query: {err}")))?,
+            )),
+            "relation" => Input::Relation(relation_query_from_bytes(&query)?),
+            _ => {
+                return Err(JsValue::from_str(
+                    "prepared query kind must be query or relation",
+                ));
+            }
+        };
+        let is_relation = kind == "relation";
         let db = self.open_inner()?;
-        Ok(WasmPendingPreparation {
+        let pending = WasmPendingPreparation {
             wake: RefCell::new(None),
             future: RefCell::new(Some(Box::pin(async move {
-                let inner = with_wasm_db!(&db, |db| db.prepare_query_async(&query).await)
-                    .map_err(to_js_error)?;
+                let inner = with_wasm_db!(&db, |db| match input {
+                    Input::Query(query) => db.prepare_query_async(&query).await,
+                    Input::Relation(query) => db.prepare_relation_query_async(&query).await,
+                })
+                .map_err(to_js_error)?;
                 let inner = match admission {
                     Some((author, claims)) => inner.with_identity_claims(author, claims),
                     None => inner,
                 };
-                Ok(WasmPreparedQuery { inner })
+                Ok(WasmPreparedQuery { inner, is_relation })
             }))),
-        })
+        };
+        match pending.poll_once()? {
+            Some(query) => Ok(query.into()),
+            None => Ok(pending.into()),
+        }
     }
 
     #[wasm_bindgen(js_name = all)]
@@ -2093,46 +1955,183 @@ impl WasmDb {
         author: Option<Vec<u8>>,
     ) -> Result<JsValue, JsValue> {
         let inner = self.open_inner()?;
+        let tier_is_explicit = if opts.is_null() || opts.is_undefined() {
+            false
+        } else {
+            optional_string_prop(&opts, "tier")?.is_some()
+        };
+        let synchronous = optional_bool_prop(&opts, "sync")?.unwrap_or(false);
         let opts = read_opts_from_js(opts)?;
         let author = self.read_author(author)?;
-        if let Some(tx_id) = open_transaction_id {
-            let tx_id = tx_id
-                .parse::<OpenTransactionId>()
-                .map_err(|error| JsValue::from_str(&error))?;
-            return Ok(
-                transaction_rows_promise_by_id(&inner, query, tx_id, author, opts, false)?.into(),
-            );
-        }
-        let rows = match author {
-            Some(author) => inner.all_for_identity(&query.inner, opts, author),
-            None => inner.all(&query.inner, opts),
-        }
-        .map_err(to_js_error)?;
-        bytes_to_js(encode_synchronous_rows(&rows)?)
-    }
-
-    /// Asynchronous ordinary read. Unlike the legacy synchronous entry point,
-    /// this can suspend to hydrate indirect large values without blocking the
-    /// browser event loop that drives the owning peer transport.
-    #[wasm_bindgen(js_name = allAsync)]
-    pub fn all_async(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-        open_transaction_id: Option<String>,
-        author: Option<Vec<u8>>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let inner = self.open_inner()?;
+        let open_tx = open_transaction_id
+            .map(|id| id.parse::<OpenTransactionId>())
+            .transpose()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let is_relation = query.is_relation;
         let query = query.inner.clone();
-        let opts = read_opts_from_js(opts)?;
-        let author = self.read_author(author)?;
-        if let Some(tx_id) = open_transaction_id {
-            let tx_id = tx_id
-                .parse::<OpenTransactionId>()
-                .map_err(|error| JsValue::from_str(&error))?;
-            return transaction_rows_promise_by_id_inner(&inner, query, tx_id, author, opts, false);
+        let non_durable_client = self.non_durable_client.get();
+        if synchronous
+            && open_tx.is_none()
+            && !is_relation
+            && query.shape().query().array_subqueries.is_empty()
+        {
+            let rows = match author {
+                Some(author) => inner.all_for_identity(&query, opts, author),
+                None => inner.all(&query, opts),
+            }
+            .map_err(to_js_error)?;
+            return bytes_to_js(encode_synchronous_rows(&rows)?);
         }
-        Ok(future_to_promise(async move {
+        let future = Box::pin(async move {
+            let requires_coverage = tier_is_explicit
+                && (non_durable_client
+                    || (opts.tier >= DurabilityTier::Edge
+                        && opts.propagation == Propagation::Full));
+
+            // Output-changing relation plans are maintained through the
+            // subscription compiler. Consume its first settled reset for a
+            // one-shot read so the worker-owned coverage and the returned
+            // relation use the same binding. This remains an implementation
+            // detail of the single public `all` operation.
+            let mut relation_subscription_covered = false;
+            if is_relation && open_tx.is_none() && requires_coverage {
+                let mut stream = with_wasm_db!(&inner, |db| match author {
+                    Some(author) =>
+                        db.subscribe_for_identity(&query, opts.clone(), author)
+                            .await,
+                    None => db.subscribe(&query, opts.clone()).await,
+                })
+                .map_err(to_js_error)?;
+                while let Some(event) = stream.next().await {
+                    match event {
+                        SubscriptionEvent::Delta {
+                            reset: true,
+                            publishable: true,
+                            settled: true,
+                            ..
+                        } => {
+                            relation_subscription_covered = true;
+                            break;
+                        }
+                        SubscriptionEvent::Rejected { reason } => {
+                            return Err(JsValue::from_str(&format!(
+                                "query subscription rejected: {reason:?}"
+                            )));
+                        }
+                        SubscriptionEvent::Closed => {
+                            return Err(JsValue::from_str(
+                                "query subscription closed before its settled result",
+                            ));
+                        }
+                        SubscriptionEvent::Delta { .. } => {}
+                    }
+                }
+                if !relation_subscription_covered {
+                    return Err(JsValue::from_str(
+                        "query subscription ended before its settled result",
+                    ));
+                }
+            }
+
+            let coverage = if requires_coverage && !relation_subscription_covered {
+                let attachment = inner
+                    .attach_query(&query, opts.clone(), open_tx, author)
+                    .await
+                    .map_err(to_js_error)?;
+                Some(WasmQueryCoverageGuard {
+                    db: inner.clone(),
+                    attachment: Some(attachment),
+                })
+            } else {
+                None
+            };
+            if let Some(coverage) = coverage.as_ref() {
+                let coverage_deadline_ms = js_sys::Date::now() + 15_000.0;
+                futures_util::future::poll_fn(|_| {
+                    if inner.query_attachment_is_covered(
+                        coverage
+                            .attachment
+                            .as_ref()
+                            .expect("live coverage guard must own its attachment"),
+                    ) {
+                        Poll::Ready(Ok(()))
+                    } else if js_sys::Date::now() >= coverage_deadline_ms {
+                        Poll::Ready(Err(JsValue::from_str(
+                            "Timed out waiting for query coverage",
+                        )))
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await?;
+            }
+
+            if let Some(tx_id) = open_tx {
+                if query.shape().query().array_subqueries.is_empty() {
+                    let mut rows = inner
+                        .transaction_rows(tx_id, query, author, opts)
+                        .await
+                        .map_err(to_js_error)?;
+                    if is_relation {
+                        inner
+                            .hydrate_rows_for_binding(&mut rows)
+                            .await
+                            .map_err(to_js_error)?;
+                        let snapshot = jazz::node::RelationSnapshot {
+                            root_count: rows.len(),
+                            rows,
+                            edges: Vec::new(),
+                        };
+                        return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+                    }
+                    return encode_rows(&rows).map_err(to_js_error);
+                }
+                let snapshot = inner
+                    .transaction_relation_snapshot(tx_id, query, author, opts)
+                    .await
+                    .map_err(to_js_error)?;
+                return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+            }
+
+            if is_relation {
+                // Relation programs change the root row set itself (for example,
+                // Union + OrderBy). Execute that prepared program through the
+                // ordinary row path so its occurrence order is retained, then wrap
+                // those roots in the one canonical relation-result envelope.
+                let mut rows = match author {
+                    Some(author) => inner.all_for_identity_async(&query, opts, author).await,
+                    None => inner.all_async(&query, opts).await,
+                }
+                .map_err(to_js_error)?;
+                inner
+                    .hydrate_rows_for_binding(&mut rows)
+                    .await
+                    .map_err(to_js_error)?;
+                let snapshot = jazz::node::RelationSnapshot {
+                    root_count: rows.len(),
+                    rows,
+                    edges: Vec::new(),
+                };
+                return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+            }
+
+            if !query.shape().query().array_subqueries.is_empty() {
+                let mut snapshot = match author {
+                    Some(author) => {
+                        inner
+                            .all_relation_snapshot_for_identity(&query, opts, author)
+                            .await
+                    }
+                    None => inner.all_relation_snapshot(&query, opts).await,
+                }
+                .map_err(to_js_error)?;
+                inner
+                    .hydrate_relation_snapshot_for_binding(&mut snapshot)
+                    .await
+                    .map_err(to_js_error)?;
+                return encode_relation_snapshot(&snapshot).map_err(to_js_error);
+            }
+
             let mut rows = match author {
                 Some(author) => inner.all_for_identity_async(&query, opts, author).await,
                 None => inner.all_async(&query, opts).await,
@@ -2142,41 +2141,9 @@ impl WasmDb {
                 .hydrate_rows_for_binding(&mut rows)
                 .await
                 .map_err(to_js_error)?;
-            bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
-        }))
-    }
-
-    #[wasm_bindgen(js_name = one)]
-    pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let mut rows = self
-            .open_inner()?
-            .all(&query.inner, opts)
-            .map_err(to_js_error)?;
-        rows.truncate(1);
-        encode_synchronous_rows(&rows)
-    }
-
-    #[wasm_bindgen(js_name = oneInTransaction)]
-    pub fn one_in_transaction(
-        &self,
-        query: &WasmPreparedQuery,
-        tx: &WasmTx,
-        opts: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        transaction_rows_promise(&self.open_inner()?, query, tx, None, opts, true)
-    }
-
-    #[wasm_bindgen(js_name = oneInTransactionForIdentity)]
-    pub fn one_in_transaction_for_identity(
-        &self,
-        query: &WasmPreparedQuery,
-        tx: &WasmTx,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let author = author_id_from_bytes(&author)?;
-        transaction_rows_promise(&self.open_inner()?, query, tx, Some(author), opts, true)
+            encode_rows(&rows).map_err(to_js_error)
+        });
+        wasm_read_or_pending(future)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -2187,174 +2154,18 @@ impl WasmDb {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = allRelationQuery)]
-    pub fn all_relation_query(
-        &self,
-        query_bytes: Vec<u8>,
-        opts: JsValue,
-        author: Option<Vec<u8>>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let inner = self.open_inner()?;
-        let opts = read_opts_from_js(opts)?;
-        let author = self.read_author(author)?;
-        let query = relation_query_from_bytes(&query_bytes)?;
-        Ok(future_to_promise(async move {
-            let mut snapshot = match author {
-                Some(author) => {
-                    inner
-                        .all_relation_query_for_identity(&query, opts, author)
-                        .await
-                }
-                None => inner.all_relation_query(&query, opts).await,
-            }
-            .map_err(to_js_error)?;
-            inner
-                .hydrate_relation_snapshot_for_binding(&mut snapshot)
-                .await
-                .map_err(to_js_error)?;
-            bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
-        }))
-    }
-
-    #[wasm_bindgen(js_name = allRelationSnapshot)]
-    pub fn all_relation_snapshot(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-        open_transaction_id: Option<String>,
-        author: Option<Vec<u8>>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let inner = self.open_inner()?;
-        let opts = read_opts_from_js(opts)?;
-        let author = self.read_author(author)?;
-        if let Some(tx_id) = open_transaction_id {
-            let tx_id = tx_id
-                .parse::<OpenTransactionId>()
-                .map_err(|error| JsValue::from_str(&error))?;
-            return transaction_relation_snapshot_promise_by_id(&inner, query, tx_id, author, opts);
-        }
-        let query = query.inner.clone();
-        Ok(future_to_promise(async move {
-            let mut snapshot = match author {
-                Some(author) => {
-                    inner
-                        .all_relation_snapshot_for_identity(&query, opts, author)
-                        .await
-                }
-                None => inner.all_relation_snapshot(&query, opts).await,
-            }
-            .map_err(to_js_error)?;
-            inner
-                .hydrate_relation_snapshot_for_binding(&mut snapshot)
-                .await
-                .map_err(to_js_error)?;
-            bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
-        }))
-    }
-
-    #[wasm_bindgen(js_name = subscribeForBackend)]
-    pub fn subscribe_for_backend(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        self.require_trusted_backend()?;
-        let opts = read_opts_from_js(opts)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_for_identity(&query.inner, opts, AuthorSubject::SYSTEM)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
     #[wasm_bindgen(js_name = subscribe)]
-    pub fn subscribe(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let inner = self.open_inner()?;
-        let stream = inner.subscribe(&query.inner, opts).map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeForIdentity)]
-    pub fn subscribe_for_identity(
-        &self,
-        query: &WasmPreparedQuery,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let author = author_id_from_bytes(&author)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_for_identity(&query.inner, opts, author)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQuery)]
-    pub fn subscribe_relation_query(
-        &self,
-        query_bytes: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_bytes(&query_bytes)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query(&query, opts)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
-    pub fn subscribe_relation_query_for_identity(
-        &self,
-        query_bytes: Vec<u8>,
-        author: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let author = author_id_from_bytes(&author)?;
-        let query = relation_query_from_bytes(&query_bytes)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query_for_identity(&query, opts, author)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeRelationQueryForBackend)]
-    pub fn subscribe_relation_query_for_backend(
-        &self,
-        query_bytes: Vec<u8>,
-        opts: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        self.require_trusted_backend()?;
-        let opts = read_opts_from_js(opts)?;
-        let query = relation_query_from_bytes(&query_bytes)?;
-        let inner = self.open_inner()?;
-        let stream = inner
-            .subscribe_relation_query_for_identity(&query, opts, AuthorSubject::SYSTEM)
-            .map_err(to_js_error)?;
-        subscription_stream_to_js(inner, stream)
-    }
-
-    #[wasm_bindgen(js_name = subscribeAsync)]
-    pub fn subscribe_async(
+    pub fn subscribe(
         &self,
         query: &WasmPreparedQuery,
         opts: JsValue,
         author: Option<Vec<u8>>,
-    ) -> Result<WasmPendingSubscription, JsValue> {
+    ) -> Result<JsValue, JsValue> {
         let opts = read_opts_from_js(opts)?;
-        let author = match author {
-            Some(author) => Some(author_id_from_bytes(&author)?),
-            None if self.trusted_backend => Some(AuthorSubject::SYSTEM),
-            None => None,
-        };
+        let author = self.read_author(author)?;
         let db = self.open_inner()?;
         let query = query.inner.clone();
-        Ok(WasmPendingSubscription {
+        let pending = WasmPendingSubscription {
             wake: RefCell::new(None),
             future: RefCell::new(Some(Box::pin(async move {
                 let stream = with_wasm_db!(&db, |db| match author {
@@ -2364,66 +2175,10 @@ impl WasmDb {
                 .map_err(to_js_error)?;
                 subscription_stream_to_js(db, stream)
             }))),
-        })
-    }
-
-    /// Attach query coverage using one native entry point. An optional open
-    /// transaction selects its frozen snapshot; an explicit author selects
-    /// trusted-serving authorization. With no author, an explicit backend
-    /// open uses backend authority and an ordinary open remains client-local.
-    #[wasm_bindgen(js_name = attachQuery)]
-    pub fn attach_query(
-        &self,
-        query: &WasmPreparedQuery,
-        opts: JsValue,
-        open_transaction_id: Option<String>,
-        author: Option<Vec<u8>>,
-    ) -> Result<WasmQueryAttachment, JsValue> {
-        let opts = read_opts_from_js(opts)?;
-        let open_tx = open_transaction_id
-            .map(|id| id.parse::<OpenTransactionId>())
-            .transpose()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let author = match author {
-            Some(author) => Some(author_id_from_bytes(&author)?),
-            None if self.trusted_backend => Some(AuthorSubject::SYSTEM),
-            None => None,
         };
-        let db = self.open_inner()?;
-        let query = query.inner.clone();
-        Ok(WasmQueryAttachment {
-            wake: RefCell::new(None),
-            state: RefCell::new(WasmQueryAttachmentState::Pending(Box::pin(async move {
-                let inner = with_wasm_db!(&db, |db| db
-                    .attach_query_with_opts_async(&query, opts, open_tx, author)
-                    .await)
-                .map_err(to_js_error)?;
-                Ok(inner)
-            }))),
-        })
-    }
-
-    #[wasm_bindgen(js_name = queryAttachmentIsCovered)]
-    pub fn query_attachment_is_covered(
-        &self,
-        attachment: &WasmQueryAttachment,
-    ) -> Result<bool, JsValue> {
-        let Some(attachment) = attachment.ready()? else {
-            return Ok(false);
-        };
-        Ok(self
-            .open_inner()
-            .map(|inner| inner.query_attachment_is_covered(&attachment))
-            .unwrap_or(false))
-    }
-
-    #[wasm_bindgen(js_name = detachQuery)]
-    pub fn detach_query(&self, attachment: &WasmQueryAttachment) {
-        let state = attachment.state.replace(WasmQueryAttachmentState::Detached);
-        if let WasmQueryAttachmentState::Ready(attachment) = state {
-            if let Ok(inner) = self.open_inner() {
-                inner.detach_query(attachment);
-            }
+        match pending.poll_once()? {
+            Some(subscription) => Ok(subscription),
+            None => Ok(pending.into()),
         }
     }
 
@@ -2452,8 +2207,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = canInsertEncoded)]
-    pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
+    #[wasm_bindgen(js_name = canInsert)]
+    pub fn can_insert(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
         let cells = decode_cells(&cells)?;
         let inner = self.open_inner()?;
         match &inner {
@@ -2470,8 +2225,8 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = requestInsertPermissionAdviceEncoded)]
-    pub fn request_insert_permission_advice_encoded(
+    #[wasm_bindgen(js_name = requestInsertPermissionAdvice)]
+    pub fn request_insert_permission_advice(
         &self,
         table: String,
         cells: Vec<u8>,
@@ -2496,8 +2251,8 @@ impl WasmDb {
             })
     }
 
-    #[wasm_bindgen(js_name = requestUpdatePermissionAdviceEncoded)]
-    pub fn request_update_permission_advice_encoded(
+    #[wasm_bindgen(js_name = requestUpdatePermissionAdvice)]
+    pub fn request_update_permission_advice(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -2612,9 +2367,9 @@ impl WasmDb {
         })
     }
 
-    #[wasm_bindgen(js_name = beginStreamingMutationEncoded)]
+    #[wasm_bindgen(js_name = beginStreamingMutation)]
     #[allow(clippy::too_many_arguments)]
-    pub fn begin_streaming_mutation_encoded(
+    pub fn begin_streaming_mutation(
         &self,
         table: String,
         row_id: Vec<u8>,
@@ -2622,71 +2377,51 @@ impl WasmDb {
         column: String,
         mutation: Option<String>,
         author: Option<Vec<u8>>,
+        attribution: Option<Vec<u8>>,
         updated_at_ms: Option<f64>,
         head: Option<JsValue>,
         base: Option<JsValue>,
     ) -> Result<WasmStreamingMutation, JsValue> {
-        self.begin_streaming_mutation_inner(
-            table,
-            row_id,
-            cells,
-            column,
-            mutation,
-            author,
-            None,
-            updated_at_ms,
-            head,
-            base,
-        )
-    }
-
-    /// Trusted-backend streaming counterpart.  SYSTEM remains the admission
-    /// identity; `attribution` is only final row provenance.  Branch streaming
-    /// remains intentionally unsupported until its state model is designed.
-    #[wasm_bindgen(js_name = beginStreamingMutationAttributedEncoded)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn begin_streaming_mutation_attributed_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        column: String,
-        mutation: Option<String>,
-        author: Option<Vec<u8>>,
-        attribution: Vec<u8>,
-        updated_at_ms: Option<f64>,
-        head: Option<JsValue>,
-        base: Option<JsValue>,
-    ) -> Result<WasmStreamingMutation, JsValue> {
-        self.require_trusted_backend()?;
-        if author.is_some() {
+        if author.is_some() && attribution.is_some() {
             return Err(JsValue::from_str(
-                "backend-attributed streaming mutations cannot override backend admission identity",
+                "streaming mutation identity cannot contain both author and attribution",
             ));
         }
-        if head
-            .as_ref()
-            .is_some_and(|value| !value.is_null() && !value.is_undefined())
-            || base
+        if attribution.is_some()
+            && (head
                 .as_ref()
                 .is_some_and(|value| !value.is_null() && !value.is_undefined())
+                || base
+                    .as_ref()
+                    .is_some_and(|value| !value.is_null() && !value.is_undefined()))
         {
             return Err(JsValue::from_str(
                 "backend-attributed streaming mutations do not support branch writes",
             ));
         }
-        let attribution = author_id_from_bytes(&attribution)?;
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+        }
+        let identity = match (author, attribution) {
+            (Some(author), None) => {
+                jazz::db::WriteIdentity::Session(author_id_from_bytes(&author)?)
+            }
+            (None, Some(attribution)) => {
+                jazz::db::WriteIdentity::Attribution(author_id_from_bytes(&attribution)?)
+            }
+            (None, None) => jazz::db::WriteIdentity::Database,
+            (Some(_), Some(_)) => unreachable!("checked above"),
+        };
         self.begin_streaming_mutation_inner(
             table,
             row_id,
             cells,
             column,
             mutation,
-            None,
-            Some(attribution),
+            identity,
             updated_at_ms,
-            None,
-            None,
+            head,
+            base,
         )
     }
 
@@ -2698,8 +2433,7 @@ impl WasmDb {
         cells: Vec<u8>,
         column: String,
         mutation: Option<String>,
-        author: Option<Vec<u8>>,
-        attribution: Option<AuthorSubject>,
+        identity: jazz::db::WriteIdentity,
         updated_at_ms: Option<f64>,
         head: Option<JsValue>,
         base: Option<JsValue>,
@@ -2712,7 +2446,6 @@ impl WasmDb {
             "upsert" => StreamingMutationKind::Upsert,
             _ => return Err(JsValue::from_str("unknown streaming mutation kind")),
         };
-        let identity = author.as_deref().map(author_id_from_bytes).transpose()?;
         let updated_at_ms = updated_at_ms
             .map(|value| checked_js_u64(value, "updatedAtMs"))
             .transpose()?;
@@ -2748,166 +2481,12 @@ impl WasmDb {
                     cells,
                     column,
                     identity,
-                    attribution,
                     updated_at_ms,
                     head,
                     base,
                 }),
             ))),
         })
-    }
-
-    #[wasm_bindgen(js_name = readValueRange)]
-    pub fn read_value_range(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        column: String,
-        start: f64,
-        end: f64,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let range = checked_js_u64_range(start, end)?;
-        let inner = self.open_inner()?;
-        Ok(future_to_promise(async move {
-            let bytes = match &inner {
-                WasmDbInner::Memory(db) => {
-                    db.read_value_range(&table, row_id, &column, range).await
-                }
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.read_value_range(&table, row_id, &column, range).await
-                }
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
-            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
-        }))
-    }
-
-    #[wasm_bindgen(js_name = readTextUtf16Range)]
-    pub fn read_text_utf16_range(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        column: String,
-        start: f64,
-        end: f64,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let range = checked_js_u64_range(start, end)?;
-        let inner = self.open_inner()?;
-        Ok(future_to_promise(async move {
-            let text = match &inner {
-                WasmDbInner::Memory(db) => {
-                    db.read_text_utf16_range(&table, row_id, &column, range)
-                        .await
-                }
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.read_text_utf16_range(&table, row_id, &column, range)
-                        .await
-                }
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
-            Ok(JsValue::from_str(&text))
-        }))
-    }
-
-    #[wasm_bindgen(js_name = readJsonPointer)]
-    pub fn read_json_pointer(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        column: String,
-        pointer: String,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let inner = self.open_inner()?;
-        Ok(future_to_promise(async move {
-            let value = match &inner {
-                WasmDbInner::Memory(db) => {
-                    db.read_json_pointer(&table, row_id, &column, &pointer)
-                        .await
-                }
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => {
-                    db.read_json_pointer(&table, row_id, &column, &pointer)
-                        .await
-                }
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }
-            .map_err(to_js_error)?;
-            serde_wasm_bindgen::to_value(&value)
-                .map_err(|error| JsValue::from_str(&error.to_string()))
-        }))
-    }
-
-    #[wasm_bindgen(js_name = appendValue)]
-    pub fn append_value(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        column: String,
-        bytes: Vec<u8>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let inner = self.open_inner()?;
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.append_value(&table, row_id, &column, bytes)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.append_value(&table, row_id, &column, bytes)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
-    }
-
-    #[wasm_bindgen(js_name = spliceValue)]
-    pub fn splice_value(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        column: String,
-        offset: f64,
-        delete_length: f64,
-        insert: Vec<u8>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let offset = checked_js_u64(offset, "offset")?;
-        let delete_length = checked_js_u64(delete_length, "deleteLength")?;
-        let inner = self.open_inner()?;
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.splice_value(&table, row_id, &column, offset, delete_length, insert)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.splice_value(&table, row_id, &column, offset, delete_length, insert)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     /// Configure this runtime as the optimistic in-memory side of a browser
@@ -2921,6 +2500,7 @@ impl WasmDb {
             WasmDbInner::Browser(db) => db.set_non_durable_client(),
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
+        self.non_durable_client.set(true);
         Ok(())
     }
 
@@ -3152,64 +2732,11 @@ impl WasmDb {
         })
     }
 
-    #[wasm_bindgen(js_name = mergeableTx)]
-    pub fn mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, None)
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
-    #[wasm_bindgen(js_name = mergeableTxForIdentity)]
-    pub fn mergeable_tx_for_identity(
-        &self,
-        open_transaction_id: String,
-        author: Vec<u8>,
-    ) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let author = author_id_from_bytes(&author)?;
-        let db = self.open_inner()?;
-        db.begin_mergeable(open_transaction_id, Some(author))
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
-    #[wasm_bindgen(js_name = exclusiveTx)]
-    pub fn exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let db = self.open_inner()?;
-        db.begin_exclusive(open_transaction_id, None)
-            .map_err(to_js_error)?;
-        Ok(WasmTx {
-            db,
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_transaction_id),
-            owns_lifetime: true,
-        })
-    }
-
     #[wasm_bindgen(js_name = close)]
     pub fn close(&self) -> js_sys::Promise {
         // A close failure still consumes the binding. Retrying a partially
         // failed storage close would re-enter an indeterminate runtime; this
-        // matches the previous eager `Closed` transition and keeps physical
+        // matches the previous eager Closed transition and keeps physical
         // close exactly once.
         let Some(inner) = self.inner.borrow_mut().take() else {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
@@ -3401,255 +2928,11 @@ impl WasmTransport {
     }
 }
 
-#[wasm_bindgen]
-impl WasmTx {
-    #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded_with_options(
-        &mut self,
-        table: String,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let options = insert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let row = with_wasm_db!(&self.db, |db| db.enqueue_transaction_insert(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            cells,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(row.to_bytes())
-    }
-
-    #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let options = update_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_update(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            patch,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = upsert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_upsert(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            cells,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = deleteEncoded)]
-    pub fn delete_encoded_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let options = delete_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_delete(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded_with_options(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = restore_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| db.enqueue_transaction_restore(
-            open_tx,
-            matches!(self.kind, WasmTxKind::Exclusive),
-            table,
-            row_id,
-            Some(cells),
-            options,
-        ))
-        .map_err(to_js_error)?;
-        if let WasmDbInner::Memory(db) = &self.db {
-            db.drive_queued_mutation_once();
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = commit)]
-    pub fn commit(&mut self) -> Result<WasmWrite, JsValue> {
-        let open_tx = self.open_tx_for_read()?;
-        let write = match (&self.db, self.kind) {
-            (WasmDbInner::Memory(db), WasmTxKind::Mergeable) => {
-                let _ = db;
-                self.db.commit_mergeable(open_tx)
-            }
-            (WasmDbInner::Memory(db), WasmTxKind::Exclusive) => {
-                let _ = db;
-                self.db.commit_exclusive(open_tx)
-            }
-            #[cfg(target_arch = "wasm32")]
-            (WasmDbInner::Browser(db), WasmTxKind::Mergeable) => {
-                let _ = db;
-                self.db.commit_mergeable(open_tx)
-            }
-            #[cfg(target_arch = "wasm32")]
-            (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
-                let _ = db;
-                self.db.commit_exclusive(open_tx)
-            }
-            (WasmDbInner::Closed, _) => Err(JsValue::from_str("WasmDb is closed")),
-        }?;
-        self.open_tx.take();
-        Ok(write)
-    }
-
-    #[wasm_bindgen(js_name = rollback)]
-    pub fn rollback(&mut self) -> Result<(), JsValue> {
-        let open_tx = self.open_tx_for_read()?;
-        self.db.abandon_transaction(open_tx).map_err(to_js_error)?;
-        self.open_tx.take();
-        Ok(())
-    }
-
-    fn open_tx_for_read(&self) -> Result<OpenTransactionId, JsValue> {
-        self.open_tx
-            .ok_or_else(|| JsValue::from_str("transaction is already closed"))
-    }
-}
-
-fn transaction_rows_promise(
-    db: &WasmDbInner,
-    query: &WasmPreparedQuery,
-    tx: &WasmTx,
-    author: Option<AuthorSubject>,
-    opts: JsValue,
-    one: bool,
-) -> Result<js_sys::Promise, JsValue> {
-    ensure_transaction_runtime(db, tx)?;
-    let opts = read_opts_from_js(opts)?;
-    let tx_id = tx.open_tx_for_read()?;
-    transaction_rows_promise_by_id(db, query, tx_id, author, opts, one)
-}
-
-fn transaction_rows_promise_by_id(
-    db: &WasmDbInner,
-    query: &WasmPreparedQuery,
-    tx_id: OpenTransactionId,
-    author: Option<AuthorSubject>,
-    opts: ReadOpts,
-    one: bool,
-) -> Result<js_sys::Promise, JsValue> {
-    transaction_rows_promise_by_id_inner(db, query.inner.clone(), tx_id, author, opts, one)
-}
-
-fn transaction_rows_promise_by_id_inner(
-    db: &WasmDbInner,
-    query: PreparedQuery,
-    tx_id: OpenTransactionId,
-    author: Option<AuthorSubject>,
-    opts: ReadOpts,
-    one: bool,
-) -> Result<js_sys::Promise, JsValue> {
-    if !query.shape().query().array_subqueries.is_empty() {
-        return Err(JsValue::from_str(
-            "transaction-local reads do not support relation array subqueries",
-        ));
-    }
-    let db = db.clone();
-    Ok(future_to_promise(async move {
-        let mut rows = db
-            .transaction_rows(tx_id, query, author, opts)
-            .await
-            .map_err(to_js_error)?;
-        if one {
-            rows.truncate(1);
-        }
-        bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
-    }))
-}
-
-fn transaction_relation_snapshot_promise_by_id(
-    db: &WasmDbInner,
-    query: &WasmPreparedQuery,
-    tx_id: OpenTransactionId,
-    author: Option<AuthorSubject>,
-    opts: ReadOpts,
-) -> Result<js_sys::Promise, JsValue> {
-    let db = db.clone();
-    let query = query.inner.clone();
-    Ok(future_to_promise(async move {
-        let snapshot = db
-            .transaction_relation_snapshot(tx_id, query, author, opts)
-            .await
-            .map_err(to_js_error)?;
-        bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
-    }))
-}
-
-fn ensure_transaction_runtime(db: &WasmDbInner, tx: &WasmTx) -> Result<(), JsValue> {
-    if db.shares_runtime_with(&tx.db) {
-        Ok(())
-    } else {
-        Err(JsValue::from_str(
-            "transaction belongs to a different database runtime",
-        ))
+fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
+    let pending = WasmPendingNativeRead::new(future);
+    match pending.poll_once()? {
+        Some(bytes) => bytes_to_js(bytes),
+        None => Ok(pending.into()),
     }
 }
 
@@ -3682,13 +2965,20 @@ fn has_write_option(options: &JsValue, name: &str) -> Result<bool, JsValue> {
 }
 
 fn write_identity_option(options: &JsValue) -> Result<jazz::db::WriteIdentity, JsValue> {
-    write_option(options, "author")?
-        .map(|author| {
-            author_id_from_bytes(&js_sys::Uint8Array::new(&author).to_vec())
-                .map(jazz::db::WriteIdentity::Session)
-        })
-        .transpose()
-        .map(|identity| identity.unwrap_or_default())
+    let author = write_option(options, "author")?;
+    let attribution = write_option(options, "attribution")?;
+    match (author, attribution) {
+        (Some(_), Some(_)) => Err(JsValue::from_str(
+            "write identity cannot contain both author and attribution",
+        )),
+        (Some(author), None) => author_id_from_bytes(&js_sys::Uint8Array::new(&author).to_vec())
+            .map(jazz::db::WriteIdentity::Session),
+        (None, Some(attribution)) => {
+            author_id_from_bytes(&js_sys::Uint8Array::new(&attribution).to_vec())
+                .map(jazz::db::WriteIdentity::Attribution)
+        }
+        (None, None) => Ok(jazz::db::WriteIdentity::Database),
+    }
 }
 
 fn write_timestamp_option(options: &JsValue) -> Result<Option<u64>, JsValue> {
@@ -4028,15 +3318,6 @@ fn checked_js_safe_u64(value: f64) -> Option<u64> {
         .then_some(value as u64)
 }
 
-fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, JsValue> {
-    let start = checked_js_u64(start, "start")?;
-    let end = checked_js_u64(end, "end")?;
-    if start > end {
-        return Err(JsValue::from_str("start must not exceed end"));
-    }
-    Ok(start..end)
-}
-
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
@@ -4197,6 +3478,9 @@ fn optional_string_prop(value: &JsValue, name: &str) -> Result<Option<String>, J
 }
 
 fn optional_bool_prop(value: &JsValue, name: &str) -> Result<Option<bool>, JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
     let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
     if prop.is_undefined() || prop.is_null() {
         return Ok(None);
@@ -4676,7 +3960,7 @@ mod dynamic_schema_view_tests {
                 MemoryStorage::new(&families).expect("valid memory storage families"),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x55; 16]),
-                    author: author.clone(),
+                    author,
                 },
             )))
             .expect("WASM no-op write fixture opens"),
@@ -4922,7 +4206,7 @@ mod dynamic_schema_view_tests {
         let (abort, registration) = AbortHandle::new_pair();
         let wait = Abortable::new(futures_util::future::pending::<()>(), registration);
         abort.abort();
-        assert!(matches!(block_on(wait), Err(_)));
+        assert!(block_on(wait).is_err());
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -5060,6 +4344,7 @@ mod dynamic_schema_view_tests {
         let binding = WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(db)))),
             owns_runtime: false,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         };
         let subscriber = AuthorSubject::from_canonical(
@@ -5483,11 +4768,10 @@ mod dynamic_schema_view_tests {
             decoded.removed_occurrence_keys[1]
         );
     }
-    /// A short-lived WASM schema attachment must not abandon its owner's open
-    /// transaction when the JavaScript wrapper is collected.
+    /// A WASM schema view can address its owner's open transaction by id.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn attached_tx_drop_preserves_owner_batch() {
+    fn schema_view_uses_owner_transaction_id() {
         let source = SchemaBuilder::new()
             .table(
                 TableSchema::builder("items")
@@ -5519,12 +4803,6 @@ mod dynamic_schema_view_tests {
         let view = Rc::new(block_on(owner.register_schema_view(schema.clone())).unwrap());
         let batch = OpenTransactionId::new();
         block_on(owner.begin_mergeable(batch)).unwrap();
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(batch),
-            owns_lifetime: false,
-        });
         block_on(view.mergeable_tx_ref(batch).insert(
             "items",
             BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
@@ -5547,12 +4825,6 @@ mod dynamic_schema_view_tests {
 
         let exclusive = OpenTransactionId::new();
         block_on(owner.begin_exclusive(exclusive)).unwrap();
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(exclusive),
-            owns_lifetime: false,
-        });
         block_on(view.exclusive_tx_ref(exclusive).insert(
             "items",
             BTreeMap::from([(
@@ -5569,13 +4841,13 @@ mod dynamic_schema_view_tests {
     }
 
     /// Transaction reads cross the WASM boundary as promises: a valid
-    /// transaction must resolve them, while a transaction attached to another
+    /// transaction must resolve them, while a transaction id from another
     /// database runtime must still fail synchronously before a promise is
     /// created. Keeping both checks here makes the binding contract explicit
     /// rather than accidentally only type-checking the promise construction.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn attached_transaction_reads_are_async_and_runtime_bound() {
+    async fn transaction_reads_are_async_and_runtime_bound() {
         let source = SchemaBuilder::new()
             .table(
                 TableSchema::builder("items")
@@ -5617,12 +4889,6 @@ mod dynamic_schema_view_tests {
             .begin_mergeable(attached_batch)
             .await
             .expect("begin attached schema transaction");
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Mergeable,
-            open_tx: Some(attached_batch),
-            owns_lifetime: false,
-        });
         view.mergeable_tx_ref(attached_batch)
             .insert(
                 "items",
@@ -5654,12 +4920,6 @@ mod dynamic_schema_view_tests {
             .begin_exclusive(attached_exclusive)
             .await
             .expect("begin attached exclusive transaction");
-        drop(WasmTx {
-            db: WasmDbInner::Memory(Rc::clone(&view)),
-            kind: WasmTxKind::Exclusive,
-            open_tx: Some(attached_exclusive),
-            owns_lifetime: false,
-        });
         view.exclusive_tx_ref(attached_exclusive)
             .insert(
                 "items",
@@ -5682,6 +4942,7 @@ mod dynamic_schema_view_tests {
         let binding = WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
             owns_runtime: false,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         };
         let tx_id = OpenTransactionId::new();
@@ -5690,29 +4951,26 @@ mod dynamic_schema_view_tests {
                 tx_id.to_string(),
                 "exclusive".to_owned(),
                 Some(alice.canonical().as_bytes().to_vec()),
+                None,
             )
             .expect("begin owner transaction");
-        let tx = binding
-            .attach_exclusive_tx(tx_id.to_string())
-            .expect("attach owner transaction");
         let view_binding = WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&view))))),
             owns_runtime: false,
+            non_durable_client: Rc::new(Cell::new(false)),
             trusted_backend: false,
         };
         let view_query = WasmPreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
+            is_relation: false,
         };
 
-        // Both consolidated all forms must run through the promise rather
-        // than merely returning a promise object. The view shares its owner's
-        // transaction runtime, so every read resolves.
+        // The consolidated transaction read owns its pending operation. The
+        // view shares its owner's transaction runtime, so every read resolves.
         let all = view_binding
             .all(&view_query, JsValue::NULL, Some(tx_id.to_string()), None)
-            .expect("create all transaction read promise")
-            .dyn_into::<js_sys::Promise>()
-            .expect("transaction all returns a promise");
-        wasm_bindgen_futures::JsFuture::from(all)
+            .expect("create all transaction read");
+        resolve_wasm_read(all)
             .await
             .expect("all transaction read resolves");
         let attributed_all = view_binding
@@ -5722,31 +4980,10 @@ mod dynamic_schema_view_tests {
                 Some(tx_id.to_string()),
                 Some(alice.canonical().as_bytes().to_vec()),
             )
-            .expect("create attributed all transaction read promise")
-            .dyn_into::<js_sys::Promise>()
-            .expect("attributed transaction all returns a promise");
-        wasm_bindgen_futures::JsFuture::from(attributed_all)
+            .expect("create attributed all transaction read");
+        resolve_wasm_read(attributed_all)
             .await
             .expect("attributed all transaction read resolves");
-        wasm_bindgen_futures::JsFuture::from(
-            view_binding
-                .one_in_transaction(&view_query, &tx, JsValue::NULL)
-                .expect("create one transaction read promise"),
-        )
-        .await
-        .expect("one transaction read resolves");
-        wasm_bindgen_futures::JsFuture::from(
-            view_binding
-                .one_in_transaction_for_identity(
-                    &view_query,
-                    &tx,
-                    alice.canonical().as_bytes().to_vec(),
-                    JsValue::NULL,
-                )
-                .expect("create attributed one transaction read promise"),
-        )
-        .await
-        .expect("attributed one transaction read resolves");
 
         // Identity validation happens inside the transaction-read future. A
         // caller cannot reuse Alice's transaction capability while asking the
@@ -5754,6 +4991,7 @@ mod dynamic_schema_view_tests {
         let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
         let owner_query = WasmPreparedQuery {
             inner: owner.prepare_query(&owner.table("items")).unwrap(),
+            is_relation: false,
         };
         let mismatched_all = binding
             .all(
@@ -5762,55 +5000,31 @@ mod dynamic_schema_view_tests {
                 Some(tx_id.to_string()),
                 Some(bob.canonical().as_bytes().to_vec()),
             )
-            .expect("identity mismatch is reported by the transaction read promise")
-            .dyn_into::<js_sys::Promise>()
-            .expect("transaction all returns a promise");
-        let identity_error = wasm_bindgen_futures::JsFuture::from(mismatched_all)
+            .expect("identity mismatch is reported by the transaction read");
+        let identity_error = resolve_wasm_read(mismatched_all)
             .await
             .expect_err("Bob must not read through Alice's transaction capability");
         assert!(identity_error
             .as_string()
             .is_some_and(|message| message.contains("bound identity")));
-
-        let other_owner = Rc::new(
-            Db::open(DbConfig::new(
-                schema,
-                MemoryStorage::new(&refs).expect("valid second memory storage families"),
-                DbIdentity {
-                    node: jazz::ids::NodeUuid::from_bytes([0x47; 16]),
-                    author: alice,
-                },
-            ))
-            .await
-            .expect("open independent runtime"),
-        );
-        let other_binding = WasmDb {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(
-                &other_owner,
-            ))))),
-            owns_runtime: false,
-            trusted_backend: false,
-        };
-        let other_query = WasmPreparedQuery {
-            inner: other_owner
-                .prepare_query(&other_owner.table("items"))
-                .unwrap(),
-        };
-        let assert_foreign = |result: Result<js_sys::Promise, JsValue>| {
-            assert!(result
-                .expect_err("foreign transaction must fail before producing a promise")
-                .as_string()
-                .is_some_and(|message| message.contains("different database runtime")));
-        };
-        assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
-        assert_foreign(other_binding.one_in_transaction_for_identity(
-            &other_query,
-            &tx,
-            alice.canonical().as_bytes().to_vec(),
-            JsValue::NULL,
-        ));
         binding
             .rollback_transaction(tx_id.to_string())
             .expect("cleanup owner transaction");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn resolve_wasm_read(read: JsValue) -> Result<JsValue, JsValue> {
+        if read.is_instance_of::<js_sys::Uint8Array>() {
+            return Ok(read);
+        }
+        let poll = js_sys::Reflect::get(&read, &JsValue::from_str("poll"))?
+            .dyn_into::<js_sys::Function>()?;
+        loop {
+            let result = poll.call0(&read)?;
+            if !result.is_null() {
+                return Ok(result);
+            }
+            SubscriptionRetryTimer::new(0)?.await;
+        }
     }
 }

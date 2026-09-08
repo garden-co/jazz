@@ -95,6 +95,13 @@ where
         self.prepare_query_bound(query, BTreeMap::new())
     }
 
+    /// Normalize relation syntax into the same prepared-query representation
+    /// used by every other read path.
+    #[doc(hidden)]
+    pub fn prepare_relation_query(&self, query: &RelationQuery) -> Result<PreparedQuery, Error> {
+        self.prepare_query(&relation_query_to_query(query)?)
+    }
+
     /// Prepare a query after asynchronously acquiring the node owner.
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
@@ -155,6 +162,17 @@ where
             global_plan,
             groove_runtime_token: node.groove_runtime_token(),
         })
+    }
+
+    /// Normalize relation syntax and prepare it after asynchronously acquiring
+    /// the node owner.
+    #[doc(hidden)]
+    pub async fn prepare_relation_query_async(
+        &self,
+        query: &RelationQuery,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_async(&relation_query_to_query(query)?)
+            .await
     }
 
     /// Prepare a query with explicit parameter bindings.
@@ -658,17 +676,6 @@ where
     ) -> Result<ResultTree, Error> {
         let snapshot = self.all_relation_snapshot(prepared, opts).await?;
         materialize_result_tree(prepared.shape.query(), snapshot)
-    }
-
-    /// Normalize a relation expression through the canonical resolver and
-    /// prepare it after asynchronously acquiring the node owner.
-    #[doc(hidden)]
-    pub async fn prepare_relation_query_async(
-        &self,
-        query: &RelationQuery,
-    ) -> Result<PreparedQuery, Error> {
-        let query = relation_query_to_query(query)?;
-        self.prepare_query_async(&query).await
     }
 
     /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
