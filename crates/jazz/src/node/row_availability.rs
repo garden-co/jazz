@@ -162,7 +162,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         }
         let bundles = crate::protocol::expand_version_carriers(&receipt.version_carriers)
             .map_err(|_| invalid())?;
-        let mut covered = BTreeSet::new();
+        let mut content_covered = BTreeSet::new();
         let mut requests = Vec::new();
         for bundle in &bundles {
             if bundle.scope != crate::protocol::VersionBundleScope::ViewScoped
@@ -196,7 +196,12 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 {
                     return Err(invalid());
                 }
-                covered.insert(index);
+                // A deletion register proves lifecycle state, not a readable
+                // row body. Every Readable coordinate needs content evidence
+                // before any carrier is ingested or a caller can clear a marker.
+                if version.deletion().is_none() {
+                    content_covered.insert(index);
+                }
                 requests.push(crate::protocol::RowVersionRef::new(
                     coordinate.table.clone(),
                     coordinate.row,
@@ -205,7 +210,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
             }
         }
         if receipt.outcomes.iter().enumerate().any(|(index, outcome)| {
-            *outcome == CurrentRowOutcome::Readable && !covered.contains(&index)
+            *outcome == CurrentRowOutcome::Readable && !content_covered.contains(&index)
         }) {
             return Err(invalid());
         }

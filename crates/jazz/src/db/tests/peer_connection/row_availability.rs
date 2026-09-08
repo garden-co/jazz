@@ -560,3 +560,82 @@ fn current_rows_more_than_64_sequential_contexts_remain_functional() {
         assert!(edge.node.current_rows.borrow().floors.len() <= 64);
     }
 }
+
+/// Alice receives Bob's authorized tombstone and preimage. Removing the content
+/// carrier must make the receipt invalid before Readable can clear a durable
+/// unavailable marker. Internal ingestion is used to isolate receipt validation.
+/// Bob -> complete receipt -> Alice; deletion-only replay -> rejected.
+#[test]
+fn current_rows_reject_deletion_only_readable_receipt() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let target = row(0xd4);
+    core.insert_with_id("todos", target, cells("readable preimage", false, alice))
+        .unwrap();
+    settle(
+        &core,
+        vec![
+            MergeableCommit::new("todos", target, 20)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        ],
+    );
+    let client = open_db(0xe5, alice, &schema);
+    let (up, down) = link(alice, 0xe5, 0xc4, false);
+    let _up = block_on(client.connect_upstream(up));
+    let _down = core.accept_subscriber(down, alice);
+    for _ in 0..4 {
+        client.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let coordinate = core
+        .server
+        .node()
+        .borrow()
+        .current_row_coordinate("todos", target)
+        .unwrap();
+    let result = client.node.request_current_rows(
+        vec![coordinate],
+        PolicyBindingKey::from_canonical_parts(alice, test_provider_claims(alice)),
+    );
+    for _ in 0..4 {
+        client.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let receipt = applied(block_on(result));
+    assert_eq!(receipt.outcomes, [CurrentRowOutcome::Readable]);
+    let versions = crate::protocol::expand_version_carriers(&receipt.version_carriers)
+        .unwrap()
+        .into_iter()
+        .flat_map(|bundle| bundle.versions)
+        .collect::<Vec<_>>();
+    assert!(versions.iter().any(|version| version.deletion().is_none()));
+    assert!(
+        versions
+            .iter()
+            .any(|version| version.deletion() == Some(crate::tx::DeletionEvent::Deleted))
+    );
+    let mut partial = receipt.clone();
+    partial.version_carriers.retain(|carrier| {
+        carrier.bundle_refs().unwrap().iter().all(|bundle| {
+            bundle
+                .versions
+                .iter()
+                .all(|version| version.deletion().is_some())
+        })
+    });
+    assert!(!partial.version_carriers.is_empty());
+    let result = block_on(
+        client
+            .node
+            .node()
+            .borrow_mut()
+            .ingest_current_rows_receipt(&partial),
+    );
+    assert!(
+        result.is_err(),
+        "Readable must carry a content witness, not only deletion"
+    );
+}

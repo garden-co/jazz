@@ -657,7 +657,9 @@ successor version. Readable includes an authorized deleted-row preimage and its
 ordinary deletion-register witness so includeDeleted retains its semantics.
 Only requested readable physical rows enter native carriers; transaction siblings
 and policy-support rows do not. Receivers validate the complete cardinality,
-coordinates and immutable context before normal ingestion, and expose typed
+coordinates and immutable context before normal ingestion. Every Readable
+coordinate requires a content-layer witness; deletion-only carriers cannot clear
+an unavailable marker. Receivers expose typed
 outcomes only after that ingestion succeeds.
 
 An Edge trusted by its client may proxy the exchange. It retains a bounded
