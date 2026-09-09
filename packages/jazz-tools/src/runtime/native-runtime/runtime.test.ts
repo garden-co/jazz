@@ -6027,10 +6027,12 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     const failedQuery = preparedQueries.at(-1);
     failRead = false;
     for (let index = 0; index < 257; index += 1) {
-      await runtime.query(JSON.stringify({
-        table: "todos",
-        conditions: [{ column: "title", op: "eq", value: `coverage-${index}` }],
-      }));
+      await runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "title", op: "eq", value: `coverage-${index}` }],
+        }),
+      );
     }
     await expect(runtime.query(queryJson)).resolves.toEqual([]);
     expect(preparedQueries.at(-1)).not.toBe(failedQuery);
@@ -6077,14 +6079,19 @@ describe("NativeRuntimeAdapter prepared query retention", () => {
     await expect(failed).resolves.toBe(failure);
     const failedQuery = preparedQueries.at(-1);
     for (let index = 0; index < 257; index += 1) {
-      await runtime.query(JSON.stringify({
-        table: "todos",
-        conditions: [{ column: "title", op: "eq", value: `background-${index}` }],
-      }), null, "local", JSON.stringify({ propagation: "local-only" }));
+      await runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "title", op: "eq", value: `background-${index}` }],
+        }),
+        null,
+        "local",
+        JSON.stringify({ propagation: "local-only" }),
+      );
     }
-    await expect(runtime.query(
-      queryJson, null, "local", JSON.stringify({ propagation: "local-only" }),
-    )).resolves.toEqual([]);
+    await expect(
+      runtime.query(queryJson, null, "local", JSON.stringify({ propagation: "local-only" })),
+    ).resolves.toEqual([]);
     expect(preparedQueries.at(-1)).not.toBe(failedQuery);
   });
 });
@@ -8241,28 +8248,31 @@ it("isolates throwing callbacks when replaying a deferred admission failure", as
 });
 
 it("keeps same-query admissions with different claims out of the shared prepared cache", async () => {
-  const admitted: unknown[] = [];
+  const rows = [
+    { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
+    { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },
+  ];
+  const prepareQuery = vi.fn(
+    (
+      _query: Uint8Array,
+      _kind: "query" | "relation",
+      _identity: Uint8Array,
+      claims: { team: string },
+    ) => {
+      const prepared = { rows: encodeRows(rows.filter((row) => row.team === claims.team)) };
+      return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
+    },
+  );
   const setClaims = vi.fn();
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: (
-            _query: Uint8Array,
-            _kind: "query" | "relation",
-            identity: Uint8Array,
-            claims: unknown,
-          ) => {
-            const prepared = {
-              identity: new Uint8Array(identity),
-              claims: structuredClone(claims),
-            };
-            admitted.push(prepared);
-            return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
-          },
+          prepareQuery,
+          all: (prepared: { rows: Uint8Array }) => prepared.rows,
           setIdentityClaims: setClaims,
           tick: () => undefined,
-        } as never),
+        }),
       openBrowser: async () => {
         throw new Error("unused");
       },
@@ -8274,21 +8284,34 @@ it("keeps same-query admissions with different claims out of the shared prepared
     true,
     { readAuthorizationHost: "trusted-serving" },
   );
-  const inner = runtime as unknown as Record<string, any>;
+  const queryJson = JSON.stringify({ table: "todos" });
   const session = {
-    identity: TEST_RUNTIME_AUTHOR,
-    claims: { team: "team-a" },
-    backendAuthority: false,
+    issuer: "https://issuer.example",
+    user_id: "same-user",
+    authMode: "external",
   };
-  const a = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), session);
-  const b = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), {
-    ...session,
-    claims: { team: "team-b" },
-  });
-  expect(a).not.toBe(b);
-  expect(admitted).toHaveLength(2);
-  expect(a.claims).toEqual({ team: "team-a" });
-  expect(b.claims).toEqual({ team: "team-b" });
-  expect(setClaims).not.toHaveBeenCalled();
-  await runtime.close();
+  const sessionA = JSON.stringify({ ...session, claims: { team: "team-a" } });
+  const sessionB = JSON.stringify({ ...session, claims: { team: "team-b" } });
+  const expectedA = [
+    {
+      table: "todos",
+      id: "00000000-0000-0000-0000-000000000000",
+      values: [{ type: "Text", value: "Draft proposal" }],
+    },
+  ];
+  try {
+    await expect(runtime.query(queryJson, sessionA, "local")).resolves.toEqual(expectedA);
+    await expect(runtime.query(queryJson, sessionB, "local")).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "Review budget" }],
+      },
+    ]);
+    await expect(runtime.query(queryJson, sessionA, "local")).resolves.toEqual(expectedA);
+    expect(prepareQuery).toHaveBeenCalledTimes(3);
+    expect(setClaims).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
 });

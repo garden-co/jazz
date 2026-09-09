@@ -1888,7 +1888,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.emitQueryCoverageTrace("attach");
       if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
         if (pendingTx) {
-          const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+          const payload = await this.readRowsForContextAsync(
+            query,
+            opts,
+            readContext,
+            pendingTx.id,
+          );
           this.emitQueryCoverageTrace("covered");
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
@@ -2827,18 +2832,22 @@ export class NativeRuntimeAdapter implements Runtime {
     const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
     const queryBytes =
       kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
-    return this.preparedQueryCache.acquire(queryBytes, (encoded) => {
-      try {
-        const started = this.db.prepareQuery(encoded, kind);
-        if (isPendingNativeOperation<PreparedQuery>(started)) {
-          started.cancel();
-          throw new Error("native query preparation requires the asynchronous read boundary");
+    return this.preparedQueryCache.acquire(
+      queryBytes,
+      (encoded) => {
+        try {
+          const started = this.db.prepareQuery(encoded, kind);
+          if (isPendingNativeOperation<PreparedQuery>(started)) {
+            started.cancel();
+            throw new Error("native query preparation requires the asynchronous read boundary");
+          }
+          return started;
+        } catch (error) {
+          throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
         }
-        return started;
-      } catch (error) {
-        throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
-      }
-    }, kind);
+      },
+      kind,
+    );
   }
   /**
    * A strict remote query cannot materialize its local snapshot before an
@@ -2898,7 +2907,6 @@ export class NativeRuntimeAdapter implements Runtime {
     ) {
       await this.progressPeerTransport();
     }
-
   }
 
   private attachLocalReadCoverageInBackground(
@@ -6991,23 +6999,6 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
     (bytes[offset + 2]! << 16) |
     (bytes[offset + 3]! << 24)
   );
-}
-
-
-/** Deterministic cache-key encoding for JSON-derived session claims. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

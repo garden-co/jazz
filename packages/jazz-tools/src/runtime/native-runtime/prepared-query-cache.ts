@@ -90,8 +90,10 @@ export class PreparedQueryCache<T extends object> {
   }
 
   isCurrentEntry(entry: PreparedQueryCacheEntry<T>): boolean {
-    return entry.generation === this.generation &&
-      (entry.key === undefined || this.entries.get(entry.key) === entry);
+    return (
+      entry.generation === this.generation &&
+      (entry.key === undefined || this.entries.get(entry.key) === entry)
+    );
   }
 
   retainEntry(entry: PreparedQueryCacheEntry<T>): void {
