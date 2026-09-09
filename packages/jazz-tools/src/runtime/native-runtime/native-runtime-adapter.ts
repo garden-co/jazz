@@ -2087,7 +2087,8 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onTerminal: (error) => {
         if (!attempt) return;
-        if (error.code === "not_ready" && error.retry === "later") return;
+        if (error.code === "not_ready" && error.retry === "later" && !attempt.carrier.hasNegotiated)
+          return;
         if (this.canRetryNetworkConnection(attempt, error)) {
           const recovery = this.retryNetworkConnection(attempt, error);
           if (recovery) return;
@@ -3662,8 +3663,10 @@ export class NativeRuntimeAdapter implements Runtime {
       attempt === this.serverConnectionAttempt &&
       attempt.generation === this.serverConnectionGeneration &&
       error.retry === "later" &&
-      (error.code === "websocket_closed" || error.code === "websocket_error") &&
-      (attempt.transport !== null || this.networkRetryCount > 0) &&
+      (error.code === "websocket_closed" ||
+        error.code === "websocket_error" ||
+        error.code === "not_ready") &&
+      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0) &&
       this.networkRetryCount < NETWORK_RETRY_LIMIT
     );
   }
