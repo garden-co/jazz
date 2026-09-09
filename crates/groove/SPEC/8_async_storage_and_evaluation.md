@@ -127,6 +127,12 @@ of one non-suspending step. The step may:
 The driver continues independent runnable nodes before waiting. Equal storage
 requests join one in-flight operation. Completion stores the owned result and
 wakes every dependent evaluation entry.
+The backing I/O's wake must reach every registered consumer directly, without
+first requiring the last consumer that polled it to run again. For example,
+a parked background query and an awaited foreground read can share a cold
+chunk; completion must wake the foreground read even if the background query
+cannot receive another owner turn yet. Re-polling replaces that consumer's
+previous waker rather than retaining obsolete task owners.
 
 Pure operators remain ordinary synchronous transformations over ready inputs.
 Interruptible state is concentrated at table/index sources, persisted
