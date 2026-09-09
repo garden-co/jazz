@@ -105,7 +105,9 @@ const benchmarkSmokeMode = (mode) => {
   return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
 };
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
-  const cpu = ["test-ts", "test-react-native"].includes(jobName) ? 16 : 4;
+  const cpu = ["lint", "test-rust-workspace", "test-ts", "test-react-native"].includes(jobName)
+    ? 16
+    : 4;
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
   assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
