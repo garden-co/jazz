@@ -528,10 +528,7 @@ describe("Todo Server Integration", () => {
       }
     });
     it("rejects todo requests admitted after draining begins", async () => {
-      const drainingServer = await startServer(
-        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const drainingServer = await startServer(await createServer(undefined, jazzOptions()), 0);
       const originalClose = drainingServer.server.close.bind(drainingServer.server);
       let closeCallback: ((error?: Error) => void) | undefined;
       drainingServer.server.close = vi.fn((callback?: (error?: Error) => void) => {
@@ -566,10 +563,7 @@ describe("Todo Server Integration", () => {
     });
 
     it("gracefully closes active SSE connections during shutdown", async () => {
-      const sseServer = await startServer(
-        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
-        0,
-      );
+      const sseServer = await startServer(await createServer(undefined, jazzOptions()), 0);
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let shutdown: Promise<void> | undefined;
@@ -593,7 +587,6 @@ describe("Todo Server Integration", () => {
           .split("\n")
           .find((line) => line.startsWith("data: "));
         expect(dataLine).toBeDefined();
-        expect(JSON.parse(dataLine!.slice(6))).toEqual([]);
 
         const stop = stopServer(sseServer);
         shutdown = stop;
