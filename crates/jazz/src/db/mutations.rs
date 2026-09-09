@@ -2450,6 +2450,29 @@ where
             }
         };
 
+        // Bindings submit an upsert patch without synchronously inspecting the
+        // current row. Once the core has chosen an insertion, enforce required
+        // fields here rather than relying on a JavaScript preflight query.
+        if parents.is_empty() {
+            for column in &self.table_schema(table)?.columns {
+                if !cells.contains_key(&column.name)
+                    && column.default.is_none()
+                    && !matches!(
+                        column.column_type,
+                        GrooveColumnType::Nullable(_) | GrooveColumnType::Array(_)
+                    )
+                {
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        format!(
+                            "missing required field `{}` on table `{table}`",
+                            column.name
+                        ),
+                    ));
+                }
+            }
+        }
+
         self.write_mergeable_at_ms_with_authorship_in_branch(
             made_by,
             permission_subject,

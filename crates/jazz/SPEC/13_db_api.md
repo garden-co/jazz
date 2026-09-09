@@ -402,6 +402,14 @@ Rust `UpsertOptions::target` now uses `WriteTarget` rather than
 that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
 matches over the options field must handle `WriteTarget::BranchView`.
 
+JavaScript standalone upserts submit only the supplied cells to the Rust write
+queue. The facade MUST NOT synchronously query row existence first: another
+suspended operation may own the node, and blocking the host would prevent that
+operation from completing. Rust chooses insert versus patch under the write's
+identity and applies insertion defaults there. Consequently, errors that depend
+on that choice (such as a missing required column on a new row) are reported by
+the write handle; invalid supplied values can still be rejected before enqueue.
+
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
 durability tier (`INV-API-13`). `wait(tier)` returns only when the requested

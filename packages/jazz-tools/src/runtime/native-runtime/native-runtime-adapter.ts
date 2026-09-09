@@ -1497,16 +1497,21 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
+    // Ordinary upserts are queued by Rust, which resolves existence and merges
+    // the patch under the write's identity. A synchronous preflight read here
+    // can wait on a suspended core tick while blocking the host that must
+    // resume it. Only staged transaction bookkeeping needs a local preimage.
     const existing = branchView
       ? true
       : tx
         ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-        : this.readRow(table, rowId, attribution ? undefined : writeIdentity);
+        : undefined;
     let cells: Uint8Array;
     try {
-      cells = existing
-        ? encodeCellsForPatch(definition, values)
-        : encodeCellsForRow(definition, values, table);
+      cells =
+        !tx || branchView || existing
+          ? encodeCellsForPatch(definition, values)
+          : encodeCellsForRow(definition, values, table);
     } catch (error) {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
