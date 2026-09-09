@@ -12,35 +12,35 @@ deployment roles are chapter 9.
 Invariant digest:
 
 - `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_time` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
-- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, and predicate material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
+- `INV-SYNC-7`: A query update MUST identify supporting physical row versions individually, never imply query membership from whole-transaction possession. Result members, query-source roles and program facts are receiver-local bookkeeping, not fields in the base peer read protocol.
 - `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
-- `INV-SYNC-9`: A receiver MUST reject a `ViewUpdate` that names a `peer_payload_inventory.complete_tx_payloads`, add, or remove transaction it lacks enough tx existence, row-version payload, complete-tx payload, or view-complete exclusive payload coverage to resolve for that subscription view.
-- `INV-SYNC-10`: A reset-result-set `ViewUpdate` MUST set `reset_result_set = true`; applying it MUST clear the receiver's settled subscription result set before applying the replacement result members and program facts.
-- `INV-SYNC-11`: Reset-result-set `ViewUpdate`s MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
+- `INV-SYNC-9`: A receiver MUST NOT install a complete supporting set until its referenced transaction metadata and exact native bodies are available and valid for the selected authority usage.
+- `INV-SYNC-10`: Every non-pending `ViewUpdate` MUST replace the subscription’s complete supporting-row set atomically. There is no wire reset flag; application resets and deltas are derived locally.
+- `INV-SYNC-11`: Complete supporting-set replacement and subscription detach MUST preserve per-peer payload dedup while peer state survives.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
 - `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
-- `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-17`: A supporting set and its native payloads MUST include enough authorized deletion-register evidence to reconstruct the row’s visible presence or absence.
 - `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, branch key, row, transaction, and schema, and receivers MUST resolve the sender's record through their own stable physical mapping.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
-- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
+- `INV-SYNC-20`: Applying only the local input differences between complete supporting sets MUST be observationally equivalent to evaluating the newer complete set, including enter/leave churn and exact-version replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
-- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies and MUST preserve result membership, program facts, and inventory refs. A version body MAY be omitted only when the receiver's membership is believed — under a fast declaration, the version also MUST have settled at or before the declared position; not-yet-fated versions MUST be shipped under a fast declaration.
+- `INV-SYNC-24`: Known-state payload dedup MUST omit only native bodies, preserving the complete supporting-row set and inventory references. Fast declarations may omit only versions settled at or before their declared position; not-yet-fated versions MUST be shipped.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
-- `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
+- `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
-- `INV-SYNC-31`: A downstream subscription MUST synchronize canonical authored facts and their identity-preserving witness closure under an exact manifest/epoch/digest, never an application-projected row as replicated truth.
+- `INV-SYNC-31`: A downstream subscription MUST synchronize exact canonical authored supporting versions, never application-projected rows as replicated truth.
 - `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
-- `INV-SYNC-33`: The serving authority MUST decide visibility, membership, and settlement and ship only the safe, complete canonical closure plus identified authorized residual program from which the receiver can reproduce that authorized view; opaque admissions MUST be non-replayable across every authority/view/reader/branch-source/residual identity axis and their protected occurrence plus concrete version/layer witnesses.
-- `INV-SYNC-34`: A subscription is settled only when its receiver has verified every class of the complete reproducible input closure for the authority's declared manifest/epoch; reconnect, repair, reset, and recovery must re-establish that closure before reporting settlement.
-- `INV-SYNC-35`: A receiver MUST atomically and durably install a complete manifest, its facts, local IVM state/terminal, and any fast-known-state receipt before publication; it MUST expose neither a partial closure nor a fast receipt across a crash boundary.
+- `INV-SYNC-33`: The serving authority MUST decide disclosure under the exact reader and query context and send sufficient authorized supporting versions to reproduce the view. Opaque evidence or residual-program carriers require a separately specified extension and are not part of the base protocol.
+- `INV-SYNC-34`: A subscription is settled only after its complete supporting set and exact native witnesses are validated for the selected authority usage. Reconnect, repair and recovery MUST re-establish that evidence before reporting settlement.
+- `INV-SYNC-35`: A receiver MUST finish installation of the complete supporting set and local IVM update before publication. Persisted fast-known-state evidence MUST NOT claim partial or non-durable native input installation.
 - `INV-SYNC-36`: Peer sync carries an exact authorized input closure, never authority-produced application terminal rows or ordered terminal operations. The receiver reconciles admitted authority inputs with tier-eligible local inputs and derives the only application terminal by running its local copy of the identified maintained Groove program.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
@@ -57,8 +57,8 @@ Invariant digest:
 - `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
 - `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
 
-- `INV-SYNC-44`: Every non-pending query update MUST describe one complete supporting physical row/version set, including the empty set. The wire MUST NOT assign query-input roles or carry separate source-completeness facts. Receivers MUST validate and install the set atomically before deriving results locally. Encoding, validating and comparing a complete set may take linear work in its size. Local query maintenance after comparison MUST still apply only the changed inputs; receiving a complete set does not authorize rebuilding every local result.
-- `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Missing-version repair MUST use the live subscription or query attachment's admitted policy binding; retired usages MUST NOT initiate repair.
+- `INV-SYNC-44`: Every non-pending query update MUST describe one complete supporting physical row/version set, including the empty set. The wire MUST NOT assign query-input roles or carry separate source-completeness facts. Receivers MUST validate and install the set atomically before deriving results locally. Encoding, validating and comparing a complete set may scale with its size, including ordered-index lookup costs. Local query maintenance after comparison MUST still apply only the changed inputs; receiving a complete set does not authorize rebuilding every local result.
+- `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Repair MUST check exact content/deletion layers and branches and use the live usage’s admitted policy binding. Authorized deletion witnesses remain repairable under includeDeleted semantics; retired usages MUST NOT initiate repair.
 
 - `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field.
 
@@ -329,16 +329,16 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                                            | direction      | payload                                                                                                                               |
-| ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                                   |
-| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                                |
-| `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                             |
-| `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                                     |
-| `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                    |
-| `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                                   |
-| `ViewUpdate`                                                                       | down           | `{ subscription, reset_result_set, version_carriers, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
-| `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                                |
+| message                                                                            | direction      | payload                                                                                                                |
+| ---------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                    |
+| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                 |
+| `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                              |
+| `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                      |
+| `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                     |
+| `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                    |
+| `ViewUpdate`                                                                       | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }` |
+| `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                 |
 
 A `VersionCarrier` in `ViewUpdate.version_carriers` is either one owned
 `VersionBundle` or a packed run that expands to the same bundle sequence. A
@@ -434,359 +434,102 @@ backward (`INV-SYNC-5`). When an authority accepts a commit, it assigns a
 monotone `GlobalTime` that advances the allocator and watermark (ch. 3,
 `INV-TX-11`) and maintains the global-current tables and change stream (ch. 4).
 
-### 8.4 Downstream: query-driven view updates
+### 8.4 Downstream: query-driven supporting rows
 
-Downstream sync is driven by subscriptions rather than by raw transaction
-broadcasts (ch. 6). Each view update applies to one
-`SubscriptionKey { shape_id, binding_id, read_view }`, so peers receive the
-settled rows and versions that are visible through that specific usage-site
-shape binding and read-view identity. Three protocol rules govern these updates:
+A subscription sends a query and receives the current physical row versions
+needed to evaluate it. Every non-pending `ViewUpdate` contains one complete
+`supporting_rows` set for that subscription, including the empty set. A later
+set replaces the previous set. An opening-pending response is a lifecycle
+notification and carries no supporting rows; it is not a partial dataset.
 
-- View updates carry **accepted/settled state only** — pending versions are
-  visible only on the creating node and are never emitted to non-origin peers
-  (`INV-SYNC-12`).
-- Result sets are **member-grained**: the ordinary current-row projection is
-  `(table, row_uuid, content_tx_id)`, but protocol-visible membership is typed
-  `ResultMemberEntry` data. Real-row members carry source/read-view,
-  content/deletion layer, optional deletion tx, schema, branch key/prefix, batch,
-  and digest dimensions when those dimensions participate in identity.
-  Synthetic aggregate/window rows and path tuple rows use the same member set
-  rather than another result-set engine (`INV-SYNC-7`).
-- Payload dedup is **per peer identity** for complete transaction payloads: once
-  a peer has received all versions for a transaction, later mentions ride in
-  `peer_payload_inventory.complete_tx_payloads: Vec<TxId>`. Those tx ids are
-  peer payload inventory refs for complete transaction payloads only, not a
-  coarse peer-known version set. Partial bundles, including mergeable and
-  view-complete exclusive bundles, establish only their explicit row-version or
-  view-scoped payload coverage; they do not establish complete-transaction
-  payload coverage. A receiver rejects a `ViewUpdate` naming any inventory ref,
-  add, or remove transaction it does not know enough to resolve for that
-  subscription view
-  (`INV-SYNC-8`, `INV-SYNC-9`).
+Each supporting row identifies its permanent physical table UUID, authored
+record table name, row UUID, transaction, concrete content or deletion layer,
+and branch coordinate. The native version carriers provide the corresponding
+authored bytes. They retain their authored schema and are interpreted through
+the admitted catalogue and lens lineage; bytes authored under one schema MUST
+NOT be relabeled as another schema's row (`INV-SYNC-31..32`).
 
-### 8.4.1 Intended reconstruction model
+The wire carries neither result members nor query-source role labels, separate
+source-completeness facts, relation facts, residual programs, or application
+terminal operations. For example, a person/manager query receives ordinary
+physical rows. The receiver's compiler determines which rows participate in
+each scan. If the same row plays two roles, it need not be transmitted twice
+for that reason. Internal compiler source identities and local output deltas
+remain implementation details (`INV-SYNC-7`, `INV-SYNC-36`, `INV-SYNC-44`).
 
-**Design decision.** A peer-sync subscription replicates the _inputs_ to a
-view, not the view's projected application rows. The authority owns the
-security-sensitive decision of which inputs are visible, which result members
-are admitted, and when that view is settled. The receiving node then runs the
-same authorized residual program locally and is therefore able to recreate its
-own terminal result deterministically. A terminal projected row is a cache and
-an application/binding presentation value; it is never replicated truth.
+The authority filters disclosure under the exact admitted reader and query
+context before shipping any supporting version. Pending versions remain local
+to their author until accepted. A partial Edge consumes Core-authorized inputs
+for delegated client queries; possession of other cached rows is not authority
+to serve them to that reader (`INV-SYNC-12..14`, `INV-SYNC-41`).
 
-For a canonical binding view at a declared frontier, the authority sends a safe
-**witness closure** consisting of:
+### 8.4.1 Reconstructing results and repairing native bodies
 
-- the ordered, active catalogue/schema/lens lineage needed to interpret every
-  included fact and to reach the binding's read schema;
-- canonical authored content and deletion `VersionRecord`s, with their logical
-  table, branch key, row, transaction, authored `SchemaVersionId`, source lineage,
-  and fate/frontier identity intact;
-- authority-maintained relation/correlation, winner, and replacement witnesses
-  needed by the lowered program, including their source/witness identity;
-- authority-produced membership, policy, and settlement facts sufficient to
-  gate the local program without asking the receiver to infer a hidden policy
-  witness; and
-- a frontier/closure declaration identifying exactly the canonical binding view
-  and the inputs complete at that frontier.
+The receiver evaluates the query with its own IVM. A complete supporting set
+may replace tasks A and B with B and C, but the receiver compares the sets and
+applies only the changed local inputs. The application sees A removed and C
+added, without a reset of B. Initial attachment may publish a local reset;
+subsequent complete wire sets do not require repeated application resets.
+Complete sets require references proportional to their size; constructing and
+looking up ordered indexes may add O(n log n) processing. That does not justify
+rebuilding all local query results.
 
-Two fact families are intentionally distinct. **Canonical authored history** is
-immutable content/deletion history authored by a client, and remains meaningful
-outside this subscription. **Authority-maintained facts** are correlation,
-membership, admission, replacement, and settlement facts computed for this
-authorized binding view. They are not re-authored history and cannot be reused
-as ordinary rows or across another reader, branch view, policy revision, or binding.
-The manifest identifies the exact **authorized residual program** that consumes
-both families: the canonical shape/read view plus the authority-maintained
-relations that replace policy evaluation or hidden correlation at the receiver.
-Its identity and canonical digest are inputs to IVM, not an informal promise.
+Native body dedup is separate from supporting-set membership. Complete
+transaction inventory may suppress already-retained native payloads, but MUST
+NOT remove their references from the complete supporting set. A partial
+transaction bundle establishes only its explicit payload coverage, never
+complete-transaction inventory merely because cardinalities happen to match
+(`INV-SYNC-8..9`, `INV-SYNC-24..26`).
 
-Every closure begins with a canonical **closure manifest**. It names the
-authority database lineage and authority view epoch, canonical binding view,
-reader/policy revision, normalized branch sources and `SnapshotRef` where applicable,
-frontier, ordered catalogue segment and digest, residual-program/admission
-identity and digest, plus a complete canonical inventory for every fact class.
-Each inventory has stable fact identities, count, and digest; the manifest's
-digest covers those inventories and their ordering. A receiver treats the
-manifest as an exact completeness contract, not a best-effort hint: an unseen
-fact identity, conflicting digest, later epoch, or fact from a different
-manifest is parked/rejected rather than blended into the view.
+A receiver lacking an exact referenced body requests repair before installing
+the set. Content and deletion are independent layers: retaining content for a
+row and transaction does not establish possession of its deletion-register
+witness. Branch coordinates are likewise part of the exact lookup. A repair
+coordinate naming a physical row and transaction may require both native
+layers, but cannot authorize unrelated transaction siblings.
 
-This is deliberately not a request to ship all data used by a policy. The
-authority evaluates policy and sends only facts the receiver is permitted to
-hold. When an internal policy/join/reachability witness is needed to explain a
-membership transition but revealing it would disclose hidden data, the protocol
-uses an authority-owned opaque admission fact with stable identity, not the
-hidden row and not a projected substitute. That fact can enable or retract the
-authorized member in the receiver's graph, but cannot be reinterpreted as an
-independently readable source row (`INV-SYNC-33`, ch. 7). Its identity is bound
-to the authority database lineage, authority epoch, manifest digest, canonical
-shape/binding/read view, reader/policy revision, branch sources/SnapshotRef, and
-residual-program identity. A receiver rejects a replay under any other axis;
-opaque admission is a scoped residual input, not a portable capability. It is
-also bound to its **protected occurrence**: the exact output/result-member or
-path occurrence it admits, its source logical table/row, the concrete
-content/deletion version(s), and the selected exact branch key layer (current or
-snapshot-qualified). Its identity names
-every correlation, winner, replacement, and policy witness by stable witness id
-_and_ concrete version/layer. A changed content/deletion winner, layer, witness,
-or protected occurrence retires the old admission; it cannot be reused for a
-different row/output, even if all reader and query axes still match.
+For example, a still-readable task may have been deleted while its receiver
+was disconnected. The normal task query no longer displays it, but repair can
+still supply its authorized deletion witness. Repair authorization uses the
+ordinary authorized `includeDeleted` semantics rather than treating absence
+from a non-deleted query as revoked access. A reader whose current policy no
+longer permits the row receives no protected bytes. The repair uses the live
+usage's admitted identity and claims; it cannot borrow another usage's binding
+or begin work for a retired attachment (`INV-SYNC-42`, `INV-SYNC-45`).
 
-Receiver application has one fixed order:
+### 8.4.2 Atomic installation and ordering
 
-1. admit and order the catalogue closure; park data whose authored schema or
-   lineage is unavailable;
-2. decode each version using its **authored** schema and validate its canonical
-   identity, branch key, and bytes; resolve branch-key-qualified history and
-   current winners before any read-schema projection;
-3. project only those selected winners through the ordered lens lineage into the
-   subscription read schema;
-4. install only the manifest-admitted canonical and authority facts into local
-   input relations and run the local maintained IVM; then
-5. expose only that local terminal's ordinary app delta to the facade/binding.
+A complete supporting set is installed only after its catalogue, transaction
+metadata, and exact native witnesses have been validated and admitted. Chunking
+or a separate native-body repair round trip MUST NOT expose a partial set as
+the subscription's new answer. Receiver-local storage and query maintenance
+finish the installation before publication. A fast-known-state receipt MUST
+NOT claim a partial or non-durable installation (`INV-SYNC-34..35`).
 
-The receiver MUST NOT supplement the residual program with unrelated local
-history, a broader local current index, stale facts from another subscription,
-or unmanifested pending writes. A locally authored view may use its own local
-frontier under its own manifest, but it is not evidence that the remote binding
-view is settled. This isolation is what makes the authority's visibility and
-membership decision authoritative while still allowing deterministic local IVM.
+Native ingestion may batch several received updates into one local storage and
+IVM boundary while preserving per-link FIFO order. Application terminal rows
+and `Insert`/`Update`/`Remove`/`Move` operations are outputs of that local IVM;
+they are not peer-supplied replication truth. The binding ABI may carry them
+locally without making them part of the sync protocol.
 
-### 8.4.2 Atomic closure installation, transition, and publication
+If an old set needs repair and a newer complete set arrives, the old set is
+superseded. A delayed repair may populate the immutable cache but MUST NOT
+reinstall the old set or move the application's answer backward. Unsent repair
+work for superseded sets can be discarded; an already-sent request retains its
+reply correlation until completion. Repairs are split into bounded wire
+requests, and a set requiring several batches remains uninstalled until all
+of its needed bodies are available (`INV-SYNC-46`). These are local scheduling
+rules and require no per-source roles, incremental-set proofs, or extra
+completeness fields on the wire.
 
-**Live delivery contract (2026-09-02).** Within one active subscription on a
-live connection, `ViewUpdate`s form an ordered, nonduplicated stream. Transport
-backpressure retries only messages that have not been accepted for delivery;
-an internal queue/retry bug must not be normalized into application-level
-at-least-once delivery. Reconnect establishes fresh subscription coverage rather
-than replaying old incremental transitions against a new receiver. This contract
-does not require introducing wire sequence numbers. Commit-unit idempotency
-(§8.2) and resource-idempotent `Subscribe` (§8.5) do not imply idempotent
-`ViewUpdate` deltas.
-
-An incremental update must describe a possible transition from the exact state
-already received for that subscription. Removing an absent fact, removing the
-wrong version, adding an already-present exact fact, or retaining conflicting
-versions of one source row is a protocol error, not a harmless no-op. Facts
-inside one update are an unordered set transition: a valid remove-old/add-new
-replacement is checked against the predecessor and final state, not arbitrary
-vector order. A full reset explicitly replaces the closure and is validated as
-such, including coverage for required sources with no rows. Late frames for a
-detached subscription remain subject to the separate lifecycle/drop rules; they
-must never be applied to a replacement subscription.
-
-Reject an impossible transition atomically, before changing retained facts,
-durable state, settlement, or application output. Surface an actionable protocol
-error to the affected client read/subscription, with safe subscription/source
-identity and the failed transition check, not row contents or private claims.
-Do not silently discard the inconsistency, quietly convert it into a reset, or
-leave the client waiting until a timeout. The error must expose the broken
-producer/transport assumption so it can be fixed at its source.
-
-The receiver stages incoming closure members under an **inactive** manifest id.
-Staging validates identity, class, manifest inventory, catalogue order, and
-residual-program identity, but it does not change an active view, publish a
-terminal edit, advance `settled_through`, or create/advance a fast-known-state
-receipt. An initial closure or reset is a **full manifest**: it enumerates every
-required member of every fact class, and cannot become active until complete.
-
-Once a full manifest is complete, one durable installation boundary atomically
-swaps all of the following: the active manifest/epoch pointer; its canonical and
-authority-maintained facts; the local IVM input/state and derived terminal; the
-settlement frontier; and any persisted fast-known-state receipt. Only after that
-transaction commits may the receiver enqueue the local terminal delta or expose
-the fast receipt for reconnect dedup (`INV-SYNC-35`). Recovery must observe the
-old complete closure or the new complete closure, never a durable mixture. An
-inactive staged closure or a pre-commit terminal is disposable after a crash.
-
-Steady-state changes need not reship a full closure. Each fact-class inventory
-is a canonical authenticated sparse-Merkle dictionary. Its 256-bit key is
-`BLAKE3("jazz sync closure fact key v1", class_tag, canonical_fact_identity)`;
-its leaf is `BLAKE3("jazz sync closure fact leaf v1", class_tag,
-canonical_fact_identity, canonical_fact_bytes)`; and its binary interior hash
-is `BLAKE3("jazz sync closure node v1", level, left, right)`. Empty leaves and
-subtrees use the same domain-separated hash with their level, so they are fixed
-independently of local storage. A class commitment is its `u64` member count and
-root; the manifest digest commits to the canonical class-tag ordering and every
-class commitment. The exact byte framing is length-prefixed canonical encoding;
-no implementation-defined map order or unhashed count is permitted. An
-initial/reset full manifest carries every fact byte; the receiver constructs each
-dictionary from those facts and verifies its advertised count/root before the
-manifest can become complete.
-
-An incremental transition names `(previous_manifest_digest, previous_epoch)`
-and a successor manifest. For every affected class it supplies the old/new
-commitments and a canonical sequence sorted by `(class_tag, key, op)`. Every
-`Add` carries the full fact plus a current-root non-membership proof; every
-`Remove` carries the full existing leaf plus a current-root membership proof. A
-fact-content change is a remove followed by an add, never a mutable relabel.
-The receiver verifies the predecessor commitment, applies each proof against
-the root produced by the preceding canonical operation, updates the count, and
-requires the final root/count to equal the successor commitment. It then
-verifies the successor manifest digest. Thus each per-change proof has an
-executable root-transition algorithm, rather than trusting a claimed new root.
-
-The receiver accepts a transition only when its active manifest exactly equals
-the named predecessor and every authenticated operation validates. It then
-changes only the affected input relations and lets local IVM produce the
-terminal delta. This is the manifest form of
-`groove/SPEC/INVARIANTS.md::INV-INC-1`: neither normal updates nor manifest
-bookkeeping permit a full terminal/cache rebuild.
-
-If a live transition contradicts its received predecessor or any
-count/root/add/remove check fails, the receiver leaves the active view unchanged
-and surfaces the protocol error described above. Missing payload bytes during
-an explicitly negotiated initial/reconnect repair can still request the exact
-missing member or a full reset; that repair mechanism must not hide an impossible
-live transition. It is never valid to infer a successor from a projected terminal
-cache.
-
-The required crash-point ladder covers: each inactive class member staged; IVM
-precomputation before the durable swap; after the durable swap but before local
-publication enqueue; after enqueue but before local consumer observation; and
-restart before/after persisting a fast receipt. Each point must recover to one
-complete manifest whose locally derived terminal equals the authority's
-one-shot result, and must never report settled or known-state-fast from a
-partial manifest.
-
-In particular, a receiver MUST NOT relabel raw `Record` bytes authored under
-`v1` as a `v2` row merely because a `v2` subscription requested them. It decodes
-under `v1`, applies the explicit ordered lenses, and only then obtains a `v2`
-logical row. The wire protocol MUST NOT add an ad hoc `ProjectedAppRow` (or any
-equivalent "already selected" row carrier) to make a peer cache look current.
-Nor may it use terminal root/path operations, packed app-row bytes, or a
-`ResultPayload` as an alternate replicated source of truth. These values may be
-locally cached, dropped, and recomputed from the closure; their descriptor,
-projection, and host ABI have no peer-sync authority (`INV-SYNC-31`,
-`INV-SYNC-32`).
-
-This distinction applies equally to simple roots and to joins, arrays, nested
-relations, ordering, windows, and aggregates: the local IVM receives
-manifest-admitted authored-history facts plus authority-maintained witnesses and
-produces the result member, relation/path, and terminal effects. It does not
-reconstruct a query from a server-projected tree, and the server does not ask
-bindings to interpret relation facts or rerun authorization.
-The source identity of every row and witness is stable across this path, so a
-replacement, deletion, or policy revocation retracts the same local fact that
-caused the prior output.
-
-Branch views are closed in the same way, but their closure is
-source-specific. The manifest names normalized head/base branch keys and any frozen
-base `SnapshotRef`, and includes only the selected layer winners. It MUST NOT
-admit a same-row fact from another branch key or a post-cut base change merely because
-that fact is present locally. A missing base contribution, head witness, or
-branch-key-qualified authority fact prevents settlement and is repaired or reset
-as part of that read-view closure (ch. 11).
-
-The result is deterministic: with the same ordered catalogue closure, canonical
-fact multiset, authority admission facts, canonical shape/binding/read view, and
-frontier, two receivers must derive the same terminal result. A malformed,
-missing, contradictory, or out-of-order component parks or rejects the update;
-it never triggers byte relabeling, an independent semantic scan, or a best-effort
-projected-row repair. A missing manifest member of **any** fact class is repaired
-by its stable fact identity and class; if exact repair cannot prove the same
-manifest/epoch, the authority sends a new reset closure with a new manifest.
-
-Authority-produced terminal operations are not part of the replication
-contract. They cannot be an input to correctness, repair, settlement, or
-application publication and MUST NOT appear in a post-cut `ViewUpdate`. The
-pre-cut `terminal_operations` carrier and terminal-reset cache are retired by
-`INV-SYNC-36`; implementations remove them rather than retaining an empty,
-diagnostic, compatibility, or facade-side application path. Ordered terminal
-operations remain an internal output of the receiver's own Groove graph and may
-cross the local Rust-to-host binding ABI, which is not peer sync.
-
-Each post-cut `ViewUpdate` instead carries typed covered-input facts scoped by
-its exact authority result and subscription. A covered input names the
-canonical normalized source path (including aliases, recursive, correlated, and
-policy roles), its logical source table and row occurrence, plus the logical
-table, concrete content/deletion version, transaction, and branch identity of
-the version body; the ordinary
-`VersionBundle` path carries the corresponding version body. A retained result therefore emits a covered-input
-remove/add when its nested child, deletion witness, or order-key source changes,
-even when result membership and relation facts do not. An idempotent authority
-tick emits neither fact transition nor body. This is the only publication seam
-needed by receiver-local reconciliation; it neither exposes collector output
-nor creates an authority ordering/index path.
-
-**Hard aggregate boundary; exceptions require a new protocol decision.** An
-ordinary aggregate is reconstructible only when its entire admitted canonical
-input multiset, grouping/window/order facts, and deterministic aggregate
-operator are in the closure; an authority-produced aggregate output is not a
-shortcut fact. A genuinely non-reconstructible operator or a privacy-preserving
-aggregate may not silently tunnel an output value through this rule. Until its
-replay inputs, disclosure boundary, stable identity, repair/reset semantics,
-and settlement proof have their own specified protocol, it is outside the
-peer-sync maintained-subscription surface and must be rejected or exposed only
-through an explicitly separate read API.
-
-Protocol state deliberately keeps facts separate: concrete row-version payloads
-received in bundles, transaction existence/metadata (`Transaction` by `TxId`),
-non-versioned synthetic result payloads (`ResultPayload` program facts keyed by
-typed result member), full transaction-payload coverage
-(`peer_payload_inventory.complete_tx_payloads` / `CompleteTxPayloadCoverage`),
-subscription-scoped exclusive completeness (`ViewCompleteExclusiveCoverage`),
-source/read-frontier coverage, policy decisions/witnesses, predicate output
-sets. Subscription-scoped exclusive completeness is a
-visibility rule for a particular view, not a reusable tx-level reference.
-
-Receiver apply is single-mode at the semantic boundary. For each receiver apply
-boundary, the runtime drains repair-clean inbound view updates, stages all bundle
-effects in one storage batch, commits once, and therefore runs one IVM tick for
-that receiver boundary. Per-link FIFO order is preserved while staging bundle
-effects; cross-subscription ordering inside the same receiver tick carries no
-protocol meaning beyond that FIFO stream.
-
-The staged batch provides read-your-own-write behavior while the receiver
-boundary is being built. That matters for same-tick transaction+fate delivery,
-multiple transactions in one boundary competing for a row's current winner, and
-ahead-overlay cleanup retractions following fate application.
-
-Reset view updates keep their wire form, but the receiver internalizes them as
-deltas: retract the previous result set for that subscription, then apply the
-reset's adds and coverage/settlement state. A reset is not a separate storage
-mode. Serve-dirty marking is also a receiver-boundary effect: if applying the
-staged batch can change what any downstream subscriber would be served, the
-subscriber connections are marked dirty at the same boundary as cache
-invalidation and applied-global-time bookkeeping.
-
-Under the intended reconstruction model, a reset replaces the receiver's
-canonical closure manifest and every class inventory for that binding view; the
-receiver re-runs local maintenance over that closure and publishes the resulting
-local terminal reset. A reset of projected rows alone is insufficient because it
-cannot prove that later local replacement, lens, policy, relation, branch-source, or
-admission deltas have the inputs required to reproduce the same result.
-
-**Implementation status (2026-07-27).** The receiver uses the staged-delta path
-for non-reset bundles; `receiver_batch_ingests_non_reset_complete_bundles_once`
-and `cold_reset_bulk_ingest_matches_incremental_ingest`
-(`crates/jazz/src/node/tests/sync.rs`) cover the one-batch/one-tick behavior.
-The remaining reset-specific bypass and the move to an `OrderedKvStorage`
-transaction are implementation work, not protocol invariants.
-
-**Structured-output delivery after the reconstruction cut.** `INV-SYNC-28` is
-retired. Peer sync carries no terminal reset or root/path `Insert`, `Update`,
-`Remove`, or `Move`. The receiver atomically installs the verified covered
-inputs, runs its local maintained program, and publishes the resulting local
-terminal reset/edit sequence only after that graph quiesces (`INV-SYNC-35..36`).
-Bindings therefore see one receiver-local sequence, never a partial authority
-sequence or a mixture of authority indices and local-overlay indices.
-Row/version payload references and peer payload dedup remain separate from
-local terminal delivery.
-
-_Further invariants._ `INV-SYNC-17` — a result add carries enough
-deletion-register witness to reconstruct the row's visible presence/absence.
-`INV-SYNC-20` — incremental view updates are observationally equivalent to a full
-reset `ViewUpdate` for the same canonical program instance (ch. 6).
-
-The universal deletion-history table is not a wire namespace. A commit still
-carries a logical table and a deletion `VersionRecord`; receiver catalogue
-admission resolves that table/schema to its receiver-local `PhysicalTableId` and
-persists the event under its local `(physical_table_id, branch_key, row)`
-prefix. A payload cannot choose or forge a physical id, and a shared storage
-layout never changes table-scoped sync or authorization semantics
-(`INV-SYNC-27`).
+The receiver must also reconcile stale extra local inputs as specified below.
+Readable negative evidence for more complex queries requires the authority to
+collect sufficient supporting rows; simplifying the carrier alone does not
+implement that collection. The scalar pilot and its explicit limitations are
+specified under “Readable negative evidence and the pilot boundary.” Opaque
+policy evidence and shallow aggregates require a separately specified,
+feature-negotiated extension; they MUST NOT be smuggled into ordinary row
+payloads as projected results or unnamed program facts.
 
 ### 8.5 Subscription Attach, Reset, And Detach
 
@@ -799,11 +542,11 @@ instance `(shape, resolved_read, policy, binding)` and maintains one shared view
 for that key, then fans `ViewUpdate`s out to each usage-site `SubscriptionKey`. Remote serving
 options are settled-only: `Local`/`None` are link-local facade tiers and must be
 normalized before propagation or rejected by a serving peer. A new usage-site
-subscription always receives a complete replacement response with
-`reset_result_set = true`; later updates may be incremental. Applying a reset
-response clears the receiver's settled subscription result set before applying
-the replacement rows (`INV-SYNC-10`), because removals against a discarded
-server-side result set are no longer expressible.
+subscription receives a complete supporting-row replacement once ready;
+every later non-pending update is also a complete replacement. The receiver
+compares it with the previous set and derives local input changes
+(`INV-SYNC-10`); the sender does not need to retain a matching incremental
+predecessor at the receiver.
 
 While a usage-site `SubscriptionKey` is active on a live link, its canonical
 attachment is immutable. The `Subscribe.shape_id` must equal
@@ -1064,27 +807,21 @@ views' confirmed cuts. The separate `history_complete` capability determines
 whether `committed_global_time` is also a locally readable complete-history
 frontier (ch. 3 and ch. 5).
 
-For the reconstruction contract, `settled_through` is necessary but not
-sufficient. Settlement means the receiver has installed a **complete,
-reproducible input closure** for that cursor: ordered catalogue lineage,
-authorized canonical version/witness facts, authoritative admission facts, and
-the exact shape/binding/read-view identity. More precisely, the receiver must
-hold one complete closure manifest for the selected authority epoch and verify
-every catalogue, authored-history, branch-source, correlation, admission, replacement,
-and settlement inventory named by it. A reconnect fast cursor may omit a known
-version body only under the ordinary repair rule, but it cannot certify
-settlement until every omitted body and every needed fact in every manifest
-class is locally available, manifest digests match, and local IVM has drained.
-Durable recovery rebuilds that closure from durable canonical state and/or
-requests exact class-specific repairs; it does not rehydrate settlement from a
-persisted projected terminal cache (`INV-SYNC-34`).
+For reconstruction, `settled_through` is necessary but not sufficient. The
+receiver must have admitted the complete supporting set, the catalogue needed
+to interpret it, and every exact native body for the selected authority usage.
+Its local IVM must finish before settlement is published. A fast cursor permits
+native-body dedup; it does not stand in for a fresh authority confirmation or
+allow partially available inputs. Recovery rebuilds from durable native state
+and repairs missing bodies, rather than trusting a persisted projected terminal
+cache (`INV-SYNC-34`).
 
 The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
 may be omitted iff the receiver's membership in it is believed — "row in the
 query's scope now" under a fast declaration, exact set membership under a slow
 declaration — and, for fast declarations, the version settled at or before
 `p`. Not-yet-fated versions are always shipped under a fast declaration.
-Result membership, program facts, and inventory refs are never omitted — only
+The complete supporting-row set and inventory refs are never omitted — only
 payload bodies.
 
 The optimism is bounded by two nets. First, the structural integrity check: a
@@ -1095,12 +832,9 @@ tx_node_id)` payloads, and the server MUST serve them subject to ordinary read
 policy (`INV-SYNC-26`). Convergence is preserved: a stream served under
 known-state dedup followed by its repairs MUST be observationally equivalent
 to the same stream served without dedup (`INV-SYNC-25`, cf. `INV-SYNC-20`).
-The closure manifest extends that discipline beyond version bodies: a receiver
-requests the exact missing catalogue, branch-source, correlation, admission,
-replacement, or settlement fact by its manifest class and identity. A server
-that cannot provide a matching member of the current manifest sends a reset
-with a new manifest; it must not leave the receiver partially settled or fill
-the gap from another binding view. The canonical repair-carrying case is
+A receiver must not fill a gap from another binding's authority receipt or
+claim settlement while an exact supporting body is unavailable. A superseded
+set is discarded when a newer complete set arrives. The canonical repair-carrying case is
 visibility gained without a new version being minted — a policy/membership
 change admitting rows whose versions settled at or before `p` (ch. 7);
 version-minting scope entry is self-consistent because the entering version
@@ -1292,7 +1026,7 @@ not a wire role or a cache history-completeness claim.
 
 Strict receivers retain the selected usage's deletion-layer CoveredInput facts
 and exact version bodies beside the content graph, since a tombstone contributes
-no app tuple. They forward those witnesses under the original source occurrence;
+no app tuple. They forward those witnesses as ordinary physical row/version references;
 replacement or teardown releases them. They never select a deletion from an
 unrelated shared-cache version. This retained state is proportional to the
 selected scope's deletion witnesses and changes only with its source receipt.
