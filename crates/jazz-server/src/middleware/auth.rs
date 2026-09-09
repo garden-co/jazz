@@ -317,7 +317,9 @@ impl JwksRefreshFlight {
     }
 
     fn publish(&self, result: Result<JwkSet, String>) {
-        let _ = self.result.send(Some(result));
+        // A caller can join before subscribing. Retain completion even when no
+        // receivers exist yet, including fetch errors and owner cancellation.
+        self.result.send_replace(Some(result));
     }
 }
 
@@ -1513,6 +1515,75 @@ mod tests {
                 }
             ]
         })
+    }
+
+    // The public load API cannot pause between joining a flight and subscribing.
+    // Join internally to force that scheduling window, but complete the owner
+    // through its real HTTP/error/cancellation paths.
+    async fn assert_jwks_late_waiter_completion(fail_fetch: bool, cancel_owner: bool) {
+        let probe = JwksProbe::start(jwks_document("late-kid", "late-secret")).await;
+        if fail_fetch {
+            probe.set_body(None).await;
+        }
+        let gate = probe.gate_next_cohort().await;
+        let cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            reqwest::Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        let owner = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.load(false).await })
+        };
+        gate.entered.notified().await;
+        let (waiter, became_owner) = cache.start_or_join_refresh();
+        assert!(!became_owner);
+        assert_eq!(waiter.result.receiver_count(), 0);
+
+        let expected = if cancel_owner {
+            owner.abort();
+            assert!(
+                owner
+                    .await
+                    .expect_err("owner must be cancelled")
+                    .is_cancelled()
+            );
+            Err("JWKS refresh was cancelled".to_owned())
+        } else {
+            gate.released.store(true, Ordering::Release);
+            gate.release.notify_waiters();
+            owner.await.expect("owner must not panic")
+        };
+        assert_eq!(expected.is_err(), fail_fetch || cancel_owner);
+        assert!(cache.lock_refresh_flight().is_none());
+        // Subscribe only after completion and removal from the cache's active slot.
+        // Repeat to prove the result remains available for every late joiner.
+        for _ in 0..2 {
+            let actual = tokio::time::timeout(Duration::from_secs(1), waiter.wait())
+                .await
+                .expect("joined request must receive completion without hanging");
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+        assert_eq!(probe.requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_success() {
+        assert_jwks_late_waiter_completion(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_fetch_error() {
+        assert_jwks_late_waiter_completion(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_cancellation() {
+        assert_jwks_late_waiter_completion(false, true).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
