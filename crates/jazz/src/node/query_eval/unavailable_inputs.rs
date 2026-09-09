@@ -18,6 +18,25 @@ pub(crate) struct LocalUnavailableInput {
     rows: BTreeSet<RowUuid>,
 }
 
+/// Final-owner drop queues reclamation without borrowing the node or running
+/// storage work. Arc preserves PeerState's cross-thread ownership contract.
+#[derive(Debug)]
+pub(crate) struct EdgeAvailabilityOwner {
+    scope: PolicyBindingKey,
+    retirements: std::sync::Weak<std::sync::Mutex<VecDeque<PolicyBindingKey>>>,
+}
+
+impl Drop for EdgeAvailabilityOwner {
+    fn drop(&mut self) {
+        if let Some(queue) = self.retirements.upgrade() {
+            queue
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push_back(self.scope.clone());
+        }
+    }
+}
+
 fn descriptor() -> RecordDescriptor {
     RecordDescriptor::new([("row_uuid", ValueType::Uuid)])
 }
@@ -185,6 +204,12 @@ impl<S: OrderedKvStorage> NodeState<S> {
         &self,
         scope: &PolicyBindingKey,
     ) -> Result<(), Error> {
+        // Serving graph ownership is bounded by normal query/connection
+        // admission and reclaimed on close, not by the request-only advice
+        // cache's 256-context budget. Do not cap an Edge at 256 readers.
+        if self.query.edge_availability_owners.contains_key(scope) {
+            return Ok(());
+        }
         let live_scopes = self
             .query
             .local_unavailable_inputs
@@ -194,6 +219,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
             })
             .map(|((scope, _), _)| scope)
             .chain(self.query.local_availability_authorities.keys())
+            .filter(|key| !self.query.edge_availability_owners.contains_key(*key))
             .collect::<BTreeSet<_>>();
         if !live_scopes.contains(scope)
             && live_scopes.len() >= crate::authorization_scope::MAX_AUTHORIZATION_SCOPES
@@ -203,11 +229,68 @@ impl<S: OrderedKvStorage> NodeState<S> {
         Ok(())
     }
 
+    pub(super) fn pin_edge_availability_scope(
+        &mut self,
+        scope: PolicyBindingKey,
+    ) -> std::sync::Arc<EdgeAvailabilityOwner> {
+        if let Some(owner) = self
+            .query
+            .edge_availability_owners
+            .get(&scope)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return owner;
+        }
+        let owner = std::sync::Arc::new(EdgeAvailabilityOwner {
+            scope: scope.clone(),
+            retirements: std::sync::Arc::downgrade(&self.query.edge_availability_retirements),
+        });
+        self.query
+            .edge_availability_owners
+            .insert(scope, std::sync::Arc::downgrade(&owner));
+        owner
+    }
+
+    async fn retire_closed_edge_availability_scopes(&mut self) -> Result<(), Error> {
+        loop {
+            let scope = self
+                .query
+                .edge_availability_retirements
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .front()
+                .cloned();
+            let Some(scope) = scope else {
+                return Ok(());
+            };
+            // Keep the queued entry across awaits: cancellation or storage
+            // failure must leave the cleanup retryable by the next owner.
+            if self
+                .query
+                .edge_availability_owners
+                .get(&scope)
+                .is_some_and(|owner| owner.strong_count() == 0)
+            {
+                self.retire_local_availability_scope_inputs(&scope).await?;
+                self.query.edge_availability_owners.remove(&scope);
+                self.query
+                    .local_unavailable_inputs
+                    .retain(|(key, _), input| key != &scope || !input.rows.is_empty());
+            }
+            self.query
+                .edge_availability_retirements
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .pop_front();
+        }
+    }
+
     async fn local_unavailable_input(
         &mut self,
         scope: &PolicyBindingKey,
         table: crate::ids::GlobalPhysicalTableId,
     ) -> Result<InputSourceId, Error> {
+        self.retire_closed_edge_availability_scopes().await?;
         let key = (scope.clone(), table);
         if let Some(input) = self.query.local_unavailable_inputs.get(&key)
             && input.runtime_token == self.groove_runtime_token

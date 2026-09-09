@@ -1150,3 +1150,134 @@ fn local_availability_readmission_after_restart_uses_incarnation_not_epoch_order
     );
     assert_eq!(parent_ids(&mut node, &schema, alice).len(), 2);
 }
+
+/// Internal lifecycle control retains live graphs while closing hundreds of
+/// siblings. Results and subsequent live updates detect premature retirement.
+#[test]
+fn edge_serving_scope_churn_reclaims_closed_inputs_without_retiring_live_siblings() {
+    let (_dir, mut node, schema) = fixture();
+    node.enable_edge_query_serving();
+    let alice = author(1);
+    let scope = node.local_read_policy_binding(alice).unwrap();
+    node.set_local_row_unavailable(&scope, "parents", row(1), true)
+        .unwrap();
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (mut live, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Global,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::EdgeServing,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 1);
+    let bob = author(2);
+    let (mut local_live, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            bob,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 2);
+    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
+        let mut bytes = [0x9a; 16];
+        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+        let reader = AuthorSubject::for_test_bytes(bytes);
+        let (temporary, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                reader,
+                DurabilityTier::Global,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::EdgeServing,
+            )
+            .unwrap();
+        assert_eq!(initial.root_count, 2, "reader {index}");
+        node.database.unsubscribe(temporary.subscription.id());
+        drop(temporary);
+    }
+    assert!(
+        node.query.local_unavailable_inputs.len() < 8,
+        "closed empty scopes must not accumulate"
+    );
+    node.set_local_row_unavailable(&scope, "parents", row(1), false)
+        .unwrap();
+    assert!(
+        node.drain_local_maintained_view_subscription(&mut live, None)
+            .unwrap()
+            .is_some()
+    );
+    let bob_scope = node.local_read_policy_binding(bob).unwrap();
+    node.set_local_row_unavailable(&bob_scope, "parents", row(1), true)
+        .unwrap();
+    assert!(
+        node.drain_local_maintained_view_subscription(&mut local_live, None)
+            .unwrap()
+            .is_some()
+    );
+    node.database.unsubscribe(live.subscription.id());
+    node.database.unsubscribe(local_live.subscription.id());
+}
+
+/// Capability checks can be abandoned before Subscribe opens its evaluator.
+#[test]
+fn edge_serving_preflight_churn_reclaims_unowned_inputs() {
+    let (_dir, mut node, schema) = fixture();
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
+        let mut bytes = [0x9b; 16];
+        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+        node.ensure_peer_maintained_subscription_view_supported(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::for_test_bytes(bytes),
+            &ReadViewSpec::default(),
+            QueryAuthorizationMode::EdgeServing,
+        )
+        .unwrap();
+    }
+    assert!(node.query.local_unavailable_inputs.len() < 4);
+}
+
+/// The advice cache's fixed request quota must not cap live Edge readers.
+#[test]
+fn edge_serving_more_than_advice_quota_live_readers_remain_independent() {
+    let (_dir, mut node, schema) = fixture();
+    let shape = Query::from("parents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut readers = Vec::new();
+    for index in 0..(crate::authorization_scope::MAX_AUTHORIZATION_SCOPES + 4) {
+        let mut bytes = [0x9c; 16];
+        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+        let reader = AuthorSubject::for_test_bytes(bytes);
+        let (live, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                reader,
+                DurabilityTier::Global,
+                &ReadViewSpec::default(),
+                None,
+                QueryAuthorizationMode::EdgeServing,
+            )
+            .unwrap();
+        assert_eq!(initial.root_count, 2, "reader {index}");
+        readers.push(live);
+    }
+    for live in readers {
+        node.database.unsubscribe(live.subscription.id());
+    }
+}

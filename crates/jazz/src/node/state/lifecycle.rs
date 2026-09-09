@@ -623,6 +623,8 @@ where
             query: QueryServing {
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
+                edge_availability_owners: BTreeMap::new(),
+                edge_availability_retirements: Default::default(),
                 local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),

@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
+pub(crate) use unavailable_inputs::EdgeAvailabilityOwner;
 
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
@@ -3721,6 +3722,18 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
+        // Acquire before compiling the input graph, including across cold
+        // storage awaits. On failure the temporary owner drops; on success
+        // the maintained view retains it for its complete serving lifetime.
+        let edge_availability_owner = if authorization_mode == QueryAuthorizationMode::EdgeServing
+            || (self.edge_query_serving
+                && authorization_mode == QueryAuthorizationMode::ClientLocal)
+        {
+            unavailable_inputs::local_unavailable_policy_binding(&request)
+                .map(|scope| self.pin_edge_availability_scope(scope))
+        } else {
+            None
+        };
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
                 if let SourceExpr::SettledBindingView {
@@ -3870,6 +3883,7 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
         // from equal row UUIDs or a search for the first matching table label.

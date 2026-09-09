@@ -844,6 +844,10 @@ struct QueryServing {
         query_eval::LocalAvailabilityRecord,
     >,
     local_availability_authorities: BTreeMap<PolicyBindingKey, (NodeUuid, u64)>,
+    /// A serving scope remains live while any maintained Edge view uses it.
+    edge_availability_owners:
+        BTreeMap<PolicyBindingKey, std::sync::Weak<query_eval::EdgeAvailabilityOwner>>,
+    edge_availability_retirements: std::sync::Arc<std::sync::Mutex<VecDeque<PolicyBindingKey>>>,
     /// Runtime-only, exact-context app-read exclusions. These do not change
     /// stored payloads or serving-side permission proofs.
     local_unavailable_inputs: BTreeMap<
