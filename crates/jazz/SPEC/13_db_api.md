@@ -402,6 +402,14 @@ Rust `UpsertOptions::target` now uses `WriteTarget` rather than
 that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
 matches over the options field must handle `WriteTarget::BranchView`.
 
+A binding's asynchronous one-shot read MUST run after local mutation commands
+already admitted when the read began. WASM and NAPI place a marker in the owner
+FIFO before reading; a read following a queued deletion must not include the
+old row in a nested relation simply because that deletion has not executed yet.
+The marker does not wait for upstream acknowledgement or later writes, and does
+not claim a durability tier. Transaction reads retain their transaction-aware
+FIFO ordering. With no pending local commands the marker is immediately ready.
+
 JavaScript standalone upserts submit only the supplied cells to the Rust write
 queue. The facade MUST NOT synchronously query row existence first: another
 suspended operation may own the node, and blocking the host would prevent that

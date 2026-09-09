@@ -634,6 +634,16 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Order a binding read after mutations already admitted on this owner.
+    /// This only waits for local command execution, not persistence or sync,
+    /// and later writes cannot extend the wait.
+    #[doc(hidden)]
+    pub fn queued_mutation_barrier(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
+        self.node.queued_mutation_barrier()
+    }
+
     /// Observe a ready queued staging failure without consuming its transaction
     /// poison. A subsequent commit must report the same rejected transaction.
     #[doc(hidden)]

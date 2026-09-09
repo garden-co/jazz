@@ -2524,7 +2524,19 @@ impl NapiDb {
                 let attachment = Rc::new(RefCell::new(None::<CoreQueryAttachment>));
                 let cleanup_attachment = Rc::clone(&attachment);
                 let cleanup_db = Rc::clone(&db);
+                let preceding_writes =
+                    (!synchronous && open_tx.is_none()).then(|| db.queued_mutation_barrier());
                 let future = Box::pin(async move {
+                    if let Some(preceding_writes) = preceding_writes {
+                        preceding_writes
+                            .await
+                            .map_err(|_| {
+                                napi::Error::from_reason(
+                                    "local write ordering barrier was cancelled",
+                                )
+                            })?
+                            .map_err(napi_error)?;
+                    }
                     let requires_coverage = non_durable_client
                         || (opts.tier >= jazz::tx::DurabilityTier::Edge
                             && opts.propagation == CorePropagation::Full);

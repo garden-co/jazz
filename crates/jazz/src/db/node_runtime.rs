@@ -464,6 +464,27 @@ where
         open_tx_id: OpenTransactionId,
         read: impl Future<Output = Result<T, Error>> + 'static,
     ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        self.enqueue_read_after_mutations(Some(open_tx_id), read)
+    }
+
+    pub(super) fn queued_mutation_barrier(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
+        if self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let _ = sender.send(Ok(()));
+            return receiver;
+        }
+        self.enqueue_read_after_mutations(None, std::future::ready(Ok(())))
+    }
+
+    fn enqueue_read_after_mutations<T: 'static>(
+        &self,
+        open_tx_id: Option<OpenTransactionId>,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
         let (sender, receiver) = futures::channel::oneshot::channel();
         let sender = Rc::new(RefCell::new(Some(sender)));
         let read_sender = Rc::clone(&sender);
@@ -472,7 +493,7 @@ where
             .borrow_mut()
             .push_back(QueuedMutationOperation {
                 tx_id: None,
-                open_tx_id: Some(open_tx_id),
+                open_tx_id,
                 future: Box::pin(async move {
                     let result = read.await;
                     if let Some(sender) = read_sender.borrow_mut().take() {

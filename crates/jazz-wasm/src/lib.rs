@@ -1982,7 +1982,16 @@ impl WasmDb {
             .map_err(to_js_error)?;
             return bytes_to_js(encode_synchronous_rows(&rows)?);
         }
+        let preceding_writes = open_tx
+            .is_none()
+            .then(|| with_wasm_db!(&inner, |db| db.queued_mutation_barrier()));
         let future = Box::pin(async move {
+            if let Some(preceding_writes) = preceding_writes {
+                preceding_writes
+                    .await
+                    .map_err(|_| JsValue::from_str("local write ordering barrier was cancelled"))?
+                    .map_err(to_js_error)?;
+            }
             let requires_coverage = tier_is_explicit
                 && (non_durable_client
                     || (opts.tier >= DurabilityTier::Edge
