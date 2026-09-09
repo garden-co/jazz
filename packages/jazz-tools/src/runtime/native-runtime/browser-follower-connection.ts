@@ -195,7 +195,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       if (controlClosed) return;
       controlClosed = true;
       closeInspectorControlPort(channel.port1);
-      channel.port2.close();
     };
     const onAbort = () => {
       if (!this.pending.delete(id)) return;
@@ -214,6 +213,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         [channel.port2],
       );
     } catch (error) {
+      channel.port2.close();
       this.fail(asError(error));
     }
     try {
