@@ -2833,11 +2833,21 @@ where
                                 if matches!(&message, SyncMessage::ViewUpdate(payload)
                                     if !payload.peer_payload_inventory.opening_pending)
                                 {
-                                    for repair in pending_row_version_repairs.iter_mut() {
-                                        if matches!(&repair.update, SyncMessage::ViewUpdate(payload)
+                                    // Keep the active request until its correlated reply
+                                    // arrives, but discard obsolete work that was never
+                                    // sent. A slow repair must not retain every complete
+                                    // snapshot produced while the connection is waiting.
+                                    debug_assert_eq!(pending_row_version_repairs.len(), pending_row_version_fetches.len());
+                                    for index in (0..pending_row_version_repairs.len()).rev() {
+                                        if matches!(&pending_row_version_repairs[index].update, SyncMessage::ViewUpdate(payload)
                                             if payload.subscription == subscription)
                                         {
-                                            repair.superseded = true;
+                                            if pending_row_version_fetches[index].sent_count == 0 {
+                                                pending_row_version_repairs.remove(index);
+                                                pending_row_version_fetches.remove(index);
+                                            } else {
+                                                pending_row_version_repairs[index].superseded = true;
+                                            }
                                         }
                                     }
                                 }

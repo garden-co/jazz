@@ -1305,3 +1305,81 @@ fn known_state_repair_batches_more_than_one_wire_request() {
         expected
     );
 }
+
+/// Alice's receiver keeps only the latest unsent complete snapshot while Core's
+/// first immutable-body repair is delayed. Releasing that response must still
+/// let Alice converge to the newest version, rather than replaying the backlog.
+///
+/// Core ──many complete snapshots──► Alice (one active + one latest repair)
+/// Core ──delayed repair response──► Alice ──latest repair──► Core
+#[test]
+fn newer_supporting_snapshots_coalesce_unsent_repairs() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb2, alice, &schema);
+    let row = RowUuid::from_bytes([0xb3; 16]);
+    server
+        .insert_with_id("todos", row, cells("0", false, alice))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut held = Vec::new();
+    let mut snapshot = RelationSnapshot::default();
+    for revision in 0..16 {
+        if revision > 0 {
+            server
+                .update(
+                    "todos",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Model a deduplicated body missing at this receiver. Hold only
+            // repair replies; complete snapshots keep arriving normally.
+            responses.borrow_mut().retain_mut(|message| {
+                match message {
+                    SyncMessage::ViewUpdate(payload) => payload.version_carriers.clear(),
+                    SyncMessage::RowVersionPayloads { .. } => {
+                        held.push(message.clone());
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+    }
+    let queued = match &upstream.borrow().link {
+        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
+        _ => unreachable!("client upstream"),
+    };
+    assert!(
+        queued <= 2,
+        "obsolete complete snapshots retained {queued} repairs"
+    );
+    assert!(!held.is_empty(), "the first repair was actually delayed");
+    responses.borrow_mut().extend(held);
+    for _ in 0..24 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("15".to_owned()))
+    );
+}

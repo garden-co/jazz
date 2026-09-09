@@ -824,7 +824,18 @@ where
         };
         let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
         let mut facts = BTreeSet::new();
+        let mut sources_by_table = BTreeMap::<_, Vec<_>>::new();
         for source in &sources {
+            let physical = self
+                .catalogue
+                .physical_mappings
+                .get(&schema)
+                .and_then(|mapping| mapping.identities.tables.get(source.table.as_str()))
+                .ok_or(Error::InvalidStoredValue(
+                    "compiled source physical table mapping missing",
+                ))?
+                .id;
+            sources_by_table.entry(physical).or_default().push(source);
             facts.insert(ProgramFactEntry::ProgramSourceCoverage(
                 crate::protocol::ProgramSourceCoverageEntry {
                     source: source.clone(),
@@ -840,37 +851,27 @@ where
                     transition: "invalid or duplicate supporting physical row version".to_owned(),
                 });
             }
-            let mut mapped = false;
-            for source in &sources {
-                let physical = self
-                    .catalogue
-                    .physical_mappings
-                    .get(&schema)
-                    .and_then(|mapping| mapping.identities.tables.get(source.table.as_str()))
-                    .ok_or(Error::InvalidStoredValue(
-                        "compiled source physical table mapping missing",
-                    ))?
-                    .id;
-                if physical == row.physical_table {
-                    mapped = true;
-                    facts.insert(ProgramFactEntry::CoveredInput(
-                        crate::protocol::CoveredInputEntry {
-                            source: source.clone(),
-                            version_table: row.version_table.clone(),
-                            source_row: row.row,
-                            version: row.version.clone(),
-                        },
-                    ));
-                }
-            }
-            if !mapped {
+            let Some(sources) = sources_by_table.get(&row.physical_table) else {
                 return Err(Error::InvalidAuthoritySourceClosure {
                     subscription: update.subscription,
                     transition: "supporting row physical table is outside the query dataset"
                         .to_owned(),
                 });
+            };
+            // Index the compiler's occurrences once; a row need only visit
+            // occurrences of its own table, rather than every query source.
+            for source in sources {
+                facts.insert(ProgramFactEntry::CoveredInput(
+                    crate::protocol::CoveredInputEntry {
+                        source: (*source).clone(),
+                        version_table: row.version_table.clone(),
+                        source_row: row.row,
+                        version: row.version.clone(),
+                    },
+                ));
             }
         }
+
         let previous = prior_snapshots.get(&key).cloned().or_else(|| {
             self.query.authority_results.get(&key).and_then(|state| {
                 matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }).then(|| {
@@ -1104,6 +1105,13 @@ where
         // cannot repair a missing same-transaction register witness.
         let mut result_add_deletion_winners =
             BTreeMap::<(String, RowUuid), Option<VersionRow>>::new();
+        // Initial snapshots may add thousands of rows. Test membership by
+        // coordinate instead of rescanning the entire result-add list for
+        // each wanted native body.
+        let result_add_coordinates = row_result_adds
+            .iter()
+            .map(|(table, row, tx)| (table.as_str(), *row, *tx))
+            .collect::<BTreeSet<_>>();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
@@ -1154,14 +1162,7 @@ where
             }
             let mut same_transaction_deletion_winners = Vec::new();
             for (entry_table, row_uuid) in wanted_rows {
-                if !row_result_adds
-                    .iter()
-                    .any(|(table, result_row_uuid, content_tx_id)| {
-                        table.as_str() == entry_table
-                            && result_row_uuid == row_uuid
-                            && content_tx_id == tx_id
-                    })
-                {
+                if !result_add_coordinates.contains(&(entry_table.as_str(), *row_uuid, *tx_id)) {
                     continue;
                 }
                 let winner_key = (entry_table.clone(), *row_uuid);
