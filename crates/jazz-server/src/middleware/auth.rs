@@ -1434,11 +1434,14 @@ mod tests {
 
                 state.requests.fetch_add(1, Ordering::SeqCst);
                 let gate = state.gate.lock().await.clone();
-                if let Some(gate) = gate
-                    && !gate.released.load(Ordering::Acquire)
-                {
-                    gate.entered.notify_waiters();
-                    gate.release.notified().await;
+                if let Some(gate) = gate {
+                    let released = gate.release.notified();
+                    tokio::pin!(released);
+                    released.as_mut().enable();
+                    if !gate.released.load(Ordering::Acquire) {
+                        gate.entered.notify_one();
+                        released.await;
+                    }
                 }
 
                 let Some(body) = state.body.read().await.clone() else {
@@ -1610,13 +1613,12 @@ mod tests {
             tokio::spawn(async move { cache.load(false).await })
         };
         overlap_gate.entered.notified().await;
-        let forced_task = {
-            let cache = overlap_cache.clone();
-            tokio::spawn(async move { cache.load(true).await })
-        };
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
+        let mut forced_load = std::pin::pin!(overlap_cache.load(true));
+        std::future::poll_fn(|cx| {
+            assert!(forced_load.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
         overlap_gate
             .released
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1625,9 +1627,8 @@ mod tests {
             .await
             .expect("ordinary overlap load must not panic")
             .expect("ordinary overlap load must succeed");
-        forced_task
+        forced_load
             .await
-            .expect("forced overlap load must not panic")
             .expect("forced overlap load must share the ordinary fetch");
         assert_eq!(
             probe.requests(),
