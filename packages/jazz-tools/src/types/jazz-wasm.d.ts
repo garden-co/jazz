@@ -139,7 +139,6 @@ declare module "jazz-wasm" {
 
     all(
       query: Uint8Array,
-      kind: "query" | "relation",
       opts: unknown,
       openTransactionId?: string,
       author?: Uint8Array,
@@ -147,7 +146,6 @@ declare module "jazz-wasm" {
     ): Uint8Array | PendingNativeRead;
     subscribe(
       query: Uint8Array,
-      kind: "query" | "relation",
       opts: unknown,
       author?: Uint8Array,
       claims?: Record<string, unknown>,

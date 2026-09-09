@@ -47,13 +47,11 @@ const cases: [string, unknown, unknown][] = [
     {
       type: "all",
       query: Uint8Array.of(0x4a, 0x52, 0x51, 0x01, 0x00),
-      kind: "relation",
       optionsJson,
     },
     {
       All: {
         query: [0x4a, 0x52, 0x51, 0x01, 0x00],
-        kind: "Relation",
         options_json: optionsJson,
         transaction: null,
       },
@@ -68,24 +66,23 @@ const cases: [string, unknown, unknown][] = [
   ],
   [
     "read without transaction",
-    { type: "all", query: Uint8Array.of(128), kind: "query", optionsJson },
-    { All: { query: [128], kind: "Query", options_json: optionsJson, transaction: null } },
+    { type: "all", query: Uint8Array.of(128), optionsJson },
+    { All: { query: [128], options_json: optionsJson, transaction: null } },
   ],
   [
     "relation transaction",
     {
       type: "all",
       query: Uint8Array.of(1),
-      kind: "relation",
       optionsJson,
       transaction: 256,
     },
-    { All: { query: [1], kind: "Relation", options_json: optionsJson, transaction: 256 } },
+    { All: { query: [1], options_json: optionsJson, transaction: 256 } },
   ],
   [
     "subscription",
-    { type: "subscribe", query: Uint8Array.of(128), kind: "query", optionsJson },
-    { Subscribe: { query: [128], kind: "Query", options_json: optionsJson } },
+    { type: "subscribe", query: Uint8Array.of(128), optionsJson },
+    { Subscribe: { query: [128], options_json: optionsJson } },
   ],
   [
     "settlement",

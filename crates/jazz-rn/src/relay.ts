@@ -97,7 +97,6 @@ export type NativeForegroundCommand =
   | {
       type: "all";
       query: Uint8Array;
-      kind: "query" | "relation";
       optionsJson: string;
       transaction?: number;
     }
@@ -105,7 +104,6 @@ export type NativeForegroundCommand =
   | {
       type: "subscribe";
       query: Uint8Array;
-      kind: "query" | "relation";
       optionsJson: string;
     }
   | { type: "drainSubscription"; subscription: number }
@@ -386,7 +384,6 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     return concatForegroundBytes(
       Uint8Array.of(2),
       encodeForegroundBytes(command.query),
-      Uint8Array.of(command.kind === "query" ? 0 : 1),
       encodeForegroundString(command.optionsJson),
       command.transaction === undefined
         ? Uint8Array.of(0)
@@ -397,7 +394,6 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     return concatForegroundBytes(
       Uint8Array.of(3),
       encodeForegroundBytes(command.query),
-      Uint8Array.of(command.kind === "query" ? 0 : 1),
       encodeForegroundString(command.optionsJson),
     );
   }

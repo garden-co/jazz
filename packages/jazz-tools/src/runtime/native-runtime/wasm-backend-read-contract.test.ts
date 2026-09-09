@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../../index.js";
-import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 import { createOpenTransactionId } from "../client.js";
 import { testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
-import { openConfig, queryFromTable } from "./native-codec.js";
+import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 
 const app = s.defineApp({
@@ -27,24 +26,26 @@ describe("WASM backend read capability parity", () => {
         ),
       );
       const query = queryFromTable("notes");
-      const relation = encodeRelationQueryPostcard({
-        Project: {
-          input: { TableScan: { table: "notes" } },
-          columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
+      const relation = queryWithPredicates("notes", [], {
+        relation: {
+          Project: {
+            input: { TableScan: { table: "notes" } },
+            columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
+          },
         },
-      } satisfies RelExpr);
+      });
       const opts = { tier: "local" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [
-        () => db.all(query, "query", opts),
-        () => db.all(query, "query", opts, txId),
-        () => db.all(relation, "relation", opts),
+        () => db.all(query, opts),
+        () => db.all(query, opts, txId),
+        () => db.all(relation, opts),
       ];
       try {
         for (const read of reads) expect(await resolveRead(read())).toBeInstanceOf(Uint8Array);
-        await db.subscribe(query, "query", opts).cancel();
-        await db.subscribe(relation, "relation", opts).cancel();
+        await db.subscribe(query, opts).cancel();
+        await db.subscribe(relation, opts).cancel();
       } finally {
         db.rollbackTransaction(txId);
         db.close();

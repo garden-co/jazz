@@ -67,8 +67,7 @@ use jazz::db::{
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
-    SeededRowIdSource as CoreSeededRowIdSource, SerializedQueryKind as CoreSerializedQueryKind,
-    SerializedReadResult as CoreSerializedReadResult,
+    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
     SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
@@ -2367,7 +2366,6 @@ impl NapiDb {
     pub fn all(
         &self,
         query: Uint8Array,
-        #[napi(ts_arg_type = "'query' | 'relation'")] kind: String,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
         )]
@@ -2376,7 +2374,6 @@ impl NapiDb {
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
     ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
-        let kind = core_serialized_query_kind(&kind)?;
         let synchronous = opts
             .as_ref()
             .map(|opts| optional_json_bool_prop(opts, "sync"))
@@ -2416,7 +2413,6 @@ impl NapiDb {
                     let result = db
                         .all_serialized_query(
                             &query,
-                            kind,
                             opts,
                             open_tx,
                             admission,
@@ -2494,7 +2490,6 @@ impl NapiDb {
     pub fn subscribe(
         &self,
         query: Uint8Array,
-        #[napi(ts_arg_type = "'query' | 'relation'")] kind: String,
         #[napi(
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
@@ -2502,7 +2497,6 @@ impl NapiDb {
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
     ) -> napi::Result<Either<Subscription, PendingNativeSubscription>> {
-        let kind = core_serialized_query_kind(&kind)?;
         let opts = core_read_opts_from_json(opts)?;
         let trusted_client = self.trusted_backend;
         let explicit_author = author
@@ -2536,13 +2530,7 @@ impl NapiDb {
                             None => CoreSerializedSubscriptionAuthorization::ClientLocal,
                         };
                         let stream = db
-                            .subscribe_serialized_query(
-                                &query,
-                                kind,
-                                opts,
-                                admission,
-                                authorization,
-                            )
+                            .subscribe_serialized_query(&query, opts, admission, authorization)
                             .await
                             .map_err(napi_error)?;
                         Ok(Subscription {
@@ -3820,16 +3808,6 @@ fn core_terminal_operation_to_napi(
 
 fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().copied().map(u32::from).collect()
-}
-
-fn core_serialized_query_kind(kind: &str) -> napi::Result<CoreSerializedQueryKind> {
-    match kind {
-        "query" => Ok(CoreSerializedQueryKind::Query),
-        "relation" => Ok(CoreSerializedQueryKind::Relation),
-        _ => Err(napi::Error::from_reason(
-            "query kind must be query or relation",
-        )),
-    }
 }
 
 // ============================================================================
@@ -6292,14 +6270,7 @@ mod tests {
             Uint8Array::new(postcard::to_allocvec(&owner.table("items")).expect("encode query"));
         assert!(
             binding
-                .all(
-                    query,
-                    "query".to_owned(),
-                    None,
-                    Some(bound.to_string()),
-                    None,
-                    None,
-                )
+                .all(query, None, Some(bound.to_string()), None, None)
                 .is_ok(),
             "planted positive: the bound transaction reads successfully"
         );
@@ -6316,14 +6287,7 @@ mod tests {
             Uint8Array::new(postcard::to_allocvec(&view.table("items")).expect("encode query"));
         assert!(
             view_binding
-                .all(
-                    view_query,
-                    "query".to_owned(),
-                    None,
-                    Some(bound.to_string()),
-                    None,
-                    None,
-                )
+                .all(view_query, None, Some(bound.to_string()), None, None)
                 .is_ok(),
             "a registered schema facade shares its owner's transaction runtime"
         );

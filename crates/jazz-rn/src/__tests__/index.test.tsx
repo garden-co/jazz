@@ -14,7 +14,6 @@ type NativeForegroundCommand =
   | {
       type: "all";
       query: Uint8Array;
-      kind: "query" | "relation";
       optionsJson: string;
       transaction?: number;
     }
@@ -243,7 +242,7 @@ it("keeps malformed capability input out of the JSI foreground factory", () => {
   expect(openAttached).toHaveBeenCalledWith(admitted);
 });
 
-it("uses a compact versioned byte vocabulary for the initial foreground NativeDb slice", () => {
+it("uses the compact canonical byte vocabulary for the foreground NativeDb slice", () => {
   const relay = loadRelay({
     getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
@@ -256,10 +255,9 @@ it("uses a compact versioned byte vocabulary for the initial foreground NativeDb
     relay.encodeNativeForegroundCommand({
       type: "all",
       query: Uint8Array.of(1, 2),
-      kind: "query",
       optionsJson: "{}",
     }),
-  ).toEqual(Uint8Array.of(2, 2, 1, 2, 0, 2, 123, 125, 0));
+  ).toEqual(Uint8Array.of(2, 2, 1, 2, 2, 123, 125, 0));
   expect(relay.encodeNativeForegroundCommand({ type: "poll", operation: 129 })).toEqual(
     Uint8Array.of(7, 129, 1),
   );

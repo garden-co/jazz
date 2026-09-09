@@ -21,10 +21,9 @@ use idb_tree::IndexedDbPageStore;
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, Propagation, ReadOpts, RowCells, SeededRowIdSource, SerializedQueryKind,
-    SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    PermissionAdvice, Propagation, ReadOpts, RowCells, SeededRowIdSource, SerializedReadResult,
+    SerializedSubscriptionAuthorization, StreamingMutationKind, StreamingValueUpload,
+    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
@@ -905,7 +904,6 @@ impl WasmDbInner {
     async fn all_serialized_query(
         &self,
         query: Vec<u8>,
-        kind: SerializedQueryKind,
         opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
@@ -921,7 +919,6 @@ impl WasmDbInner {
                     owner
                         .all_serialized_query(
                             &query,
-                            kind,
                             opts,
                             open_tx,
                             request_scope,
@@ -958,13 +955,12 @@ impl WasmDbInner {
     async fn subscribe_serialized_query(
         &self,
         query: Vec<u8>,
-        kind: SerializedQueryKind,
         opts: ReadOpts,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
     ) -> Result<jazz::db::SubscriptionStream, Error> {
         with_wasm_db!(self, |db| db
-            .subscribe_serialized_query(&query, kind, opts, request_scope, authorization)
+            .subscribe_serialized_query(&query, opts, request_scope, authorization)
             .await)
     }
 
@@ -1706,14 +1702,12 @@ impl WasmDb {
     pub fn all(
         &self,
         query: Vec<u8>,
-        kind: String,
         opts: JsValue,
         open_transaction_id: Option<String>,
         author: Option<Vec<u8>>,
         claims: JsValue,
     ) -> Result<JsValue, JsValue> {
         let inner = self.open_inner()?;
-        let kind = serialized_query_kind(&kind)?;
         let tier_is_explicit = if opts.is_null() || opts.is_undefined() {
             false
         } else {
@@ -1742,7 +1736,6 @@ impl WasmDb {
             let result = inner
                 .all_serialized_query(
                     query,
-                    kind,
                     opts,
                     open_tx,
                     admission,
@@ -1773,12 +1766,10 @@ impl WasmDb {
     pub fn subscribe(
         &self,
         query: Vec<u8>,
-        kind: String,
         opts: JsValue,
         author: Option<Vec<u8>>,
         claims: JsValue,
     ) -> Result<JsValue, JsValue> {
-        let kind = serialized_query_kind(&kind)?;
         let opts = read_opts_from_js(opts)?;
         let has_explicit_author = author.is_some();
         let author = self.read_author(author)?;
@@ -1798,7 +1789,7 @@ impl WasmDb {
                     None => SerializedSubscriptionAuthorization::ClientLocal,
                 };
                 let stream = db
-                    .subscribe_serialized_query(query, kind, opts, admission, authorization)
+                    .subscribe_serialized_query(query, opts, admission, authorization)
                     .await
                     .map_err(to_js_error)?;
                 subscription_stream_to_js(db, stream)
@@ -2727,14 +2718,6 @@ fn decode_open_args(
 
 fn decode_public_schema(schema: &[u8]) -> Result<JazzSchema, JsValue> {
     jazz::tools::public_schema_convert::decode_public_schema_json(schema).map_err(to_js_error)
-}
-
-fn serialized_query_kind(kind: &str) -> Result<SerializedQueryKind, JsValue> {
-    match kind {
-        "query" => Ok(SerializedQueryKind::Query),
-        "relation" => Ok(SerializedQueryKind::Relation),
-        _ => Err(JsValue::from_str("query kind must be query or relation")),
-    }
 }
 
 async fn open_db<S>(
@@ -4416,7 +4399,6 @@ mod dynamic_schema_view_tests {
         let query = postcard::to_allocvec(&view.table("items")).unwrap();
         let result = block_on(WasmDbInner::Memory(Rc::clone(&view)).all_serialized_query(
             query,
-            SerializedQueryKind::Query,
             ReadOpts::default(),
             Some(batch),
             None,
@@ -4512,7 +4494,6 @@ mod dynamic_schema_view_tests {
         let attached_result = WasmDbInner::Memory(Rc::clone(&view))
             .all_serialized_query(
                 attached_query,
-                SerializedQueryKind::Query,
                 ReadOpts::default(),
                 Some(attached_batch),
                 None,
@@ -4587,7 +4568,6 @@ mod dynamic_schema_view_tests {
         let all = view_binding
             .all(
                 view_query.clone(),
-                "query".to_owned(),
                 JsValue::NULL,
                 Some(tx_id.to_string()),
                 None,
@@ -4600,7 +4580,6 @@ mod dynamic_schema_view_tests {
         let attributed_all = view_binding
             .all(
                 view_query,
-                "query".to_owned(),
                 JsValue::NULL,
                 Some(tx_id.to_string()),
                 Some(alice.canonical().as_bytes().to_vec()),
@@ -4619,7 +4598,6 @@ mod dynamic_schema_view_tests {
         let mismatched_all = binding
             .all(
                 owner_query,
-                "query".to_owned(),
                 JsValue::NULL,
                 Some(tx_id.to_string()),
                 Some(bob.canonical().as_bytes().to_vec()),

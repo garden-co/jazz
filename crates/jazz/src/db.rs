@@ -4660,14 +4660,6 @@ impl Drop for SubscriptionStream {
     }
 }
 
-/// Canonical serialized query families accepted by runtime host adapters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[doc(hidden)]
-pub enum SerializedQueryKind {
-    Query,
-    Relation,
-}
-
 /// Materialized result of a serialized host read.
 #[doc(hidden)]
 pub enum SerializedReadResult {

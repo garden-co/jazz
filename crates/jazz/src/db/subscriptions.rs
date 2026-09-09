@@ -12,13 +12,12 @@ where
     pub async fn subscribe_serialized_query(
         &self,
         query: &[u8],
-        kind: SerializedQueryKind,
         opts: ReadOpts,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
     ) -> Result<SubscriptionStream, Error> {
         let prepared = self
-            .prepare_serialized_query_async(query, kind, request_scope)
+            .prepare_serialized_query_async(query, request_scope)
             .await?;
         match authorization {
             SerializedSubscriptionAuthorization::ClientLocal => {

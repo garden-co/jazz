@@ -77,7 +77,7 @@ export declare class NapiDb {
    * Decode, prepare, and execute one read inside Rust. Query-plan ownership
    * never crosses the language boundary.
    */
-  all(query: Uint8Array, kind: 'query' | 'relation', opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /**
    * Set ambient claims for mutation and other explicitly serialized
    * identity operations. Prepared queries capture scoped identity and
@@ -86,7 +86,7 @@ export declare class NapiDb {
    */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  subscribe(query: Uint8Array, kind: 'query' | 'relation', opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription | PendingNativeSubscription
+  subscribe(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription | PendingNativeSubscription
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void

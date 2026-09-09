@@ -172,7 +172,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     let cancelSubscription: number | undefined;
     try {
       await withWatchdog(commitGate.started, "push holds the real WASM owner");
-      const subscription = db.subscribe(query, "query", opts) as {
+      const subscription = db.subscribe(query, opts) as {
         poll(): unknown | undefined;
         cancel(): void;
       };

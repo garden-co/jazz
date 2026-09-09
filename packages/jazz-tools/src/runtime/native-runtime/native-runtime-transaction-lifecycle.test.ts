@@ -681,7 +681,6 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         fakeDb({
           all: (
             _query: object,
-            _kind: "query" | "relation",
             _opts: unknown,
             receivedTransactionId: string,
             receivedIdentity: Uint8Array,
@@ -1258,7 +1257,6 @@ it("keeps session-scoped transaction reads on the client-local native method", a
         fakeDb({
           all: (
             _query: object,
-            _kind: "query" | "relation",
             _opts: unknown,
             receivedTransactionId: string,
             receivedIdentity: Uint8Array,

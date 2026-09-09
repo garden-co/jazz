@@ -200,24 +200,11 @@ where
     pub(crate) async fn prepare_serialized_query_async(
         &self,
         query: &[u8],
-        kind: SerializedQueryKind,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<PreparedQuery, Error> {
-        let prepared = match kind {
-            SerializedQueryKind::Query => {
-                let query: Query = crate::wire::decode_postcard_exact(query).map_err(|error| {
-                    Error::new(ErrorCode::Query, format!("decode query: {error}"))
-                })?;
-                self.prepare_query_async(&query).await?
-            }
-            SerializedQueryKind::Relation => {
-                let query =
-                    crate::query::decode_relation_query_postcard(query).map_err(|error| {
-                        Error::new(ErrorCode::Query, format!("decode relation query: {error}"))
-                    })?;
-                self.prepare_relation_query_async(&query).await?
-            }
-        };
+        let query: Query = crate::wire::decode_postcard_exact(query)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+        let prepared = self.prepare_query_async(&query).await?;
         Ok(match request_scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -235,7 +222,6 @@ where
     pub async fn all_serialized_query<F, E>(
         &self,
         query: &[u8],
-        kind: SerializedQueryKind,
         opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
@@ -248,9 +234,19 @@ where
         F: FnOnce(QueryAttachment),
         E: Fn() -> bool,
     {
-        let prepared = self
-            .prepare_serialized_query_async(query, kind, request_scope)
-            .await?;
+        let decoded: Query = crate::wire::decode_postcard_exact(query)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+        if open_tx.is_some() && decoded.relation.is_some() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation reads inside a transaction are not supported",
+            ));
+        }
+        let prepared = self.prepare_query_async(&decoded).await?;
+        let prepared = match request_scope {
+            Some((author, claims)) => prepared.with_identity_claims(author, claims),
+            None => prepared,
+        };
         let coverage = if require_coverage {
             let attachment = self
                 .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
@@ -281,25 +277,6 @@ where
                 }
             })
             .await?;
-        }
-
-        if kind == SerializedQueryKind::Relation {
-            let mut rows = match open_tx {
-                Some(open_tx) => {
-                    self.all_in_open_transaction(open_tx, &prepared, opts, author)
-                        .await
-                }
-                None => match author {
-                    Some(author) => self.all_for_identity(&prepared, opts, author).await,
-                    None => self.all(&prepared, opts).await,
-                },
-            }?;
-            self.hydrate_rows_for_binding(&mut rows).await?;
-            return Ok(SerializedReadResult::Relation(RelationSnapshot {
-                root_count: rows.len(),
-                rows,
-                edges: Vec::new(),
-            }));
         }
 
         if !prepared.shape().query().array_subqueries.is_empty() {

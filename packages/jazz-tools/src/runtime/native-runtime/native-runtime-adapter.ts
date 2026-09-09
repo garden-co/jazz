@@ -14,11 +14,7 @@ import type {
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import {
-  encodeRelationQueryPostcard,
-  parseRelationQueryJsonLossless,
-  type RelExpr,
-} from "../../ir.js";
+import { parseRelationQueryJsonLossless } from "../../ir.js";
 import type {
   TxId,
   InsertResult,
@@ -126,10 +122,7 @@ type NativeReadContext =
       readonly claims?: Record<string, unknown>;
     }
   | { readonly kind: "backend-authority" };
-type NativeQueryInput = {
-  readonly bytes: Uint8Array;
-  readonly kind: "query" | "relation";
-};
+type NativeQueryInput = Uint8Array;
 type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
 type NativeDbConstructor = {
@@ -228,7 +221,6 @@ type NativeDb = {
   rollbackTransaction(openTransactionId: string): void;
   all(
     query: Uint8Array,
-    kind: "query" | "relation",
     opts: unknown,
     openTransactionId?: OpenTransactionId,
     author?: Uint8Array,
@@ -240,7 +232,6 @@ type NativeDb = {
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
   subscribe?(
     query: Uint8Array,
-    kind: "query" | "relation",
     opts: unknown,
     author?: Uint8Array,
     claims?: Record<string, unknown>,
@@ -1832,13 +1823,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    const usesNativeRelationApi = queryUsesNativeRelationApi(coreQueryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    // Relation IR is normalized by Rust inside the read operation. Transaction
-    // overlays for this syntax remain unsupported until its semantics are defined.
-    if (pendingTx && usesNativeRelationApi) {
-      throw new Error("Native runtime does not support relation reads inside a transaction");
-    }
     // Browser runtimes still materialize row bodies from their in-memory
     // cache, but an Edge/Global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
@@ -1854,7 +1839,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
     this.emitQueryCoverageTrace("attach");
-    if (usesNativeRelationApi || queryHasArraySubqueries(coreQueryJson)) {
+    if (queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
         const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
         this.emitQueryCoverageTrace("covered");
@@ -1869,9 +1854,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromRelationSnapshot(
         readRelationSnapshot(payload),
         this.schema,
-        usesNativeRelationApi
-          ? undefined
-          : subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
@@ -1893,7 +1876,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
-    const usesNativeRelationApi = queryUsesNativeRelationApi(queryJson);
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
@@ -1905,9 +1887,7 @@ export class NativeRuntimeAdapter implements Runtime {
       rows: [],
       rowIndexByKey: new Map(),
       visibleRows: [],
-      outputColumns: usesNativeRelationApi
-        ? null
-        : subscriptionOutputColumns(queryJson, this.schema),
+      outputColumns: subscriptionOutputColumns(queryJson, this.schema),
       session,
       opts,
       opened: false,
@@ -2386,7 +2366,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return rows[0];
     }
     const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
-    const rows = this.db.all(query.bytes, query.kind, {
+    const rows = this.db.all(query, {
       ...(readOptions() as Record<string, unknown>),
       sync: true,
     });
@@ -2466,8 +2446,7 @@ export class NativeRuntimeAdapter implements Runtime {
     context: NativeReadContext,
   ): Uint8Array {
     const result = this.db.all(
-      query.bytes,
-      query.kind,
+      query,
       { ...(opts as Record<string, unknown>), sync: true },
       undefined,
       this.nativeReadAuthor(context),
@@ -2501,14 +2480,7 @@ export class NativeRuntimeAdapter implements Runtime {
     openTransactionId?: OpenTransactionId,
   ): NativeReadResult | Promise<NativeReadResult> {
     const author = this.nativeReadAuthor(context);
-    return this.db.all(
-      query.bytes,
-      query.kind,
-      opts,
-      openTransactionId,
-      author,
-      this.nativeReadClaims(context),
-    );
+    return this.db.all(query, opts, openTransactionId, author, this.nativeReadClaims(context));
   }
 
   private nativeReadAuthor(context: NativeReadContext): Uint8Array | undefined {
@@ -2553,7 +2525,7 @@ export class NativeRuntimeAdapter implements Runtime {
     | PendingNativeOperation<ReadableStream<unknown> | Subscription> {
     if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
     const author = context.kind === "session-authority" ? context.identity : undefined;
-    return this.db.subscribe(query.bytes, query.kind, opts, author, this.nativeReadClaims(context));
+    return this.db.subscribe(query, opts, author, this.nativeReadClaims(context));
   }
 
   /** Drive the binding-owned coverage and hydration operation while the
@@ -4253,43 +4225,8 @@ function queryHasArraySubqueries(queryJson: string): boolean {
   }
 }
 
-function queryUsesNativeRelationApi(queryJson: string): boolean {
-  try {
-    const relationIr = (JSON.parse(queryJson) as { relation_ir?: unknown }).relation_ir;
-    return relationIrContainsNativeOperator(relationIr);
-  } catch {
-    return false;
-  }
-}
-
-function relationQueryBytes(queryJson: string): Uint8Array {
-  let relation_ir: unknown;
-  try {
-    relation_ir = (parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown })
-      .relation_ir;
-  } catch {
-    throw new Error("Relation query is not valid runtime query JSON");
-  }
-  if (!relation_ir || typeof relation_ir !== "object") {
-    throw new Error("Relation query is missing relation_ir");
-  }
-  return encodeRelationQueryPostcard(relation_ir as RelExpr);
-}
-
 function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInput {
-  const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
-  return {
-    kind,
-    bytes: kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, schema),
-  };
-}
-
-function relationIrContainsNativeOperator(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsNativeOperator);
-  const record = value as Record<string, unknown>;
-  if ("Join" in record || "Gather" in record || "Union" in record) return true;
-  return Object.values(record).some(relationIrContainsNativeOperator);
+  return encodeQueryJson(queryJson, schema);
 }
 
 function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
@@ -4763,180 +4700,39 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
   }
-  // UNION ALL is retained relation IR. It cannot be flattened into the legacy
-  // predicate envelope because duplicate arm occurrences and global windows
-  // are semantic. Carry the relation tree in Query.relation instead.
-  if (relationOperator(parsed.relation_ir) === "Union") {
-    return queryWithPredicates(parsed.table, [], { relation: parsed.relation_ir });
+  const table = parsed.table;
+  if (parsed.relation_ir != null) {
+    const lossless = parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown };
+    if (!lossless.relation_ir || typeof lossless.relation_ir !== "object") {
+      throw new Error("Relation query is missing relation_ir");
+    }
+    // Every relational query crosses the native boundary in Query.relation.
+    // Rust normalizes non-union relations into the ordinary Query shape and
+    // retains unions only where occurrence identity requires it.
+    return queryWithPredicates(table, [], {
+      relation: lossless.relation_ir,
+      select: readSelectColumns(parsed.select_columns ?? parsed.select),
+      arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, table, schema),
+    });
   }
-  const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
-  return queryWithPredicates(parsed.table, encoded.predicates, {
-    limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
-    offset: readOffset(parsed.offset ?? encoded.offset),
-    orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by ?? parsed.orderBy)),
-    select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
-    arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
-  });
+  const predicates = readFlatConditions(parsed.conditions);
+  if (!predicates) throw unsupportedQueryEncodingError();
+  return queryWithPredicates(
+    table,
+    predicates.map((filter) => coerceQueryPredicate(table, filter, schema)),
+    {
+      limit: readLimitIfPresent(parsed.limit),
+      offset: readOffset(parsed.offset),
+      orderBy: readRootOrderBy(parsed.order_by ?? parsed.orderBy),
+      select: readSelectColumns(parsed.select_columns ?? parsed.select),
+      arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, table, schema),
+    },
+  );
 }
 
 function unsupportedQueryEncodingError(context?: string): Error {
   const suffix = context ? ` (${context})` : "";
   return new Error(`Native runtime cannot encode this query shape${suffix}.`);
-}
-
-function unsupportedRelationQueryError(operator?: string): Error {
-  const detail = operator
-    ? ` Relation IR operator "${operator}" requires a relation-tree lowerer or native relation query API; the TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.`
-    : " The TS native runtime can currently lower only TableScan plus Filter/Project/OrderBy/Offset/Limit into flat native predicates.";
-  return new Error(`Native runtime cannot lower this relation IR.${detail}`);
-}
-
-function encodeSimpleRelationQuery(
-  table: string,
-  query: {
-    conditions?: unknown;
-    relation_ir?: unknown;
-    limit?: unknown;
-    offset?: unknown;
-  },
-  schema: WasmSchema,
-): {
-  predicates: QueryPredicate[];
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} {
-  const unwrapped = unwrapSimpleQuery(table, query);
-  if (!unwrapped) throw unsupportedRelationQueryError(relationOperator(query.relation_ir));
-  const rootPredicates = readFlatConditions(query.conditions);
-  if (!rootPredicates) throw unsupportedQueryEncodingError();
-  return {
-    limit: unwrapped.limit,
-    offset: unwrapped.offset,
-    orderBy: unwrapped.orderBy,
-    select: unwrapped.select,
-    predicates: unwrapped.predicates
-      .concat(rootPredicates)
-      .map((filter) => coerceQueryPredicate(table, filter, schema)),
-  };
-}
-
-function relationOperator(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  for (const operator of ["Join", "Project", "Gather", "Union"]) {
-    if (operator in record) return operator;
-  }
-  for (const operator of ["Limit", "Offset", "OrderBy", "Filter"]) {
-    const child = record[operator];
-    if (child && typeof child === "object") {
-      const input = (child as { input?: unknown }).input;
-      const nested = relationOperator(input);
-      if (nested) return nested;
-    }
-  }
-  return undefined;
-}
-
-function unwrapSimpleQuery(
-  table: string,
-  query: {
-    relation_ir?: unknown;
-  },
-): {
-  predicates: QueryPredicate[];
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} | null {
-  if (query.relation_ir == null) return { predicates: [], offset: 0, orderBy: [] };
-  return unwrapSimpleRelation(table, query.relation_ir);
-}
-
-function unwrapSimpleRelation(
-  table: string,
-  relationIr: unknown,
-): {
-  predicates: QueryPredicate[];
-  limit?: number;
-  offset: number;
-  orderBy: QueryOrder[];
-  select?: string[];
-} | null {
-  if (relationIr == null) return { predicates: [], offset: 0, orderBy: [] };
-  if (typeof relationIr !== "object") return null;
-  const relation = relationIr as Record<string, unknown>;
-  const tableScan = relation.TableScan;
-  if (
-    tableScan &&
-    typeof tableScan === "object" &&
-    (tableScan as { table?: unknown }).table === table
-  ) {
-    return { predicates: [], offset: 0, orderBy: [] };
-  }
-  const limit = relation.Limit;
-  if (limit && typeof limit === "object") {
-    const limitRecord = limit as { input?: unknown; limit?: unknown };
-    const input = unwrapSimpleRelation(table, limitRecord.input);
-    if (!input) return null;
-    return { ...input, limit: readLimit(limitRecord.limit) };
-  }
-  const offset = relation.Offset;
-  if (offset && typeof offset === "object") {
-    const offsetRecord = offset as { input?: unknown; offset?: unknown };
-    const input = unwrapSimpleRelation(table, offsetRecord.input);
-    if (!input) return null;
-    return { ...input, offset: readOffset(offsetRecord.offset) };
-  }
-  const orderBy = relation.OrderBy;
-  if (orderBy && typeof orderBy === "object") {
-    const orderByRecord = orderBy as { input?: unknown; terms?: unknown };
-    const input = unwrapSimpleRelation(table, orderByRecord.input);
-    const terms = readOrderByTerms(orderByRecord.terms);
-    if (!input || !terms) return null;
-    return { ...input, orderBy: input.orderBy.concat(terms) };
-  }
-  const project = relation.Project;
-  if (project && typeof project === "object") {
-    const projectRecord = project as { input?: unknown; columns?: unknown };
-    const input = unwrapSimpleRelation(table, projectRecord.input);
-    const columns = readProjectColumns(projectRecord.columns);
-    if (!input || !columns) return null;
-    return { ...input, select: columns };
-  }
-  const filter = relation.Filter;
-  if (!filter || typeof filter !== "object") return null;
-  const filterRecord = filter as { input?: unknown; predicate?: unknown };
-  const input = unwrapSimpleRelation(table, filterRecord.input);
-  if (!input) return null;
-  const predicates = predicateToFilters(filterRecord.predicate);
-  return predicates ? { ...input, predicates: input.predicates.concat(predicates) } : null;
-}
-
-function readProjectColumns(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const columns: string[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") return null;
-    const record = entry as { alias?: unknown; expr?: unknown; source?: unknown };
-    const expr = record.expr ?? record.source;
-    if (!expr || typeof expr !== "object") return null;
-    const column = readColumnProjectExpr(expr);
-    if (!column) return null;
-    if (record.alias != null && record.alias !== column) return null;
-    columns.push(column);
-  }
-  return columns;
-}
-
-function readColumnProjectExpr(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as { Column?: unknown; column?: unknown };
-  if (record.Column != null) return readColumnRef(record.Column);
-  if (record.column != null) return readColumnRef(record);
-  return null;
 }
 
 function coerceQueryPredicate(
@@ -5270,19 +5066,6 @@ function readArraySubqueryRequirement(value: unknown): QueryArraySubquery["requi
 function stripParentQualifier(column: string, parentTable: string): string {
   const prefix = `${parentTable}.`;
   return column.startsWith(prefix) ? column.slice(prefix.length) : column;
-}
-
-function readOrderByTerms(value: unknown): QueryOrder[] | null {
-  if (!Array.isArray(value)) return null;
-  const terms: QueryOrder[] = [];
-  for (const term of value) {
-    if (!term || typeof term !== "object") return null;
-    const record = term as { column?: unknown; direction?: unknown };
-    const column = readColumnRef(record.column);
-    if (!column || (record.direction !== "Asc" && record.direction !== "Desc")) return null;
-    terms.push({ column, direction: record.direction });
-  }
-  return terms;
 }
 
 function coerceQueryLiteral(

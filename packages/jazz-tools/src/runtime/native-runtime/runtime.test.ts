@@ -570,7 +570,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[2]).toEqual({ tier: "edge" });
+    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
   });
 
   it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
@@ -1478,13 +1478,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (
-              _query: unknown,
-              _kind: unknown,
-              _opts: unknown,
-              _tx: unknown,
-              author: Uint8Array,
-            ) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
               if (author) {
                 throw new Error("ordinary client query must not use trusted serving");
               }
@@ -1814,7 +1808,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: (
               _query: unknown,
-              _kind: unknown,
               _opts: unknown,
               _tx: unknown,
               author: Uint8Array,
@@ -1885,13 +1878,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (
-              _query: unknown,
-              _kind: unknown,
-              _opts: unknown,
-              _tx: unknown,
-              author: Uint8Array,
-            ) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
               if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
@@ -1965,13 +1952,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (
-              _query: unknown,
-              _kind: unknown,
-              _opts: unknown,
-              _tx: unknown,
-              author: Uint8Array,
-            ) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
               if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
@@ -2124,7 +2105,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
-  it("lowers scalar comparison relation IR into the prepared native query", async () => {
+  it("carries scalar comparison relation IR in the prepared Query envelope", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2147,10 +2128,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    await runtime.query(
-      JSON.stringify({
-        table: "todos",
-        relation_ir: {
+    const relation = {
+      Limit: {
+        input: {
           Filter: {
             input: { TableScan: { table: "todos" } },
             predicate: {
@@ -2163,17 +2143,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           },
         },
         limit: 5,
-      }),
-    );
+      },
+    };
+    await runtime.query(JSON.stringify({ table: "todos", relation_ir: relation }));
 
-    expect(readPreparedComparison(preparedBytes!)).toEqual({
-      table: "todos",
-      predicateTag: 6,
-      column: "title",
-      literalTag: 6,
-      value: "m",
-      limit: 5,
-    });
+    expect(preparedBytes).toEqual(queryWithPredicates("todos", [], { relation }));
   });
 
   it("trusts native prepared queries for simple equality relation filters", async () => {
@@ -2210,24 +2184,20 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
 
-    await expect(
-      runtime.query(
-        JSON.stringify({
-          table: "todos",
-          relation_ir: {
-            Filter: {
-              input: { TableScan: { table: "todos" } },
-              predicate: {
-                Cmp: {
-                  left: { column: "title" },
-                  op: "Eq",
-                  right: { Literal: { type: "Text", value: "keep" } },
-                },
-              },
-            },
+    const relation = {
+      Filter: {
+        input: { TableScan: { table: "todos" } },
+        predicate: {
+          Cmp: {
+            left: { column: "title" },
+            op: "Eq",
+            right: { Literal: { type: "Text", value: "keep" } },
           },
-        }),
-      ),
+        },
+      },
+    };
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", relation_ir: relation })),
     ).resolves.toEqual([
       {
         table: "todos",
@@ -2240,17 +2210,10 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "drop" }],
       },
     ]);
-    expect(readPreparedComparison(preparedBytes!)).toEqual({
-      table: "todos",
-      predicateTag: 3,
-      column: "title",
-      literalTag: 6,
-      value: "keep",
-      limit: undefined,
-    });
+    expect(preparedBytes).toEqual(queryWithPredicates("todos", [], { relation }));
   });
 
-  it("lowers a payload enum match relation filter into the native prepared query", () => {
+  it("carries a payload enum match relation filter in the Query envelope", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2322,18 +2285,31 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(handle).toBe(1);
     expect(preparedBytes).toEqual(
-      queryWithPredicates(
-        "events",
-        [
-          {
-            column: "event",
-            op: "EnumMatch",
-            case: "message",
-            payload: { column: "level", op: "Eq", value: { type: "Integer", value: 2 } },
+      queryWithPredicates("events", [], {
+        relation: {
+          Project: {
+            input: {
+              Filter: {
+                input: { TableScan: { table: "events" } },
+                predicate: {
+                  EnumMatch: {
+                    column: { column: "event", scope: "events" },
+                    case: "message",
+                    payload: {
+                      Cmp: {
+                        left: { column: "level" },
+                        op: "Eq",
+                        right: { Literal: { type: "Integer", value: 2 } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
           },
-        ],
-        { select: ["event"] },
-      ),
+        },
+      }),
     );
   });
 
@@ -2501,17 +2477,10 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     ]);
-    expect(readPreparedComparison(preparedBytes!)).toEqual({
-      table: "todos",
-      predicateTag: 3,
-      column: "title",
-      literalTag: 6,
-      value: "keep",
-      limit: undefined,
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
-  it("routes Join relation IR to the native relation API", async () => {
+  it("routes Join relation IR through the canonical Query API", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2519,7 +2488,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => {
               calls.push("all");
-              return encodeRelationSnapshot([
+              return encodeRows([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -2552,14 +2521,14 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual(["all"]);
   });
 
-  it("preserves raw subscription literal number spellings in native relation bytes", () => {
-    let relationBytes: Uint8Array | undefined;
+  it("preserves raw subscription literal number spellings in the Query relation envelope", () => {
+    let queryBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
           fakeDb({
-            subscribe: (bytes: Uint8Array, kind: "query" | "relation") => {
-              if (kind === "relation") relationBytes = bytes;
+            subscribe: (bytes: Uint8Array) => {
+              queryBytes = bytes;
               return new ReadableStream();
             },
             tick: () => undefined,
@@ -2576,16 +2545,16 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.createSubscription(
-      '{"relation_ir":{"Union":{"inputs":[{"label":"source","input":{"Filter":{"input":{"TableScan":{"table":"todos"}},"predicate":{"Cmp":{"left":{"column":"priority"},"op":"Eq","right":{"Literal":1.0}}}}}}]}}}',
+      '{"table":"todos","relation_ir":{"Union":{"inputs":[{"label":"source","input":{"Filter":{"input":{"TableScan":{"table":"todos"}},"predicate":{"Cmp":{"left":{"column":"priority"},"op":"Eq","right":{"Literal":1.0}}}}}}]}}}',
     );
 
-    expect(relationBytes).toBeDefined();
-    expect(Array.from(relationBytes!.slice(-10))).toEqual([
+    expect(queryBytes).toBeDefined();
+    expect(Array.from(queryBytes!.slice(-10))).toEqual([
       4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
     ]);
   });
 
-  it("lowers simple Project relation IR while preparing the original subscription query", () => {
+  it("carries Project relation IR in the prepared Query envelope", () => {
     const calls: string[] = [];
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -2615,10 +2584,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     expect(handle).toBe(1);
     expect(calls).toEqual(["subscribe"]);
-    expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
-  it("subscribes to supported root relation IR as one prepared native query", () => {
+  it("subscribes to supported root relation IR through one Query envelope", () => {
     const calls: string[] = [];
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -2686,14 +2655,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(handle).toBe(1);
     expect(calls).toEqual(["subscribe"]);
-    expect(readPreparedQueryShape(preparedBytes!)).toEqual({
-      table: "todos",
-      predicates: [{ column: "title", opTag: 3, literalTag: 6, value: "native" }],
-      orderBy: [{ column: "priority", directionTag: 1 }],
-      limit: 3,
-      offset: 2,
-    });
-    expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
+    expectPreparedRelationEnvelope(preparedBytes!, "todos", ["title"]);
   });
 
   it("encodes public typed-builder root orderBy into native query bytes", () => {
@@ -2787,12 +2749,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
 
-    expect(readPreparedFirstLiteral(preparedBytes!)).toEqual({
-      column: "priority",
-      opTag: 8,
-      literalTag: 15,
-      value: -1,
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
   it("preserves signed i32 query literal boundaries and rejects overflow", () => {
@@ -3196,7 +3153,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _kind: unknown, opts: unknown) => {
+            all: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
@@ -3228,35 +3185,21 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
     const calls: string[] = [];
     let reads = 0;
+    let subscriptions = 0;
     const nativeDb = fakeDb({
-      all: (
-        _query: Uint8Array,
-        kind: "query" | "relation",
-        _opts: unknown,
-        openTransactionId: string,
-        author: Uint8Array,
-      ) => {
+      all: (_query: Uint8Array, _opts: unknown, openTransactionId: string, author: Uint8Array) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
         const sequence = reads++;
-        if (kind === "relation") {
-          calls.push("relation");
-          return encodeRelationSnapshot([]);
-        }
         if (sequence === 2 || sequence === 4) {
           calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
           return encodeRelationSnapshot([]);
         }
-        calls.push(openTransactionId ? "transaction" : "plain");
+        calls.push(sequence === 1 ? "relation" : openTransactionId ? "transaction" : "plain");
         return encodeRows([]);
       },
-      subscribe: (
-        _query: Uint8Array,
-        kind: "query" | "relation",
-        _opts: unknown,
-        author: Uint8Array,
-      ) => {
+      subscribe: (_query: Uint8Array, _opts: unknown, author: Uint8Array) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(kind === "relation" ? "relation-subscription" : "subscription");
+        calls.push(subscriptions++ === 0 ? "subscription" : "relation-subscription");
         return new ReadableStream();
       },
       tick: () => undefined,
@@ -3378,7 +3321,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _kind: unknown, opts: unknown) => {
+            all: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return encodeRows([row]);
             },
@@ -3414,7 +3357,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _kind: unknown, opts: unknown) => {
+            all: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return encodeRows([]);
             },
@@ -3453,7 +3396,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _kind: unknown, opts: unknown) => {
+            all: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
@@ -3489,13 +3432,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (
-              _query: unknown,
-              _kind: unknown,
-              _opts: unknown,
-              _tx: unknown,
-              author: Uint8Array,
-            ) => {
+            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
               if (author) throw new Error("client coverage must not use an authority identity");
               attachedSubjects.push("client");
               return encodeRows([]);
@@ -3579,7 +3516,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _kind: unknown, opts: unknown) => {
+            all: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
@@ -3844,7 +3781,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("rejects JSON-only relation reads inside a transaction before ordinary relation APIs", async () => {
+  it("lets the core reject relation reads inside a transaction", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3852,7 +3789,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => {
               calls.push("all");
-              return new Uint8Array();
+              throw new Error("relation reads inside a transaction are not supported");
             },
             tick: () => undefined,
           }),
@@ -3877,8 +3814,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         undefined,
         opts,
       ),
-    ).rejects.toThrow("does not support relation reads inside a transaction");
-    expect(calls).toEqual([]);
+    ).rejects.toThrow("relation reads inside a transaction are not supported");
+    expect(calls).toEqual(["all"]);
   });
 
   it("rejects permission introspection in array subqueries before native snapshot prep", async () => {
@@ -3958,7 +3895,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
-  it("rejects permission introspection relation projections before native relation APIs", async () => {
+  it("rejects permission introspection relation projections before the native query API", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -4044,7 +3981,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            subscribe: (_query: unknown, _kind: unknown, opts: unknown) => {
+            subscribe: (_query: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new ReadableStream();
             },
@@ -4352,14 +4289,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "native returned extra" }],
       },
     ]);
-    expect(readPreparedUuidComparison(preparedBytes!)).toEqual({
-      table: "todos",
-      predicateTag: 3,
-      column: "id",
-      literalTag: 9,
-      value: "00000000-0000-0000-0000-000000000001",
-      limit: undefined,
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
   it("preserves raw provenance timestamps from native rows without Date.now fallbacks", async () => {
@@ -4628,29 +4558,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
 
-    expect(readPreparedInLiterals(preparedBytes!)).toEqual([
-      {
-        column: "count",
-        literals: [
-          { tag: 15, value: 5 },
-          { tag: 15, value: 10 },
-        ],
-      },
-      {
-        column: "ratio",
-        literals: [
-          { tag: 4, value: 1.5 },
-          { tag: 4, value: 2.5 },
-        ],
-      },
-      {
-        column: "createdAt",
-        literals: [
-          { tag: 3, value: 1767225600000 },
-          { tag: 3, value: 1767312000000 },
-        ],
-      },
-    ]);
+    expectPreparedRelationEnvelope(preparedBytes!, "metrics");
   });
 
   it("preserves relation IR range literal types for double and timestamp columns", async () => {
@@ -4726,12 +4634,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
 
-    expect(readPreparedComparisonLiterals(preparedBytes!)).toEqual([
-      { predicateTag: 6, column: "ratio", literal: { tag: 4, value: 1.5 } },
-      { predicateTag: 8, column: "ratio", literal: { tag: 4, value: 4.5 } },
-      { predicateTag: 6, column: "createdAt", literal: { tag: 3, value: 1770076800000 } },
-      { predicateTag: 8, column: "createdAt", literal: { tag: 3, value: 1770336000000 } },
-    ]);
+    expectPreparedRelationEnvelope(preparedBytes!, "metrics");
   });
 
   it("does not filter native subscription snapshots by public id in JS", async () => {
@@ -4803,13 +4706,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(decodeTestDeltas(deltas)[0]).toHaveLength(2);
-    expect(readPreparedUuidComparison(preparedBytes!)).toMatchObject({
-      table: "todos",
-      predicateTag: 3,
-      column: "id",
-      literalTag: 9,
-      value: "00000000-0000-0000-0000-000000000001",
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
   it("delivers packed reset rows with the same public shape as legacy decode when native batches include internal fields", () => {
@@ -5521,13 +5418,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "keep" }],
       },
     ]);
-    expect(readPreparedUuidComparison(preparedBytes!)).toMatchObject({
-      table: "todos",
-      predicateTag: 6,
-      column: "id",
-      literalTag: 9,
-      value: "00000000-0000-0000-0000-000000000001",
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
   it("pushes limits with native id predicates", async () => {
@@ -5578,10 +5469,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
 
-    expect(readPreparedLimit(preparedBytes!)).toBe(1);
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 
-  it("lowers root order and pagination into the prepared core query", async () => {
+  it("carries relation order and pagination in the Query envelope", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -5647,16 +5538,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
 
-    expect(readPreparedQueryShape(preparedBytes!)).toEqual({
-      table: "todos",
-      predicates: [{ column: "title", opTag: 3, literalTag: 6, value: "ship it" }],
-      orderBy: [
-        { column: "priority", directionTag: 1 },
-        { column: "title", directionTag: 0 },
-      ],
-      limit: 10,
-      offset: 5,
-    });
+    expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 });
 
@@ -6686,6 +6568,15 @@ function readPreparedQueryTail(
   return { select, orderBy, limit, offset };
 }
 
+function expectPreparedRelationEnvelope(query: Uint8Array, table: string, select?: string[]): void {
+  const reader = new PostcardReader(query);
+  expect(reader.string()).toBe(table);
+  expect(reader.readVec(() => undefined)).toEqual([]); // filters
+  const tail = readPreparedQueryTail(reader);
+  expect(tail).toEqual({ select, orderBy: [], limit: undefined, offset: 0 });
+  expect(reader.option(() => true)).toBe(true);
+}
+
 function readPreparedSelect(query: Uint8Array): string[] | undefined {
   const reader = new PostcardReader(query);
   reader.string();
@@ -6783,7 +6674,7 @@ function unsupportedProjectRelationIr(): unknown {
   return {
     Project: {
       input: { TableScan: { table: "todos" } },
-      columns: [{ source: { column: "title" }, alias: "title" }],
+      columns: [{ expr: { Column: { column: "title" } }, alias: "title" }],
     },
   };
 }
@@ -7813,7 +7704,6 @@ it("passes different claims independently on same-query reads", async () => {
         fakeDb({
           all: (
             _query: Uint8Array,
-            _kind: "query" | "relation",
             _opts: unknown,
             _transaction: unknown,
             identity: Uint8Array,

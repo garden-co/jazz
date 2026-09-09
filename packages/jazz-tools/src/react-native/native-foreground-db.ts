@@ -27,7 +27,6 @@ type ForegroundCommand =
   | {
       type: "all";
       query: Uint8Array;
-      kind: "query" | "relation";
       optionsJson: string;
       transaction?: number;
     }
@@ -35,7 +34,6 @@ type ForegroundCommand =
   | {
       type: "subscribe";
       query: Uint8Array;
-      kind: "query" | "relation";
       optionsJson: string;
     }
   | { type: "drainSubscription"; subscription: number }
@@ -236,7 +234,6 @@ export class NativeForegroundDb {
 
   all(
     query: Uint8Array,
-    kind: "query" | "relation",
     opts: unknown,
     openTransactionId?: string,
   ): Uint8Array | { poll(): Uint8Array | null } {
@@ -252,7 +249,6 @@ export class NativeForegroundDb {
     const response = this.execute({
       type: "all",
       query,
-      kind,
       optionsJson: JSON.stringify(opts ?? {}),
       transaction,
     });
@@ -271,16 +267,11 @@ export class NativeForegroundDb {
     return response.rows;
   }
 
-  subscribe(
-    query: Uint8Array,
-    kind: "query" | "relation",
-    opts: unknown,
-  ): NativeForegroundSubscription {
+  subscribe(query: Uint8Array, opts: unknown): NativeForegroundSubscription {
     this.tick();
     const response = this.execute({
       type: "subscribe",
       query,
-      kind,
       optionsJson: JSON.stringify(opts ?? {}),
     });
     if (response.type === "operationError") throw new Error(response.reason);
