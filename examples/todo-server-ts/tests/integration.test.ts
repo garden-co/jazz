@@ -555,7 +555,10 @@ describe("Todo Server Integration", () => {
       }
     });
     it("rejects todo requests admitted after draining begins", async () => {
-      const drainingServer = await startServer(await createServer(undefined, jazzOptions()), 0);
+      const drainingServer = await startServer(
+        await createServer({ type: "memory" }, jazzOptions()),
+        0,
+      );
       const originalClose = drainingServer.server.close.bind(drainingServer.server);
       let closeCallback: ((error?: Error) => void) | undefined;
       drainingServer.server.close = vi.fn((callback?: (error?: Error) => void) => {
@@ -590,7 +593,7 @@ describe("Todo Server Integration", () => {
     });
 
     it("gracefully closes active SSE connections during shutdown", async () => {
-      const sseServer = await startServer(await createServer(undefined, jazzOptions()), 0);
+      const sseServer = await startServer(await createServer({ type: "memory" }, jazzOptions()), 0);
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let shutdown: Promise<void> | undefined;
