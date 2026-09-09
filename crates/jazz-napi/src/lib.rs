@@ -2522,9 +2522,7 @@ impl NapiDb {
             column,
             mutation,
             identity,
-            updated_at_ms: updated_at_ms
-                .map(|value| checked_u64(value, "updatedAtMs"))
-                .transpose()?,
+            updated_at_ms,
             head,
             base,
         })
@@ -5104,15 +5102,14 @@ mod tests {
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
         NapiDb, NapiDbInnerStorage, NapiWrite, NativeAuthorAdmissions, ParsedUpsertOptions,
         PendingNativeRead, PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
-        PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, UpdateOptions,
-        authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes, core_block_on,
-        core_claim_value_from_json, core_drive_direct_mutation_once, core_insert_options,
-        core_open_backend_identity, core_open_identity, core_read_opts_from_json,
-        core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
-        core_update_options, core_upsert_options, core_write_memory, core_write_state_to_json,
-        StreamingOwnerLifecycle,
-        encode_core_subscription_delta, requeue_retryable_subscription_batch,
-        unknown_transaction_kind_message,
+        PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, StreamingOwnerLifecycle,
+        UpdateOptions, authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes,
+        core_block_on, core_claim_value_from_json, core_drive_direct_mutation_once,
+        core_insert_options, core_open_backend_identity, core_open_identity,
+        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
+        core_subscription_event_to_napi, core_update_options, core_upsert_options,
+        core_write_memory, core_write_state_to_json, encode_core_subscription_delta,
+        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
 
     #[test]
@@ -5534,11 +5531,12 @@ mod tests {
         let raw = descriptor.create(&[]).expect("encode streaming cells");
         let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode streaming cells");
         let mut stream = db
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd2; 16]),
                 Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5562,11 +5560,12 @@ mod tests {
             "Drop cleanup must win before the TTL backstop"
         );
         let mut retained = db
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd3; 16]),
                 Uint8Array::from(cells),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5616,11 +5615,12 @@ mod tests {
         let raw = descriptor.create(&[]).expect("encode view cells");
         let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode view cells");
         let mut view_stream = view
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd5; 16]),
                 Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5632,11 +5632,12 @@ mod tests {
             .push(Uint8Array::from(b"view".to_vec()))
             .expect("stage view stream");
         let mut owner_stream = owner
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd6; 16]),
                 Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5664,11 +5665,12 @@ mod tests {
             .register_schema(Uint8Array::from(schema.clone()))
             .expect("register explicitly closed view");
         let mut closed_stream = closed_view
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd9; 16]),
                 Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5704,11 +5706,12 @@ mod tests {
             .set_large_value_staging_policy(1.0, 60_000.0, None)
             .expect("set restrictive ingress policy");
         let mut failed_stream = owner
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xd7; 16]),
                 Uint8Array::from(cells),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5862,11 +5865,12 @@ mod tests {
         let raw = descriptor.create(&[]).expect("encode drain cells");
         let cells = postcard::to_allocvec(&(descriptor, raw)).expect("encode drain cells");
         let mut first_stream = first_view
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xe2; 16]),
                 Uint8Array::from(cells.clone()),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
@@ -5878,11 +5882,12 @@ mod tests {
             .push(Uint8Array::from(b"first".to_vec()))
             .expect("stage first drain stream");
         let mut second_stream = second_view
-            .begin_streaming_mutation_encoded(
+            .begin_streaming_mutation(
                 "items".to_owned(),
                 Uint8Array::from(vec![0xe3; 16]),
                 Uint8Array::from(cells),
                 "payload".to_owned(),
+                None,
                 None,
                 None,
                 None,
