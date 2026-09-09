@@ -416,7 +416,10 @@ suspended operation may own the node, and blocking the host would prevent that
 operation from completing. Rust chooses insert versus patch under the write's
 identity and applies insertion defaults there. Consequently, errors that depend
 on that choice (such as a missing required column on a new row) are reported by
-the write handle; invalid supplied values can still be rejected before enqueue.
+the write handle; invalid supplied values can still be rejected before enqueue. This
+complete-insert validation belongs to the typed binding command path; raw Rust
+`RowCells` retain their sparse-row contract. Branch selector columns are supplied
+by the runtime and are not required in the caller's insertion cells.
 
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
