@@ -1989,6 +1989,75 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     );
 }
 
+/// Alice reads a projected reverse include whose parent has an unrelated JSON cell.
+/// The binding hydration boundary must expose the parent and child without physical types.
+#[test]
+fn relation_snapshot_json_parent_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(false);
+}
+
+/// Alice includes a child with JSON, so collector anchor and child arms must
+/// agree on the physical JSON descriptor before binding hydration.
+#[test]
+fn relation_snapshot_json_child_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(true);
+}
+
+fn assert_relation_snapshot_json_binding_hydration(child_json: bool) {
+    let mut children = PublicTableSchemaBuilder::new("children").fk_column("parentId", "parents");
+    if child_json {
+        children = children.column("metadata", PublicColumnType::Json { schema: None });
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("name", PublicColumnType::Text)
+                    .column("metadata", PublicColumnType::Json { schema: None }),
+            )
+            .table(children),
+    );
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    // Db's binding-facing API accepts core cells; row_input! is for JazzClient's
+    // public Value algebra and cannot represent this lower-level input type.
+    let parent = db
+        .insert(
+            "parents",
+            BTreeMap::from([
+                ("name".into(), Value::String("alice".into())),
+                ("metadata".into(), Value::String("{}".into())),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let mut child_cells = BTreeMap::from([("parentId".into(), Value::Uuid(parent.0))]);
+    if child_json {
+        child_cells.insert("metadata".into(), Value::String("{}".into()));
+    }
+    let child = db
+        .insert("children", child_cells, Default::default())
+        .unwrap()
+        .row_uuid();
+    let children = ArraySubquery::new("childrenViaParent", "children", "parentId", "id");
+    let children = if child_json {
+        children
+    } else {
+        children.select(["id"])
+    };
+    let query = Query::from("parents")
+        .select(["id"])
+        .array_subquery(children);
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![parent]);
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "childrenViaParent", "row_uuid"),
+        vec![Value::Uuid(child.0)]
+    );
+}
+
 #[test]
 fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let schema = build_public_db_test_schema(
