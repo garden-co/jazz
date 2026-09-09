@@ -289,6 +289,18 @@ reads lower with `Propagation::Full`. The Inspector MAY use an internal
 updates, and `Propagation::LocalOnly`; that tier MUST NOT appear in the public
 binding `ReadTier` type.
 
+For an attached browser Inspector, both these reads and its edit batches execute
+inside the authenticated storage owner's runtime through a private MessagePort.
+They are not peer queries with propagation disabled. In particular, reading a
+cached row in the worker and then authoring a partial update in a fresh, empty
+foreground would lose the update's local preimage: an edit to `done` would have
+no `title` to preserve. The worker instead stages the Inspector's whole edit
+batch as one ordinary mergeable transaction under its configured account
+identity, preserving the cached cells and the normal durability/upload path.
+Only a worker-minted attachment for the exact account/storage scope admits these
+commands; callers cannot supply an alternate author, claims, or backend
+attribution. A write wait must name a transaction created by that attachment.
+
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
 chooses once. A subscription follows definite connectivity transitions in both

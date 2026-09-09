@@ -292,7 +292,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
-    if (message.type === "inspector-binding") return;
+    if (message.type === "inspector-binding" || message.type === "inspector-query-result") return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);

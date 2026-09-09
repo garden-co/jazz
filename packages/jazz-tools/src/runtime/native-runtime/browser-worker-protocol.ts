@@ -1,4 +1,4 @@
-import type { WasmSchema } from "../../drivers/types.js";
+import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
@@ -385,7 +385,36 @@ export interface InspectorAttachmentBinding {
   storageOwner: string;
 }
 
+export type InspectorStagedEdit = {
+  operation: "insert" | "update" | "delete";
+  table: string;
+  rowId: string;
+  values?: Record<string, Value>;
+  updatedAt?: number;
+};
+
 export type BrowserFollowerPortRequest =
+  | {
+      type: "inspect-commit";
+      id: number;
+      binding: InspectorAttachmentBinding;
+      edits: InspectorStagedEdit[];
+    }
+  | {
+      type: "inspect-wait";
+      id: number;
+      binding: InspectorAttachmentBinding;
+      txId: string;
+      tier: string;
+    }
+  | {
+      type: "inspect-query" | "inspect-subscribe";
+      id: number;
+      binding: InspectorAttachmentBinding;
+      query: string;
+      options?: string | null;
+    }
+  | { type: "inspect-unsubscribe"; id: number; binding: InspectorAttachmentBinding }
   | {
       type: "init";
       id: number;
@@ -501,6 +530,7 @@ export type BrowserInspectorControlEvent =
     };
 
 export type BrowserFollowerPortEvent =
+  | { type: "inspector-query-result"; id: number; value?: unknown; error?: BrowserRelayError }
   | { type: "inspector-binding"; id: number; binding: InspectorAttachmentBinding }
   | { type: "frames"; frames: Uint8Array[] }
   /**

@@ -243,7 +243,20 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
-    return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
+    return JazzClient.connectWithRuntime(
+      this.wrapClientRuntime(mainThreadPeerRuntime, config, schema),
+      context,
+      runtimeOptions,
+    );
+  }
+
+  /** Private runtime sources may attach diagnostic reads to their admitted owner. */
+  protected wrapClientRuntime(
+    runtime: NativeRuntimeAdapter,
+    _config: DbConfig,
+    _schema: WasmSchema,
+  ): NativeRuntimeAdapter {
+    return runtime;
   }
 
   override async acquireBrowserForegroundNodeLease(config: DbConfig) {

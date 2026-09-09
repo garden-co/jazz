@@ -1,3 +1,6 @@
+import type { WasmSchema } from "../drivers/types.js";
+import { attachInspectorCacheRuntime } from "./inspector-cache-runtime.js";
+import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { SharedBrowserForegroundNodeLease } from "../runtime/native-runtime/browser-shared-worker-connection.js";
 /** Private diagnostic clients. Public application contexts require AccountHandle. */
 import { createDbWithRuntimeSource, type DbConfig } from "../runtime/db.js";
@@ -60,8 +63,23 @@ async function verifyAttachment(
 
 class InspectorRuntimeSource extends DefaultRuntimeSource {
   leaseRequested = false;
-  constructor(private readonly leasePort: MessagePort) {
+  constructor(
+    private readonly leasePort: MessagePort,
+    private readonly inspectorPort: MessagePort,
+  ) {
     super();
+  }
+  protected override wrapClientRuntime(
+    runtime: NativeRuntimeAdapter,
+    config: DbConfig,
+    schema: WasmSchema,
+  ) {
+    return attachInspectorCacheRuntime(
+      runtime,
+      this.inspectorPort,
+      config.runtimeSources!.inspectorBinding!,
+      schema,
+    );
   }
   override async acquireBrowserForegroundNodeLease(config: DbConfig) {
     this.leaseRequested = true;
@@ -83,7 +101,7 @@ export async function createInspectorAttachmentClient(
   port: MessagePort,
 ) {
   const leaseChannel = new MessageChannel();
-  const source = new InspectorRuntimeSource(leaseChannel.port1);
+  const source = new InspectorRuntimeSource(leaseChannel.port1, port);
   try {
     if (!host.jwtToken)
       throw new Error("Inspector attachment requires the host's resolved client token");

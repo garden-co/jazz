@@ -1,3 +1,4 @@
+import { createOpenTransactionId, type TxId } from "../runtime/client.js";
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
@@ -62,6 +63,8 @@ type TabPeer = {
   /** True only for a port transferred through authenticated Inspector control. */
   inspectorAttachment: boolean;
   pendingInspectorBootstraps: Set<() => void>;
+  inspectorSubscriptions: Map<number, number>;
+  inspectorWrites: Set<TxId>;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -1255,6 +1258,8 @@ function attachTab(
     transportWaitAbort: new AbortController(),
     inspectorAttachment,
     pendingInspectorBootstraps: new Set(),
+    inspectorSubscriptions: new Map(),
+    inspectorWrites: new Set(),
     onMessage,
     onMessageError,
   };
@@ -1361,6 +1366,107 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
 
   try {
     const activeRuntime = requireRuntime(peer.context);
+    if (
+      message.type === "inspect-query" ||
+      message.type === "inspect-subscribe" ||
+      message.type === "inspect-unsubscribe" ||
+      message.type === "inspect-commit" ||
+      message.type === "inspect-wait"
+    ) {
+      assertInspectorBinding(peer, message.binding);
+      if (!peer.subscriber || !peer.pump || peer.context.storageInvalidated || peer.context.closing)
+        throw new Error("Inspector cache reads require an active authenticated attachment");
+      if (!Number.isSafeInteger(message.id) || message.id >= -1)
+        throw new Error("Invalid Inspector query identifier");
+      if (message.type === "inspect-commit") {
+        // The attachment capability selects the storage owner. The sender
+        // cannot supply an alternate author, claims, or backend attribution.
+        const tx = createOpenTransactionId();
+        activeRuntime.beginTransaction("mergeable", tx);
+        let txId: TxId;
+        try {
+          for (const edit of message.edits) {
+            const context = JSON.stringify({ transaction_id: tx, updated_at: edit.updatedAt });
+            switch (edit.operation) {
+              case "insert":
+                activeRuntime.insert(edit.table, edit.values ?? {}, context, edit.rowId);
+                break;
+              case "update":
+                activeRuntime.update(edit.table, edit.rowId, edit.values ?? {}, context);
+                break;
+              case "delete":
+                activeRuntime.delete(edit.table, edit.rowId, context);
+                break;
+              default:
+                throw new Error("Invalid Inspector edit operation");
+            }
+          }
+          txId = activeRuntime.commitTransaction(tx);
+        } catch (error) {
+          try {
+            await activeRuntime.rollbackTransaction(tx);
+          } catch {
+            /* Preserve the original admission/commit error. */
+          }
+          throw error;
+        }
+        peer.inspectorWrites.add(txId);
+        post(peer.port, { type: "inspector-query-result", id: message.id, value: txId });
+        return;
+      }
+      if (message.type === "inspect-wait") {
+        const txId = message.txId as TxId;
+        if (!peer.inspectorWrites.has(txId)) throw new Error("Unknown Inspector write");
+        await activeRuntime.waitForTransaction(txId, message.tier);
+        if (
+          peer.context.peers.get(peer.tabId) === peer &&
+          peer.context.runtime === activeRuntime &&
+          !peer.context.storageInvalidated &&
+          !peer.context.closing
+        )
+          post(peer.port, { type: "inspector-query-result", id: message.id, value: null });
+        return;
+      }
+      if (message.type === "inspect-unsubscribe") {
+        const handle = peer.inspectorSubscriptions.get(message.id);
+        peer.inspectorSubscriptions.delete(message.id);
+        if (handle !== undefined) activeRuntime.unsubscribe(handle);
+        return;
+      }
+      const options = JSON.stringify({
+        ...JSON.parse(message.options ?? "{}"),
+        propagation: "local-only",
+      });
+      const current = () =>
+        peer.context.peers.get(peer.tabId) === peer &&
+        peer.context.runtime === activeRuntime &&
+        !peer.context.storageInvalidated &&
+        !peer.context.closing &&
+        !!peer.subscriber;
+      if (message.type === "inspect-query") {
+        const value = await activeRuntime.query(message.query, undefined, "local", options);
+        if (current()) post(peer.port, { type: "inspector-query-result", id: message.id, value });
+      } else {
+        if (peer.inspectorSubscriptions.has(message.id))
+          throw new Error("Inspector subscription already exists");
+        const handle = activeRuntime.createSubscription(message.query, undefined, "local", options);
+        peer.inspectorSubscriptions.set(message.id, handle);
+        activeRuntime.executeSubscription(handle, (value) => {
+          if (!current() || peer.inspectorSubscriptions.get(message.id) !== handle) return;
+          post(
+            peer.port,
+            value instanceof Error
+              ? {
+                  type: "inspector-query-result",
+                  id: message.id,
+                  error: serializeBrowserRelayError(value),
+                }
+              : { type: "inspector-query-result", id: message.id, value },
+          );
+        });
+      }
+      return;
+    }
     if (message.type === "inspect-binding") {
       assertInspectorBinding(peer, message.binding);
       if (message.leasePort) {
@@ -1680,6 +1786,9 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   peer.transportWaitAbort.abort();
   for (const dispose of peer.pendingInspectorBootstraps) dispose();
   peer.pendingInspectorBootstraps.clear();
+  for (const handle of peer.inspectorSubscriptions.values()) context.runtime?.unsubscribe(handle);
+  peer.inspectorSubscriptions.clear();
+  peer.inspectorWrites.clear();
   acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
