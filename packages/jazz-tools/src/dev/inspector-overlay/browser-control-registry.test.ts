@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorControlEvent,
@@ -144,5 +144,125 @@ describe("aggregated inspector browser control", () => {
     });
     outer.close();
     channel.port2.close();
+  });
+  it("closes acquired controls when a sibling factory rejects", async () => {
+    const acquired = new MessageChannel();
+    acquired.port2.start();
+    let markOpened: () => void = () => {};
+    const opened = new Promise<void>((resolve) => {
+      markOpened = resolve;
+    });
+    const closed = new Promise<void>((resolve) => {
+      acquired.port2.addEventListener(
+        "message",
+        (event: MessageEvent<BrowserInspectorControlRequest>) => {
+          if (event.data.type === "close") resolve();
+        },
+        { once: true },
+      );
+    });
+    disposers.push(
+      registerBrowserInspectorControl(async () => {
+        markOpened();
+        return acquired.port1;
+      }),
+      registerBrowserInspectorControl(async () => {
+        await opened;
+        await Promise.resolve();
+        throw new Error("factory failed");
+      }),
+    );
+
+    await expect(
+      openAggregatedBrowserInspectorControlPort(async () => {
+        throw new Error("fallback should not be used");
+      }),
+    ).rejects.toThrow("factory failed");
+    await expect(closed).resolves.toBeUndefined();
+    acquired.port2.close();
+  });
+
+  it("closes a control that resolves after a sibling factory rejects", async () => {
+    const late = new MessageChannel();
+    late.port2.start();
+    let resolveLate: (port: MessagePort) => void = () => {};
+    const lateFactory = new Promise<MessagePort>((resolve) => {
+      resolveLate = resolve;
+    });
+    disposers.push(
+      registerBrowserInspectorControl(() => lateFactory),
+      registerBrowserInspectorControl(async () => {
+        throw new Error("factory failed first");
+      }),
+    );
+
+    await expect(
+      openAggregatedBrowserInspectorControlPort(async () => {
+        throw new Error("fallback should not be used");
+      }),
+    ).rejects.toThrow("factory failed first");
+
+    const closed = new Promise<unknown>((resolve) => {
+      late.port2.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+    resolveLate(late.port1);
+    await expect(closed).resolves.toEqual({ type: "close" });
+    late.port2.close();
+  });
+
+  it("protocol-closes acquired controls when the aggregate closes", async () => {
+    const inner = new MessageChannel();
+    inner.port2.start();
+    disposers.push(registerBrowserInspectorControl(async () => inner.port1));
+    const outer = await openAggregatedBrowserInspectorControlPort(async () => {
+      throw new Error("fallback should not be used");
+    });
+    const closed = new Promise<unknown>((resolve) => {
+      inner.port2.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+
+    outer.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+
+    await expect(closed).resolves.toEqual({ type: "close" });
+    inner.port2.close();
+  });
+
+  it("bounds silent registered control requests", async () => {
+    vi.useFakeTimers();
+    const silent = new MessageChannel();
+    silent.port2.start();
+    const received = new Promise<void>((resolve) => {
+      silent.port2.addEventListener(
+        "message",
+        (event: MessageEvent<BrowserInspectorControlRequest>) => {
+          if (event.data.type === "list-contexts") resolve();
+        },
+        { once: true },
+      );
+    });
+    disposers.push(registerBrowserInspectorControl(async () => silent.port1));
+    try {
+      const outer = await openAggregatedBrowserInspectorControlPort(async () => {
+        throw new Error("fallback should not be used");
+      });
+      const result = waitForEvent(
+        outer,
+        (event): event is Extract<BrowserInspectorControlEvent, { type: "result" }> =>
+          event.type === "result" && event.id === 9,
+      );
+      outer.postMessage({ type: "list-contexts", id: 9 } satisfies BrowserInspectorControlRequest);
+      await received;
+
+      await vi.advanceTimersByTimeAsync(4_500);
+      await expect(result).resolves.toMatchObject({
+        error: expect.objectContaining({
+          message: "Inspector relay control request timed out",
+        }),
+      });
+      outer.close();
+    } finally {
+      silent.port2.close();
+      vi.useRealTimers();
+    }
   });
 });

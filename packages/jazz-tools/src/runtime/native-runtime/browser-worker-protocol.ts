@@ -3,6 +3,11 @@ import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 
+/** Local lifecycle classification, never inferred from a relayed error's name or message. */
+export class BrowserWorkerUnresponsiveError extends Error {
+  override readonly name = "BrowserWorkerUnresponsiveError";
+}
+
 /**
  * Structured-clone-safe Error representation used across browser worker
  * MessagePorts. Error's own fields are not consistently enumerable or retained
@@ -293,6 +298,11 @@ export interface BrowserSharedWorkerConnectRequest {
   options: BrowserWorkerInitOptions;
 }
 
+/** Cancel only this port's runtime admission, never shared initialization. */
+export interface BrowserSharedWorkerBootstrapCancelRequest {
+  type: "cancel-runtime-bootstrap";
+}
+
 /**
  * Liveness handshake sent before a foreground lease request. The worker must
  * acknowledge this without touching durable state; only then may the client
@@ -372,6 +382,8 @@ export type BrowserForegroundNodeLeasePortEvent = {
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }
+  /** The admission is fenced; the client may release its retained port. */
+  | { type: "runtime-bootstrap-cancelled" }
   | { type: "runtime-error"; error: BrowserRelayError }
   /** The realm has acknowledged inspector-directed termination. */
   | { type: "worker-closing" };
@@ -394,6 +406,8 @@ export type InspectorStagedEdit = {
 };
 
 export type BrowserFollowerPortRequest =
+  /** Connection liveness only; never acknowledges an operation's outcome. */
+  | { type: "runtime-probe"; connectionId: string; nonce: number }
   | {
       type: "inspect-commit";
       id: number;
@@ -531,6 +545,7 @@ export type BrowserInspectorControlEvent =
 
 export type BrowserFollowerPortEvent =
   | { type: "inspector-query-result"; id: number; value?: unknown; error?: BrowserRelayError }
+  | { type: "runtime-pong"; connectionId: string; nonce: number }
   | { type: "inspector-binding"; id: number; binding: InspectorAttachmentBinding }
   | { type: "frames"; frames: Uint8Array[] }
   /**

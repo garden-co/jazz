@@ -111,6 +111,21 @@ function parseJwksUrl(jwksUrl: string): URL {
     throw new Error(`Invalid jwksUrl: ${jwksUrl}`);
   }
 
+  // WHATWG URL parsing canonicalises numeric IP spellings and IPv6 compression.
+  // Check the parsed hostname, never a textual prefix or a DNS resolution.
+  const hostname = parsedUrl.hostname;
+  if (
+    parsedUrl.protocol !== "https:" &&
+    !(
+      parsedUrl.protocol === "http:" &&
+      (hostname === "localhost" ||
+        hostname === "[::1]" ||
+        /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname))
+    )
+  ) {
+    throw new Error("Invalid jwksUrl: HTTPS is required except for loopback HTTP development");
+  }
+
   return parsedUrl;
 }
 
@@ -122,7 +137,7 @@ async function fetchRemoteJwks(jwksUrl: string): Promise<LocalJwksDocument> {
 
   let response: Response;
   try {
-    response = await fetchFn(parseJwksUrl(jwksUrl));
+    response = await fetchFn(parseJwksUrl(jwksUrl), { redirect: "error" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Unable to fetch JWKS: ${message}`);

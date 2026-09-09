@@ -103,6 +103,15 @@ internally; callers with separate clean and routed graphs can instead use
 `output_key_fields` entry absent from the graph output descriptor
 (`ShapeKeyFieldNotFound`).
 
+Graph-level `Database::prepare` installs all routed terminals atomically. If any
+terminal fails to compile, preparation MUST return that compile error without
+publishing a prepared shape or any of its graph retainers. A binding source
+newly inserted by that attempt MUST be removed, and unretained ephemeral graph
+additions MUST be collected. A pre-existing compatible binding source, its
+active bindings, and graphs retained by existing shapes or subscriptions MUST
+remain unchanged. Retrying after a failed first preparation may therefore reuse
+the same source name with a different binding descriptor.
+
 ### 5.3 The binding lifecycle
 
 A binding source represents active parameter tuples, not subscriber identities.

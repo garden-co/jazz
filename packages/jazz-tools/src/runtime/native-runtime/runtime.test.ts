@@ -30,6 +30,7 @@ import {
   applySubscriptionDeltaWithRootDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
+import { PreparedQueryCache } from "./prepared-query-cache.js";
 import { encodeSchema } from "./schema-codec.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
@@ -2858,6 +2859,146 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("decodes canonical BigInt query strings into exact native i64 literals", () => {
+    const preparedBytes = prepareNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Ge",
+            right: {
+              Literal: { type: "BigInt", value: "-9223372036854775808" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Eq",
+            right: {
+              Literal: { type: "BigInt", value: "-9007199254740993" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Le",
+            right: {
+              Literal: { type: "BigInt", value: "9223372036854775807" },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedComparisonLiterals(preparedBytes)).toEqual([
+      {
+        predicateTag: 7,
+        column: "largeCount",
+        literal: { tag: 14, value: -9223372036854775808n },
+      },
+      {
+        predicateTag: 3,
+        column: "largeCount",
+        literal: { tag: 14, value: -9007199254740993n },
+      },
+      {
+        predicateTag: 9,
+        column: "largeCount",
+        literal: { tag: 14, value: 9223372036854775807n },
+      },
+    ]);
+  });
+
+  it("decodes canonical BigInt strings recursively inside array literals", () => {
+    const preparedBytes = prepareNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCounts" },
+            op: "Eq",
+            right: {
+              Literal: {
+                type: "Array",
+                value: [
+                  { type: "BigInt", value: "9223372036854775807" },
+                  { type: "BigInt", value: "-9007199254740993" },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedArrayComparison(preparedBytes)).toEqual({
+      predicateTag: 3,
+      column: "largeCounts",
+      literalTag: 12,
+      values: [
+        { tag: 14, value: 9223372036854775807n },
+        { tag: 14, value: -9007199254740993n },
+      ],
+    });
+  });
+
+  it("rejects malformed, noncanonical, oversized, and out-of-range BigInt strings", async () => {
+    const invalidValues = [
+      "",
+      " 1",
+      "-0",
+      "01",
+      "+1",
+      "1e3",
+      "0x10",
+      "9".repeat(21),
+      "9223372036854775808",
+      "-9223372036854775809",
+    ];
+
+    const prepareQuery = vi.fn(() => ({}));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ prepareQuery, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      bigintQuerySchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    try {
+      for (const value of invalidValues) {
+        await expect(
+          runtime.query(
+            JSON.stringify({
+              table: "metrics",
+              conditions: [
+                {
+                  Cmp: {
+                    left: { column: "largeCount" },
+                    op: "Eq",
+                    right: { Literal: { type: "BigInt", value } },
+                  },
+                },
+              ],
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(prepareQuery).not.toHaveBeenCalled();
+      }
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("preserves signed policy literals for Rust lowering", () => {
     const encoded = encodeSchema({
       metrics: {
@@ -5210,28 +5351,30 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
       null,
     );
+    // The adapter state is intentionally inspected here to verify that
+    // termination clears deferred buffers on the object that was terminated.
+    const runtimeState = runtime as unknown as {
+      subscriptions: Map<
+        number,
+        {
+          cancelled: boolean;
+          deferredVisiblePublication: boolean;
+          deferredVisibleReset: boolean;
+          deferredTerminalOperations: unknown[];
+          deferredPlaceholderChunks: number;
+          deferredPlaceholderRows: number;
+          deferredPlaceholderBytes: number;
+        }
+      >;
+    };
+    const subscription = runtimeState.subscriptions.get(handle);
+    expect(subscription).toBeDefined();
 
     runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
     await Promise.resolve();
     await Promise.resolve();
 
     expect(callbacks).toEqual([]);
-    const subscription = (
-      runtime as unknown as {
-        subscriptions: Map<
-          number,
-          {
-            cancelled: boolean;
-            deferredVisiblePublication: boolean;
-            deferredVisibleReset: boolean;
-            deferredTerminalOperations: unknown[];
-            deferredPlaceholderChunks: number;
-            deferredPlaceholderRows: number;
-            deferredPlaceholderBytes: number;
-          }
-        >;
-      }
-    ).subscriptions.get(handle);
     expect(subscription?.cancelled).toBe(true);
     expect(subscription?.deferredVisiblePublication).toBe(false);
     expect(subscription?.deferredVisibleReset).toBe(false);
@@ -5734,6 +5877,362 @@ describe("NativeRuntimeAdapter server transport", () => {
       limit: 10,
       offset: 5,
     });
+  });
+});
+describe("NativeRuntimeAdapter prepared query retention", () => {
+  it("bounds flat literal preparation while active subscriptions stay pinned", async () => {
+    const preparedQueries: object[] = [];
+    let lastReadQuery: object | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: (query: object) => {
+              lastReadQuery = query;
+              return new Uint8Array([0]);
+            },
+            subscribe: () => ({ readAll: () => [] }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    const query = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const pinnedHandle = runtime.createSubscription(query("pinned"));
+    const pinnedQuery = preparedQueries.at(-1);
+    expect(pinnedQuery).toBeDefined();
+
+    for (let index = 0; index < 256; index += 1) {
+      await runtime.query(query(`literal-${index}`));
+    }
+    await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
+    expect(lastReadQuery).toBe(pinnedQuery);
+
+    runtime.unsubscribe(pinnedHandle);
+    for (let index = 256; index < 513; index += 1) {
+      await runtime.query(query(`literal-${index}`));
+    }
+    await expect(runtime.query(query("pinned"))).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(pinnedQuery);
+  });
+  it("evicts an individually oversized inactive query and keeps clear generation safe", () => {
+    let preparations = 0;
+    const cache = new PreparedQueryCache<object>(() => undefined);
+    const oversized = new Uint8Array(1_048_577);
+    const first = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    first.release();
+    const second = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    expect(preparations).toBe(2);
+
+    cache.clear();
+    const replacement = cache.acquire(oversized, () => {
+      preparations += 1;
+      return {};
+    });
+    first.release();
+    first.release();
+    second.release();
+    expect(replacement.isCurrent()).toBe(true);
+    const reused = cache.acquire(oversized, () => ({}));
+    expect(reused.query).toBe(replacement.query);
+    reused.release();
+    replacement.release();
+  });
+
+  it("releases flat subscription leases on native close and readable EOF", async () => {
+    const preparedQueries: object[] = [];
+    let subscriptionCount = 0;
+    let nativeClose = vi.fn(() => true);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => {
+              subscriptionCount += 1;
+              if (subscriptionCount === 1) {
+                nativeClose = vi.fn(() => true);
+                return { readAll: () => [{ type: "closed" }], close: nativeClose };
+              }
+              return new ReadableStream({
+                start(controller) {
+                  controller.close();
+                },
+              });
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const nativeClosed = runtime.createSubscription(queryJson("closed"));
+    const closedQuery = preparedQueries.at(-1);
+    runtime.executeSubscription(nativeClosed, vi.fn());
+    await Promise.resolve();
+    expect(nativeClose).toHaveBeenCalledTimes(1);
+    for (let index = 0; index < 257; index += 1) await runtime.query(queryJson(`new-${index}`));
+    await runtime.query(queryJson("closed"));
+    expect(preparedQueries.at(-1)).not.toBe(closedQuery);
+
+    const eofHandle = runtime.createSubscription(queryJson("eof"));
+    const eofPrepared = preparedQueries.at(-1);
+    runtime.executeSubscription(eofHandle, vi.fn());
+    await Promise.resolve();
+    runtime.unsubscribe(eofHandle);
+    for (let index = 0; index < 257; index += 1) await runtime.query(queryJson(`eof-new-${index}`));
+    await runtime.query(queryJson("eof"));
+    expect(preparedQueries.at(-1)).not.toBe(eofPrepared);
+  });
+  it("pins a pending flat read until its native result is released", async () => {
+    const preparedQueries: object[] = [];
+    let delayedRead = true;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    let resolveRead!: (bytes: Uint8Array) => void;
+    const pendingRead = new Promise<Uint8Array>((resolve) => {
+      resolveRead = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => {
+              if (!delayedRead) return new Uint8Array([0]);
+              readStarted();
+              return pendingRead;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = (literal: string) =>
+      JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "title", op: "eq", value: literal }],
+      });
+
+    const target = runtime.query(queryJson("pending"));
+    await started;
+    delayedRead = false;
+    for (let index = 0; index < 256; index += 1) await runtime.query(queryJson(`read-${index}`));
+    expect(preparedQueries).toHaveLength(257);
+    resolveRead(new Uint8Array([0]));
+    await expect(target).resolves.toEqual([]);
+
+    for (let index = 256; index < 513; index += 1) await runtime.query(queryJson(`read-${index}`));
+    await runtime.query(queryJson("pending"));
+    expect(preparedQueries).toHaveLength(515);
+  });
+  it("rejects flat acquisition after close without invoking native preparation", async () => {
+    let preparations = 0;
+    let subscriptions = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              preparations += 1;
+              return {};
+            },
+            all: () => new Uint8Array([0]),
+            subscribe: () => {
+              subscriptions += 1;
+              return { readAll: () => [] };
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "closed" }],
+    });
+
+    await runtime.close();
+    await expect(runtime.query(queryJson)).rejects.toThrow("Native runtime is closed");
+    const closedSubscription = runtime.createSubscription(queryJson);
+    const onError = vi.fn();
+    runtime.executeSubscription(closedSubscription, onError);
+    runtime.executeSubscription(closedSubscription, onError);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(onError.mock.calls[0]?.[0].message).toBe("Native runtime is closed");
+    expect(preparations).toBe(0);
+    expect(subscriptions).toBe(0);
+  });
+  it("releases the prepared lease when foreground native coverage fails", async () => {
+    const preparedQueries: object[] = [];
+    const failure = new Error("coverage failure");
+    let failRead = true;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: () => {
+              if (failRead) throw failure;
+              return new Uint8Array([0]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    await runtime.connectUpstreamPeer();
+    const queryJson = JSON.stringify({
+      table: "todos",
+      conditions: [{ column: "title", op: "eq", value: "coverage" }],
+    });
+
+    await expect(
+      runtime.query(queryJson, null, "edge", JSON.stringify({ propagation: "full" })),
+    ).rejects.toBe(failure);
+    const failedQuery = preparedQueries.at(-1);
+    failRead = false;
+    for (let index = 0; index < 257; index += 1) {
+      await runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "title", op: "eq", value: `coverage-${index}` }],
+        }),
+      );
+    }
+    await expect(runtime.query(queryJson)).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(failedQuery);
+  });
+  it("releases the prepared lease when background native coverage fails", async () => {
+    const preparedQueries: object[] = [];
+    const failure = new Error("background coverage failure");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => {
+              const query = {};
+              preparedQueries.push(query);
+              return query;
+            },
+            all: (_query: object, options: { tier?: string }) => {
+              if (options.tier === "edge") throw failure;
+              return new Uint8Array([0]);
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const failed = new Promise<Error>((resolve) => runtime.onServerTransportError(resolve));
+    Object.assign(runtime as object, {
+      serverTransport: new FakeTransport([]),
+      serverCarrier: {},
+      serverCarrierPromise: Promise.resolve(),
+    });
+    const queryJson = JSON.stringify({ table: "todos" });
+
+    await expect(
+      runtime.query(queryJson, null, null, JSON.stringify({ propagation: "full" })),
+    ).resolves.toEqual([]);
+    await expect(failed).resolves.toBe(failure);
+    const failedQuery = preparedQueries.at(-1);
+    for (let index = 0; index < 257; index += 1) {
+      await runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "title", op: "eq", value: `background-${index}` }],
+        }),
+        null,
+        "local",
+        JSON.stringify({ propagation: "local-only" }),
+      );
+    }
+    await expect(
+      runtime.query(queryJson, null, "local", JSON.stringify({ propagation: "local-only" })),
+    ).resolves.toEqual([]);
+    expect(preparedQueries.at(-1)).not.toBe(failedQuery);
   });
 });
 
@@ -6410,6 +6909,44 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
+const bigintQuerySchema = s.defineApp({
+  metrics: s.table({
+    largeCount: s.bigint(),
+    largeCounts: s.array(s.bigint()),
+  }),
+}).wasmSchema;
+
+// Capture native bytes for valid queries through the serialized adapter interface.
+function prepareNativeQuery(schema: WasmSchema, query: object): Uint8Array {
+  let preparedBytes: Uint8Array | undefined;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          prepareQuery: (prepared: Uint8Array) => {
+            preparedBytes = prepared;
+            return {};
+          },
+          subscribe: () => new ReadableStream(),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    schema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  runtime.createSubscription(JSON.stringify(query));
+  if (preparedBytes === undefined) {
+    throw new Error("native query was not prepared");
+  }
+  return preparedBytes;
+}
+
 function emptyNativeRuntime(): NativeRuntimeAdapter {
   return new NativeRuntimeAdapter(
     {
@@ -6642,6 +7179,27 @@ function readPreparedComparisonLiterals(query: Uint8Array): Array<{
     expect(predicateReader.u64()).toBe(3);
     return { predicateTag, column, literal: readPreparedNumericLiteral(predicateReader) };
   });
+}
+
+function readPreparedArrayComparison(query: Uint8Array): {
+  predicateTag: number;
+  column: string;
+  literalTag: number;
+  values: Array<{ tag: number; value: number | bigint }>;
+} {
+  const reader = new PostcardReader(query);
+  reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  const predicateTag = reader.u64();
+  expect(predicateTag).toBe(3);
+  expect(reader.u64()).toBe(0);
+  const column = reader.string();
+  expect(reader.u64()).toBe(3);
+  const literalTag = reader.u64();
+  expect(literalTag).toBe(12);
+  const values = reader.readVec((valueReader) => readPreparedNumericLiteral(valueReader));
+  return { predicateTag, column, literalTag, values };
 }
 
 function readPreparedNumericLiteral(reader: PostcardReader): {
@@ -7889,28 +8447,31 @@ it("isolates throwing callbacks when replaying a deferred admission failure", as
 });
 
 it("keeps same-query admissions with different claims out of the shared prepared cache", async () => {
-  const admitted: unknown[] = [];
+  const rows = [
+    { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
+    { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },
+  ];
+  const prepareQuery = vi.fn(
+    (
+      _query: Uint8Array,
+      _kind: "query" | "relation",
+      _identity: Uint8Array,
+      claims: { team: string },
+    ) => {
+      const prepared = { rows: encodeRows(rows.filter((row) => row.team === claims.team)) };
+      return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
+    },
+  );
   const setClaims = vi.fn();
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: (
-            _query: Uint8Array,
-            _kind: "query" | "relation",
-            identity: Uint8Array,
-            claims: unknown,
-          ) => {
-            const prepared = {
-              identity: new Uint8Array(identity),
-              claims: structuredClone(claims),
-            };
-            admitted.push(prepared);
-            return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
-          },
+          prepareQuery,
+          all: (prepared: { rows: Uint8Array }) => prepared.rows,
           setIdentityClaims: setClaims,
           tick: () => undefined,
-        } as never),
+        }),
       openBrowser: async () => {
         throw new Error("unused");
       },
@@ -7922,21 +8483,34 @@ it("keeps same-query admissions with different claims out of the shared prepared
     true,
     { readAuthorizationHost: "trusted-serving" },
   );
-  const inner = runtime as unknown as Record<string, any>;
+  const queryJson = JSON.stringify({ table: "todos" });
   const session = {
-    identity: TEST_RUNTIME_AUTHOR,
-    claims: { team: "team-a" },
-    backendAuthority: false,
+    issuer: "https://issuer.example",
+    user_id: "same-user",
+    authMode: "external",
   };
-  const a = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), session);
-  const b = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), {
-    ...session,
-    claims: { team: "team-b" },
-  });
-  expect(a).not.toBe(b);
-  expect(admitted).toHaveLength(2);
-  expect(a.claims).toEqual({ team: "team-a" });
-  expect(b.claims).toEqual({ team: "team-b" });
-  expect(setClaims).not.toHaveBeenCalled();
-  await runtime.close();
+  const sessionA = JSON.stringify({ ...session, claims: { team: "team-a" } });
+  const sessionB = JSON.stringify({ ...session, claims: { team: "team-b" } });
+  const expectedA = [
+    {
+      table: "todos",
+      id: "00000000-0000-0000-0000-000000000000",
+      values: [{ type: "Text", value: "Draft proposal" }],
+    },
+  ];
+  try {
+    await expect(runtime.query(queryJson, sessionA, "local")).resolves.toEqual(expectedA);
+    await expect(runtime.query(queryJson, sessionB, "local")).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "Review budget" }],
+      },
+    ]);
+    await expect(runtime.query(queryJson, sessionA, "local")).resolves.toEqual(expectedA);
+    expect(prepareQuery).toHaveBeenCalledTimes(3);
+    expect(setClaims).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
 });

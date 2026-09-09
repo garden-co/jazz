@@ -35,7 +35,7 @@ use jsonwebtoken::{
     jwk::{Jwk, JwkSet, KeyAlgorithm},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::warn;
 
 use crate::server::ServerState;
@@ -293,6 +293,53 @@ struct CachedJwksEntry {
     set: JwkSet,
 }
 
+struct JwksRefreshFlight {
+    result: watch::Sender<Option<Result<JwkSet, String>>>,
+}
+
+impl JwksRefreshFlight {
+    fn new() -> std::sync::Arc<Self> {
+        let (result, _) = watch::channel(None);
+        std::sync::Arc::new(Self { result })
+    }
+
+    async fn wait(&self) -> Result<JwkSet, String> {
+        let mut receiver = self.result.subscribe();
+        loop {
+            let result = receiver.borrow().clone();
+            if let Some(result) = result {
+                return result;
+            }
+            if receiver.changed().await.is_err() {
+                return Err("JWKS refresh coordination ended unexpectedly".to_owned());
+            }
+        }
+    }
+
+    fn publish(&self, result: Result<JwkSet, String>) {
+        // A caller can join before subscribing. Retain completion even when no
+        // receivers exist yet, including fetch errors and owner cancellation.
+        self.result.send_replace(Some(result));
+    }
+}
+
+struct JwksRefreshOwner<'a> {
+    cache: &'a JwksCache,
+    flight: std::sync::Arc<JwksRefreshFlight>,
+    finished: bool,
+}
+
+impl Drop for JwksRefreshOwner<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.flight
+            .publish(Err("JWKS refresh was cancelled".to_owned()));
+        self.cache.clear_refresh_flight(&self.flight);
+    }
+}
+
 /// JWKS cache with TTL-based expiry and on-demand refresh.
 ///
 /// Caches the keyset from a JWKS endpoint and transparently refetches when:
@@ -300,6 +347,7 @@ struct CachedJwksEntry {
 /// - A caller forces a refresh (e.g. after encountering an unknown kid).
 pub struct JwksCache {
     endpoint: String,
+    refresh_flight: std::sync::Mutex<Option<std::sync::Arc<JwksRefreshFlight>>>,
     http_client: reqwest::Client,
     ttl: Duration,
     max_stale: Duration,
@@ -316,6 +364,7 @@ impl JwksCache {
     ) -> Self {
         Self {
             endpoint,
+            refresh_flight: std::sync::Mutex::new(None),
             http_client,
             ttl,
             max_stale,
@@ -330,6 +379,7 @@ impl JwksCache {
     pub fn from_static(jwks: JwkSet) -> Self {
         Self {
             endpoint: String::new(),
+            refresh_flight: std::sync::Mutex::new(None),
             http_client: reqwest::Client::new(),
             ttl: JWKS_CACHE_TTL,
             max_stale: JWKS_MAX_STALE,
@@ -344,70 +394,122 @@ impl JwksCache {
 
     /// Load the JWKS, returning a cached copy if fresh or fetching anew.
     ///
-    /// When `force_refresh` is true but a forced refresh happened within the
-    /// cooldown window (10s), the request is downgraded to a cache read. This
-    /// prevents unauthenticated callers from using fabricated key IDs to
-    /// trigger unbounded outbound fetches.
-    pub async fn load(&self, force_refresh: bool) -> Result<JwkSet, String> {
+    /// Forced refreshes are reserved before network I/O. All cold, expired,
+    /// and forced loads share one in-flight refresh for this cache instance.
+    pub async fn load(&self, force_requested: bool) -> Result<JwkSet, String> {
         let ttl_us = self.ttl.as_micros().min(u128::from(u64::MAX)) as u64;
         let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
-
-        // Reserve a forced refresh before starting network I/O.  A plain
-        // load-then-store here would let every concurrent request carrying an
-        // unknown `kid` observe the old timestamp and trigger its own JWKS
-        // fetch.  The reservation deliberately survives a failed fetch: the
-        // cooldown protects the endpoint from the unauthenticated caller in
-        // precisely that failure case as well.
-        let force_refresh = force_refresh && self.reserve_forced_refresh(cooldown_us);
-
-        if !force_refresh {
-            let guard = self.cached.read().await;
-            if let Some(ref entry) = *guard {
-                let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
-                if entry.endpoint == self.endpoint && age_us <= ttl_us {
-                    return Ok(entry.set.clone());
-                }
-            }
-        }
-
         let max_stale_us = (self.ttl + self.max_stale)
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
 
+        if !force_requested && let Some(cached) = self.cached_up_to(ttl_us).await {
+            return Ok(cached);
+        }
+
+        let (flight, owner) = self.start_or_join_refresh();
+        if !owner {
+            return flight.wait().await;
+        }
+
+        let mut owner_guard = JwksRefreshOwner {
+            cache: self,
+            flight: flight.clone(),
+            finished: false,
+        };
+        let result = if force_requested {
+            if self.reserve_forced_refresh(cooldown_us) {
+                self.fetch_and_cache(max_stale_us).await
+            } else {
+                self.cached_during_forced_cooldown(max_stale_us).await
+            }
+        } else if let Some(cached) = self.cached_up_to(ttl_us).await {
+            Ok(cached)
+        } else {
+            self.fetch_and_cache(max_stale_us).await
+        };
+
+        owner_guard.finished = true;
+        flight.publish(result.clone());
+        self.clear_refresh_flight(&flight);
+        result
+    }
+
+    fn lock_refresh_flight(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<std::sync::Arc<JwksRefreshFlight>>> {
+        self.refresh_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn start_or_join_refresh(&self) -> (std::sync::Arc<JwksRefreshFlight>, bool) {
+        let mut guard = self.lock_refresh_flight();
+        if let Some(flight) = guard.as_ref() {
+            return (flight.clone(), false);
+        }
+        let flight = JwksRefreshFlight::new();
+        *guard = Some(flight.clone());
+        (flight, true)
+    }
+
+    fn clear_refresh_flight(&self, flight: &std::sync::Arc<JwksRefreshFlight>) {
+        let mut guard = self.lock_refresh_flight();
+        if guard
+            .as_ref()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, flight))
+        {
+            *guard = None;
+        }
+    }
+
+    async fn cached_up_to(&self, max_age_us: u64) -> Option<JwkSet> {
+        let guard = self.cached.read().await;
+        let entry = guard.as_ref()?;
+        let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
+        (entry.endpoint == self.endpoint && age_us <= max_age_us).then(|| entry.set.clone())
+    }
+
+    async fn cached_during_forced_cooldown(&self, max_stale_us: u64) -> Result<JwkSet, String> {
+        self.cached_up_to(max_stale_us).await.ok_or_else(|| {
+            "JWKS refresh cooldown active and no bounded cached keyset is available".to_owned()
+        })
+    }
+
+    async fn fetch_and_cache(&self, max_stale_us: u64) -> Result<JwkSet, String> {
         let jwks = match fetch_jwks(&self.http_client, &self.endpoint).await {
             Ok(jwks) => jwks,
-            Err(e) => {
-                // Stale-if-error: serve the cached keyset if it's not too old.
-                let guard = self.cached.read().await;
-                if let Some(ref entry) = *guard {
-                    let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
-                    if age_us <= max_stale_us {
-                        warn!(
-                            error = %e,
-                            "JWKS fetch failed, serving stale cached keyset"
-                        );
-                        return Ok(entry.set.clone());
-                    }
-                    warn!(
-                        error = %e,
-                        "JWKS fetch failed and stale keyset has expired"
-                    );
-                }
-                return Err(e);
-            }
+            Err(error) => return self.stale_if_error(error, max_stale_us).await,
         };
 
         let now = now_timestamp_us();
-
         *self.cached.write().await = Some(CachedJwksEntry {
             endpoint: self.endpoint.clone(),
             fetched_at_us: now,
             set: jwks.clone(),
         });
-
         Ok(jwks)
+    }
+
+    async fn stale_if_error(&self, error: String, max_stale_us: u64) -> Result<JwkSet, String> {
+        let guard = self.cached.read().await;
+        if let Some(ref entry) = *guard {
+            let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
+            if entry.endpoint == self.endpoint && age_us <= max_stale_us {
+                warn!(
+                    error = %error,
+                    "JWKS fetch failed, serving stale cached keyset"
+                );
+                return Ok(entry.set.clone());
+            }
+            warn!(
+                error = %error,
+                "JWKS fetch failed and stale keyset has expired"
+            );
+        }
+        Err(error)
     }
 
     /// Atomically claim the one forced refresh permitted by the cooldown.
@@ -1304,38 +1406,458 @@ mod tests {
     fn test_jwks_cache() -> JwksCache {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
     }
+    #[derive(Clone)]
+    struct JwksProbeState {
+        requests: std::sync::Arc<AtomicU64>,
+        body: std::sync::Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+        gate: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<JwksProbeGate>>>>,
+    }
 
-    #[test]
-    fn forced_jwks_refresh_reservation_allows_only_one_concurrent_request() {
-        let cache = std::sync::Arc::new(test_jwks_cache());
-        let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
-            .as_micros()
-            .min(u128::from(u64::MAX)) as u64;
-        cache.last_forced_refresh_us.store(
-            now_timestamp_us().saturating_sub(cooldown_us.saturating_add(1)),
-            Ordering::SeqCst,
-        );
+    struct JwksProbeGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        released: std::sync::atomic::AtomicBool,
+    }
 
-        let callers = 16;
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(callers));
-        let mut workers = Vec::with_capacity(callers);
-        for _ in 0..callers {
-            let cache = cache.clone();
-            let barrier = barrier.clone();
-            workers.push(std::thread::spawn(move || {
-                barrier.wait();
-                cache.reserve_forced_refresh(cooldown_us)
-            }));
+    struct JwksProbe {
+        state: JwksProbeState,
+        address: std::net::SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl JwksProbe {
+        async fn start(body: serde_json::Value) -> Self {
+            use axum::Router;
+            use axum::extract::State;
+            use axum::routing::get;
+
+            async fn handler(State(state): State<JwksProbeState>) -> axum::response::Response {
+                use axum::response::IntoResponse;
+
+                state.requests.fetch_add(1, Ordering::SeqCst);
+                let gate = state.gate.lock().await.clone();
+                if let Some(gate) = gate {
+                    let released = gate.release.notified();
+                    tokio::pin!(released);
+                    released.as_mut().enable();
+                    if !gate.released.load(Ordering::Acquire) {
+                        gate.entered.notify_one();
+                        released.await;
+                    }
+                }
+
+                let Some(body) = state.body.read().await.clone() else {
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                };
+                (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+            }
+
+            let state = JwksProbeState {
+                requests: std::sync::Arc::new(AtomicU64::new(0)),
+                body: std::sync::Arc::new(tokio::sync::RwLock::new(Some(body))),
+                gate: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind JWKS probe");
+            let address = listener.local_addr().expect("read JWKS probe address");
+            let app = Router::new()
+                .route("/jwks", get(handler))
+                .with_state(state.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve JWKS probe");
+            });
+            Self {
+                state,
+                address,
+                task,
+            }
         }
 
-        let refreshes = workers
-            .into_iter()
-            .map(|worker| worker.join().expect("forced-refresh worker must not panic"))
-            .filter(|claimed| *claimed)
-            .count();
+        fn endpoint(&self) -> String {
+            format!("http://{}/jwks", self.address)
+        }
+
+        fn requests(&self) -> u64 {
+            self.state.requests.load(Ordering::SeqCst)
+        }
+
+        async fn set_body(&self, body: Option<serde_json::Value>) {
+            *self.state.body.write().await = body;
+        }
+
+        async fn gate_next_cohort(&self) -> std::sync::Arc<JwksProbeGate> {
+            let gate = std::sync::Arc::new(JwksProbeGate {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            });
+            *self.state.gate.lock().await = Some(gate.clone());
+            gate
+        }
+    }
+
+    impl Drop for JwksProbe {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn jwks_document(kid: &str, secret: &str) -> serde_json::Value {
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes());
+        serde_json::json!({
+            "keys": [
+                {
+                    "kty": "oct",
+                    "kid": kid,
+                    "alg": "HS256",
+                    "k": encoded
+                }
+            ]
+        })
+    }
+
+    // The public load API cannot pause between joining a flight and subscribing.
+    // Join internally to force that scheduling window, but complete the owner
+    // through its real HTTP/error/cancellation paths.
+    async fn assert_jwks_late_waiter_completion(fail_fetch: bool, cancel_owner: bool) {
+        let probe = JwksProbe::start(jwks_document("late-kid", "late-secret")).await;
+        if fail_fetch {
+            probe.set_body(None).await;
+        }
+        let gate = probe.gate_next_cohort().await;
+        let cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            reqwest::Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        let owner = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.load(false).await })
+        };
+        gate.entered.notified().await;
+        let (waiter, became_owner) = cache.start_or_join_refresh();
+        assert!(!became_owner);
+        assert_eq!(waiter.result.receiver_count(), 0);
+
+        let expected = if cancel_owner {
+            owner.abort();
+            assert!(
+                owner
+                    .await
+                    .expect_err("owner must be cancelled")
+                    .is_cancelled()
+            );
+            Err("JWKS refresh was cancelled".to_owned())
+        } else {
+            gate.released.store(true, Ordering::Release);
+            gate.release.notify_waiters();
+            owner.await.expect("owner must not panic")
+        };
+        assert_eq!(expected.is_err(), fail_fetch || cancel_owner);
+        assert!(cache.lock_refresh_flight().is_none());
+        // Subscribe only after completion and removal from the cache's active slot.
+        // Repeat to prove the result remains available for every late joiner.
+        for _ in 0..2 {
+            let actual = tokio::time::timeout(Duration::from_secs(1), waiter.wait())
+                .await
+                .expect("joined request must receive completion without hanging");
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+        assert_eq!(probe.requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_success() {
+        assert_jwks_late_waiter_completion(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_fetch_error() {
+        assert_jwks_late_waiter_completion(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn jwks_late_waiter_receives_cancellation() {
+        assert_jwks_late_waiter_completion(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jwks_refreshes_are_singleflight_and_failed_forced_refreshes_are_cooldown_bound() {
+        let old_secret = "old-jwks-secret";
+        let new_secret = "new-jwks-secret";
+        let probe = JwksProbe::start(jwks_document("old-kid", old_secret)).await;
+        let client = reqwest::Client::new();
+        let cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            client.clone(),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        ));
+
+        let cold_gate = probe.gate_next_cohort().await;
+        let cold_callers = 16;
+        let mut cold_tasks = Vec::with_capacity(cold_callers);
+        for _ in 0..cold_callers {
+            let cache = cache.clone();
+            cold_tasks.push(tokio::spawn(async move { cache.load(false).await }));
+        }
+        cold_gate.entered.notified().await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        cold_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        cold_gate.release.notify_waiters();
+        for task in cold_tasks {
+            task.await
+                .expect("cold JWKS load must not panic")
+                .expect("cold JWKS load must succeed");
+        }
         assert_eq!(
-            refreshes, 1,
-            "only one unknown-kid request may refresh JWKS"
+            probe.requests(),
+            1,
+            "concurrent cold loads must share one JWKS fetch"
+        );
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let expired_gate = probe.gate_next_cohort().await;
+        let mut expired_tasks = Vec::with_capacity(cold_callers);
+        for _ in 0..cold_callers {
+            let cache = cache.clone();
+            expired_tasks.push(tokio::spawn(async move { cache.load(false).await }));
+        }
+        expired_gate.entered.notified().await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        expired_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        expired_gate.release.notify_waiters();
+        for task in expired_tasks {
+            task.await
+                .expect("expired JWKS load must not panic")
+                .expect("expired JWKS load must succeed");
+        }
+        assert_eq!(
+            probe.requests(),
+            2,
+            "concurrent expired loads must share one JWKS fetch"
+        );
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        probe.set_body(None).await;
+        let first_failed_forced = cache
+            .load(true)
+            .await
+            .expect("failed forced refresh should serve bounded stale data");
+        let second_failed_forced = cache
+            .load(true)
+            .await
+            .expect("cooldown-denied forced refresh should serve bounded stale data");
+        assert_eq!(first_failed_forced.keys.len(), 1);
+        assert_eq!(second_failed_forced.keys.len(), 1);
+        assert_eq!(
+            probe.requests(),
+            3,
+            "a failed forced refresh must reserve the cooldown"
+        );
+
+        probe
+            .set_body(Some(jwks_document("old-kid", old_secret)))
+            .await;
+        let overlap_cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            client.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        let overlap_gate = probe.gate_next_cohort().await;
+        let ordinary_task = {
+            let cache = overlap_cache.clone();
+            tokio::spawn(async move { cache.load(false).await })
+        };
+        overlap_gate.entered.notified().await;
+        let mut forced_load = std::pin::pin!(overlap_cache.load(true));
+        std::future::poll_fn(|cx| {
+            assert!(forced_load.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        overlap_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        overlap_gate.release.notify_waiters();
+        ordinary_task
+            .await
+            .expect("ordinary overlap load must not panic")
+            .expect("ordinary overlap load must succeed");
+        forced_load
+            .await
+            .expect("forced overlap load must share the ordinary fetch");
+        assert_eq!(
+            probe.requests(),
+            4,
+            "a forced caller overlapping an ordinary refresh must not fetch again"
+        );
+
+        let rotated_cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            client,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        rotated_cache
+            .load(false)
+            .await
+            .expect("rotation test must warm its cache");
+        let requests_before_rotation = probe.requests();
+        probe
+            .set_body(Some(jwks_document("new-kid", new_secret)))
+            .await;
+        let claims = JwtClaims {
+            sub: "rotated-user".to_owned(),
+            iss: Some("https://issuer.jazz.test".to_owned()),
+            claims: std::collections::BTreeMap::new(),
+            exp: Some(4_102_444_800),
+            iat: None,
+        };
+        let token = make_jwt(&claims, new_secret, "new-kid");
+        let config = make_test_config();
+        let forced_gate = probe.gate_next_cohort().await;
+        let mut validation_tasks = Vec::with_capacity(cold_callers);
+        for _ in 0..cold_callers {
+            let cache = rotated_cache.clone();
+            let token = token.clone();
+            let config = config.clone();
+            validation_tasks.push(tokio::spawn(async move {
+                validate_jwt_with_cache_at(&token, &cache, &config, 1_000_000).await
+            }));
+        }
+        forced_gate.entered.notified().await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        forced_gate
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        forced_gate.release.notify_waiters();
+        for task in validation_tasks {
+            task.await
+                .expect("rotated JWT validation must not panic")
+                .expect("all concurrent rotated JWT validations must succeed");
+        }
+        assert_eq!(
+            probe.requests(),
+            requests_before_rotation + 1,
+            "concurrent forced refreshes must share one JWKS fetch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jwks_failed_forced_refresh_without_stale_is_cooldown_bound() {
+        let secret = "failed-forced-secret";
+        let probe = JwksProbe::start(jwks_document("failed-kid", secret)).await;
+        probe.set_body(None).await;
+        let cache = JwksCache::new(
+            probe.endpoint(),
+            reqwest::Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+
+        assert!(cache.load(true).await.is_err());
+        assert_eq!(probe.requests(), 1);
+
+        assert!(cache.load(true).await.is_err());
+        assert_eq!(
+            probe.requests(),
+            1,
+            "a failed forced refresh without stale data must retain cooldown"
+        );
+
+        probe
+            .set_body(Some(jwks_document("failed-kid", secret)))
+            .await;
+        cache
+            .load(false)
+            .await
+            .expect("ordinary retry should remain eligible after forced failure");
+        assert_eq!(
+            probe.requests(),
+            2,
+            "an eligible ordinary retry must be able to fetch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jwks_cancelled_owner_wakes_waiters_and_preserves_forced_cooldown() {
+        let secret = "cancelled-owner-secret";
+        let probe = JwksProbe::start(jwks_document("cancelled-kid", secret)).await;
+        let gate = probe.gate_next_cohort().await;
+        let cache = std::sync::Arc::new(JwksCache::new(
+            probe.endpoint(),
+            reqwest::Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+
+        let owner = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.load(true).await })
+        };
+        gate.entered.notified().await;
+        let waiter = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.load(true).await })
+        };
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        owner.abort();
+        assert!(
+            owner
+                .await
+                .expect_err("cancelled owner must not complete")
+                .is_cancelled(),
+            "owner must be cancelled while the endpoint is gated"
+        );
+
+        let waiter_result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancelled refresh must wake its waiter")
+            .expect("waiter must not panic");
+        assert!(
+            waiter_result.is_err(),
+            "cancelled refresh must deliver a local error to waiters"
+        );
+        assert_eq!(probe.requests(), 1);
+
+        gate.released
+            .store(true, std::sync::atomic::Ordering::Release);
+        gate.release.notify_waiters();
+
+        assert!(cache.load(true).await.is_err());
+        assert_eq!(
+            probe.requests(),
+            1,
+            "forced retry after cancellation must remain cooldown-bound"
+        );
+
+        cache
+            .load(false)
+            .await
+            .expect("ordinary retry should progress after cancellation");
+        assert_eq!(
+            probe.requests(),
+            2,
+            "ordinary retry should be allowed to fetch after cancellation"
         );
     }
 

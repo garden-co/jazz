@@ -11,7 +11,7 @@ rules for tables and indices. Chapters 3–7 build on these guarantees.
 Invariant digest:
 
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
-- `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction and include keys `>= start` while excluding keys `>= end`.
+- `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction, include keys `>= start` while excluding keys `>= end`, and return an empty result without panicking when `start >= end`.
 - `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
@@ -177,10 +177,11 @@ without changing pages.
 
 The only ordering property groove requires from the backing store is unsigned
 lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
-integers, locale text, or a backend-native collation. A range `ScanRequest` returns keys in that order and
-includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
-writes are atomic: `write_many` applies every operation in the batch or none of
-them; if any operation is invalid, no operation partially applies
+integers, locale text, or a backend-native collation. A range `ScanRequest`
+returns keys in that order and includes keys `>= start` while excluding keys
+`>= end` (`INV-STORAGE-1`). When `start >= end`, it returns no keys without
+panicking. Batch writes are atomic: `write_many` applies every operation in the
+batch or none of them; if any operation is invalid, no operation partially applies
 (`INV-STORAGE-4`). Its completion outcome also distinguishes a failure known to
 have left the batch unapplied from a failure that may have followed a durable
 commit. Backends must classify an uncertain acknowledgement conservatively as

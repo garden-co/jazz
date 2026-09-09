@@ -1,4 +1,5 @@
 import { useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { parseSignedBigInt64 } from "./parse-signed-bigint.js";
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 import {
   getSupportedWhereOperatorsForColumn,
@@ -83,7 +84,6 @@ function parseScalarValue(columnType: ColumnType, value: string): unknown {
       return parsed;
     }
     case "Integer":
-    case "BigInt":
     case "Double": {
       const parsed = Number(trimmed);
       if (!Number.isFinite(parsed)) {
@@ -91,6 +91,8 @@ function parseScalarValue(columnType: ColumnType, value: string): unknown {
       }
       return parsed;
     }
+    case "BigInt":
+      return parseSignedBigInt64(trimmed);
     case "Bytea":
       return parseBytea(trimmed);
     case "Json":
@@ -140,8 +142,11 @@ function parseFilterValue(
 
 function formatClauseValue(value: unknown): string {
   if (value instanceof Uint8Array) return `[${Array.from(value).join(", ")}]`;
+  if (typeof value === "bigint") return value.toString();
   if (typeof value === "string") return value;
-  return JSON.stringify(value);
+  return JSON.stringify(value, (_key, candidate) =>
+    typeof candidate === "bigint" ? candidate.toString() : candidate,
+  );
 }
 
 function createClauseId(): string {

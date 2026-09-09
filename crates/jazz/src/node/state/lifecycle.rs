@@ -661,6 +661,7 @@ where
             content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
+            next_authoritative_reset_generation: 1,
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,

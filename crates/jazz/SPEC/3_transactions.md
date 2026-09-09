@@ -34,7 +34,7 @@ Invariant digest:
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing the `(RowUuid, TxId)` output set at `base_snapshot.global_base` against current global output for the same shape and binding.
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing source-row predicate output as real `(RowUuid, TxId)` identities, while aggregate predicate output MUST be compared as stable synthetic group identities plus canonical public aggregate payloads, at `base_snapshot.global_base` against current global output for the same shape and binding.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
@@ -301,9 +301,12 @@ recorded reads against current global state:
   separate from a write's own-layer CAS below and is covered by
   `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
-- a **predicate read** must not have gained or lost rows — checked by comparing
-  the `(RowUuid, TxId)` output set for that shape+binding at
-  the complete dotted `base_snapshot` against the current output (`INV-TX-18`);
+- a **predicate read** must not have gained or lost rows — for source-row
+  predicates, authority compares the `(RowUuid, TxId)` output set for that
+  shape+binding at the complete dotted `base_snapshot` against current global
+  output (`INV-TX-18`). Aggregate predicates are the exception: authority
+  compares stable synthetic group identities together with canonical public
+  aggregate payloads at the same two frontiers.
 - each **write** is first-committer-wins in its **written history layer**: a
   content version compares its parent to the row's current global content
   `TxId`, while a deletion or restore version compares its parent to the

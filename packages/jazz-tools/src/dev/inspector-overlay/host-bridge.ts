@@ -115,8 +115,11 @@ export function installInspectorHost(
         }),
       );
     },
-    openControlPort() {
-      return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());
+    openControlPort(signal) {
+      return openAggregatedBrowserInspectorControlPort(
+        (factorySignal) => db.openInspectorControlPort(factorySignal),
+        signal,
+      );
     },
     getWasmSchema() {
       const live = db.getRuntimeSchema();

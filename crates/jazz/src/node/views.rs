@@ -2178,6 +2178,15 @@ where
         // policy-scoped authority identity captured when that subscription was
         // admitted; never reconstruct or share it through BindingViewKey.
         let authority_result_key = self.authority_result_key_for_subscription(subscription)?;
+        let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
+            reset_input_set,
+            !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
+            opening_pending,
+            self.query.authority_results.get(&authority_result_key),
+        );
+        let pending_authoritative_reset_generation = reset_cleared_shared_state
+            .then(|| self.allocate_authoritative_reset_generation())
+            .transpose()?;
         let preflight = if preloaded_tx_ids.is_none() {
             Some(
                 self.preflight_view_bundle_conflicts(&version_bundle_refs)
@@ -2261,12 +2270,7 @@ where
         }
         let persisted_fact_adds = program_fact_adds.clone();
         let persisted_fact_removes = program_fact_removes.clone();
-        let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
-            reset_input_set,
-            !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
-            opening_pending,
-            self.query.authority_results.get(&authority_result_key),
-        );
+
         if reset_cleared_shared_state {
             self.clear_settled_result_view(authority_result_key.clone());
         }
@@ -2316,12 +2320,8 @@ where
             // it carries retractions. The public subscription materializes its
             // replacement snapshot below, rather than attempting to apply a
             // removal after the reset has cleared the cached result set.
-            if reset_cleared_shared_state {
-                self.query
-                    .authority_results
-                    .entry(authority_result_key.clone())
-                    .or_default()
-                    .pending_authoritative_reset = true;
+            if let Some(generation) = pending_authoritative_reset_generation {
+                state.pending_authoritative_reset = Some(generation);
             }
         }
         if !defer_settlement && !opening_pending {

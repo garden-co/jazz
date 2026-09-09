@@ -878,8 +878,9 @@ pub(super) fn join_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
     fields: &[String],
+    comparison: ValueComparison,
 ) -> Result<Vec<JoinKey>, IvmRuntimeError> {
-    join_keys_with_comparison(descriptor, record, fields, ValueComparison::Exact)
+    join_keys_with_comparison(descriptor, record, fields, comparison)
 }
 
 fn join_keys_with_comparison(
@@ -1103,8 +1104,8 @@ mod tests {
             "integer and float join keys remain type-exact"
         );
         assert_ne!(
-            join_keys(&u32, &u32_record, &fields).unwrap(),
-            join_keys(&i64, &i64_record, &fields).unwrap(),
+            join_keys(&u32, &u32_record, &fields, ValueComparison::Exact).unwrap(),
+            join_keys(&i64, &i64_record, &fields, ValueComparison::Exact).unwrap(),
             "ordinary arrangement keys retain their exact typed encoding"
         );
     }

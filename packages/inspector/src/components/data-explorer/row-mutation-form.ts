@@ -1,4 +1,5 @@
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
+import { parseSignedBigInt64 } from "./parse-signed-bigint.js";
 
 export type MutationFormMode = "edit" | "insert";
 
@@ -45,8 +46,7 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
       }
       return parsed;
     }
-    case "Integer":
-    case "BigInt": {
+    case "Integer": {
       if (trimmed.length === 0) {
         throw new Error("Value is required.");
       }
@@ -55,6 +55,12 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
         throw new Error("Value must be an integer.");
       }
       return parsed;
+    }
+    case "BigInt": {
+      if (trimmed.length === 0) {
+        throw new Error("Value is required.");
+      }
+      return parseSignedBigInt64(trimmed);
     }
     case "Double": {
       if (trimmed.length === 0) {

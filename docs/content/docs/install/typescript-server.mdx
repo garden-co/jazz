@@ -83,6 +83,14 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
 
+For this TypeScript backend, use a direct HTTPS `jwksUrl`. HTTP is allowed for
+development only when the URL's WHATWG-canonical hostname is `localhost`,
+`[::1]`, or an IPv4 address in `127.0.0.0/8` (for example,
+`http://127.0.0.1:3000/api/auth/jwks`). HTTP with the trailing-dot spelling
+`localhost.`, other schemes, and remote HTTP are rejected before fetching keys.
+The backend rejects every redirect, even to another HTTPS URL, so configure your
+provider's final JWKS URL rather than a redirecting URL.
+
 Each route handler awaits `client.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 For server-owned work, use the ready snapshot's `client.db`. Backend admission requires the core
 even with a memory driver; keep the secret server-side and provide it through `initial` or `session.becomeBackend(...)`. [Server Setup](/docs/getting-started/server-setup)

@@ -2357,6 +2357,55 @@ describe("permissions DSL", () => {
       ]),
     ).toThrow(/unsupported session\.where operator "startsWith"/i);
   });
+  it.each(["gt", "gte", "lt", "lte"] as const)(
+    "rejects session.where range operator %s synchronously",
+    (operator) => {
+      expect(() =>
+        definePermissions(app, ({ policy, session }) => [
+          policy.todos.allowRead.where(session.where({ "claims.age": { [operator]: 18 } })),
+        ]),
+      ).toThrow(new RegExp(`Unsupported session\\.where operator "${operator}"`));
+    },
+  );
+
+  it("prioritizes unsupported session range operators over invalid literals", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({ "claims.age": { gt: session.claims["sub"] } }),
+        ),
+      ]),
+    ).toThrow(/Unsupported session\.where operator "gt"/);
+  });
+
+  it("omits undefined session range values", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where(session.where({ "claims.age": { gt: undefined } })),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({ type: "True" });
+  });
+
+  it.each([
+    ["gt", "Gt"],
+    ["gte", "Ge"],
+    ["lt", "Lt"],
+    ["lte", "Le"],
+  ] as const)("preserves ordinary row range operator %s", (operator, expectedOp) => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where({ done: { [operator]: true } } as unknown as TodoWhere),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Cmp",
+      column: "done",
+      op: expectedOp,
+      value: {
+        type: "Literal",
+        value: true,
+      },
+    });
+  });
 
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>

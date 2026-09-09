@@ -761,6 +761,28 @@ JSON source remains literal UTF-8 JSON bytes in the same tree and edit format as
 bytes and text. Complete replacement is deterministically lowered to byte edits;
 persisted operations do not form a second JSON-tree mutation protocol.
 
+Buffered preparation, reader-streamed preparation, push preparation and completed
+remote uploads enforce the same JSON grammar, numeric representability, Unicode
+escape and recursion rules as the configured default `serde_json::Value` parser.
+Outside strings only SP, HT, LF and CR are whitespace; FF and VT are rejected.
+The validator's normative memory ceiling remains 128 open array/object frames.
+The resolved parser starts with a recursion budget of 128 and rejects the
+container that exhausts it, so all admission paths support at most 127
+simultaneous containers and reject the 128th without retaining its frame.
+The memory ceiling is not an independent promise to admit deeper values than
+the parser supports. Numbers that overflow
+its finite floating-point range and unpaired UTF-16 surrogate escapes (in keys
+or values) fail with `InvalidJson`; finite underflow and zero with a large
+exponent remain valid. Streaming admission retains only bounded numeric and
+escape metadata across windows, never an entire number or string token.
+Mantissas exceeding the parser's signed 32-bit decimal-place counter domain
+are rejected before that parser could panic or wrap on a subsequent read.
+
+Validation never normalizes source bytes or changes descriptor, node, storage
+or wire encodings. A failed completed upload removes pending upload metadata and
+issues no staging receipt. Immutable chunks already staged are queued for the
+existing explicit orphan reclamation lifecycle, not synchronously deleted.
+
 Queries may use a streaming parser to satisfy pointer and predicate demands.
 The parser retains bounded syntactic state and requests further logical windows
 as needed. It may finish early only when it has proved the exact semantic answer

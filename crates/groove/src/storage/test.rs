@@ -604,6 +604,9 @@ where
     }
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        if request.bounds.is_empty_range() {
+            return self.inner.scan(request);
+        }
         let remaining = request.max_items;
         let region = match &request.bounds {
             ScanBounds::Range { start, end } => ResidentRegion::Range {
@@ -641,7 +644,6 @@ where
             }) as StorageScan<'_>)
         })
     }
-
     fn write_many(
         &self,
         operations: Vec<OwnedWriteOperation>,

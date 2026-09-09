@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAccountManager } from "jazz-tools";
 import {
   deploy,
@@ -85,13 +88,19 @@ describe("Todo Server request authentication", () => {
     alice = await createIdentity(jwtIssuer, upstream, "todo-rest-auth-alice");
     bob = await createIdentity(jwtIssuer, upstream, "todo-rest-auth-bob");
     server = await startServer(
-      await createServer(undefined, {
-        jwksUrl: jwtIssuer.jwksUrl,
-        appId: upstream.appId,
-        serverUrl: upstream.url,
-        backendSecret: upstream.backendSecret,
-        adminSecret: upstream.adminSecret,
-      }),
+      await createServer(
+        {
+          type: "persistent",
+          dataPath: join(mkdtempSync(join(tmpdir(), "jazz-auth-")), "jazz.db"),
+        },
+        {
+          jwksUrl: jwtIssuer.jwksUrl,
+          appId: upstream.appId,
+          serverUrl: upstream.url,
+          backendSecret: upstream.backendSecret,
+          adminSecret: upstream.adminSecret,
+        },
+      ),
       0,
     );
     baseUrl = server.baseUrl;

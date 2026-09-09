@@ -2,10 +2,17 @@ import fs from "node:fs";
 import { setTimeout as sleepTimer } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-const REQUIRED_ENV = ["VERCEL_ORG_ID", "VERCEL_PROJECT_ID", "VERCEL_TOKEN", "GITHUB_OUTPUT"];
+const REQUIRED_ENV = [
+  "VERCEL_ORG_ID",
+  "VERCEL_PROJECT_ID",
+  "VERCEL_TOKEN",
+  "GITHUB_OUTPUT",
+  "GITHUB_SHA",
+];
 
 const DEFAULT_ATTEMPTS = 30;
 const DEFAULT_DELAY_MS = 20_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 function requireEnv(env) {
   for (const name of REQUIRED_ENV) {
@@ -22,11 +29,12 @@ export function buildDeploymentsUrl(env) {
     target: "production",
     state: "READY",
     branch,
+    sha: env.GITHUB_SHA,
     limit: "20",
     teamId: env.VERCEL_ORG_ID,
   });
 
-  return `https://api.vercel.com/v6/deployments?${params}`;
+  return `https://api.vercel.com/v7/deployments?${params}`;
 }
 
 export function describeDeployment(deployment) {
@@ -38,10 +46,15 @@ export function describeDeployment(deployment) {
   ].join(" ");
 }
 
-function findDeploymentToPromote(deployments) {
+function deploymentSourceSha(deployment) {
+  return deployment.meta?.githubCommitSha ?? deployment.gitSource?.sha ?? deployment.sha;
+}
+
+function findDeploymentToPromote(deployments, sourceSha) {
   const latest = deployments.find(
     (deployment) =>
       deployment.url &&
+      deploymentSourceSha(deployment) === sourceSha &&
       (deployment.readySubstate === "STAGED" || deployment.readySubstate === "PROMOTED"),
   );
 
@@ -55,20 +68,46 @@ function findDeploymentToPromote(deployments) {
   };
 }
 
-async function listDeployments({ fetchImpl, listUrl, token }) {
-  const response = await fetchImpl(listUrl, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+async function listDeployments({ fetchImpl, listUrl, token, requestTimeoutMs }) {
+  const signal = AbortSignal.timeout(requestTimeoutMs);
+  let response;
+
+  try {
+    response = await fetchImpl(listUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(`Vercel deployment lookup timed out after ${requestTimeoutMs}ms.`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Vercel deployment lookup failed (${response.status}): ${body}`);
   }
 
-  const body = await response.json();
-  return Array.isArray(body.deployments) ? body.deployments : [];
+  let body;
+  try {
+    body = await response.json();
+  } catch (error) {
+    throw new Error("Vercel deployment lookup returned invalid JSON.", { cause: error });
+  }
+
+  if (!body || !Array.isArray(body.deployments)) {
+    throw new Error(
+      "Vercel deployment lookup returned a malformed response: deployments must be an array.",
+    );
+  }
+
+  return body.deployments;
 }
 
 function writeGithubOutput(outputFile, result) {
@@ -86,6 +125,7 @@ export async function resolveInspectorDeployment({
   log = console.log,
   attempts = DEFAULT_ATTEMPTS,
   delayMs = DEFAULT_DELAY_MS,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   sleep = sleepTimer,
 } = {}) {
   requireEnv(env);
@@ -98,9 +138,10 @@ export async function resolveInspectorDeployment({
       fetchImpl,
       listUrl,
       token: env.VERCEL_TOKEN,
+      requestTimeoutMs,
     });
 
-    const match = findDeploymentToPromote(lastDeployments);
+    const match = findDeploymentToPromote(lastDeployments, env.GITHUB_SHA);
     if (match) {
       const deploymentUrl = `https://${match.deployment.url}`;
       const result = {

@@ -166,23 +166,35 @@ describe("React Todo App core browser canary", () => {
   it("syncs two persistent IndexedDB app instances through one core server", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
+    let writerEdgeResult: Error | null | undefined;
+    let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+      onEdgeSettled: (error) => {
+        writerEdgeResult = error;
+      },
     });
     const reader = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
+      onEdgeSettled: (error) => {
+        readerEdgeResult = error;
+      },
     });
 
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 750));
-    });
+    await waitFor(
+      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      15000,
+      "both todo subscriptions should establish edge coverage before the online write",
+    );
+    if (writerEdgeResult) throw writerEdgeResult;
+    if (readerEdgeResult) throw readerEdgeResult;
 
     await addTodo(writer, "Core writer todo");
     await waitFor(

@@ -81,6 +81,77 @@ describe("Vue Jazz providers", () => {
     await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
   });
 
+  it("does not recreate an equivalent config while the client is loading", async () => {
+    let resolveClient!: (client: JazzClient) => void;
+    const first = fakeClient();
+    const creation = new Promise<JazzClient>((resolve) => {
+      resolveClient = resolve;
+    });
+    mocks.createJazzClient.mockReturnValue(creation);
+    const config = ref<DbConfig>({ appId: "loading", driver: { type: "memory" } });
+    const root = defineComponent(
+      () => () =>
+        h(
+          JazzProvider,
+          { config: config.value },
+          {
+            default: () => h("p", { id: "ready" }, "ready"),
+            fallback: () => h("p", { id: "loading" }, "loading"),
+          },
+        ),
+    );
+
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    const app = createApp(root);
+    apps.push(app);
+    app.mount(element);
+    await settle();
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+
+    config.value = { driver: { type: "memory" }, appId: "loading" };
+    await settle();
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+
+    resolveClient(first);
+    await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(first.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("does not flicker or recreate an equivalent config after the client is ready", async () => {
+    const client = fakeClient();
+    mocks.createJazzClient.mockResolvedValue(client);
+    const config = ref<DbConfig>({ appId: "ready", driver: { type: "memory" } });
+    const root = defineComponent(
+      () => () =>
+        h(
+          JazzProvider,
+          { config: config.value },
+          {
+            default: () => h("p", { id: "ready" }, "ready"),
+            fallback: () => h("p", { id: "loading" }, "loading"),
+          },
+        ),
+    );
+
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    const app = createApp(root);
+    apps.push(app);
+    app.mount(element);
+    await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+
+    config.value = { driver: { type: "memory" }, appId: "ready" };
+    await nextTick();
+    expect(element.querySelector("#ready")).not.toBeNull();
+    expect(element.querySelector("#loading")).toBeNull();
+    await settle();
+    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(client.shutdown).not.toHaveBeenCalled();
+  });
+
   it("JazzClientProvider never shuts down a caller-owned client", async () => {
     const first = fakeClient();
     const second = fakeClient();

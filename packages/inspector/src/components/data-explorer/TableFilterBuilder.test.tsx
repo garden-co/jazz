@@ -12,6 +12,11 @@ const schemaColumns = [
   { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
 ] satisfies ColumnDescriptor[];
 
+const bigintSchemaColumns = [
+  ...schemaColumns,
+  { name: "rank", column_type: { type: "BigInt" }, nullable: false },
+] satisfies ColumnDescriptor[];
+
 describe("TableFilterBuilder", () => {
   afterEach(() => {
     cleanup();
@@ -214,5 +219,38 @@ describe("TableFilterBuilder", () => {
     expect(screen.getAllByRole("button", { name: /Remove filter on/ })[0]?.textContent).toBe("×");
     expect(screen.getAllByText("title contains alpha").length).toBeGreaterThan(0);
     expect(screen.getAllByText("count gt 1").length).toBeGreaterThan(0);
+  });
+
+  it("renders BigInt filter values as exact decimal text", () => {
+    render(
+      <TableFilterBuilder
+        schemaColumns={bigintSchemaColumns}
+        clauses={[{ id: "rank-filter", column: "rank", operator: "eq", value: 9007199254740993n }]}
+        onClausesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("rank eq 9007199254740993").length).toBeGreaterThan(0);
+  });
+
+  it("renders BigInt membership filters as exact decimal text", () => {
+    render(
+      <TableFilterBuilder
+        schemaColumns={bigintSchemaColumns}
+        clauses={[
+          {
+            id: "rank-membership-filter",
+            column: "rank",
+            operator: "in",
+            value: [9007199254740993n, -9007199254740993n],
+          },
+        ]}
+        onClausesChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByText('rank in ["9007199254740993","-9007199254740993"]').length,
+    ).toBeGreaterThan(0);
   });
 });

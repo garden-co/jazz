@@ -1,6 +1,6 @@
 # todo-server-ts
 
-Node + Express REST API backed by Jazz as the database. No frontend — pure server-side TypeScript, persistent Fjall storage via the Jazz NAPI bindings.
+Node + Express REST API backed by Jazz as the database. No frontend — pure server-side TypeScript, with persistent Fjall storage via the Jazz NAPI bindings.
 
 ## What it demonstrates
 
@@ -9,7 +9,7 @@ Node + Express REST API backed by Jazz as the database. No frontend — pure ser
 - Request authentication through `client.forRequest(req)`. Every `/todos` request sends `Authorization: Bearer <token>`; Jazz verifies the token and derives the session owner.
 - Server-Sent Events (`/todos/live`) pushing only the authenticated caller's live snapshot on every mutation.
 - Write durability control via `wait({ tier })` (`local`, `edge`, `global`).
-- Persistent Fjall storage rooted in a temp directory on cold start.
+- Explicit persistent or in-memory storage selection for programmatic servers and the CLI.
 
 ## Schema
 
@@ -22,7 +22,15 @@ Node + Express REST API backed by Jazz as the database. No frontend — pure ser
 pnpm dev
 ```
 
-`pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`); a fresh Fjall database is created in a temp directory.
+`pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`).
+
+Storage is persistent by default. The CLI resolves its database path in this order:
+
+1. `--data-path <path>` (if supplied).
+2. A non-empty `DB_PATH` environment variable.
+3. `./data/todos/<effective-app-id-base64url>/jazz.db`, relative to the current working directory. The effective app ID is `JAZZ_APP_ID`, or the example's default when it is unset.
+
+`--in-memory` is the only volatile mode. It conflicts with `--data-path` and with any set `DB_PATH`, including an empty value. Unknown options, missing or empty `--data-path` values, and an explicitly empty `DB_PATH` fail before the server listens. Explicit paths are operator-owned: storage-open or lock errors are not redirected to another path.
 
 ## Authentication
 
@@ -44,4 +52,4 @@ The `/health` endpoint remains public.
 pnpm test
 ```
 
-Vitest integration tests cover request authentication, owner-scoped CRUD and live updates, and persistence/cold-start.
+Vitest integration tests cover request authentication, owner-scoped CRUD and live updates, persistence/cold-start, and a real CLI process restart.

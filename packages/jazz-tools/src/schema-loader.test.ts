@@ -1,12 +1,27 @@
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { describe, expect, it, afterEach } from "vitest";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import { loadCompiledSchema } from "./schema-loader.js";
+import { loadCompiledSchema, schemaLoaderTestHooks } from "./schema-loader.js";
 
 const WITH_DEFAULTS_DIR = fileURLToPath(
   new URL("./testing/fixtures/with-defaults", import.meta.url),
 );
 const WITH_BIGINT_DIR = fileURLToPath(new URL("./testing/fixtures/with-bigint", import.meta.url));
+const WITH_ENUM_PAYLOAD_DEFAULTS_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-defaults", import.meta.url),
+);
+const WITH_ENUM_PAYLOAD_WRONG_TAG_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-wrong-tag", import.meta.url),
+);
+const WITH_ENUM_PAYLOAD_REQUIRED_NULL_DIR = fileURLToPath(
+  new URL("./testing/fixtures/with-enum-payload-required-null", import.meta.url),
+);
+
+const defaultRemoveTempDirectory = schemaLoaderTestHooks.removeTempDirectory;
+afterEach(() => {
+  schemaLoaderTestHooks.removeTempDirectory = defaultRemoveTempDirectory;
+});
 
 describe("loadCompiledSchema", () => {
   it("keeps typed-app schema and wasm schema losslessly aligned", async () => {
@@ -45,6 +60,33 @@ describe("loadCompiledSchema", () => {
     );
   });
 
+  it("round-trips payload enum defaults from wasm schema exports", async () => {
+    const { app } = (await import("./testing/fixtures/with-enum-payload-defaults/schema.js")) as {
+      app: { wasmSchema: unknown };
+    };
+    const loaded = await loadCompiledSchema(WITH_ENUM_PAYLOAD_DEFAULTS_DIR);
+
+    expect(loaded.schema.tables[0]?.columns[0]?.default).toEqual({
+      type: "ready",
+      count: 7,
+      label: "live",
+      note: null,
+    });
+    expect(schemaToWasm(loaded.schema)).toEqual(app.wasmSchema);
+  });
+
+  it("rejects payload enum defaults with a nested value tag mismatch", async () => {
+    await expect(loadCompiledSchema(WITH_ENUM_PAYLOAD_WRONG_TAG_DIR)).rejects.toThrow(
+      "Text default does not match column type.",
+    );
+  });
+
+  it("rejects null defaults for required payload enum fields", async () => {
+    await expect(loadCompiledSchema(WITH_ENUM_PAYLOAD_REQUIRED_NULL_DIR)).rejects.toThrow(
+      "Null default does not match non-nullable column.",
+    );
+  });
+
   it("loads typed-app BIGINT columns from wasm schema exports", async () => {
     const loaded = await loadCompiledSchema(WITH_BIGINT_DIR);
 
@@ -56,3 +98,107 @@ describe("loadCompiledSchema", () => {
     expect(largeCount?.default).toBe(9007199254740993n);
   });
 });
+const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.meta.url));
+
+const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
+
+describe("bundled DSL schema loading", () => {
+  it("collects tables from a public bare jazz-tools side-effect import", async () => {
+    const loaded = await loadCompiledSchema(fixtureDir("side-effect-only"));
+
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  });
+
+  it("preserves explicit schema precedence while consuming side-effect collection", async () => {
+    const explicit = await loadCompiledSchema(fixtureDir("explicit-precedence"));
+    expect(explicit.schema.tables.map((table) => table.name)).toEqual(["explicit_tasks"]);
+
+    const sideEffect = await loadCompiledSchema(fixtureDir("side-effect-only"));
+    expect(sideEffect.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  });
+
+  it("cleans failed bundle state so a retry can load the schema", async () => {
+    const previous = process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+    try {
+      process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
+      await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
+        "intentional schema fixture failure",
+      );
+
+      delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      const loaded = await loadCompiledSchema(fixtureDir("retry-after-failure"));
+      expect(loaded.schema.tables.map((table) => table.name)).toEqual(["retry_tasks"]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      } else {
+        process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = previous;
+      }
+    }
+  });
+
+  it("cleans temporary bundles and preserves the original load error", async () => {
+    const cleaned: string[] = [];
+    let failCleanup = false;
+    schemaLoaderTestHooks.removeTempDirectory = async (tempDir) => {
+      cleaned.push(tempDir);
+      await defaultRemoveTempDirectory(tempDir);
+      if (failCleanup) throw new Error("intentional cleanup failure");
+    };
+    await loadCompiledSchema(fixtureDir("side-effect-only"));
+
+    const previous = process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+    try {
+      failCleanup = true;
+      process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = "1";
+      await expect(loadCompiledSchema(fixtureDir("retry-after-failure"))).rejects.toThrow(
+        "intentional schema fixture failure",
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY;
+      } else {
+        process.env.JAZZ_SCHEMA_LOADER_FAIL_RETRY = previous;
+      }
+    }
+
+    expect(cleaned).toHaveLength(3);
+    expect(new Set(cleaned).size).toBe(3);
+  });
+
+  it("propagates a cleanup failure after a successful load", async () => {
+    schemaLoaderTestHooks.removeTempDirectory = async (tempDir) => {
+      await defaultRemoveTempDirectory(tempDir);
+      throw new Error("intentional cleanup failure");
+    };
+
+    await expect(loadCompiledSchema(fixtureDir("side-effect-only"))).rejects.toThrow(
+      "intentional cleanup failure",
+    );
+  });
+
+  it("isolates parallel top-level-await bundles deterministically", async () => {
+    const [a, b] = await Promise.all([
+      loadCompiledSchema(fixtureDir("parallel-tla-a")),
+      loadCompiledSchema(fixtureDir("parallel-tla-b")),
+    ]);
+
+    expect(a.schema.tables.map((table) => table.name)).toEqual(["parallel_a"]);
+    expect(b.schema.tables.map((table) => table.name)).toEqual(["parallel_b"]);
+  });
+});
+
+const DIST_SCHEMA_LOADER = fileURLToPath(new URL("../dist/schema-loader.js", import.meta.url).href);
+
+it.skipIf(!existsSync(DIST_SCHEMA_LOADER))(
+  "loads a public bare jazz-tools schema through the built distribution",
+  async () => {
+    // The loader path is runtime-selected because this canary targets the built artifact.
+    const { loadCompiledSchema: loadBuiltSchema } = (await import(
+      pathToFileURL(DIST_SCHEMA_LOADER).href
+    )) as typeof import("./schema-loader.js");
+    const loaded = await loadBuiltSchema(fixtureDir("side-effect-only"));
+
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  },
+);

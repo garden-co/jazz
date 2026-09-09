@@ -10,6 +10,7 @@ const requiredEnv = {
   VERCEL_ORG_ID: "team_alice",
   VERCEL_PROJECT_ID: "project_inspector",
   VERCEL_TOKEN: "vercel_token",
+  GITHUB_SHA: "sha-current",
 };
 
 function makeOutputFile() {
@@ -43,6 +44,7 @@ test("resolveInspectorDeployment writes GitHub output for the latest staged depl
         deployments: [
           {
             url: "jazz-inspector-git-main-alice.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
             readyState: "READY",
             target: "production",
             readySubstate: "STAGED",
@@ -71,12 +73,12 @@ test("resolveInspectorDeployment writes GitHub output for the latest staged depl
   assert.equal(requests.length, 1);
   assert.equal(requests[0].authorization, "Bearer vercel_token");
   const requestUrl = new URL(requests[0].url);
-  assert.equal(requestUrl.origin + requestUrl.pathname, "https://api.vercel.com/v6/deployments");
+  assert.equal(requestUrl.origin + requestUrl.pathname, "https://api.vercel.com/v7/deployments");
   assert.equal(requestUrl.searchParams.get("projectId"), "project_inspector");
   assert.equal(requestUrl.searchParams.get("target"), "production");
   assert.equal(requestUrl.searchParams.get("state"), "READY");
   assert.equal(requestUrl.searchParams.get("branch"), "main");
-  assert.equal(requestUrl.searchParams.has("sha"), false);
+  assert.equal(requestUrl.searchParams.get("sha"), "sha-current");
   assert.equal(requestUrl.searchParams.get("teamId"), "team_alice");
   assert.deepEqual(logs, [
     "Resolved inspector deployment: jazz-inspector-git-main-alice.vercel.app state=READY target=production substate=STAGED",
@@ -93,6 +95,7 @@ test("resolveInspectorDeployment marks an already promoted deployment", async ()
         deployments: [
           {
             url: "jazz-inspector.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
             readyState: "READY",
             target: "production",
             readySubstate: "PROMOTED",
@@ -122,12 +125,14 @@ test("resolveInspectorDeployment uses the latest main deployment before older st
         deployments: [
           {
             url: "jazz-inspector-latest-main.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
             readyState: "READY",
             target: "production",
             readySubstate: "PROMOTED",
           },
           {
             url: "jazz-inspector-older-main.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
             readyState: "READY",
             target: "production",
             readySubstate: "STAGED",
@@ -163,6 +168,7 @@ test("resolveInspectorDeployment reports the last matching deployments when none
           deployments: [
             {
               url: "jazz-inspector-main.vercel.app",
+              meta: { githubCommitSha: "sha-current" },
               readyState: "READY",
               target: "production",
               readySubstate: "QUEUED",
@@ -194,6 +200,7 @@ test("resolveInspectorDeployment uses VERCEL_DEPLOY_BRANCH to query deployments 
         deployments: [
           {
             url: "jazz-inspector-git-feature-foo.vercel.app",
+            meta: { githubCommitSha: "sha-current" },
             readyState: "READY",
             target: "production",
             readySubstate: "STAGED",
@@ -247,5 +254,79 @@ test("resolveInspectorDeployment requires all CI environment variables", async (
       log: () => {},
     }),
     /Missing required environment variable VERCEL_TOKEN/,
+  );
+});
+test("resolveInspectorDeployment ignores an old promoted deployment with a different SHA", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async () =>
+        jsonResponse({
+          deployments: [
+            {
+              url: "jazz-inspector-old.vercel.app",
+              meta: { githubCommitSha: "sha-old" },
+              readyState: "READY",
+              target: "production",
+              readySubstate: "PROMOTED",
+            },
+          ],
+        }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /No staged inspector production deployment found on main/,
+  );
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("resolveInspectorDeployment requires a non-empty source SHA", async () => {
+  const env = { ...requiredEnv, GITHUB_OUTPUT: makeOutputFile() };
+  delete env.GITHUB_SHA;
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env,
+      fetchImpl: async () => {
+        throw new Error("fetch should not run without a source SHA");
+      },
+      log: () => {},
+    }),
+    /Missing required environment variable GITHUB_SHA/,
+  );
+});
+
+test("resolveInspectorDeployment rejects a successful response without deployments", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async () => jsonResponse({ deployments: null }),
+      attempts: 1,
+      log: () => {},
+    }),
+    /malformed response.*deployments must be an array/,
+  );
+  assert.equal(fs.existsSync(outputFile), false);
+});
+
+test("resolveInspectorDeployment aborts a request at its deadline", async () => {
+  const outputFile = makeOutputFile();
+
+  await assert.rejects(
+    resolveInspectorDeployment({
+      env: { ...requiredEnv, GITHUB_OUTPUT: outputFile },
+      fetchImpl: async (_url, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+      requestTimeoutMs: 10,
+      attempts: 1,
+      log: () => {},
+    }),
+    /timed out after 10ms/,
   );
 });

@@ -1319,7 +1319,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       expect(String(unsupported.notifications[1]?.[0])).toContain(
         "UnsupportedShapeCapability: fixture unsupported shape",
       );
-      expect(unsupported.notifications[1]?.[1]).toBeNull();
+      expect(unsupported.notifications[1]?.[1]).toBeUndefined();
 
       const rejected = openHarness("rejected");
       rejected.injectedEvents.push(serverFailureEvent);
@@ -1334,7 +1334,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       expect(rejected.notifications).toHaveLength(2);
       expect(rejected.notifications[1]?.[0]).toBeInstanceOf(Error);
       expect(String(rejected.notifications[1]?.[0])).toContain("ServerFailure: QueryValidation");
-      expect(rejected.notifications[1]?.[1]).toBeNull();
+      expect(rejected.notifications[1]?.[1]).toBeUndefined();
 
       const closed = openHarness("closed");
       closed.injectedEvents.push(closedEvent);
@@ -1734,9 +1734,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           author: Uint8Array,
         ): Uint8Array | Promise<Uint8Array>;
       };
-      prepareQuery(queryJson: string): unknown;
+      acquirePreparedQuery(queryJson: string): {
+        query: unknown;
+        release(): void;
+      };
     };
-    const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
+    const queryLease = raw.acquirePreparedQuery(JSON.stringify({ table: "todos" }));
+    const query = queryLease.query;
     const aliceAuthor = testExternalAuthorBytes(ALICE_ID);
     const bobAuthor = testExternalAuthorBytes(BOB_ID);
     await expect(
@@ -1745,6 +1749,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(
       Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, bobAuthor)),
     ).rejects.toThrow(/open transaction identity.*bound identity/i);
+    queryLease.release();
     await runtime.rollbackTransaction(transactionId);
   });
 

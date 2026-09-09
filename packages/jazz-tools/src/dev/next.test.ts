@@ -162,7 +162,6 @@ describe("withJazz", () => {
   });
 
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
-    const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -170,18 +169,21 @@ describe("withJazz", () => {
     const wrapped = withJazz(
       { reactStrictMode: true },
       {
-        server: { port, adminSecret: "next-test-admin" },
+        server: { port: 0, adminSecret: "next-test-admin" },
         schemaDir,
       },
     );
 
     const resolved = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
 
-    const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
+    const serverUrl = resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL;
+    expect(serverUrl).toMatch(/^http:\/\/127\.0\.0\.1:[1-9]\d*$/);
+
+    const healthResponse = await fetch(`${serverUrl}/health`);
     expect(healthResponse.ok).toBe(true);
 
     const schemasResponse = await fetch(
-      `http://127.0.0.1:${port}/apps/${resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID}/schemas`,
+      `${serverUrl}/apps/${resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID}/schemas`,
       {
         headers: { "X-Jazz-Admin-Secret": "next-test-admin" },
       },
@@ -191,13 +193,12 @@ describe("withJazz", () => {
     const body = (await schemasResponse.json()) as { hashes?: string[] };
     expect(body.hashes?.length).toBeGreaterThan(0);
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID).toBeTruthy();
-    expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBe(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID);
-    expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(serverUrl);
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining(
         `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
-          `http://127.0.0.1:${port}`,
+          serverUrl!,
         )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}&adminSecret=next-test-admin`,
       ),
     );

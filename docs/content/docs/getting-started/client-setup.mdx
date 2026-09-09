@@ -113,6 +113,16 @@ Browser clients default to `driver: { type: "persistent" }`, which stores data l
 
 When you supply `driver: { type: "persistent", dbName }`, the name is a logical base. Jazz derives the physical root from registry, app, environment, and account. Linked identities share that account's durable root while opening distinct live authorization sessions. A root whose recorded scope does not match is rejected.
 
+#### Browser worker failures
+
+After the shared worker acknowledges startup, runtime initialisation has a five-minute grace period. If it does not become ready, startup reports an error instead of leaving the client pending indefinitely. Suspended tabs receive fresh grace when they resume.
+
+While control requests are waiting for worker replies, Jazz probes the connection every 30 seconds and allows 30 seconds for a response. These are connection-health checks, not query or storage-operation timeouts: a responsive worker can continue a long operation, and idle connections are not continuously probed.
+
+An unresponsive-worker error does not prove that an outstanding operation failed. It may already have completed. Jazz does not automatically retry operations with an unknown outcome or clear IndexedDB. Use the existing [client and session lifecycle](/docs/auth/lifecycle) to recover, and establish a mutation's outcome before retrying it. Terminal shutdown reports the causal failure without waiting indefinitely for an unresponsive worker; it does not claim that an unacknowledged durable handoff succeeded.
+
+An intentional storage reset releases the old foreground identity without returning it to the erased store. `deleteClientStorage()` waits for a fresh identity before the same application client can be used again. If shutdown starts during that acquisition, Jazz retires the unused identity instead. Inspector attachments are session-scoped: after a reset, open a new attachment rather than reusing the old one.
+
 #### Browser storage eviction
 
 `{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.

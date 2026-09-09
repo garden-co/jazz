@@ -536,6 +536,14 @@ where
     }
 
     pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
+        self.enqueue_transaction_cleanup_with_completion(future, None);
+    }
+
+    pub(super) fn enqueue_transaction_cleanup_with_completion(
+        &self,
+        future: QueuedMutationFuture,
+        completion: Option<QueuedMutationCompletion>,
+    ) {
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
@@ -543,7 +551,7 @@ where
                 open_tx_id: None,
                 future,
                 status: None,
-                completion: None,
+                completion,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
@@ -3694,8 +3702,8 @@ where
 {
     let mut retained = Vec::new();
     let mut changed = 0;
-    let pending_authoritative_resets = node.lock().await.take_pending_authoritative_resets();
-    let mut consumed_authoritative_resets = BTreeSet::new();
+    let pending_authoritative_resets = node.lock().await.snapshot_pending_authoritative_resets();
+    let mut reconciled_authoritative_resets = BTreeMap::new();
     node.lock()
         .await
         .drive_ready_query_runtime_with_waker(progress_waker)
@@ -3895,12 +3903,12 @@ where
             );
             let pending_authority_result = delivered_authority_result
                 .as_ref()
-                .filter(|key| pending_authoritative_resets.contains(*key))
+                .filter(|key| pending_authoritative_resets.contains_key(*key))
                 .cloned()
                 .or_else(|| {
                     settled_authority_result
                         .as_ref()
-                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .filter(|key| pending_authoritative_resets.contains_key(*key))
                         .cloned()
                 });
             let local_overlay_row_keys = BTreeSet::new();
@@ -3971,7 +3979,12 @@ where
                         terminal_layout,
                     )?;
                     materialize_subscription_terminal_records(&mut snapshot, &snapshot_index)?;
-                    consumed_authoritative_resets.insert(authority_result_key);
+                    if let Some(generation) = pending_authoritative_resets
+                        .get(&authority_result_key)
+                        .copied()
+                    {
+                        reconciled_authoritative_resets.insert(authority_result_key, generation);
+                    }
                 }
             }
             let root_occurrence_ids = if shape.query().aggregate.is_some() || terminal_rows {
@@ -4123,12 +4136,12 @@ where
             });
             let authoritative_reset_result = delivered_authority_result
                 .as_ref()
-                .filter(|key| pending_authoritative_resets.contains(*key))
+                .filter(|key| pending_authoritative_resets.contains_key(*key))
                 .cloned()
                 .or_else(|| {
                     settled_authority_result
                         .as_ref()
-                        .filter(|key| pending_authoritative_resets.contains(*key))
+                        .filter(|key| pending_authoritative_resets.contains_key(*key))
                         .cloned()
                 });
             // A propagation receipt is not a replacement input frontier for
@@ -4150,9 +4163,6 @@ where
                 .as_ref()
                 .is_some_and(|key| node.borrow().publication_deferred_for_authority_result(key))
             {
-                if let Some(key) = authoritative_reset_result.as_ref() {
-                    node.borrow_mut().defer_authoritative_reset(key);
-                }
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
@@ -4182,9 +4192,6 @@ where
                 if authorization_mode == QueryAuthorizationMode::ClientLocal
                     && remote_read_tier.is_some()
                 {
-                    if let Some(key) = authoritative_reset_result.as_ref() {
-                        node.borrow_mut().defer_authoritative_reset(key);
-                    }
                     retained.push(Rc::downgrade(&state));
                     continue;
                 }
@@ -4277,9 +4284,6 @@ where
                         Ok(update) => update,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();
-                            if let Some(key) = authoritative_reset_result.as_ref() {
-                                node_ref.defer_authoritative_reset(key);
-                            }
                             retained.push(Rc::downgrade(&state));
                             continue;
                         }
@@ -4315,14 +4319,14 @@ where
                         // Missing source descriptors and incomplete coverage
                         // are both pending protocol state, never permission to
                         // reuse the authority's result set or payload.
-                        node.borrow_mut()
-                            .defer_authoritative_reset(authority_result_key);
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
                 }
-                if let Some(key) = authoritative_reset_result.as_ref() {
-                    consumed_authoritative_resets.insert(key.clone());
+                if let Some(key) = authoritative_reset_result.as_ref()
+                    && let Some(generation) = pending_authoritative_resets.get(key).copied()
+                {
+                    reconciled_authoritative_resets.insert(key.clone(), generation);
                 }
                 if cold_runtime_replacement_pending {
                     let replacement_ready = refresh
@@ -4828,10 +4832,11 @@ where
         }
         retained.push(Rc::downgrade(&state));
     }
-    for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
-        node.borrow_mut().defer_authoritative_reset(pending);
-    }
     *subscriptions.borrow_mut() = retained;
+    for (authority_result_key, generation) in reconciled_authoritative_resets {
+        node.borrow_mut()
+            .acknowledge_authoritative_reset(&authority_result_key, generation);
+    }
     Ok(changed)
 }
 

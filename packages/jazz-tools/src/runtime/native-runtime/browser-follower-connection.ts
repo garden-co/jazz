@@ -5,6 +5,7 @@ import type {
 } from "../runtime-source.js";
 import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
 import {
+  BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
   type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
@@ -12,6 +13,11 @@ import {
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
+import {
+  closeInspectorControlPort,
+  inspectorControlAbortError,
+  waitForInspectorOpening,
+} from "./inspector-control-lifecycle.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -35,6 +41,12 @@ type BrowserFollowerPortRpcRequest =
   | { type: "abort-storage-reset" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
+// Connection policy, not an operation deadline. A matching pong keeps even
+// an indefinitely pending server/durability wait alive.
+const PROBE_INTERVAL_MS = 30_000;
+const PROBE_REPLY_MS = 30_000;
+const CALLBACK_SUSPENSION_SLACK_MS = 1_000;
+
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private pump: BrowserWorkerTransportPump | null = null;
@@ -47,6 +59,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private closed = false;
   private failed: Error | null = null;
   private readonly disposeQueryCoverageTrace: (() => void) | null;
+  private readonly connectionId = crypto.randomUUID();
+  private nextProbeNonce = 1;
+  private probeNonce: number | null = null;
+  private watchdogTimer: number | NodeJS.Timeout | null = null;
+  private watchdogEpoch = 0;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -68,6 +85,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
     port.start();
+    globalThis.addEventListener?.("pageshow", this.onResume);
+    globalThis.document?.addEventListener("visibilitychange", this.onVisibilityChange);
     this.disposeQueryCoverageTrace = traceRelay
       ? runtime.onQueryCoverageTrace((entry) => {
           if (this.closed) return;
@@ -160,23 +179,57 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "finish-storage-reset" });
   }
 
-  async openInspectorControlPort(): Promise<MessagePort> {
-    await this.ready();
+  async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
+    await waitForInspectorOpening(this.ready(), signal);
+    if (signal?.aborted) throw inspectorControlAbortError();
+
     const channel = new MessageChannel();
     const id = this.nextRequestId++;
+    let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
+      rejectPending = reject;
       this.pending.set(id, { type: "open-inspector-control", resolve, reject });
     });
-    this.port.postMessage(
-      {
-        type: "open-inspector-control",
-        id,
-        port: channel.port2,
-      } satisfies BrowserFollowerPortRequest,
-      [channel.port2],
-    );
-    await promise;
-    return channel.port1;
+    let controlClosed = false;
+    const closeControl = () => {
+      if (controlClosed) return;
+      controlClosed = true;
+      closeInspectorControlPort(channel.port1);
+    };
+    const onAbort = () => {
+      if (!this.pending.delete(id)) return;
+      closeControl();
+      rejectPending(inspectorControlAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.armWatchdog();
+    try {
+      this.port.postMessage(
+        {
+          type: "open-inspector-control",
+          id,
+          port: channel.port2,
+        } satisfies BrowserFollowerPortRequest,
+        [channel.port2],
+      );
+    } catch (error) {
+      channel.port2.close();
+      this.fail(asError(error));
+    }
+    try {
+      await promise;
+      if (signal?.aborted) {
+        closeControl();
+        throw inspectorControlAbortError();
+      }
+      return channel.port1;
+    } catch (error) {
+      this.pending.delete(id);
+      closeControl();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
@@ -234,12 +287,87 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const promise = new Promise<void>((resolve, reject) => {
       this.pending.set(id, { type: request.type, resolve, reject });
     });
-    this.port.postMessage(message satisfies BrowserFollowerPortRequest);
+    this.armWatchdog();
+    try {
+      this.port.postMessage(message satisfies BrowserFollowerPortRequest);
+    } catch (error) {
+      this.fail(asError(error));
+    }
     return promise;
   }
 
+  private clearWatchdog(): void {
+    if (this.watchdogTimer !== null) clearTimeout(this.watchdogTimer);
+    this.watchdogTimer = null;
+    this.probeNonce = null;
+    this.watchdogEpoch++;
+  }
+
+  private armWatchdog(): void {
+    if (this.closed || this.failed || this.pending.size === 0 || this.watchdogTimer !== null)
+      return;
+    this.scheduleWatchdog(PROBE_INTERVAL_MS, false);
+  }
+
+  private scheduleWatchdog(delay: number, awaitingReply: boolean): void {
+    const epoch = ++this.watchdogEpoch;
+    const deadline = Date.now() + delay;
+    this.watchdogTimer = setTimeout(() => {
+      if (epoch !== this.watchdogEpoch || this.closed || this.failed) return;
+      this.watchdogTimer = null;
+      if (this.pending.size === 0) {
+        this.clearWatchdog();
+        return;
+      }
+      // A suspended page must not consume a reply grace during time in which
+      // it could not dispatch messages. Fence the old reply and probe afresh.
+      if (!awaitingReply || Date.now() > deadline + CALLBACK_SUSPENSION_SLACK_MS) {
+        this.sendProbe();
+        return;
+      }
+      const error = new BrowserWorkerUnresponsiveError(
+        "Browser worker connection is unresponsive. Pending operation outcomes are unknown; operations were not retried.",
+      );
+      this.runtime.reportRemoteServerTransportError(error);
+      this.fail(error);
+    }, delay);
+  }
+
+  private sendProbe(): void {
+    this.clearWatchdog();
+    if (this.closed || this.failed || this.pending.size === 0) return;
+    const nonce = this.nextProbeNonce++;
+    this.probeNonce = nonce;
+    // Arm first so a synchronous adapter reply cannot leave an expiry behind.
+    this.scheduleWatchdog(PROBE_REPLY_MS, true);
+    try {
+      this.port.postMessage({
+        type: "runtime-probe",
+        connectionId: this.connectionId,
+        nonce,
+      } satisfies BrowserFollowerPortRequest);
+    } catch (error) {
+      this.fail(asError(error));
+    }
+  }
+
+  private readonly onResume = (): void => {
+    this.sendProbe();
+  };
+
+  private readonly onVisibilityChange = (): void => {
+    if (globalThis.document?.visibilityState === "visible") this.onResume();
+  };
+
   private readonly onMessage = (event: MessageEvent<BrowserFollowerPortEvent>): void => {
+    if (this.closed || this.failed) return;
     const message = event.data;
+    if (message.type === "runtime-pong") {
+      if (message.connectionId !== this.connectionId || message.nonce !== this.probeNonce) return;
+      this.clearWatchdog();
+      this.armWatchdog();
+      return;
+    }
     if (message.type === "frames") {
       if (this.pump) this.pump.receive(message.frames);
       else this.pendingFrames.push(message.frames);
@@ -274,11 +402,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.pending.delete(id);
         pending.resolve();
       }
+      if (this.pending.size === 0) this.clearWatchdog();
       this.port.postMessage({
         type: "storage-reset-observed",
         resetId: message.resetId,
       } satisfies BrowserFollowerPortRequest);
-      this.callbacks.onStorageReset?.();
+      this.callbacks.onStorageReset?.(message.resetId);
       return;
     }
     if (message.type === "storage-invalidated") {
@@ -298,6 +427,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
+    if (this.pending.size === 0) this.clearWatchdog();
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
@@ -321,13 +451,19 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     } catch {
       // The port may already be unusable; disposal below is still required.
     }
-    this.callbacks.onFailure(error);
-    this.dispose(error);
+    try {
+      this.callbacks.onFailure(error);
+    } finally {
+      this.dispose(error);
+    }
   }
 
   private dispose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.clearWatchdog();
+    globalThis.removeEventListener?.("pageshow", this.onResume);
+    globalThis.document?.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
     this.disposeQueryCoverageTrace?.();

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 
 const otelMocks = vi.hoisted(() => {
   const traceExporterConstructors = vi.fn();
@@ -16,9 +17,11 @@ const otelMocks = vi.hoisted(() => {
     end: ReturnType<typeof vi.fn>;
   }> = [];
   const traceForceFlush = vi.fn(() => Promise.resolve());
+  const traceShutdown = vi.fn(() => Promise.resolve());
 
   const logExporterConstructors = vi.fn();
   const logProviderConstructors = vi.fn();
+  const logShutdown = vi.fn(() => Promise.resolve());
   const logProcessorConstructors = vi.fn();
   const loggerNames: string[] = [];
   const emitLog = vi.fn();
@@ -29,11 +32,13 @@ const otelMocks = vi.hoisted(() => {
     traceProcessorConstructors,
     tracerNames,
     startSpan,
+    traceShutdown,
     traceSpans,
     traceForceFlush,
     logExporterConstructors,
     logProviderConstructors,
     logProcessorConstructors,
+    logShutdown,
     loggerNames,
     emitLog,
   };
@@ -56,6 +61,9 @@ vi.mock("@opentelemetry/sdk-trace-base", () => ({
     getTracer(name: string) {
       otelMocks.tracerNames.push(name);
       return { startSpan: otelMocks.startSpan };
+    }
+    shutdown() {
+      return otelMocks.traceShutdown();
     }
 
     forceFlush() {
@@ -86,6 +94,10 @@ vi.mock("@opentelemetry/sdk-logs", () => ({
     getLogger(name: string) {
       otelMocks.loggerNames.push(name);
       return { emit: otelMocks.emitLog };
+    }
+
+    shutdown() {
+      return otelMocks.logShutdown();
     }
   },
   BatchLogRecordProcessor: class {
@@ -158,13 +170,16 @@ afterEach(() => {
     otelMocks.traceProcessorConstructors,
     otelMocks.startSpan,
     otelMocks.traceForceFlush,
+    otelMocks.traceShutdown,
     otelMocks.logExporterConstructors,
     otelMocks.logProviderConstructors,
     otelMocks.logProcessorConstructors,
+    otelMocks.logShutdown,
     otelMocks.emitLog,
   ]) {
     mock.mockClear();
   }
+  vi.mocked(resourceFromAttributes).mockClear();
   otelMocks.tracerNames.length = 0;
   otelMocks.traceSpans.length = 0;
   otelMocks.loggerNames.length = 0;
@@ -218,7 +233,6 @@ describe("telemetry OTLP helpers", () => {
     installWasmTelemetry({
       wasmModule,
       collectorUrl: undefined,
-      appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
@@ -237,7 +251,6 @@ describe("telemetry OTLP helpers", () => {
     const dispose = installWasmTelemetry({
       wasmModule: {} as MockWasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
@@ -258,7 +271,6 @@ describe("telemetry OTLP helpers", () => {
     const dispose = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
@@ -283,7 +295,6 @@ describe("telemetry OTLP helpers", () => {
     const dispose = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
@@ -333,7 +344,6 @@ describe("telemetry OTLP helpers", () => {
     const dispose = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
@@ -398,7 +408,6 @@ describe("telemetry OTLP helpers", () => {
     const dispose = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
       runtimeThread: "main",
     });
 
@@ -414,17 +423,15 @@ describe("telemetry OTLP helpers", () => {
     const liveContext = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "live-context",
       runtimeThread: "worker",
     });
     const failedContext = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "failed-context",
       runtimeThread: "worker",
     });
 
-    expect(wasmModule.subscribers).toHaveLength(2);
+    expect(wasmModule.subscribers).toHaveLength(1);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
 
     // Models cleanupFailedContext after B installs telemetry but fails opening its database.
@@ -435,7 +442,6 @@ describe("telemetry OTLP helpers", () => {
     const retriedContext = installWasmTelemetry({
       wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "retried-context",
       runtimeThread: "worker",
     });
     retriedContext();
@@ -446,5 +452,129 @@ describe("telemetry OTLP helpers", () => {
     expect(wasmModule.subscribers).toHaveLength(0);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(2);
+  });
+  it("shares one collector stream for compatible leases on one WASM namespace", () => {
+    const wasmModule = createWasmModule([[]]);
+    const first = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418/v1/traces",
+      runtimeThread: "main",
+    });
+    const second = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418/v1/logs",
+      runtimeThread: "main",
+    });
+
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    expect(wasmModule.subscribers).toHaveLength(1);
+
+    second();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    first();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("rejects an incompatible endpoint pair before mutating the existing collector", () => {
+    const wasmModule = createWasmModule();
+    const live = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      runtimeThread: "main",
+    });
+
+    expect(() =>
+      installWasmTelemetry({
+        wasmModule,
+        collectorUrl: "http://127.0.0.1:54419",
+        runtimeThread: "main",
+      }),
+    ).toThrow("incompatible WASM telemetry collector");
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+    live();
+  });
+  it("keeps collector resources app-neutral", async () => {
+    const wasmModule = createWasmModule([
+      [
+        {
+          kind: "log",
+          sequence: 0,
+          target: "jazz",
+          level: "INFO",
+          message: "hello",
+          timestampUnixNano: [1, 0],
+        },
+      ],
+    ]);
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      runtimeThread: "main",
+    });
+
+    wasmModule.subscribers[0]!();
+    await vi.waitFor(() => expect(otelMocks.emitLog).toHaveBeenCalledOnce());
+
+    expect(resourceFromAttributes).toHaveBeenCalledWith({
+      "service.name": "jazz-browser",
+      "telemetry.sdk.language": "webjs",
+    });
+    dispose();
+  });
+  it("rejects a runtime-thread mismatch on the shared namespace before mutation", () => {
+    const wasmModule = createWasmModule();
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      runtimeThread: "main",
+    });
+
+    expect(() =>
+      installWasmTelemetry({
+        wasmModule,
+        collectorUrl: "http://127.0.0.1:54418",
+        runtimeThread: "worker",
+      }),
+    ).toThrow("incompatible WASM telemetry runtime thread");
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledOnce();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledOnce();
+    dispose();
+    expect(wasmModule.unsubscribeTraceEntries).toHaveBeenCalledOnce();
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("shuts down lazy providers after final exports", async () => {
+    const wasmModule = createWasmModule([
+      [
+        {
+          kind: "log",
+          sequence: 0,
+          target: "jazz",
+          level: "INFO",
+          message: "final",
+          timestampUnixNano: [1, 0],
+        },
+      ],
+    ]);
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      runtimeThread: "main",
+    });
+
+    wasmModule.subscribers[0]!();
+    dispose();
+
+    await vi.waitFor(() => expect(otelMocks.emitLog).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(otelMocks.traceShutdown).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(otelMocks.logShutdown).toHaveBeenCalledOnce());
+    expect(otelMocks.emitLog.mock.invocationCallOrder[0]).toBeLessThan(
+      otelMocks.traceShutdown.mock.invocationCallOrder[0]!,
+    );
+    expect(otelMocks.emitLog.mock.invocationCallOrder[0]).toBeLessThan(
+      otelMocks.logShutdown.mock.invocationCallOrder[0]!,
+    );
   });
 });
