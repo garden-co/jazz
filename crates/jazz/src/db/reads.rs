@@ -236,7 +236,8 @@ where
     {
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
-        if open_tx.is_some() && decoded.relation.is_some() {
+        let is_relation = decoded.relation.is_some();
+        if open_tx.is_some() && is_relation {
             return Err(Error::new(
                 ErrorCode::Query,
                 "relation reads inside a transaction are not supported",
@@ -247,7 +248,45 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
-        let coverage = if require_coverage {
+        // Output-changing relation plans are maintained by the subscription
+        // compiler. Wait for its first settled reset so a one-shot host read
+        // uses the same complete coverage boundary without requiring bindings
+        // to carry a separate query kind.
+        let relation_subscription_covered = if require_coverage && is_relation {
+            let mut stream = match author {
+                Some(author) => {
+                    self.subscribe_for_identity(&prepared, opts.clone(), author)
+                        .await?
+                }
+                None => self.subscribe(&prepared, opts.clone()).await?,
+            };
+            loop {
+                match stream.next_event().await {
+                    Some(SubscriptionEvent::Delta {
+                        reset: true,
+                        publishable: true,
+                        settled: true,
+                        ..
+                    }) => break true,
+                    Some(SubscriptionEvent::Rejected { reason }) => {
+                        return Err(Error::new(
+                            ErrorCode::Query,
+                            format!("query subscription rejected: {reason:?}"),
+                        ));
+                    }
+                    Some(SubscriptionEvent::Closed) | None => {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "query subscription ended before its settled result",
+                        ));
+                    }
+                    Some(SubscriptionEvent::Delta { .. }) => {}
+                }
+            }
+        } else {
+            false
+        };
+        let coverage = if require_coverage && !relation_subscription_covered {
             let attachment = self
                 .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
                 .await?;
