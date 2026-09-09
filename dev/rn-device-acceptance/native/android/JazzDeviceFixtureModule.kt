@@ -1,5 +1,9 @@
 package dev.jazz.rndeviceacceptance
 
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
@@ -183,34 +187,73 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     }
   }
 
+  /** React can start JS before onHostResume installs currentActivity. Wait for
+   * that lifecycle event once; never invent launch identity or retry database work.
+   * All listener state is confined to the UI queue, hashing stays off that queue. */
+  private fun withLaunchActivity(promise: Promise, action: (Activity) -> Unit) {
+    reactApplicationContext.runOnUiQueueThread {
+      val handler = Handler(Looper.getMainLooper())
+      var finished = false
+      lateinit var listener: LifecycleEventListener
+      lateinit var timeout: Runnable
+      fun finish(activity: Activity?) {
+        if (finished) return
+        finished = true
+        handler.removeCallbacks(timeout)
+        reactApplicationContext.removeLifecycleEventListener(listener)
+        if (activity == null) {
+          Log.e("JazzFixtureMetadata", "receipt-failed-activity")
+          promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture launch activity unavailable")
+        } else {
+          reactApplicationContext.runOnNativeModulesQueueThread { action(activity) }
+        }
+      }
+      listener = object : LifecycleEventListener {
+        override fun onHostResume() {
+          reactApplicationContext.currentActivity?.let { finish(it) }
+        }
+        override fun onHostPause() {}
+        override fun onHostDestroy() { finish(null) }
+      }
+      timeout = Runnable { finish(null) }
+      handler.postDelayed(timeout, 5_000)
+      reactApplicationContext.addLifecycleEventListener(listener)
+      // Also covers an Activity installed immediately before listener registration.
+      reactApplicationContext.currentActivity?.let { finish(it) }
+    }
+  }
+
   @ReactMethod fun receiptContext(promise: Promise) {
-    var stage = "activity"
     Log.e("JazzFixtureMetadata", "receipt-started")
-    try {
-      val activity = reactApplicationContext.currentActivity
-        ?: error("acceptance activity is unavailable")
-      stage = "nonce"
-      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
-        ?: error("acceptance launch did not include a run nonce")
-      // Hash the installed package itself, rather than echoing an adb extra.
-      stage = "package-hash"
-      Log.e("JazzFixtureMetadata", "package-hash-started")
-      val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
-      stage = "device-identity"
-      val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
-        ?: error("Android build fingerprint is unavailable")
-      stage = "resolve"
-      promise.resolve(Arguments.createMap().apply {
-        putString("platform", "android")
-        putString("deviceIdentifier", deviceIdentifier)
-        putString("buildFingerprint", buildFingerprint)
-        putString("runNonce", nonce)
-      })
-      Log.e("JazzFixtureMetadata", "receipt-resolved")
-    } catch (_: Throwable) {
-      // Fixed internal stages only; never log intent data or exception text.
-      Log.e("JazzFixtureMetadata", "receipt-failed-$stage")
-      promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture receipt metadata unavailable")
+    if (reactApplicationContext.currentActivity == null)
+      Log.e("JazzFixtureMetadata", "receipt-waiting-activity")
+    withLaunchActivity(promise) { activity ->
+      Log.e("JazzFixtureMetadata", "receipt-activity-ready")
+      var stage = "activity"
+      try {
+        stage = "nonce"
+        val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+          ?: error("acceptance launch did not include a run nonce")
+        // Hash the installed package itself, rather than echoing an adb extra.
+        stage = "package-hash"
+        Log.e("JazzFixtureMetadata", "package-hash-started")
+        val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
+        stage = "device-identity"
+        val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
+          ?: error("Android build fingerprint is unavailable")
+        stage = "resolve"
+        promise.resolve(Arguments.createMap().apply {
+          putString("platform", "android")
+          putString("deviceIdentifier", deviceIdentifier)
+          putString("buildFingerprint", buildFingerprint)
+          putString("runNonce", nonce)
+        })
+        Log.e("JazzFixtureMetadata", "receipt-resolved")
+      } catch (_: Throwable) {
+        // Fixed internal stages only; never log intent data or exception text.
+        Log.e("JazzFixtureMetadata", "receipt-failed-$stage")
+        promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", "Fixture receipt metadata unavailable")
+      }
     }
   }
 
