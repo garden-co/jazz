@@ -27,7 +27,7 @@ import {
 import {
   formatUuid,
   NativeRuntimeAdapter,
-  applySubscriptionDeltaWithRootDelta,
+  decodeSubscriptionDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -2299,7 +2299,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       // rejection here, which Vitest treats as a failed test run.
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(callback.mock.calls).toEqual([[error]]);
-      runtime.executeSubscription(handle, callback);
+      expect(() => runtime.executeSubscription(handle, callback)).toThrow("already been activated");
       expect(callback).toHaveBeenCalledTimes(1);
       if (kind !== "stream") expect(close).toHaveBeenCalledTimes(1);
       if (kind === "native-close-throws") {
@@ -2310,6 +2310,65 @@ describe("NativeRuntimeAdapter server transport", () => {
       } else expect(cleanupLog).not.toHaveBeenCalled();
       await runtime.close();
       cleanupLog.mockRestore();
+    },
+  );
+
+  it.each(["native", "stream"] as const)(
+    "activates a %s subscription once without replacing its callback or replaying rows",
+    async (kind) => {
+      const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
+      const opening = subscriptionReset([{ table: "todos", rowId, title: "initial" }]);
+      const change = {
+        type: "delta",
+        delta: encodeSubscriptionDelta({
+          added: [],
+          updated: [{ table: "todos", rowId, title: "updated" }],
+          removed: [],
+          updatedIndices: [4],
+        }),
+      };
+      const readAll = vi.fn().mockReturnValueOnce([opening, change]).mockReturnValue([]);
+      const source =
+        kind === "native"
+          ? { readAll, close: vi.fn() }
+          : new ReadableStream({
+              start(controller) {
+                controller.enqueue(opening);
+                controller.enqueue(change);
+              },
+            });
+      const runtime = runtimeWithSubscriptionSource(source);
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const handle = runtime.createSubscription(app.todos._build());
+      const replacement = vi.fn();
+      const callback = vi.fn(() => {
+        expect(() => runtime.executeSubscription(handle, replacement)).toThrow(
+          "already been activated",
+        );
+      });
+      try {
+        // Core wakes before activation must not consume the opening event.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(readAll).not.toHaveBeenCalled();
+        runtime.executeSubscription(handle, callback);
+        if (kind === "native") expect(callback).toHaveBeenCalledTimes(2);
+        await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(2));
+        expect(callback.mock.calls[0]).toEqual([expect.objectContaining({ reset: true })]);
+        expect(callback.mock.calls[1]).toEqual([
+          expect.objectContaining({
+            added: [],
+            updated: [expect.objectContaining({ index: 4 })],
+            removed: [],
+          }),
+        ]);
+        expect(() => runtime.executeSubscription(handle, replacement)).toThrow(
+          "already been activated",
+        );
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(replacement).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
     },
   );
 
@@ -4921,12 +4980,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
 
-    const applied = applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
+    const applied = decodeSubscriptionDelta(nativeDelta, schema, true, {
       rootTable: "notes",
       rootColumns: publicColumns,
     });
 
-    const [change] = runtimeDeltaChanges(applied.rootDelta);
+    const [change] = runtimeDeltaChanges(applied);
     expect(change?.kind).toBe(0);
     if (!change || change.kind !== 0) throw new Error("expected inserted row");
     expect(change.row.values).toEqual([
@@ -4988,7 +5047,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
+      decodeSubscriptionDelta(nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -5022,7 +5081,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
+      decodeSubscriptionDelta(nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -6715,16 +6774,15 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       addedOccurrenceKeys: [direct, inherited],
     }),
   );
-  const first = applySubscriptionDeltaWithRootDelta([], initial, testSchema);
-  const firstDelta = runtimeDeltaChanges(first.rootDelta);
-  expect(first.rows).toHaveLength(2);
+  const first = decodeSubscriptionDelta(initial, testSchema);
+  const firstDelta = runtimeDeltaChanges(first);
   expect(firstDelta.map((change) => change.id)).toEqual([
     expect.stringContaining("result:01"),
     expect.stringContaining("result:01"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
-  const transformed = manager.handleDelta(first.rootDelta, (row) => ({
+  const transformed = manager.handleDelta(first, (row) => ({
     id: row.id,
     title: row.values[0]?.type === "Text" ? row.values[0].value : "",
   }));
@@ -6742,12 +6800,11 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       updatedOccurrenceKeys: [inherited],
     }),
   );
-  const afterUpdate = applySubscriptionDeltaWithRootDelta(first.rows, update, testSchema);
-  const updatedDelta = runtimeDeltaChanges(afterUpdate.rootDelta);
+  const afterUpdate = decodeSubscriptionDelta(update, testSchema);
+  const updatedDelta = runtimeDeltaChanges(afterUpdate);
   expect(updatedDelta).toHaveLength(1);
   expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
-  expect(afterUpdate.rows).toHaveLength(2);
-  const publicUpdate = manager.handleDelta(afterUpdate.rootDelta, (row) => ({
+  const publicUpdate = manager.handleDelta(afterUpdate, (row) => ({
     id: row.id,
     title: row.values[0]?.type === "Text" ? row.values[0].value : "",
   }));
@@ -6763,16 +6820,14 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       removedOccurrenceKeys: [direct],
     }),
   );
-  const second = applySubscriptionDeltaWithRootDelta(afterUpdate.rows, removal, testSchema);
-  expect(second.rows).toHaveLength(1);
-  expect(runtimeDeltaChanges(second.rootDelta)[0]!.id).toBe(firstDelta[0]!.id);
-  const publicRemoval = manager.handleDelta(second.rootDelta, (row) => ({ id: row.id, title: "" }));
+  const second = decodeSubscriptionDelta(removal, testSchema);
+  expect(runtimeDeltaChanges(second)[0]!.id).toBe(firstDelta[0]!.id);
+  const publicRemoval = manager.handleDelta(second, (row) => ({ id: row.id, title: "" }));
   expect(publicRemoval.all).toHaveLength(1);
   applySubscriptionDelta(publicRows, publicRemoval);
   expect(publicRows).toHaveLength(1);
 
-  const reopened = applySubscriptionDeltaWithRootDelta(
-    [],
+  const reopened = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "inherited" }],
@@ -6784,8 +6839,13 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
     testSchema,
     true,
   );
-  expect(reopened.rows).toHaveLength(1);
-  expect(runtimeDeltaChanges(reopened.rootDelta)[0]!.id).toBe(firstDelta[1]!.id);
+  expect(runtimeDeltaChanges(reopened)[0]!.id).toBe(firstDelta[1]!.id);
+  const publicReset = manager.handleDelta(reopened, (row) => ({
+    id: row.id,
+    title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+  }));
+  applySubscriptionDelta(publicRows, publicReset);
+  expect(publicRows).toEqual([{ id: formatUuid(rowId), title: "inherited" }]);
 });
 
 it("uses Rust's explicit indices for root replacement and movement", () => {
@@ -6795,8 +6855,7 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     return bytes;
   });
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const initial = applySubscriptionDeltaWithRootDelta(
-    [],
+  const initial = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: ids.map((rowId, index) => ({ table: "todos", rowId, title: `todo-${index}` })),
@@ -6806,9 +6865,12 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     ),
     testSchema,
   );
+  const manager = new SubscriptionManager<{ id: string }>();
+  const apply = (delta: RuntimeSubscriptionDelta) =>
+    manager.handleDelta(delta, (row) => ({ id: row.id })).all?.map((row) => row.id);
+  expect(apply(initial)).toEqual(ids.map((id) => formatUuid(id)));
   const replaced = ids[0]!;
-  const afterTitleOnlyReplacement = applySubscriptionDeltaWithRootDelta(
-    initial.rows,
+  const afterTitleOnlyReplacement = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: [],
@@ -6821,15 +6883,12 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     testSchema,
   );
 
-  expect(afterTitleOnlyReplacement.rows.map((row) => row.id)).toEqual(
-    ids.map((id) => formatUuid(id)),
-  );
-  expect(runtimeDeltaChanges(afterTitleOnlyReplacement.rootDelta)).toEqual([
+  expect(apply(afterTitleOnlyReplacement)).toEqual(ids.map((id) => formatUuid(id)));
+  expect(runtimeDeltaChanges(afterTitleOnlyReplacement)).toEqual([
     expect.objectContaining({ id: formatUuid(replaced), index: 0 }),
   ]);
 
-  const afterSortReplacement = applySubscriptionDeltaWithRootDelta(
-    afterTitleOnlyReplacement.rows,
+  const afterSortReplacement = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: [],
@@ -6841,15 +6900,14 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     ),
     testSchema,
   );
-  expect(afterSortReplacement.rows.map((row) => row.id)).toEqual([
+  expect(apply(afterSortReplacement)).toEqual([
     formatUuid(ids[1]!),
     formatUuid(ids[2]!),
     formatUuid(replaced),
   ]);
 
   const moved = ids[2]!;
-  const afterExplicitMove = applySubscriptionDeltaWithRootDelta(
-    afterSortReplacement.rows,
+  const afterExplicitMove = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: [],
@@ -6861,7 +6919,7 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     ),
     testSchema,
   );
-  expect(afterExplicitMove.rows.map((row) => row.id)).toEqual([
+  expect(apply(afterExplicitMove)).toEqual([
     formatUuid(moved),
     formatUuid(ids[1]!),
     formatUuid(replaced),
@@ -6872,8 +6930,7 @@ it("preserves the producer's explicit position over lazy relation state", () => 
   const rowId = new Uint8Array(16);
   rowId[15] = 3;
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const applied = applySubscriptionDeltaWithRootDelta(
-    [],
+  const applied = decodeSubscriptionDelta(
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "third" }],
@@ -6887,7 +6944,7 @@ it("preserves the producer's explicit position over lazy relation state", () => 
     null,
   );
 
-  expect(runtimeDeltaChanges(applied.rootDelta)).toEqual([
+  expect(runtimeDeltaChanges(applied)).toEqual([
     expect.objectContaining({ id: formatUuid(rowId), index: 2 }),
   ]);
 });

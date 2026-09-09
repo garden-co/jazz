@@ -508,10 +508,8 @@ type SubscriptionState = {
   terminalErrorDelivered?: boolean;
   source?: SubscriptionSource;
   reading: boolean;
-  rows: RowState[];
   outputColumns: SubscriptionOutputColumns | null;
   tier: string;
-  opened: boolean;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
 };
@@ -539,8 +537,6 @@ export type RowState = {
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
-  resultKey?: string;
-  resultKeyBytes?: Uint8Array;
 };
 
 type NativeRowFieldPlan = {
@@ -1873,10 +1869,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       openingAbort: new AbortController(),
       reading: false,
-      rows: [],
       outputColumns: subscriptionOutputColumns(queryJson, this.schema),
       tier: tier ?? "local",
-      opened: false,
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
@@ -1921,15 +1915,11 @@ export class NativeRuntimeAdapter implements Runtime {
   executeSubscription(handle: number, onUpdate: Function): void {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
+    if (subscription.callback) throw new Error("Subscription has already been activated");
     subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
     if (subscription.terminalError) {
       this.deliverSubscriptionFailure(subscription);
       return;
-    }
-    if (subscription.opened) {
-      subscription.callback(
-        runtimeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
-      );
     }
     this.startSubscriptionReader(handle, subscription);
   }
@@ -2988,7 +2978,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
     const source = subscription.source;
-    if (subscription.cancelled || subscription.reading || !source) return;
+    if (subscription.cancelled || subscription.reading || !subscription.callback || !source) return;
     subscription.reading = true;
     this.readSubscription(handle, subscription, source);
   }
@@ -3077,21 +3067,17 @@ export class NativeRuntimeAdapter implements Runtime {
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
-    if (chunk.reset) subscription.rows = [];
-    const applied = applySubscriptionDeltaWithRootDelta(
-      subscription.rows,
+    const delta = decodeSubscriptionDelta(
       chunk.delta,
       this.schema,
       chunk.reset === true,
       subscription.outputColumns,
     );
-    subscription.rows = applied.rows;
-    applied.rootDelta.terminalOperations = decodeRuntimeTerminalOperations(
+    delta.terminalOperations = decodeRuntimeTerminalOperations(
       chunk.terminalOperations,
       subscription.outputColumns?.rootColumns,
     );
-    subscription.callback?.(applied.rootDelta);
-    subscription.opened = true;
+    subscription.callback?.(delta);
   }
 
   private scheduleServerPump(): void {
@@ -5472,129 +5458,44 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-export function applySubscriptionDeltaWithRootDelta(
-  currentRows: RowState[],
+export function decodeSubscriptionDelta(
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-): {
-  rows: RowState[];
-  rootDelta: RuntimeSubscriptionDelta;
-} {
-  const { addedRows, updatedRows, removedEntries, rows } = applySubscriptionDeltaToState(
-    currentRows,
-    delta,
-    schema,
-    reset,
-    outputColumns,
-  );
-  const rootIndexByKey = new Map<string, number>();
-  addedRows.forEach((row, index) =>
-    rootIndexByKey.set(rowStateKey(row), delta.addedIndices[index]!),
-  );
-  updatedRows.forEach((row, index) =>
-    rootIndexByKey.set(rowStateKey(row), delta.updatedIndices[index]!),
-  );
-  return {
-    rows,
-    rootDelta: {
-      ...runtimeDeltaFromChanges(
-        subscriptionOutputRows(addedRows, outputColumns),
-        subscriptionOutputRows(updatedRows, outputColumns),
-        subscriptionOutputRemovals(removedEntries, outputColumns),
-        rootIndexByKey,
-        schema,
-        outputColumns,
-      ),
-      ...(reset ? { reset: true } : {}),
-    },
+): RuntimeSubscriptionDelta {
+  const decodeRows = (batches: NativeRowBatch[], keys: Uint8Array[], indices: number[]) => {
+    const rows = rowsFromSubscriptionBatches(batches, schema, outputColumns, "full-record");
+    if (rows.length !== keys.length)
+      throw new Error("subscription occurrence sidecar length mismatch");
+    return rows.flatMap((row, index) =>
+      outputColumns && row.table !== outputColumns.rootTable
+        ? []
+        : [
+            {
+              sourceId: row.id,
+              occurrenceKey: keys[index]!,
+              index: indices[index]!,
+              row: runtimeSubscriptionRow(row, schema, outputColumns),
+            },
+          ],
+    );
   };
-}
-
-function subscriptionOutputRows(
-  rows: RowState[],
-  outputColumns: SubscriptionOutputColumns | null,
-): RowState[] {
-  return outputColumns ? rows.filter((row) => row.table === outputColumns.rootTable) : rows;
-}
-
-function subscriptionOutputRemovals(
-  removed: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>,
-  outputColumns: SubscriptionOutputColumns | null,
-): Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> {
-  return outputColumns ? removed.filter((row) => row.table === outputColumns.rootTable) : removed;
-}
-
-function applySubscriptionDeltaToState(
-  currentRows: RowState[],
-  delta: NativeSubscriptionDelta,
-  schema: WasmSchema,
-  reset = false,
-  outputColumns: SubscriptionOutputColumns | null = null,
-): {
-  addedRows: RowState[];
-  updatedRows: RowState[];
-  removedEntries: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>;
-  rows: RowState[];
-} {
-  const rowsByKey = reset
-    ? new Map<string, RowState>()
-    : new Map(currentRows.map((row) => [rowStateKey(row), row]));
-  const removedEntries: Array<{
-    table: string;
-    id: string;
-    index: number;
-    resultKeyBytes?: Uint8Array;
-  }> = [];
-
-  const addedRows = rowsFromSubscriptionBatches(delta.added, schema, outputColumns, "full-record");
-  const updatedRows = rowsFromSubscriptionBatches(
-    delta.updated,
-    schema,
-    outputColumns,
-    "full-record",
-  );
-  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
-  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
-
-  for (const [removedIndex, removed] of delta.removed.entries()) {
-    const id = formatUuid(removed.rowId);
-    const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
-    const key = resultKeyBytes
-      ? occurrenceStateKey(resultKeyBytes, removed.table, id)
-      : rowKey(removed.table, id);
-    removedEntries.push({
-      table: removed.table,
-      id,
-      index: delta.removedIndices[removedIndex]!,
-      resultKeyBytes,
-    });
-    rowsByKey.delete(key);
-  }
-
-  const changedRows = addedRows.concat(updatedRows);
-  for (const row of changedRows) {
-    rowsByKey.set(rowStateKey(row), row);
-  }
-
-  const changedKeys = new Set(changedRows.map((row) => rowStateKey(row)));
-  const rows = (reset ? [] : currentRows).filter((row) => {
-    const key = rowStateKey(row);
-    return rowsByKey.has(key) && !changedKeys.has(key);
-  });
-  const placements = [
-    ...addedRows.map((row, index) => ({ row, index: delta.addedIndices[index]! })),
-    ...updatedRows.map((row, index) => ({ row, index: delta.updatedIndices[index]! })),
-  ].sort((left, right) => left.index - right.index);
-  for (const placement of placements) {
-    rows.splice(Math.max(0, Math.min(placement.index, rows.length)), 0, placement.row);
-  }
   return {
-    addedRows,
-    updatedRows,
-    removedEntries,
-    rows,
+    added: decodeRows(delta.added, delta.addedOccurrenceKeys, delta.addedIndices),
+    updated: decodeRows(delta.updated, delta.updatedOccurrenceKeys, delta.updatedIndices),
+    removed: delta.removed.flatMap((row, index) =>
+      outputColumns && row.table !== outputColumns.rootTable
+        ? []
+        : [
+            {
+              sourceId: formatUuid(row.rowId),
+              occurrenceKey: delta.removedOccurrenceKeys[index]!,
+              index: delta.removedIndices[index]!,
+            },
+          ],
+    ),
+    ...(reset ? { reset: true } : {}),
   };
 }
 
@@ -5612,48 +5513,6 @@ function rowsFromSubscriptionBatches(
       nestedRowCarrier,
     ),
   );
-}
-
-function indexRowsByKey(rows: RowState[]): Map<string, number> {
-  const index = new Map<string, number>();
-  rows.forEach((row, rowIndex) => {
-    index.set(rowStateKey(row), rowIndex);
-  });
-  return index;
-}
-
-function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
-  if (rows.length !== keys.length)
-    throw new Error("subscription occurrence sidecar length mismatch");
-  rows.forEach((row, index) => {
-    const bytes = keys[index]!;
-    row.resultKeyBytes = bytes;
-    row.resultKey = publicResultKey(bytes);
-  });
-}
-
-function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
-  if (isOrdinaryResultKey(bytes) && table && sourceId) return rowKey(table, sourceId);
-  return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
-}
-
-function publicResultKey(bytes: Uint8Array): string {
-  if (isOrdinaryResultKey(bytes)) return formatUuid(bytes.subarray(1, 17));
-  return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
-}
-
-function isOrdinaryResultKey(bytes: Uint8Array): boolean {
-  return bytes.length === 25 && bytes[0] === 1 && bytes.subarray(17).every((byte) => byte === 0);
-}
-
-function rowStateKey(row: RowState): string {
-  return row.resultKeyBytes
-    ? occurrenceStateKey(row.resultKeyBytes, row.table, row.id)
-    : rowKey(row.table, row.id);
-}
-
-function rowKey(table: string, id: string): string {
-  return `${table}\0${id}`;
 }
 
 function decodePlannedField(
@@ -6064,46 +5923,6 @@ function subscriptionSource(
   };
 }
 
-function runtimeResetDeltaFromRows(
-  rows: RowState[],
-  schema: WasmSchema,
-  outputColumns: SubscriptionOutputColumns | null = null,
-): RuntimeSubscriptionDelta {
-  return {
-    ...runtimeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
-    reset: true,
-  };
-}
-
-function runtimeDeltaFromChanges(
-  added: RowState[],
-  updated: RowState[],
-  removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>,
-  rowIndexByKey: Map<string, number>,
-  schema?: WasmSchema,
-  outputColumns: SubscriptionOutputColumns | null = null,
-): RuntimeSubscriptionDelta {
-  return {
-    added: added.map((row) => ({
-      sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
-      index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
-      row: runtimeSubscriptionRow(row, schema, outputColumns),
-    })),
-    updated: updated.map((row) => ({
-      sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
-      index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
-      row: runtimeSubscriptionRow(row, schema, outputColumns),
-    })),
-    removed: removed.map((row) => ({
-      sourceId: row.id,
-      occurrenceKey: row.resultKeyBytes ?? ordinaryResultKey(row.id),
-      index: row.index,
-    })),
-  };
-}
-
 function runtimeSubscriptionRow(
   row: RowState,
   schema: WasmSchema | undefined,
@@ -6189,10 +6008,6 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
     values[index] = value;
   }
   return values;
-}
-
-function ordinaryResultKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...parseUuid(id), 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
