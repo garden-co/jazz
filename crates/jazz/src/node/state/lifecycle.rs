@@ -1456,6 +1456,26 @@ where
 
         Box::pin(async move {
             match value_type {
+                // JSON remains string-shaped to callers, but query collectors
+                // retain its distinct storage codec through the binding boundary.
+                ValueType::Internal(_)
+                    if *value_type == groove::large_values::physical_storage_value_type(
+                        groove::large_values::LargeValueKind::Json,
+                    ) =>
+                {
+                    match value {
+                        Value::String(_) => Ok(()),
+                        Value::Large(value_ref)
+                            if value_ref.kind == groove::large_values::LargeValueKind::Json =>
+                        {
+                            *value = self.materialize_large_value(value_ref).await?;
+                            Ok(())
+                        }
+                        _ => Err(Error::InvalidStoredValue(
+                            "binding JSON value does not match its descriptor",
+                        )),
+                    }
+                }
                 ValueType::String => match value {
                     Value::String(_) => Ok(()),
                     Value::Large(value_ref)
