@@ -8,6 +8,16 @@ import {
   type InspectorStagedEdit,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 
+// A runtime source can expose several schema views through the same port.
+// Keep correlation IDs unique across those views and across their lifetimes.
+const requestIds = new WeakMap<MessagePort, number>();
+function nextRequestId(port: MessagePort): number {
+  const id = requestIds.get(port) ?? -2;
+  if (!Number.isSafeInteger(id)) throw new Error("Inspector request identifiers exhausted");
+  requestIds.set(port, id - 1);
+  return id;
+}
+
 /** Private MessagePort reads and edit batches execute in the authenticated
  * storage owner, so patches preserve the same cached preimage the UI reads.
  * They never ask another peer node to disable query propagation. */
@@ -17,7 +27,6 @@ export function attachInspectorCacheRuntime(
   binding: InspectorAttachmentBinding,
   schema: WasmSchema,
 ): NativeRuntimeAdapter {
-  let nextId = -2; // -1 belongs to attachment admission; normal follower RPCs are positive.
   let closed = false;
   const staged = new Map<OpenTransactionId, InspectorStagedEdit[]>();
   const ownedWrites = new Set<TxId>();
@@ -89,7 +98,7 @@ export function attachInspectorCacheRuntime(
   const request = (message: Record<string, unknown>): Promise<unknown> => {
     if (closed) return Promise.reject(new Error("Inspector cache connection closed"));
     return new Promise((resolve, reject) => {
-      const id = nextId--;
+      const id = nextRequestId(port);
       reads.set(id, { resolve, reject });
       try {
         port.postMessage({ ...message, id, binding });
@@ -193,7 +202,7 @@ export function attachInspectorCacheRuntime(
           if (!cacheOnly(tier, options))
             return target.createSubscription(query, session, tier, options);
           if (closed) throw new Error("Inspector cache connection closed");
-          const id = nextId--;
+          const id = nextRequestId(port);
           subscriptions.set(id, { query, options, started: false });
           return id;
         };
