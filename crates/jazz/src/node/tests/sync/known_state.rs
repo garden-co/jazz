@@ -1257,8 +1257,8 @@ fn two_table_edge_budget_counts_shared_physical_history_once_without_eviction() 
         .map(String::as_str)
         .collect::<Vec<_>>();
     let storage = FailWriteManyMemoryStorage::new(&refs);
-    let mut reader = NodeState::new(node(3), test_schema, storage).unwrap();
-    let mut peer = PeerState::relay();
+    let mut reader =
+        NodeState::new_with_shared_test_catalogue(node(3), test_schema, storage).unwrap();
     let rows = [
         (
             "todos",
@@ -1280,7 +1280,8 @@ fn two_table_edge_budget_counts_shared_physical_history_once_without_eviction() 
         );
         let (shape, binding) = core.whole_table_shape_binding(table).unwrap();
         let subscription = core.whole_table_subscription_key(table).unwrap();
-        let update = peer
+        register_shape_binding(&mut reader, &shape, &binding);
+        let update = relay_with_system_binding(subscription)
             .rehydrate_query_for_subscription_with_opts(
                 &mut core,
                 subscription,
