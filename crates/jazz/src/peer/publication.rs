@@ -824,6 +824,10 @@ impl PeerState {
             None,
         )
         .await
+        .map(|progress| match progress {
+            std::task::Poll::Ready(update) => update,
+            std::task::Poll::Pending => None,
+        })
     }
 
     pub(crate) async fn query_update_for_subscription_with_opts_and_waker<S>(
@@ -834,7 +838,7 @@ impl PeerState {
         binding: &Binding,
         opts: RegisterShapeOptions,
         progress_waker: Option<&std::task::Waker>,
-    ) -> Result<Option<SyncMessage>, Error>
+    ) -> Result<std::task::Poll<Option<SyncMessage>>, Error>
     where
         S: OrderedKvStorage,
     {
@@ -847,7 +851,10 @@ impl PeerState {
             progress_waker,
         )
         .await
-        .map(|update| update.and_then(|update| update.changed.then_some(update.update)))
+        .map(|update| match update {
+            Some(update) => std::task::Poll::Ready(update.changed.then_some(update.update)),
+            None => std::task::Poll::Pending,
+        })
     }
 
     async fn query_update_inner<S>(

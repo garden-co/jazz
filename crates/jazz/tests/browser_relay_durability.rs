@@ -4978,3 +4978,56 @@ fn recovered_browser_relay_wait_suppresses_mutation_error_fallback() {
         "the active wait must consume the relay rejection before fallback delivery"
     );
 }
+
+// Host scheduling is observed at the raw Db boundary because client query
+// values cannot reveal an otherwise invisible busy loop on the authority.
+#[test]
+fn settled_subscription_does_not_reschedule_idle_authority_ticks() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client = open_db(0x12, alice, &schema);
+    let core = open_core(0x34, &schema);
+    let (upstream, downstream) = duplex();
+    let _connection = block_on(client.connect_upstream(upstream));
+    let _subscriber = core.accept_subscriber(downstream, alice);
+    let query = client.prepare_query(&client.table("todos")).expect("query");
+    let mut subscription = block_on(client.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe");
+    for _ in 0..32 {
+        client.tick().expect("client tick");
+        core.tick().expect("core tick");
+    }
+    assert!(
+        subscription.try_next_event().is_some(),
+        "subscription opened"
+    );
+    core.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    )
+    .expect("write");
+    for _ in 0..8 {
+        core.tick().expect("publish change");
+        client.tick().expect("receive change");
+    }
+
+    // This local authority write dirties query serving but does not change
+    // the settled Edge snapshot. A no-op must not keep the host awake.
+    assert_eq!(core.read(&query).expect("local authority row").len(), 1);
+    let scheduler = Rc::new(CountingScheduler::default());
+    core.set_tick_scheduler(Some(scheduler.clone()));
+    scheduler.clear();
+    core.tick().expect("idle authority tick");
+    assert_eq!(
+        scheduler.calls.get(),
+        0,
+        "settled unchanged query must not spin"
+    );
+}

@@ -5767,6 +5767,10 @@ where
                                     progress_waker.as_ref(),
                                 ))
                                 .await
+                                .map(|update| match update {
+                                    Some(update) => std::task::Poll::Ready(Some(update)),
+                                    None => std::task::Poll::Pending,
+                                })
                             } else {
                                 Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
@@ -5780,8 +5784,8 @@ where
                             }
                         };
                         let update = match update_result {
-                            Ok(Some(update)) => update,
-                            Ok(None) => {
+                            Ok(std::task::Poll::Ready(update)) => update,
+                            Ok(std::task::Poll::Pending) => {
                                 serve_again = true;
                                 continue;
                             }
@@ -5805,6 +5809,11 @@ where
                                 false,
                             );
                         }
+                        let Some(update) = update else {
+                            // A settled unchanged view has no more work. Only an
+                            // unfinished hydration needs another owner turn.
+                            continue;
+                        };
                         {
                             // Producer-local change tracking suppresses no-ops; an empty snapshot is meaningful.
                             #[cfg(feature = "sync-autopsy")]
