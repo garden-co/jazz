@@ -12,6 +12,28 @@ import { compile, compileModule } from "svelte/compiler";
 const packageDir =
   process.env.JAZZ_CLASSIC_CONSUMER_DIR ?? fileURLToPath(new URL("..", import.meta.url));
 
+// Match the enrolled-account fixture used by runtime tests. Only the external
+// registration response is substituted; provider configs receive opaque handles.
+const accountFixture = `
+  import { createAccountManagerWithRuntime } from ${JSON.stringify(
+    pathToFileURL(join(packageDir, "dist/accounts/enrollment.js")).href,
+  )};
+  async function accountConfig(appId) {
+    const issuer = "https://issuer.example";
+    const subject = "classic-consumer";
+    const serverUrl = "https://core.example";
+    const manager = createAccountManagerWithRuntime({
+      registry: serverUrl + "/apps/" + appId + "/accounts",
+      localFirst: { create() { throw new Error("Unexpected local key creation"); } },
+      fetch: async () => new Response(JSON.stringify({
+        account: crypto.randomUUID(), identity: { issuer, subject },
+      }), { status: 200 }),
+    });
+    const token = "header." + btoa(JSON.stringify({ iss: issuer, sub: subject })) + ".signature";
+    return { appId, serverUrl, account: await manager.registerJWT(token) };
+  }
+`;
+
 function runConsumer(source, { browser = false } = {}) {
   const args = [];
   if (browser) {
@@ -65,6 +87,11 @@ async function runFrameworkConsumer(source, { browser = false, controlledFactory
       {
         name: "compiled-public-svelte",
         setup(build) {
+          // Bundle fixture enrollment with the provider so opaque account
+          // handles share the same module-owned credentials.
+          build.onResolve({ filter: /^file:/ }, ({ path }) => ({
+            path: fileURLToPath(path),
+          }));
           // Race tests control only the existing client-factory dependency. The
           // public provider, renderer and scheduler still execute their real code.
           if (controlledFactory) {
@@ -159,20 +186,25 @@ for (const [entrypoint, provider] of [
   ["expo", "JazzExpoProvider"],
 ]) {
   test(`Classic ${entrypoint} hooks fail directly and providers fail only when rendered`, () => {
-    // Expo's public barrel needs native peers. Substitute only those host modules,
-    // and fail if used; this is export/render coverage, not Expo device coverage.
-    const expoHostAdapters = `
+    // Node cannot load React Native's Flow sources. Substitute only native host
+    // peers through the existing loader seam, and fail if any host operation runs.
+    // The public Jazz modules remain real; this is not native device coverage.
+    const nativeHostAdapters = `
       import { register } from "node:module";
       const host = "data:text/javascript," + encodeURIComponent(\`
-        const unavailable = () => { throw new Error("Unexpected Expo host call"); };
+        const unavailable = () => { throw new Error("Unexpected native host call"); };
+        export const CryptoDigestAlgorithm = { SHA256: "SHA-256" };
+        export const TurboModuleRegistry = { get: unavailable, getEnforcing: unavailable };
         export {
-          unavailable as getRandomBytes, unavailable as getItemAsync,
+          unavailable as View, unavailable as Text, unavailable as Pressable,
+          unavailable as getRandomBytes, unavailable as digestStringAsync,
+          unavailable as getItem, unavailable as setItem, unavailable as getItemAsync,
           unavailable as setItemAsync, unavailable as deleteItemAsync,
         };
       \`);
       register("data:text/javascript," + encodeURIComponent(\`
         export function resolve(specifier, context, nextResolve) {
-          if (specifier === "expo-crypto" || specifier === "expo-secure-store") {
+          if (["react-native", "expo-crypto", "expo-secure-store"].includes(specifier)) {
             return { url: \${JSON.stringify(host)}, shortCircuit: true };
           }
           return nextResolve(specifier, context);
@@ -183,7 +215,8 @@ for (const [entrypoint, provider] of [
       import assert from "node:assert/strict";
       import { createElement, isValidElement } from "react";
       import { renderToString } from "react-dom/server";
-      ${entrypoint === "expo" ? expoHostAdapters : ""}
+      ${accountFixture}
+      ${entrypoint === "expo" || entrypoint === "react-native" ? nativeHostAdapters : ""}
       const binding = await import("jazz-tools/${entrypoint}");
       for (const name of ["useCoState", "useAccount", "useSuspenseCoState", "useSuspenseAccount"]) {
         assert.throws(() => binding[name](), error =>
@@ -204,7 +237,7 @@ for (const [entrypoint, provider] of [
         assert.equal(renderToString(createElement(CurrentAuth)), "<p>loading</p>");
       } else {
         const current = createElement(binding.JazzProvider, {
-          config: { appId: "classic-coexistence" },
+          config: await accountConfig("classic-coexistence"),
           fallback: createElement("p", {}, "loading"),
           autoAttachDevTools: false,
           ...(${JSON.stringify(entrypoint)} === "react-core" ? { createJazzClient: binding.createJazzClient } : {}),
@@ -282,14 +315,17 @@ for (const [file, bundler] of [
 
 test("Vue rejects Classic provider configuration instead of silently ignoring it", () => {
   runConsumer(`
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createSSRApp, h } from "vue";
     import { renderToString } from "@vue/server-renderer";
     import { JazzProvider } from "jazz-tools/vue";
+    const invalidConfig = await accountConfig("classic-vue-props");
+    const validConfig = await accountConfig("current-vue-props");
 
     const app = createSSRApp({
       render: () => h(JazzProvider, {
-        config: { appId: "classic-vue-props" },
+        config: invalidConfig,
         sync: { peer: "wss://classic.invalid" },
       }, {
         fallback: () => h("p", "invalid-fallback"),
@@ -304,7 +340,7 @@ test("Vue rejects Classic provider configuration instead of silently ignoring it
     assert.ok(failures[0].message.includes("JazzProvider.sync"));
     assert.ok(!html.includes("invalid-fallback") && !html.includes("invalid-child"));
     const valid = await renderToString(createSSRApp({
-      render: () => h(JazzProvider, { config: { appId: "current-vue-props" } },
+      render: () => h(JazzProvider, { config: validConfig },
         { fallback: () => h("p", "valid-fallback") }),
     }));
     assert.ok(valid.includes("<p>valid-fallback</p>"));
@@ -329,6 +365,7 @@ test("Svelte Classic classes and Vue Classic composables reject through public e
 
 test("reused Svelte and Vue providers reject present Classic props but preserve valid SSR", async () => {
   await runFrameworkConsumer(`
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createRawSnippet } from "svelte";
     import { render } from "svelte/server";
@@ -336,7 +373,7 @@ test("reused Svelte and Vue providers reject present Classic props but preserve 
     import { createSSRApp, h } from "vue";
     import { renderToString } from "@vue/server-renderer";
     import { JazzProvider } from "jazz-tools/vue";
-    const config = { appId: "classic-props-presence" };
+    const config = await accountConfig("classic-props-presence");
     const fallback = createRawSnippet(() => ({ render: () => "<p>loading</p>" }));
     for (const legacy of [{sync: undefined}, {AccountSchema: class Account {}}, {"account-schema": undefined}]) {
       assert.throws(() => render(JazzSvelteProvider, {
@@ -370,12 +407,13 @@ test("reused Svelte and Vue providers reject present Classic props but preserve 
 test("Svelte notices newly introduced Classic props even when config is unchanged", async () => {
   await runFrameworkConsumer(
     `
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createRawSnippet, mount, unmount, flushSync } from "svelte";
     import { JazzSvelteProvider } from "jazz-tools/svelte";
     const snippet = createRawSnippet(() => ({ render: () => "<p>loading</p>" }));
     const props = $state({
-      config: { appId: "svelte-prop-transition", driver: { type: "memory" } },
+      config: { ...await accountConfig("svelte-prop-transition"), driver: { type: "memory" } },
       children: snippet, fallback: snippet,
     });
     const instance = mount(JazzSvelteProvider, { target: document.getElementById("app"), props });
@@ -393,10 +431,13 @@ test("Svelte notices newly introduced Classic props even when config is unchange
 test("Vue notices newly introduced Classic attrs even when config is unchanged", async () => {
   await runFrameworkConsumer(
     `
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createApp, h, reactive, nextTick } from "vue";
     import { JazzProvider } from "jazz-tools/vue";
-    const props = reactive({ config: { appId: "vue-prop-transition", driver: { type: "memory" } } });
+    const props = reactive({ config: {
+      ...await accountConfig("vue-prop-transition"), driver: { type: "memory" },
+    } });
     const failures = [];
     const app = createApp({
       render: () => h(JazzProvider, props, { fallback: () => h("p", "loading") }),
@@ -416,12 +457,14 @@ test("Vue notices newly introduced Classic attrs even when config is unchanged",
 
 test("Solid's supported provider still renders through its Node export", async () => {
   await runFrameworkConsumer(`
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createComponent } from "solid-js";
     import { renderToString } from "solid-js/web";
     import { JazzProvider } from "jazz-tools/solid";
+    const config = await accountConfig("solid-coexistence");
     const html = renderToString(() => createComponent(JazzProvider, {
-      config: { appId: "solid-coexistence" },
+      config,
       fallback: "loading", children: "ready", autoAttachDevTools: false,
     }));
     assert.ok(html.includes("loading"));
@@ -431,13 +474,15 @@ test("Solid's supported provider still renders through its Node export", async (
 test("Solid's supported provider still mounts through its browser export", async () => {
   await runFrameworkConsumer(
     `
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { createComponent } from "solid-js";
     import { render } from "solid-js/web";
     import { JazzProvider } from "jazz-tools/solid";
     const target = document.getElementById("app");
+    const config = { ...await accountConfig("solid-coexistence"), driver: { type: "memory" } };
     const dispose = render(() => createComponent(JazzProvider, {
-      config: { appId: "solid-coexistence", driver: { type: "memory" } },
+      config,
       fallback: "loading", children: "ready", autoAttachDevTools: false,
     }), target);
     assert.equal(target.textContent, "loading");
@@ -450,6 +495,7 @@ test("Solid's supported provider still mounts through its browser export", async
 test("Vue refuses replacement when Classic attrs arrive during prior-client shutdown", async () => {
   await runFrameworkConsumer(
     `
+    ${accountFixture}
     import assert from "node:assert/strict";
     import { setImmediate } from "node:timers/promises";
     import { createApp, h, reactive, nextTick } from "vue";
@@ -466,7 +512,7 @@ test("Vue refuses replacement when Classic attrs arrive during prior-client shut
         async shutdown() { startedShutdown(); await stopped; resource.closed = true; },
       };
     };
-    const props = reactive({ config: { appId: "first" }, autoAttachDevTools: false });
+    const props = reactive({ config: await accountConfig("first"), autoAttachDevTools: false });
     const failures = [];
     const app = createApp({ render: () => h(JazzProvider, props, {
       default: () => h("p", "ready"), fallback: () => h("p", "loading"),
@@ -475,7 +521,7 @@ test("Vue refuses replacement when Classic attrs arrive during prior-client shut
     app.mount(document.getElementById("app"));
     await setImmediate();
     assert.equal(document.querySelector("p").textContent, "ready");
-    props.config = { appId: "second" };
+    props.config = await accountConfig("second");
     await stopping;
     props.sync = undefined;
     await nextTick();
@@ -494,6 +540,7 @@ for (const framework of ["svelte", "vue"]) {
   test(`${framework} disposes an in-flight client invalidated before publication`, async () => {
     await runFrameworkConsumer(
       `
+      ${accountFixture}
       import assert from "node:assert/strict";
       import { setImmediate } from "node:timers/promises";
       import { mount, unmount, flushSync, createRawSnippet } from "svelte";
@@ -519,7 +566,7 @@ for (const framework of ["svelte", "vue"]) {
         failures.push(error);
       };
       const target = document.getElementById("app");
-      const config = { appId: "pending-create" };
+      const config = await accountConfig("pending-create");
       let props, dispose;
       if (${JSON.stringify(framework)} === "svelte") {
         // Non-reactive caller props force the post-await admission check, rather

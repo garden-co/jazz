@@ -1,4 +1,4 @@
-import { co, z, CoMap, Group, schema as s, type Db } from "jazz-tools";
+import { co, z, CoMap, Group, schema as s, type AccountHandle, type Db } from "jazz-tools";
 import {
   useCoState,
   useAccount,
@@ -20,6 +20,8 @@ import {
   type JazzProviderProps as VueProviderProps,
 } from "jazz-tools/vue";
 import type { JazzProviderProps as SolidProviderProps } from "jazz-tools/solid";
+
+declare const account: AccountHandle;
 
 // These imports must resolve against emitted declarations, never tsconfig src aliases.
 // @ts-expect-error Classic members must not become valid schema builders.
@@ -67,13 +69,13 @@ useJazzContext();
 useAcceptInvite();
 
 const oldVueProps: VueProviderProps = {
-  config: { appId: "classic-vue-types" },
+  config: { appId: "classic-vue-types", account },
   // @ts-expect-error Diagnostics must not make Classic props supported.
   AccountSchema: undefined,
 };
-const currentVueProps: VueProviderProps = { config: { appId: "current-vue-types" } };
+const currentVueProps: VueProviderProps = { config: { appId: "current-vue-types", account } };
 const currentSolidProps: SolidProviderProps = {
-  config: { appId: "current-solid-types" },
+  config: { appId: "current-solid-types", account },
   children: "Jazz 2",
 };
 void [oldVueProps, currentVueProps, currentSolidProps];
@@ -89,7 +91,7 @@ function Todos() {
   return data?.map((row) => <p key={row.id}>{row.title}</p>);
 }
 const currentReact = (
-  <JazzProvider config={{ appId: "classic-diagnostic-types" }}>
+  <JazzProvider config={{ appId: "classic-diagnostic-types", account }}>
     <Todos />
   </JazzProvider>
 );

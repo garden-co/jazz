@@ -1,4 +1,5 @@
 import type { ComponentProps } from "svelte";
+import type { AccountHandle } from "jazz-tools";
 import {
   CoState,
   AccountCoState,
@@ -19,14 +20,15 @@ new InviteListener();
 new SyncConnectionStatus();
 
 declare const children: ComponentProps<typeof JazzSvelteProvider>["children"];
+declare const account: AccountHandle;
 const oldProps: ComponentProps<typeof JazzSvelteProvider> = {
-  config: { appId: "classic-svelte-types" },
+  config: { appId: "classic-svelte-types", account },
   children,
   // @ts-expect-error Diagnostics must not make Classic props supported.
   sync: undefined,
 };
 const currentProps: ComponentProps<typeof JazzSvelteProvider> = {
-  config: { appId: "current-svelte-types" },
+  config: { appId: "current-svelte-types", account },
   children,
 };
 void [oldProps, currentProps];
