@@ -582,7 +582,8 @@ describe("backend request auth", () => {
   });
 
   it.each([
-    ["LOCALHOST", "localhost"],
+    // Bind both loopback families: localhost resolution differs across hosts.
+    ["LOCALHOST", "::"],
     ["[0:0:0:0:0:0:0:1]", "::1"],
     ["127.1", "127.0.0.1"],
     ["2130706433", "127.0.0.1"],
