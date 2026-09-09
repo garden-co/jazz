@@ -11,6 +11,13 @@ import { runCorrectnessConsumer } from "./run-correctness-consumer.mjs";
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
 try {
+  // Node scaffold tests intentionally consume jazz-rn's installed JS entry
+  // points. Rebuild that bridge before tests: prepare may have run before a
+  // rebase changed the command ABI, leaving valid-looking stale lib/ output.
+  await runCorrectnessConsumer("pnpm", ["--filter", "jazz-rn", "build"], {
+    cwd: root,
+    rootDir: root,
+  });
   await runCorrectnessConsumer(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
