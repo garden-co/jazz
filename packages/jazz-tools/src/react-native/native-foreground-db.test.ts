@@ -26,7 +26,6 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
           typeof command === "object" && command !== null
             ? (command as { type?: unknown }).type
             : command;
-        if (type === "prepareQuery") return Uint8Array.of(0);
         if (type === "all") return Uint8Array.of(1);
         if (type === "subscribe") return Uint8Array.of(2);
         if (type === "drainSubscription") return Uint8Array.of(3);
@@ -36,8 +35,6 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
       },
       decodeNativeForegroundResponse(bytes: Uint8Array) {
         switch (bytes[0]) {
-          case 0:
-            return { type: "preparedQuery", query: 10 };
           case 1:
             return { type: "pending", operation: 11 };
           case 2:
@@ -74,12 +71,12 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
 
   const wakes: string[] = [];
   db.setTickScheduler((urgency) => wakes.push(String(urgency)));
-  const query = db.prepareQuery(Uint8Array.of(1), "query");
-  const pendingRows = db.all(query, { tier: "local" });
+  const query = Uint8Array.of(1);
+  const pendingRows = db.all(query, "query", { tier: "local" });
   expect(typeof pendingRows).toBe("object");
   expect("poll" in pendingRows && pendingRows.poll()).toEqual(Uint8Array.of(9));
 
-  const subscription = db.subscribe(query, { tier: "local" });
+  const subscription = db.subscribe(query, "query", { tier: "local" });
   const pendingSubscription = subscription.readAll();
   expect(Array.isArray(pendingSubscription)).toBe(false);
   expect("retryAfterMs" in pendingSubscription && pendingSubscription.retryAfterMs()).toBe(0);
@@ -99,7 +96,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
   expect(db.close()).toBe(true);
   nativeWake?.("immediate");
   expect(wakes).toEqual(["deferred"]);
-  expect(() => db.all(query, { tier: "local" })).toThrow("runtime is closed");
+  expect(() => db.all(query, "query", { tier: "local" })).toThrow("runtime is closed");
 });
 
 // Unknown transaction handles must fail before any ordinary read is issued.
@@ -107,7 +104,7 @@ it("rejects unknown transaction reads before invoking native commands", () => {
   const execute = vi.fn();
   const tick = vi.fn();
   const db = new NativeForegroundDb({ execute, tick, close: () => true }, {} as never);
-  expect(() => db.all({ nativeForegroundQuery: 2 }, { tier: "local" }, "missing")).toThrow(
+  expect(() => db.all(Uint8Array.of(2), "query", { tier: "local" }, "missing")).toThrow(
     "cannot read unknown transaction missing",
   );
   expect(execute).not.toHaveBeenCalled();

@@ -13,7 +13,7 @@ import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { FEATURE_PAYLOAD_ZSTD, webSocketUrl } from "./native-runtime/websocket.js";
-import { openConfig } from "./native-runtime/native-codec.js";
+import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
@@ -1728,22 +1728,24 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const raw = runtime as unknown as {
       db: {
         all(
-          query: unknown,
+          query: Uint8Array,
+          kind: "query" | "relation",
           opts: unknown,
           openTransactionId: string,
           author: Uint8Array,
         ): Uint8Array | Promise<Uint8Array>;
       };
-      prepareQuery(queryJson: string): unknown;
     };
-    const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
+    const query = queryFromTable("todos");
     const aliceAuthor = testExternalAuthorBytes(ALICE_ID);
     const bobAuthor = testExternalAuthorBytes(BOB_ID);
     await expect(
-      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, aliceAuthor)),
+      Promise.resolve().then(() =>
+        raw.db.all(query, "query", undefined, transactionId, aliceAuthor),
+      ),
     ).resolves.toBeInstanceOf(Uint8Array);
     await expect(
-      Promise.resolve().then(() => raw.db.all(query, undefined, transactionId, bobAuthor)),
+      Promise.resolve().then(() => raw.db.all(query, "query", undefined, transactionId, bobAuthor)),
     ).rejects.toThrow(/open transaction identity.*bound identity/i);
     await runtime.rollbackTransaction(transactionId);
   });

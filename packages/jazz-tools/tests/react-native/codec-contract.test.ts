@@ -43,26 +43,24 @@ const cases: [string, unknown, unknown][] = [
     { PermissionAdvice: { action: { Delete: { table: "t", row: [...txId] } } } },
   ],
   [
-    "relation prepare",
+    "relation read",
     {
-      type: "prepareQuery",
+      type: "all",
       query: Uint8Array.of(0x4a, 0x52, 0x51, 0x01, 0x00),
       kind: "relation",
+      optionsJson,
     },
     {
-      PrepareQuery: {
+      All: {
         query: [0x4a, 0x52, 0x51, 0x01, 0x00],
         kind: "Relation",
+        options_json: optionsJson,
+        transaction: null,
       },
     },
   ],
 
   ["probe", "probe", "Probe"],
-  [
-    "prepare",
-    { type: "prepareQuery", query: Uint8Array.of(1, 128, 2), kind: "query" },
-    { PrepareQuery: { query: [1, 128, 2], kind: "Query" } },
-  ],
   [
     "exclusive transaction",
     { type: "beginTransaction", kind: "exclusive" },
@@ -70,18 +68,24 @@ const cases: [string, unknown, unknown][] = [
   ],
   [
     "read without transaction",
-    { type: "all", query: 128, optionsJson },
-    { All: { query: 128, options_json: optionsJson, transaction: null } },
+    { type: "all", query: Uint8Array.of(128), kind: "query", optionsJson },
+    { All: { query: [128], kind: "Query", options_json: optionsJson, transaction: null } },
   ],
   [
     "relation transaction",
-    { type: "all", query: 1, optionsJson, transaction: 256 },
-    { All: { query: 1, options_json: optionsJson, transaction: 256 } },
+    {
+      type: "all",
+      query: Uint8Array.of(1),
+      kind: "relation",
+      optionsJson,
+      transaction: 256,
+    },
+    { All: { query: [1], kind: "Relation", options_json: optionsJson, transaction: 256 } },
   ],
   [
     "subscription",
-    { type: "subscribe", query: 128, optionsJson },
-    { Subscribe: { query: 128, options_json: optionsJson } },
+    { type: "subscribe", query: Uint8Array.of(128), kind: "query", optionsJson },
+    { Subscribe: { query: [128], kind: "Query", options_json: optionsJson } },
   ],
   [
     "settlement",

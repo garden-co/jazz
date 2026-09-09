@@ -26,26 +26,25 @@ describe("WASM backend read capability parity", () => {
           true,
         ),
       );
-      const query = db.prepareQuery(queryFromTable("notes"), "query");
+      const query = queryFromTable("notes");
       const relation = encodeRelationQueryPostcard({
         Project: {
           input: { TableScan: { table: "notes" } },
           columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
         },
       } satisfies RelExpr);
-      const relationQuery = db.prepareQuery(relation, "relation");
       const opts = { tier: "local" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [
-        () => db.all(query, opts),
-        () => db.all(query, opts, txId),
-        () => db.all(relationQuery, opts),
+        () => db.all(query, "query", opts),
+        () => db.all(query, "query", opts, txId),
+        () => db.all(relation, "relation", opts),
       ];
       try {
         for (const read of reads) expect(await resolveRead(read())).toBeInstanceOf(Uint8Array);
-        await db.subscribe(query, opts).cancel();
-        await db.subscribe(relationQuery, opts).cancel();
+        await db.subscribe(query, "query", opts).cancel();
+        await db.subscribe(relation, "relation", opts).cancel();
       } finally {
         db.rollbackTransaction(txId);
         db.close();

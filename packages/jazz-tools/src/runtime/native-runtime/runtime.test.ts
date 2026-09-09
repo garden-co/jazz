@@ -311,7 +311,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => encodeRows([]),
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -571,7 +570,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
+    expect(calls[0]?.[2]).toEqual({ tier: "edge" });
   });
 
   it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
@@ -869,7 +868,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => encodeRows([]),
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -957,7 +955,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             connectUpstream: () => transport,
-            prepareQuery: () => ({}),
             subscribe: () => subscription,
             tick: () => undefined,
           }),
@@ -1013,7 +1010,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => ({}),
             subscribe: () => ({
               readAll: () => events.splice(0),
               close: () => true,
@@ -1073,7 +1069,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => ({}),
             subscribe: () => ({ readAll: () => events.splice(0), close: () => true }),
             tick: () => undefined,
           }),
@@ -1107,7 +1102,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all: () => Uint8Array.from([0]),
-            prepareQuery: () => ({}),
             update: (table: string, rowId: Uint8Array, patch: Uint8Array) => {
               calls.push(["update", table, rowId, patch]);
               return write;
@@ -1154,7 +1148,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all: () => Uint8Array.from([0]),
-            prepareQuery: () => ({}),
             updateLargeValues: (...args: unknown[]) => {
               calls.push(args);
               return fakeWrite();
@@ -1232,7 +1225,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all: () => encodeRows([{ table: "todos", rowId, title: "A😀BC" }]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1281,7 +1273,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                   title: "fresh local write",
                 },
               ]),
-            prepareQuery: () => ({}),
             insert: (_table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
               insertedRowIds.push(options?.rowId ?? new Uint8Array(16));
               return write;
@@ -1402,7 +1393,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                   },
                 ])
               : encodeRows([]),
-          prepareQuery: () => ({}),
           subscribe: () => ({
             readAll: () => {
               if (!ticked || subscriptionDrained) return [];
@@ -1488,7 +1478,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+            all: (
+              _query: unknown,
+              _kind: unknown,
+              _opts: unknown,
+              _tx: unknown,
+              author: Uint8Array,
+            ) => {
               if (author) {
                 throw new Error("ordinary client query must not use trusted serving");
               }
@@ -1501,7 +1497,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -1817,9 +1812,17 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+            all: (
+              _query: unknown,
+              _kind: unknown,
+              _opts: unknown,
+              _tx: unknown,
+              author: Uint8Array,
+              claims: Record<string, unknown>,
+            ) => {
               if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
+              claimUpdates.push({ author: new TextDecoder().decode(author), claims });
               return encodeRows([
                 {
                   table: "todos",
@@ -1827,15 +1830,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                   title: "trusted serving",
                 },
               ]);
-            },
-            prepareQuery: (
-              _query: Uint8Array,
-              _kind: "query" | "relation",
-              author: Uint8Array,
-              claims: Record<string, unknown>,
-            ) => {
-              claimUpdates.push({ author: new TextDecoder().decode(author), claims });
-              return {};
             },
             tick: () => undefined,
           }),
@@ -1891,7 +1885,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+            all: (
+              _query: unknown,
+              _kind: unknown,
+              _opts: unknown,
+              _tx: unknown,
+              author: Uint8Array,
+            ) => {
               if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
@@ -1902,7 +1902,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            prepareQuery: () => ({}),
             subscribe: () => {
               throw new Error("reserved public session must be rejected before subscribing");
             },
@@ -1966,7 +1965,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+            all: (
+              _query: unknown,
+              _kind: unknown,
+              _opts: unknown,
+              _tx: unknown,
+              author: Uint8Array,
+            ) => {
               if (!author) throw new Error("trusted serving query must provide an author");
               authors.push(new TextDecoder().decode(author));
               return encodeRows([
@@ -1977,7 +1982,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2024,7 +2028,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all,
-            prepareQuery: () => ({}),
             setIdentityClaims,
             tick: () => undefined,
           }),
@@ -2084,7 +2087,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all: () => encodeArrayRows(),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2128,10 +2130,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -2181,8 +2182,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () =>
-              encodeRows([
+            all: (query: Uint8Array) => {
+              preparedBytes = query;
+              return encodeRows([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -2193,10 +2195,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
                   title: "drop",
                 },
-              ]),
-            prepareQuery: (query: Uint8Array) => {
-              preparedBytes = query;
-              return {};
+              ]);
             },
             tick: () => undefined,
           }),
@@ -2257,11 +2256,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new ReadableStream();
             },
-            subscribe: () => new ReadableStream(),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2422,16 +2420,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
-            },
-            subscribe: () =>
-              new ReadableStream({
+              return new ReadableStream({
                 start(streamController) {
                   controller = streamController;
                 },
-              }),
+              });
+            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2531,10 +2527,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2557,7 +2549,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "should not be read" }],
       },
     ]);
-    expect(calls).toEqual(["prepareQuery", "all"]);
+    expect(calls).toEqual(["all"]);
   });
 
   it("preserves raw subscription literal number spellings in native relation bytes", () => {
@@ -2566,11 +2558,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (bytes: Uint8Array, kind: "query" | "relation") => {
+            subscribe: (bytes: Uint8Array, kind: "query" | "relation") => {
               if (kind === "relation") relationBytes = bytes;
-              return {};
+              return new ReadableStream();
             },
-            subscribe: () => new ReadableStream(),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2601,12 +2592,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
-              calls.push("prepareQuery");
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
-            },
-            subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream();
             },
@@ -2627,7 +2614,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       JSON.stringify({ table: "todos", relation_ir: unsupportedProjectRelationIr() }),
     );
     expect(handle).toBe(1);
-    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(calls).toEqual(["subscribe"]);
     expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
@@ -2638,12 +2625,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
-              calls.push("prepareQuery");
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
-            },
-            subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream();
             },
@@ -2702,7 +2685,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(handle).toBe(1);
-    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(calls).toEqual(["subscribe"]);
     expect(readPreparedQueryShape(preparedBytes!)).toEqual({
       table: "todos",
       predicates: [{ column: "title", opTag: 3, literalTag: 6, value: "native" }],
@@ -2719,11 +2702,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new ReadableStream();
             },
-            subscribe: () => new ReadableStream(),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2763,11 +2745,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new ReadableStream();
             },
-            subscribe: () => new ReadableStream(),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -2918,10 +2899,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream({
@@ -2968,7 +2945,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(calls).toEqual(["subscribe"]);
     const relationOutputColumns: ColumnDescriptor[] = [
       relationSchema.users.columns[0]!,
       {
@@ -3023,10 +3000,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             all: () => {
               calls.push("all");
               return encodeTerminalRelationSnapshot(relationSchema);
@@ -3063,7 +3036,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       valuesByColumn?: Map<string, unknown>;
     }>;
 
-    expect(calls).toEqual(["prepareQuery", "all"]);
+    expect(calls).toEqual(["all"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.table).toBe("users");
     expect(rows[0]?.valuesByColumn?.get("todosViaOwner")).toEqual({
@@ -3109,10 +3082,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream({
@@ -3151,7 +3120,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(calls).toEqual(["subscribe"]);
     expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
       [
         {
@@ -3173,10 +3142,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream();
@@ -3222,7 +3187,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         }),
       ),
     ).toBe(1);
-    expect(calls).toEqual(["prepareQuery", "subscribe"]);
+    expect(calls).toEqual(["subscribe"]);
   });
 
   it("passes supported read tiers and propagation through native read options", async () => {
@@ -3231,11 +3196,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, opts: unknown) => {
+            all: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3263,33 +3227,36 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
     const calls: string[] = [];
-    let prepared = 0;
+    let reads = 0;
     const nativeDb = fakeDb({
-      prepareQuery: (_bytes: Uint8Array, kind: "query" | "relation") => ({
-        kind,
-        sequence: prepared++,
-      }),
       all: (
-        query: { kind: "query" | "relation"; sequence: number },
+        _query: Uint8Array,
+        kind: "query" | "relation",
         _opts: unknown,
         openTransactionId: string,
         author: Uint8Array,
       ) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
-        if (query.kind === "relation") {
+        const sequence = reads++;
+        if (kind === "relation") {
           calls.push("relation");
           return encodeRelationSnapshot([]);
         }
-        if (query.sequence === 2) {
+        if (sequence === 2 || sequence === 4) {
           calls.push(openTransactionId ? "transaction-snapshot" : "snapshot");
           return encodeRelationSnapshot([]);
         }
         calls.push(openTransactionId ? "transaction" : "plain");
         return encodeRows([]);
       },
-      subscribe: (query: { kind: "query" | "relation" }, _opts: unknown, author: Uint8Array) => {
+      subscribe: (
+        _query: Uint8Array,
+        kind: "query" | "relation",
+        _opts: unknown,
+        author: Uint8Array,
+      ) => {
         if (author) throw new Error("backend authority must be implicit in its native open");
-        calls.push(query.kind === "relation" ? "relation-subscription" : "subscription");
+        calls.push(kind === "relation" ? "relation-subscription" : "subscription");
         return new ReadableStream();
       },
       tick: () => undefined,
@@ -3373,7 +3340,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     const all = vi.fn(() => encodeRows([]));
     let nativeDb: ReturnType<typeof fakeDb>;
     nativeDb = fakeDb({
-      prepareQuery: () => ({}),
       all,
       registerSchema: () => nativeDb,
       tick: () => undefined,
@@ -3412,12 +3378,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, opts: unknown) => {
+            all: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return encodeRows([row]);
             },
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3449,12 +3414,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, opts: unknown) => {
+            all: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return encodeRows([]);
             },
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3489,11 +3453,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, opts: unknown) => {
+            all: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3526,13 +3489,18 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, _opts: unknown, _tx: unknown, author: Uint8Array) => {
+            all: (
+              _query: unknown,
+              _kind: unknown,
+              _opts: unknown,
+              _tx: unknown,
+              author: Uint8Array,
+            ) => {
               if (author) throw new Error("client coverage must not use an authority identity");
               attachedSubjects.push("client");
               return encodeRows([]);
             },
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3611,11 +3579,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: (_query: unknown, opts: unknown) => {
+            all: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new Uint8Array([0]);
             },
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3646,7 +3613,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               poll: () => (++polls < 2 ? null : encodeRows([])),
             }),
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3678,7 +3644,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               return encodeRows([]);
             },
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             setNonDurableClient: () => undefined,
             tick: () => {
               processed = true;
@@ -3717,7 +3682,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => ({ poll: () => null }),
             connectUpstream: () => new FakeTransport([]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3769,10 +3733,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push("all");
               return new Uint8Array([0]);
             },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3807,10 +3767,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push("all");
               return new Uint8Array([0]);
             },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3844,10 +3800,6 @@ describe("NativeRuntimeAdapter server transport", () => {
             all: () => {
               calls.push("all");
               return new Uint8Array([0]);
-            },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
             },
             tick: () => undefined,
           }),
@@ -3939,10 +3891,6 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push("all");
               return new Uint8Array([0]);
             },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -3981,10 +3929,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             subscribe: () => {
               calls.push("subscribe");
               return new ReadableStream();
@@ -4075,10 +4019,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]);
             },
-            prepareQuery: () => {
-              calls.push("prepareQuery");
-              return {};
-            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -4095,7 +4035,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(
       runtime.query(JSON.stringify({ table: "todos", select_columns: ["title", "$createdAt"] })),
     ).resolves.toHaveLength(1);
-    expect(calls).toEqual(["prepareQuery", "all"]);
+    expect(calls).toEqual(["all"]);
   });
 
   it("passes local-only subscription propagation through native read options", () => {
@@ -4104,8 +4044,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => ({}),
-            subscribe: (_query: unknown, opts: unknown) => {
+            subscribe: (_query: unknown, _kind: unknown, opts: unknown) => {
               readOptions.push(opts);
               return new ReadableStream();
             },
@@ -4206,7 +4145,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => ({}),
             subscribe: () =>
               new ReadableStream({
                 start(streamController) {
@@ -4354,8 +4292,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () =>
-              encodeRows([
+            all: (query: Uint8Array) => {
+              preparedBytes = query;
+              return encodeRows([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -4366,10 +4305,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
                   title: "native returned extra",
                 },
-              ]),
-            prepareQuery: (query: Uint8Array) => {
-              preparedBytes = query;
-              return {};
+              ]);
             },
             tick: () => undefined,
           }),
@@ -4444,7 +4380,6 @@ describe("NativeRuntimeAdapter server transport", () => {
                   updatedAt: updatedAtMs,
                 },
               ]),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -4509,7 +4444,6 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             all: () => writer.finish(),
-            prepareQuery: () => ({}),
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -4538,10 +4472,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -4582,10 +4515,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -4629,10 +4561,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -4728,10 +4659,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -4811,16 +4741,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: (query: Uint8Array) => {
+            subscribe: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
-            },
-            subscribe: () =>
-              new ReadableStream({
+              return new ReadableStream({
                 start(streamController) {
                   controller = streamController;
                 },
-              }),
+              });
+            },
             tick: () => undefined,
           }),
         openBrowser: async () => {
@@ -5533,8 +5461,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () =>
-              encodeRows([
+            all: (query: Uint8Array) => {
+              preparedBytes = query;
+              return encodeRows([
                 {
                   table: "todos",
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -5545,10 +5474,7 @@ describe("NativeRuntimeAdapter server transport", () => {
                   rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
                   title: "keep",
                 },
-              ]),
-            prepareQuery: (query: Uint8Array) => {
-              preparedBytes = query;
-              return {};
+              ]);
             },
             tick: () => undefined,
           }),
@@ -5610,10 +5536,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -5662,10 +5587,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => new Uint8Array([0]),
-            prepareQuery: (query: Uint8Array) => {
+            all: (query: Uint8Array) => {
               preparedBytes = query;
-              return {};
+              return new Uint8Array([0]);
             },
             tick: () => undefined,
           }),
@@ -6415,7 +6339,6 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
       openMemory: () =>
         fakeDb({
           all: () => new Uint8Array([0]),
-          prepareQuery: () => ({}),
           subscribe: () => new ReadableStream(),
           tick: () => undefined,
         }),
@@ -6436,7 +6359,6 @@ function runtimeWithSubscriptionSource(source: unknown): NativeRuntimeAdapter {
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: () => ({}),
           subscribe: () => source,
           tick: () => undefined,
         }),
@@ -6464,7 +6386,6 @@ function runtimeWithNativeSubscriptionChunk(
       openMemory: () =>
         fakeDb({
           all: () => new Uint8Array([0]),
-          prepareQuery: () => ({}),
           subscribe: () => ({
             readAll: () => chunks.splice(0),
             close: () => true,
@@ -7602,7 +7523,6 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.
     wireFeatures: () => CLIENT_WIRE_FEATURES,
-    prepareQuery: () => ({}),
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (
@@ -7709,13 +7629,13 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-it("retains deferred admission failure until execute installs its callback", async () => {
-  const failure = new Error("planted preparation failure");
+it("retains deferred subscription failure until execute installs its callback", async () => {
+  const failure = new Error("planted subscription failure");
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: () => ({
+          subscribe: () => ({
             poll: () => {
               throw failure;
             },
@@ -7743,7 +7663,7 @@ it("retains deferred admission failure until execute installs its callback", asy
 });
 
 it.each([null, undefined])(
-  "wakes pending admission while an async transport tick waits on its owner (pending %s)",
+  "wakes a pending subscription while an async transport tick waits on its owner (pending %s)",
   async (pendingResult) => {
     let polls = 0;
     let wake = () => {};
@@ -7755,7 +7675,7 @@ it.each([null, undefined])(
       {
         openMemory: () =>
           fakeDb({
-            prepareQuery: () => ({
+            subscribe: () => ({
               poll: () => {
                 polls++;
                 if (polls === 1) {
@@ -7763,7 +7683,7 @@ it.each([null, undefined])(
                   return pendingResult;
                 }
                 releaseOwner();
-                return {};
+                return new ReadableStream();
               },
               cancel: () => {},
               setWake: (callback: () => void) => {
@@ -7785,19 +7705,19 @@ it.each([null, undefined])(
     const inner = runtime as unknown as Record<string, any>;
     inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
     inner.serverCarrier = { send: () => {}, close: () => {} };
-    const preparation = inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), null);
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
     try {
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(polls).toBeGreaterThan(1);
     } finally {
       releaseOwner();
-      await preparation;
+      runtime.unsubscribe(handle);
       inner.closed = true;
     }
   },
 );
 
-it("cancels wake-driven admission before shutdown waits for its blocked tick", async () => {
+it("cancels a wake-driven subscription before shutdown waits for its blocked tick", async () => {
   let cancellations = 0;
   let releaseOwner!: () => void;
   const ownerReleased = new Promise<void>((resolve) => {
@@ -7807,7 +7727,7 @@ it("cancels wake-driven admission before shutdown waits for its blocked tick", a
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: () => ({
+          subscribe: () => ({
             poll: () => null,
             setWake: () => {},
             cancel: () => {
@@ -7830,22 +7750,19 @@ it("cancels wake-driven admission before shutdown waits for its blocked tick", a
   const inner = runtime as unknown as Record<string, any>;
   inner.serverTransport = { recvWireFrames: () => [], close: () => {} };
   inner.serverCarrier = { send: () => {}, close: () => {} };
-  const result = inner
-    .prepareQueryForRead(JSON.stringify({ table: "todos" }), null)
-    .catch((error: Error) => error);
+  runtime.createSubscription(JSON.stringify({ table: "todos" }));
   await runtime.close();
   expect(cancellations).toBeGreaterThan(0);
-  expect(await result).toEqual(new Error("native operation was cancelled"));
 });
 
-it("isolates throwing callbacks when replaying a deferred admission failure", async () => {
-  const failure = new Error("preparation rejected");
+it("isolates throwing callbacks when replaying a deferred subscription failure", async () => {
+  const failure = new Error("subscription rejected");
   const callbackFailure = new Error("user callback rejected");
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: () => ({
+          subscribe: () => ({
             poll: () => {
               throw failure;
             },
@@ -7887,25 +7804,27 @@ it("isolates throwing callbacks when replaying a deferred admission failure", as
   }
 });
 
-it("keeps same-query admissions with different claims out of the shared prepared cache", async () => {
+it("passes different claims independently on same-query reads", async () => {
   const admitted: unknown[] = [];
   const setClaims = vi.fn();
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
-          prepareQuery: (
+          all: (
             _query: Uint8Array,
             _kind: "query" | "relation",
+            _opts: unknown,
+            _transaction: unknown,
             identity: Uint8Array,
             claims: unknown,
           ) => {
-            const prepared = {
+            const admission = {
               identity: new Uint8Array(identity),
               claims: structuredClone(claims),
             };
-            admitted.push(prepared);
-            return { poll: () => prepared, setWake: () => {}, cancel: () => {} };
+            admitted.push(admission);
+            return encodeRows([]);
           },
           setIdentityClaims: setClaims,
           tick: () => undefined,
@@ -7921,21 +7840,20 @@ it("keeps same-query admissions with different claims out of the shared prepared
     true,
     { readAuthorizationHost: "trusted-serving" },
   );
-  const inner = runtime as unknown as Record<string, any>;
   const session = {
-    identity: TEST_RUNTIME_AUTHOR,
+    issuer: "https://issuer.example",
+    user_id: "same-query-reader",
     claims: { team: "team-a" },
-    backendAuthority: false,
+    authMode: "external",
   };
-  const a = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), session);
-  const b = await inner.prepareQueryForRead(JSON.stringify({ table: "todos" }), {
-    ...session,
-    claims: { team: "team-b" },
-  });
-  expect(a).not.toBe(b);
+  await runtime.query(JSON.stringify({ table: "todos" }), JSON.stringify(session));
+  await runtime.query(
+    JSON.stringify({ table: "todos" }),
+    JSON.stringify({ ...session, claims: { team: "team-b" } }),
+  );
   expect(admitted).toHaveLength(2);
-  expect(a.claims).toEqual({ team: "team-a" });
-  expect(b.claims).toEqual({ team: "team-b" });
+  expect((admitted[0] as { claims: unknown }).claims).toMatchObject({ team: "team-a" });
+  expect((admitted[1] as { claims: unknown }).claims).toMatchObject({ team: "team-b" });
   expect(setClaims).not.toHaveBeenCalled();
   await runtime.close();
 });

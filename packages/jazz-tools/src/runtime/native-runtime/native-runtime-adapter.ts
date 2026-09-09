@@ -120,8 +120,16 @@ type ReadAuthorizationHost = "client-local" | "trusted-serving";
  */
 type NativeReadContext =
   | { readonly kind: "client-local" }
-  | { readonly kind: "session-authority"; readonly identity: Uint8Array }
+  | {
+      readonly kind: "session-authority";
+      readonly identity: Uint8Array;
+      readonly claims?: Record<string, unknown>;
+    }
   | { readonly kind: "backend-authority" };
+type NativeQueryInput = {
+  readonly bytes: Uint8Array;
+  readonly kind: "query" | "relation";
+};
 type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
 type NativeDbConstructor = {
@@ -219,25 +227,23 @@ type NativeDb = {
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
   all(
-    query: PreparedQuery,
+    query: Uint8Array,
+    kind: "query" | "relation",
     opts: unknown,
     openTransactionId?: OpenTransactionId,
     author?: Uint8Array,
+    claims?: Record<string, unknown>,
   ): NativeReadResult | Promise<NativeReadResult>;
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
-  prepareQuery(
+  subscribe?(
     query: Uint8Array,
     kind: "query" | "relation",
-    author?: Uint8Array,
-    claims?: Record<string, unknown>,
-  ): PreparedQuery | PendingNativeOperation<PreparedQuery>;
-  subscribe?(
-    query: PreparedQuery,
     opts: unknown,
     author?: Uint8Array,
+    claims?: Record<string, unknown>,
   ):
     | ReadableStream<unknown>
     | Subscription
@@ -384,8 +390,6 @@ type NativePermissionAdviceResult =
   | string
   | PendingNativePermissionAdvice;
 
-type PreparedQuery = object;
-
 type Subscription = {
   readAll(): unknown[] | PendingNativeSubscriptionBatch;
   drain?(): unknown[] | PendingNativeSubscriptionBatch;
@@ -513,7 +517,6 @@ type SubscriptionState = {
   terminalErrorDelivered?: boolean;
   sources: SubscriptionSourceState[];
   queryJson: string;
-  query: PreparedQuery | null;
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
@@ -650,7 +653,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly scopeIsolatedRelay: boolean;
   private readonly schemaHash: string;
   private readonly trustedBackend: boolean;
-  private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
   private readonly completedTxs: Map<string, CompletedTx>;
@@ -1146,11 +1148,6 @@ export class NativeRuntimeAdapter implements Runtime {
         closeSubscriptionSource(source.source);
       }
     }
-    // Prepared plans and coverage receipts are valid only while this runtime
-    // is live. Release them before closing the native owner so long-lived JS
-    // Db wrappers cannot retain stale native graph/storage state through a
-    // cache after their context has shut down.
-    this.preparedQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
       // Query and subscription futures may still be unwinding through this
@@ -1837,10 +1834,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const usesNativeRelationApi = queryUsesNativeRelationApi(coreQueryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    const requestSession = pendingTx?.identity ? (pendingTx.requestSession ?? session) : session;
-    // Relation IR is normalized by prepareQuery into the same native handle
-    // as ordinary queries. Transaction overlays for this syntax remain
-    // unsupported until its semantics are defined.
+    // Relation IR is normalized by Rust inside the read operation. Transaction
+    // overlays for this syntax remain unsupported until its semantics are defined.
     if (pendingTx && usesNativeRelationApi) {
       throw new Error("Native runtime does not support relation reads inside a transaction");
     }
@@ -1851,7 +1846,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
-    const query = await this.prepareQueryForRead(coreQueryJson, requestSession);
+    const query = nativeQueryInput(coreQueryJson, this.schema);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed) return [];
@@ -1906,7 +1901,6 @@ export class NativeRuntimeAdapter implements Runtime {
       sources: [],
       openingAbort: new AbortController(),
       queryJson,
-      query: null,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
@@ -1927,6 +1921,7 @@ export class NativeRuntimeAdapter implements Runtime {
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
+    const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
       subscription.sources = [{ source: subscriptionSource(native), reading: false }];
       if (subscription.cancelled || this.closed) {
@@ -1942,17 +1937,15 @@ export class NativeRuntimeAdapter implements Runtime {
           error instanceof Error ? error : new Error(String(error)),
         );
     };
-    const open = (query: PreparedQuery) => {
+    const open = () => {
       if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
-      subscription.query = query;
       const native = this.subscribeForContext(query, opts, readContext);
       return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
         ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
         : native;
     };
     try {
-      const query = this.prepareQueryForRead(queryJson, session, subscription.openingAbort!.signal);
-      const opening = query instanceof Promise ? query.then(open) : open(query);
+      const opening = open();
       if (opening instanceof Promise) void opening.then(install).catch(fail);
       else install(opening);
     } catch (error) {
@@ -2370,7 +2363,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
-    const query = this.prepareQuery(JSON.stringify({ table }));
+    const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
     const rows = this.readRowsForContext(
       query,
       readOptions(),
@@ -2392,8 +2385,8 @@ export class NativeRuntimeAdapter implements Runtime {
       );
       return rows[0];
     }
-    const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.all(query, {
+    const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
+    const rows = this.db.all(query.bytes, query.kind, {
       ...(readOptions() as Record<string, unknown>),
       sync: true,
     });
@@ -2453,7 +2446,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private async readPlainRows(
-    query: PreparedQuery,
+    query: NativeQueryInput,
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
@@ -2468,15 +2461,17 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForContext(
-    query: PreparedQuery,
+    query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
   ): Uint8Array {
     const result = this.db.all(
-      query,
+      query.bytes,
+      query.kind,
       { ...(opts as Record<string, unknown>), sync: true },
       undefined,
       this.nativeReadAuthor(context),
+      this.nativeReadClaims(context),
     );
     if (typeof (result as Promise<unknown>).then === "function") {
       throw new Error("native read is asynchronous; use the asynchronous read boundary");
@@ -2488,7 +2483,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private async readRowsForContextAsync(
-    query: PreparedQuery,
+    query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
@@ -2500,17 +2495,28 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private startRowsForContext(
-    query: PreparedQuery,
+    query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
   ): NativeReadResult | Promise<NativeReadResult> {
     const author = this.nativeReadAuthor(context);
-    return this.db.all(query, opts, openTransactionId, author);
+    return this.db.all(
+      query.bytes,
+      query.kind,
+      opts,
+      openTransactionId,
+      author,
+      this.nativeReadClaims(context),
+    );
   }
 
   private nativeReadAuthor(context: NativeReadContext): Uint8Array | undefined {
     return context.kind === "session-authority" ? context.identity : undefined;
+  }
+
+  private nativeReadClaims(context: NativeReadContext): Record<string, unknown> | undefined {
+    return context.kind === "session-authority" ? context.claims : undefined;
   }
 
   /**
@@ -2531,13 +2537,14 @@ export class NativeRuntimeAdapter implements Runtime {
       return {
         kind: "session-authority",
         identity: pendingTx?.identity ?? session?.identity ?? this.peerIdentity,
+        claims: pendingTx?.requestSession?.claims ?? session?.claims,
       };
     }
     return { kind: "client-local" };
   }
 
   private subscribeForContext(
-    query: PreparedQuery,
+    query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
   ):
@@ -2546,7 +2553,7 @@ export class NativeRuntimeAdapter implements Runtime {
     | PendingNativeOperation<ReadableStream<unknown> | Subscription> {
     if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
     const author = context.kind === "session-authority" ? context.identity : undefined;
-    return this.db.subscribe(query, opts, author);
+    return this.db.subscribe(query.bytes, query.kind, opts, author, this.nativeReadClaims(context));
   }
 
   /** Drive the binding-owned coverage and hydration operation while the
@@ -2688,56 +2695,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private prepareQueryForRead(
-    queryJson: string,
-    session: RuntimeSession | null,
-    signal?: AbortSignal,
-  ): PreparedQuery | Promise<PreparedQuery> {
-    const contextual =
-      session && !session.backendAuthority && this.readAuthorizationHost === "trusted-serving";
-    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
-    const queryBytes =
-      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
-    const key = `${kind}:${bytesKey(queryBytes)}`;
-    const cached = contextual ? undefined : this.preparedQueries.get(key);
-    if (cached) return cached;
-    const started = this.db.prepareQuery(
-      queryBytes,
-      kind,
-      contextual ? session.identity : undefined,
-      contextual ? session.claims : undefined,
-    );
-    const remember = (query: PreparedQuery) => {
-      if (!contextual) this.preparedQueries.set(key, query);
-      return query;
-    };
-    const query = isPendingNativeOperation<PreparedQuery>(started)
-      ? this.awaitNativeOperation(started, signal)
-      : started;
-    return query instanceof Promise ? query.then(remember) : remember(query);
-  }
-
-  private prepareQuery(queryJson: string): PreparedQuery {
-    const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
-    const queryBytes =
-      kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, this.schema);
-    const key = `${kind}:${bytesKey(queryBytes)}`;
-    let query = this.preparedQueries.get(key);
-    if (!query) {
-      try {
-        const started = this.db.prepareQuery(queryBytes, kind);
-        if (isPendingNativeOperation<PreparedQuery>(started)) {
-          started.cancel();
-          throw new Error("native query preparation requires the asynchronous read boundary");
-        }
-        query = started;
-      } catch (error) {
-        throw new Error(`Core prepareQuery failed for ${queryJson}: ${errorMessage(error)}`);
-      }
-      this.preparedQueries.set(key, query);
-    }
-    return query;
-  }
   /**
    * A strict remote query cannot materialize its local snapshot before an
    * in-flight server handshake has either admitted its authority transport or
@@ -2801,7 +2758,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private attachLocalReadCoverageInBackground(
     tier: string | null | undefined,
     optionsJson: string | null | undefined,
-    query: PreparedQuery,
+    query: NativeQueryInput,
     session: RuntimeSession | null,
   ): void {
     if (tier != null && tier !== "local") return;
@@ -4317,6 +4274,14 @@ function relationQueryBytes(queryJson: string): Uint8Array {
     throw new Error("Relation query is missing relation_ir");
   }
   return encodeRelationQueryPostcard(relation_ir as RelExpr);
+}
+
+function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInput {
+  const kind = queryUsesNativeRelationApi(queryJson) ? "relation" : "query";
+  return {
+    kind,
+    bytes: kind === "relation" ? relationQueryBytes(queryJson) : encodeQueryJson(queryJson, schema),
+  };
 }
 
 function relationIrContainsNativeOperator(value: unknown): boolean {
@@ -6863,10 +6828,6 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
     (bytes[offset + 2]! << 16) |
     (bytes[offset + 3]! << 24)
   );
-}
-
-function bytesKey(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
 }
 
 /** Deterministic cache-key encoding for JSON-derived session claims. */

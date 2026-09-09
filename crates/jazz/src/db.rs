@@ -4660,6 +4660,30 @@ impl Drop for SubscriptionStream {
     }
 }
 
+/// Canonical serialized query families accepted by runtime host adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum SerializedQueryKind {
+    Query,
+    Relation,
+}
+
+/// Materialized result of a serialized host read.
+#[doc(hidden)]
+pub enum SerializedReadResult {
+    Rows(Vec<CurrentRow>),
+    Relation(RelationSnapshot),
+}
+
+/// Authorization route used when a host opens a serialized subscription.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum SerializedSubscriptionAuthorization {
+    ClientLocal,
+    TrustedServing(AuthorSubject),
+    TrustedClient(AuthorSubject),
+}
+
 /// Validated and bound query plan used by all `Db` reads and subscriptions.
 #[derive(Clone, Debug)]
 pub struct PreparedQuery {

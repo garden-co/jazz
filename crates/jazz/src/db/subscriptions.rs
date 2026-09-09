@@ -7,6 +7,39 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Decode, prepare, scope, and open a serialized host subscription.
+    #[doc(hidden)]
+    pub async fn subscribe_serialized_query(
+        &self,
+        query: &[u8],
+        kind: SerializedQueryKind,
+        opts: ReadOpts,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        authorization: SerializedSubscriptionAuthorization,
+    ) -> Result<SubscriptionStream, Error> {
+        let prepared = self
+            .prepare_serialized_query_async(query, kind, request_scope)
+            .await?;
+        match authorization {
+            SerializedSubscriptionAuthorization::ClientLocal => {
+                self.subscribe(&prepared, opts).await
+            }
+            SerializedSubscriptionAuthorization::TrustedServing(author) => {
+                self.subscribe_for_identity(&prepared, opts, author).await
+            }
+            SerializedSubscriptionAuthorization::TrustedClient(author) => {
+                if author != AuthorSubject::SYSTEM && prepared.request_identity() != Some(author) {
+                    return Err(Error::new(
+                        ErrorCode::Protocol,
+                        "trusted client subscription requires immutable request claims",
+                    ));
+                }
+                self.subscribe_client_for_identity(&prepared, opts, author)
+                    .await
+            }
+        }
+    }
+
     /// Subscribe to a query and return a stream of materialized subscription events.
     ///
     /// ```rust
