@@ -702,7 +702,7 @@ fn pending_authoritative_reset_acknowledgement_is_generation_checked() {
         subscription,
         settled_through: crate::time::GlobalTime(7),
         defer_settlement: false,
-        reset_result_set: true,
+        reset_input_set: true,
         version_carriers: Vec::new(),
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: Some(3),
@@ -735,6 +735,7 @@ fn pending_authoritative_reset_acknowledgement_is_generation_checked() {
             ),
         ],
         program_fact_removes: Vec::new(),
+        wire_rows: None,
     };
 
     relay
