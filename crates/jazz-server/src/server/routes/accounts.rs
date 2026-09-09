@@ -194,15 +194,67 @@ pub(super) async fn resolve_for_edge(
     Ok(response(request.identity, assignment))
 }
 
+/// Authentication denial and temporary registry availability are different wire outcomes.
+#[derive(Debug)]
+pub(super) enum AdmissionError {
+    Denied(String),
+    Unavailable,
+}
+impl std::fmt::Display for AdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied(message) => f.write_str(message),
+            Self::Unavailable => f.write_str("account registry unavailable"),
+        }
+    }
+}
+impl From<String> for AdmissionError {
+    fn from(message: String) -> Self {
+        Self::Denied(message)
+    }
+}
+impl From<&str> for AdmissionError {
+    fn from(message: &str) -> Self {
+        Self::Denied(message.into())
+    }
+}
+impl From<RegistryError> for AdmissionError {
+    fn from(error: RegistryError) -> Self {
+        match error {
+            RegistryError::Unavailable(_) => Self::Unavailable,
+            RegistryError::Decision(error) => Self::Denied(error.to_string()),
+        }
+    }
+}
+impl AdmissionError {
+    pub(super) fn into_wire(self) -> jazz::wire::WireError {
+        use jazz::wire::{WireError, WireErrorCode, WireRetry};
+        match self {
+            Self::Unavailable => {
+                WireError::new(WireErrorCode::NotReady, WireRetry::Later, self.to_string())
+            }
+            Self::Denied(message) => {
+                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message)
+            }
+        }
+    }
+}
+
 async fn read_upstream_assignment(
     request: reqwest::RequestBuilder,
     principal: &Principal,
-) -> Result<AccountId, String> {
+) -> Result<AccountId, AdmissionError> {
     let mut response = request
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|_| "account registry unavailable")?;
+        .map_err(|_| AdmissionError::Unavailable)?;
+    if response.status().is_server_error()
+        || response.status() == StatusCode::TOO_MANY_REQUESTS
+        || response.status() == StatusCode::REQUEST_TIMEOUT
+    {
+        return Err(AdmissionError::Unavailable);
+    }
     if !response.status().is_success() {
         return Err("account identity not admitted by core".into());
     }
@@ -210,7 +262,7 @@ async fn read_upstream_assignment(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "account registry unavailable")?
+        .map_err(|_| AdmissionError::Unavailable)?
     {
         if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
             return Err("invalid account registry response".into());
@@ -228,18 +280,18 @@ async fn read_upstream_assignment(
 pub(super) async fn resolve_assignment(
     state: &ServerState,
     principal: Principal,
-) -> Result<AccountId, String> {
+) -> Result<AccountId, AdmissionError> {
     if let Some(registry) = &state.accounts {
         return registry
             .login(principal)
             .await
             .map(|value| value.account)
-            .map_err(|error| error.to_string());
+            .map_err(AdmissionError::from);
     }
     let base = state
         .upstream_http_url
         .as_deref()
-        .ok_or("account registry unavailable")?;
+        .ok_or(AdmissionError::Unavailable)?;
     let secret = state
         .auth_config
         .admin_secret
@@ -263,7 +315,7 @@ pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,
-) -> Result<(), String> {
+) -> Result<(), AdmissionError> {
     if let Some(registry) = &state.accounts {
         registry
             .execute(AccountCommand::FoundLocalFirst {
@@ -271,13 +323,13 @@ pub(super) async fn admit_local_founder(
                 app: *state.app_id.uuid(),
             })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(AdmissionError::from)?;
         return Ok(());
     }
     let base = state
         .upstream_http_url
         .as_deref()
-        .ok_or("account registry unavailable")?;
+        .ok_or(AdmissionError::Unavailable)?;
     let proof = headers
         .get("authorization")
         .ok_or("local founding requires bearer proof")?;

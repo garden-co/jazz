@@ -246,7 +246,7 @@ async fn ws_admission(
     prelude: WebSocketPrelude,
     request_headers: &HeaderMap,
     state: &Arc<ServerState>,
-) -> Result<WebSocketAdmission, String> {
+) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
     let auth = prelude.auth;
@@ -341,7 +341,7 @@ async fn ws_admission(
     })?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
+        return Err("Session required. Provide JWT, backend secret, or admin secret.".into());
     };
 
     // A backend-authenticated impersonation remains policy-scoped, but its
@@ -377,20 +377,27 @@ async fn ws_admission(
     })
 }
 
-async fn account_still_admitted(state: &ServerState, identity: Option<AuthorSubject>) -> bool {
+async fn account_still_admitted(
+    state: &ServerState,
+    identity: Option<AuthorSubject>,
+) -> Result<(), super::accounts::AdmissionError> {
     let Some(identity) = identity else {
-        return true;
+        return Ok(());
     };
     let Some(account) = identity.account_id() else {
-        return false;
+        return Err("account identity revoked".into());
     };
     let (issuer, subject) = identity.principal_parts();
-    super::accounts::resolve_assignment(
+    let assignment = super::accounts::resolve_assignment(
         state,
         jazz::account_registry::Principal { issuer, subject },
     )
-    .await
-    .is_ok_and(|assignment| assignment == account)
+    .await?;
+    if assignment == account {
+        Ok(())
+    } else {
+        Err("account identity revoked".into())
+    }
 }
 
 fn session_claims(
@@ -614,11 +621,7 @@ async fn handle_ws_connection(
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
-            )
-            .await;
+            send_ws_error(&mut socket, error.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
@@ -868,8 +871,9 @@ async fn handle_ws_connection(
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
-    if !account_still_admitted(&state, account_identity).await {
-        close_ws_for_policy(&mut socket, "account identity revoked").await;
+    if let Err(error) = account_still_admitted(&state, account_identity).await {
+        send_ws_error(&mut socket, error.into_wire()).await;
+        let _ = socket.close().await;
         core_server_shell.close(session);
         return;
     }
@@ -895,8 +899,9 @@ async fn handle_ws_connection(
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else { std::future::pending::<()>().await; }
             } => {
-                if !account_still_admitted(&state, account_identity).await {
-                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    send_ws_error(&mut socket, error.into_wire()).await;
+                    let _ = socket.close().await;
                     break;
                 }
             }
@@ -923,8 +928,9 @@ async fn handle_ws_connection(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if !account_still_admitted(&state, account_identity).await {
-                        close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    if let Err(error) = account_still_admitted(&state, account_identity).await {
+                        send_ws_error(&mut socket, error.into_wire()).await;
+                        let _ = socket.close().await;
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
@@ -971,8 +977,9 @@ async fn handle_ws_connection(
                                 break 'connection;
                             }
                         };
-                        if !account_still_admitted(&state, account_identity).await {
-                            close_ws_for_policy(&mut socket, "account identity revoked").await;
+                        if let Err(error) = account_still_admitted(&state, account_identity).await {
+                            send_ws_error(&mut socket, error.into_wire()).await;
+                        let _ = socket.close().await;
                             break 'connection;
                         }
                         if !outbound.is_empty()
@@ -1000,8 +1007,9 @@ async fn handle_ws_connection(
                 _ => {}
             },
             changed = activity_rx.changed() => {
-                if !account_still_admitted(&state, account_identity).await {
-                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    send_ws_error(&mut socket, error.into_wire()).await;
+                    let _ = socket.close().await;
                     break;
                 }
                 if changed.is_err() {
@@ -1456,7 +1464,10 @@ mod tests {
         let error = ws_admission(prelude, &headers, &state)
             .await
             .expect_err("orphan backend session must not suppress cookie origin enforcement");
-        assert!(error.contains("Origin does not match Host"), "{error}");
+        assert!(
+            error.to_string().contains("Origin does not match Host"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1782,7 +1793,9 @@ mod tests {
             .expect_err("mismatched authenticated session and peer_identity must be rejected");
 
         assert!(
-            error.contains("peer_identity must match authenticated session author"),
+            error
+                .to_string()
+                .contains("peer_identity must match authenticated session author"),
             "unexpected websocket admission error: {error}"
         );
     }
@@ -2092,6 +2105,84 @@ mod tests {
             "edge runtime is awaiting a complete authoritative catalogue; retry shortly",
         )
         .await;
+    }
+
+    /// Exercise the actual HTTP registry and WebSocket boundary, including permanent denial.
+    #[tokio::test]
+    async fn ws_registry_outages_are_retryable_but_denials_remain_terminal() {
+        for status in [503_u16, 429, 403] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream = listener.local_addr().unwrap();
+            let router = axum::Router::new()
+                .fallback(move || async move { axum::http::StatusCode::from_u16(status).unwrap() });
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let app_id = AppId::random();
+            let server = ServerBuilder::new(app_id)
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".into()),
+                    allow_local_first_auth: true,
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_upstream_url(format!("http://{upstream}"))
+                .build()
+                .await
+                .unwrap();
+            let addr = start_ws_test_server(server.state.clone()).await;
+            let seed = [0x31; 32];
+            let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+            let account = jazz::account_registry::local_first_account_id(*app_id.uuid(), &subject);
+            let identity = AuthorSubject::from_canonical(
+                &serde_json::to_string(&(
+                    account.0,
+                    jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                    &subject,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            let token = jazz::tools::identity::mint_jazz_self_signed_token(
+                &seed,
+                jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                &app_id.to_string(),
+                3600,
+            )
+            .unwrap();
+            let prelude = serde_json::json!({"peer_identity":identity.canonical(), "auth":{"jwt_token":token}}).to_string();
+            let (mut client, _) = connect_async(ws_url(addr, app_id)).await.unwrap();
+            client
+                .send(WsMessage::Binary(prelude.into_bytes().into()))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frames = decode_ws_message(&message);
+            let [WireFrame::Error(error)] = frames.as_slice() else {
+                panic!("expected structured admission error: {frames:?}")
+            };
+            assert_eq!(
+                error.code,
+                if status == 403 {
+                    WireErrorCode::AuthFailed
+                } else {
+                    WireErrorCode::NotReady
+                }
+            );
+            assert_eq!(
+                error.retry,
+                if status == 403 {
+                    WireRetry::Never
+                } else {
+                    WireRetry::Later
+                }
+            );
+            task.abort();
+        }
     }
 
     async fn assert_blank_runtime_diagnostic(edge: bool, expected: &str) {

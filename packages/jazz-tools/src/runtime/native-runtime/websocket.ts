@@ -332,6 +332,10 @@ export class WebSocketCarrier {
     return this.opened;
   }
 
+  get hasNegotiated(): boolean {
+    return this.negotiated;
+  }
+
   close(): void {
     if (this.closing) return;
     this.closing = true;
@@ -392,7 +396,13 @@ export class WebSocketCarrier {
         return;
       }
       if (isWireError(frame)) {
-        this.onError?.(decodeWireError(frame));
+        const error = decodeWireError(frame);
+        if (error.code === "not_ready" && error.retry === "later") {
+          this.reportTerminal(error);
+          this.close();
+          return;
+        }
+        this.onError?.(error);
         continue;
       }
       this.onFrame(frame);
