@@ -862,6 +862,15 @@ where
         true
     }
 
+    /// Retiring an authority connection keeps its input cache but removes the
+    /// live settlement claim. A relay must await a new receipt before serving
+    /// a fresh strict downstream usage from that cached source.
+    pub(crate) fn invalidate_authority_result_settlement(&mut self, key: &AuthorityResultKey) {
+        if let Some(state) = self.query.authority_results.get_mut(key) {
+            state.live_settled = false;
+        }
+    }
+
     /// Exact receipt variant for a usage subscription that carries delegated
     /// policy context. Unlike the binding-only compatibility facade, this
     /// never searches across sessions.

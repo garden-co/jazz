@@ -2658,6 +2658,30 @@ impl NapiDb {
         }
     }
 
+    /// Bind receipt-correlation claims to this client's own admitted identity.
+    #[napi(js_name = "setSessionClaims")]
+    pub fn set_session_claims(
+        &self,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> napi::Result<()> {
+        let inner = self.inner.borrow();
+        let db = inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let author = match db {
+            NapiDbInnerStorage::Memory(db) => db.identity().author,
+            NapiDbInnerStorage::Persistent(db) => db.identity().author,
+        };
+        let claims = core_claims_from_json(author, claims)?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_identity_claims(author, claims),
+            NapiDbInnerStorage::Persistent(db) => db.set_identity_claims(author, claims),
+        }
+        Ok(())
+    }
+
     /// Set ambient claims for mutation and other explicitly serialized
     /// identity operations. Prepared queries capture scoped identity and
     /// claims at preparation time, so concurrent reads do not consult this
@@ -2942,11 +2966,14 @@ impl NapiDb {
                 node: CoreNodeUuid::from_bytes(local_node),
                 epoch: local_epoch,
             },
-            remote: CoreWireAuthorityEndpoint {
+            remote: Some(CoreWireAuthorityEndpoint {
                 node: CoreNodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
+            }),
+            link_identity: match db {
+                NapiDbInnerStorage::Memory(db) => db.identity().author,
+                NapiDbInnerStorage::Persistent(db) => db.identity().author,
             },
-            link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features,
         };
         let transport = Box::new(

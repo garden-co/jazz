@@ -925,7 +925,7 @@ where
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
-            && remote_read_tier.is_some_and(|tier| tier >= DurabilityTier::Edge)
+            && remote_read_tier.is_some()
             && remote_propagate_upstream
             && opts.read_view.is_default()
             && crate::node::simple_scalar_exit_query(state_shape.query());

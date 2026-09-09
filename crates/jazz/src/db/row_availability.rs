@@ -315,7 +315,12 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> PeerConnection<S> {
                 let router = self.current_rows.borrow();
                 let route = router.routes.get(&id).unwrap();
                 let mut request = route.request.clone();
-                if self.transport.permits_delegated_sessions() {
+                let scoped_session = self
+                    .node
+                    .borrow()
+                    .client_relay_scope()
+                    .is_some_and(|scope| scope.admits_session(route.context.identity));
+                if self.transport.permits_delegated_sessions() || scoped_session {
                     request.delegated_session = Some(crate::protocol::DelegatedSessionBinding {
                         identity: route.context.identity,
                         claims: route.context.claims().clone(),

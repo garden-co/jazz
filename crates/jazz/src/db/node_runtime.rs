@@ -1939,11 +1939,12 @@ where
             let confirmation_floor = node.committed_global_time();
             drop(node);
             let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
-            let upstream_upload_destination =
-                session_context.map(|context| UpstreamUploadDestination {
-                    remote_node: *context.remote.node.as_bytes(),
+            let upstream_upload_destination = session_context.and_then(|context| {
+                context.remote.map(|remote| UpstreamUploadDestination {
+                    remote_node: *remote.node.as_bytes(),
                     link_identity: context.link_identity,
-                });
+                })
+            });
             let transferred_large_value_uploads = upstream_upload_destination
                 .and_then(|destination| {
                     self.detached_large_value_uploads
@@ -1972,15 +1973,17 @@ where
                     context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
                         != 0
                 })
-                .map(|context| AuthorityContext {
-                    authority: *context.remote.node.as_bytes(),
-                    link: context.link_identity,
-                    connection_id: connection_epoch,
-                    connection_epoch: context.remote.epoch,
-                    claims_revision: 0,
-                    policy_epoch: 0,
-                    authorization_progress: 0,
-                    settled_through: 0,
+                .and_then(|context| {
+                    context.remote.map(|remote| AuthorityContext {
+                        authority: *remote.node.as_bytes(),
+                        link: context.link_identity,
+                        connection_id: connection_epoch,
+                        connection_epoch: remote.epoch,
+                        claims_revision: 0,
+                        policy_epoch: 0,
+                        authorization_progress: 0,
+                        settled_through: 0,
+                    })
                 });
             // Keep every admitted link eligible, but bind each downstream route
             // to one stable selected owner. A newly connected parallel upstream
@@ -2973,6 +2976,20 @@ where
             // Retire B before staging A's queued frames: otherwise applying a
             // row-changing A update during the handoff could briefly publish
             // it under B's now-dead receipt.
+            let retired_subscriptions = self
+                .active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .map(|receipts| receipts.subscriptions.clone())
+                .unwrap_or_default();
+            {
+                let mut node = self.node.borrow_mut();
+                for subscription in retired_subscriptions {
+                    if let Ok(key) = node.authority_result_key_for_subscription(subscription) {
+                        node.invalidate_authority_result_settlement(&key);
+                    }
+                }
+            }
             *self.active_authority_view_receipts.borrow_mut() = None;
             let fallback_connection =
                 self.connections
@@ -5024,8 +5041,9 @@ pub trait Transport {
 pub struct ConnectionSessionContext {
     /// This endpoint's authority identity and fresh epoch.
     pub local: WireAuthorityEndpoint,
-    /// Authenticated remote authority identity and fresh epoch.
-    pub remote: WireAuthorityEndpoint,
+    /// Remote authority endpoint, absent for ordinary clients. Its absence
+    /// does not remove the authenticated session or our local receipt epoch.
+    pub remote: Option<WireAuthorityEndpoint>,
     /// Authenticated session identity terminated by this link.
     pub link_identity: AuthorSubject,
     /// Features accepted for this connection.

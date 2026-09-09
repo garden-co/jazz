@@ -785,14 +785,15 @@ async fn handle_ws_connection(
             | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
         != 0
     {
-        remote_hello
-            .authority
-            .map(|remote| ConnectionSessionContext {
-                local: server_endpoint,
-                remote,
-                link_identity: admission.identity,
-                negotiated_features: negotiated.features,
-            })
+        // An authenticated client can request current rows without itself
+        // being an authority. Retain our receipt epoch and its admitted identity
+        // independently of whether it advertises a remote authority endpoint.
+        Some(ConnectionSessionContext {
+            local: server_endpoint,
+            remote: remote_hello.authority,
+            link_identity: admission.identity,
+            negotiated_features: negotiated.features,
+        })
     } else {
         None
     };
@@ -1893,9 +1894,12 @@ mod tests {
             AuthorSubject::for_test_bytes([0x41; 16])
         );
         assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
-        assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
+        assert_eq!(
+            context.remote.unwrap().node,
+            NodeUuid::from_bytes([0x5e; 16])
+        );
         assert_ne!(context.local.epoch, 0);
-        assert_ne!(context.remote.epoch, 0);
+        assert_ne!(context.remote.unwrap().epoch, 0);
 
         let schema = ws_public_schema_convert();
         let column_families = schema.column_families();

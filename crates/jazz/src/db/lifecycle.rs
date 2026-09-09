@@ -56,6 +56,13 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// The node and admitted author identity owned by this database handle.
+    /// Transport bindings use the author here, never an identity synthesized
+    /// from the independently allocated node UUID.
+    pub fn identity(&self) -> DbIdentity {
+        self.identity
+    }
+
     /// Test-only simulation of a live catalogue change that invalidates
     /// prepared Groove handles while preserving received authority state.
     #[cfg(any(test, feature = "testing"))]

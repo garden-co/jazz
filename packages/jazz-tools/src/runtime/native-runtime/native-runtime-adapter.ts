@@ -77,6 +77,7 @@ import {
   isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
+  policyClaimsForAdmittedWebSocket,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
@@ -225,6 +226,7 @@ type NativeDb = {
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
+  setSessionClaims?(claims: Record<string, unknown> | undefined | null): void;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -356,12 +358,14 @@ type NativeDb = {
   acceptSubscriber?(
     author: Uint8Array,
     claims: Record<string, unknown>,
+    localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   acceptSubscriberWithSelfSignedProof?(
     claims: Record<string, unknown>,
     token: string,
     appId: string,
     claimedAuthor: string,
+    localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
   close?(): void;
@@ -846,9 +850,27 @@ export class NativeRuntimeAdapter implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  async connectUpstreamPeer(): Promise<Transport> {
-    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer();
+  createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
+    return {
+      node: this.node,
+      epoch: runtimeConnectionIncarnation(),
+      features: this.nativeWireFeatures(),
+    };
+  }
+
+  async connectUpstreamPeer(authority?: {
+    node: Uint8Array;
+    epoch: bigint;
+    features: number;
+  }): Promise<Transport> {
+    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
+    if (authority)
+      return this.connectNegotiatedUpstream({
+        protocolVersion: 1,
+        features: authority.features,
+        authority,
+      });
     return await this.db.connectUpstream();
   }
 
@@ -1019,8 +1041,8 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1047,12 +1069,13 @@ export class NativeRuntimeAdapter implements Runtime {
             proof.token,
             proof.appId,
             proof.claimedAuthor,
+            localEpoch,
           );
         } else {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims);
+          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -2098,6 +2121,17 @@ export class NativeRuntimeAdapter implements Runtime {
           carrier.close();
           return carrier;
         }
+        if (!this.trustedBackend) {
+          await this.runWhenCoreIdle(() => {
+            if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier)
+              return;
+            this.installClientSessionClaims(policyClaimsForAdmittedWebSocket(normalizedAuthJson));
+          });
+          if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+            carrier.close();
+            return carrier;
+          }
+        }
         this.preHelloRetryCount = 0;
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
           throw contextualError("connecting the negotiated upstream transport", error);
@@ -2692,7 +2726,36 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private clientSessionClaimsKey: string | undefined;
+
+  private installClientSessionClaims(claims: Record<string, unknown>): void {
+    const key = canonicalJson(claims);
+    if (key === this.clientSessionClaimsKey) return;
+    this.db.setSessionClaims?.(claims);
+    this.clientSessionClaimsKey = key;
+  }
+
   private prepareQueryForRead(
+    queryJson: string,
+    session: RuntimeSession | null,
+    signal?: AbortSignal,
+  ): PreparedQuery | Promise<PreparedQuery> {
+    if (session && !session.backendAuthority && this.readAuthorizationHost !== "trusted-serving") {
+      const key = canonicalJson(session.claims);
+      if (key !== this.clientSessionClaimsKey) {
+        // Claim installation mutates native state. Wait for any storage-backed
+        // tick to release it, and avoid serializing unchanged claims per read.
+        const prepare = () => {
+          this.installClientSessionClaims(session.claims);
+          return this.prepareQueryForReadWithClaims(queryJson, session, signal);
+        };
+        return this.ownerRuntime.coreOperation ? this.runWhenCoreIdle(prepare) : prepare();
+      }
+    }
+    return this.prepareQueryForReadWithClaims(queryJson, session, signal);
+  }
+
+  private prepareQueryForReadWithClaims(
     queryJson: string,
     session: RuntimeSession | null,
     signal?: AbortSignal,
@@ -4259,7 +4322,6 @@ function sessionClaims(
     ...(isRecord(rawClaims) ? rawClaims : {}),
     iss: session.issuer,
     sub: session.user_id,
-    authMode: session.authMode ?? "external",
   };
 }
 

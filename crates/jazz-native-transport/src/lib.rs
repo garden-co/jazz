@@ -511,7 +511,7 @@ impl WebSocketTransport {
                 .authority
                 .map(|remote| ConnectionSessionContext {
                     local: client_endpoint,
-                    remote,
+                    remote: Some(remote),
                     link_identity: peer_identity,
                     negotiated_features: negotiated.features,
                 })

@@ -219,6 +219,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       },
     );
 
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+
     await vi.waitFor(() =>
       expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledWith(failure),
     );

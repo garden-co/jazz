@@ -1493,7 +1493,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         assertWorkerSessionClaims(peer.context, message.sessionClaims);
         let unownedSubscriber: Transport | null = null;
         try {
-          unownedSubscriber = await activeRuntime.acceptPeer(message.sessionClaims);
+          const peerAuthority = activeRuntime.createPeerAuthority();
+          unownedSubscriber = await activeRuntime.acceptPeer(
+            message.sessionClaims,
+            peerAuthority.epoch,
+          );
           // Close and storage invalidation revoke publication synchronously,
           // without waiting for recovery to finish.
           if (!canPublishAdmission()) return;
@@ -1513,14 +1517,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
-          result(
-            peer,
-            message.id,
-            undefined,
-            peer.inspectorAttachment
+          result(peer, message.id, undefined, {
+            peerAuthority,
+            ...(peer.inspectorAttachment
               ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
-              : undefined,
-          );
+              : {}),
+          });
         } catch (error) {
           if (canPublishAdmission()) throw error;
         } finally {
@@ -1763,7 +1765,10 @@ function result(
   peer: TabPeer,
   id: number,
   error?: Error,
-  receipt?: { inspectorAttachmentPhysicalDbName: string },
+  receipt?: {
+    inspectorAttachmentPhysicalDbName?: string;
+    peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+  },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   post(peer.port, {

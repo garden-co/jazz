@@ -134,6 +134,11 @@ const mocks = vi.hoisted(() => {
           retirePeerTransport: vi.fn(async (transport: Transport) => {
             transport.close();
           }),
+          createPeerAuthority: vi.fn(() => ({
+            node: new Uint8Array(16).fill(7),
+            epoch: 1n,
+            features: 2037,
+          })),
           acceptPeer: vi.fn(async () => subscriber),
           connect: vi.fn(),
           disconnect: vi.fn(async () => undefined),

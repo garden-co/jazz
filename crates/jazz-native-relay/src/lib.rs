@@ -4618,9 +4618,14 @@ impl Transport for QueueTransport {
 
 struct DuplexTransport {
     wire: NativeRelayWire,
+    session_context: jazz::db::ConnectionSessionContext,
 }
 
 impl Transport for DuplexTransport {
+    fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
+        Some(self.session_context)
+    }
+
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let _terminal = self.wire.enter().map_err(transport_queue_error)?;
         self.wire
@@ -4639,7 +4644,25 @@ impl Transport for DuplexTransport {
 
 fn duplex(
     liveness: Arc<RelayLiveness>,
+    client: DbIdentity,
+    relay: DbIdentity,
 ) -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
+    // The host has admitted this foreground to one account-scoped relay.
+    // Retain per-hop receipt epochs without treating the foreground as an
+    // authority or allowing it to select a different session.
+    let relay_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(relay.node);
+    let client_context = jazz::db::ConnectionSessionContext {
+        local: jazz::wire::WireAuthorityEndpoint::fresh(client.node),
+        remote: Some(relay_endpoint),
+        link_identity: client.author,
+        negotiated_features: jazz::wire::current_wire_features(),
+    };
+    let relay_context = jazz::db::ConnectionSessionContext {
+        local: relay_endpoint,
+        remote: None,
+        link_identity: client.author,
+        negotiated_features: jazz::wire::current_wire_features(),
+    };
     let wire = NativeRelayWire::for_owner(liveness);
     let reverse = NativeRelayWire {
         inbound: Arc::clone(&wire.outbound),
@@ -4648,8 +4671,14 @@ fn duplex(
         connection_liveness: wire.connection_liveness.clone(),
     };
     (
-        Box::new(DuplexTransport { wire: wire.clone() }),
-        Box::new(DuplexTransport { wire: reverse }),
+        Box::new(DuplexTransport {
+            wire: wire.clone(),
+            session_context: client_context,
+        }),
+        Box::new(DuplexTransport {
+            wire: reverse,
+            session_context: relay_context,
+        }),
         wire,
     )
 }
@@ -5363,7 +5392,11 @@ impl RelayWorker {
         if let Some(high_water) = tx_time_floor {
             block_on(db.reserve_minted_tx_time_after(high_water)).map_err(RelayError::Db)?;
         }
-        let (client_transport, relay_transport, wire) = duplex(Arc::clone(&self.liveness));
+        let (client_transport, relay_transport, wire) = duplex(
+            Arc::clone(&self.liveness),
+            identity,
+            self.persistent.identity(),
+        );
         let upstream = block_on(db.connect_upstream(client_transport));
         // The scope and claims are captured now, while the capability is
         // admitted. Only the ordinary peer's owner/storage preparation may

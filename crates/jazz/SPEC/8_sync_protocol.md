@@ -914,6 +914,16 @@ local IVM then removes it from the unfinished list while an all-tasks query can
 still show the updated task. A live-exit push is an eager optimization; a missed
 push must not be the only opportunity to repair this query after reconnect.
 
+This exchange also crosses local foreground-to-worker links. A default local
+query may read through a durable worker before reaching an Edge or Core; the
+immediate hop being Local does not disable reconciliation. Each hop retains its
+fresh endpoint epoch and authenticated session independently of whether its
+peer is an authority. An ordinary client need not advertise an authority in
+order to receive current-row responses. A scope-isolated worker forwards only
+its admitted session binding, and the foreground correlates the reply against
+the same canonical identity and provider claims. Provider claims must not acquire
+synthetic fields merely by passing through a different JavaScript adapter.
+
 The known-row exchange in chapter 7 uses explicit global physical table and row
 identities, not a public column named `id`. Batches contain at most 64 distinct
 coordinates. The batch cap bounds work in flight, not eventual coverage. Transient

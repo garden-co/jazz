@@ -1683,7 +1683,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     const delegatedIdentity = expect.any(Uint8Array);
     for (const call of authoritative.mock.calls) {
       expect(call.at(-2)).toEqual(delegatedIdentity);
-      expect(call.at(-1)).toEqual(expect.objectContaining({ authMode: "external" }));
+      // Rust derives reserved authMode from the admitted identity. Do not
+      // synthesize a provider claim that differs from the authenticated JWT.
+      expect(call.at(-1)).toEqual({ iss: session.issuer, sub: session.user_id });
     }
     const forgedSystem = { ...session, issuer: SYSTEM_SESSION_ISSUER, user_id: SYSTEM_AUTHOR_ID };
     await expect(runtime.requestReadPermissionAdvice("todos", id, forgedSystem)).resolves.toBe(
@@ -1878,7 +1880,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           subject: "application-owned-subject",
           iss: externalIssuer,
           sub: externalUserId,
-          authMode: "external",
         },
       },
     ]);

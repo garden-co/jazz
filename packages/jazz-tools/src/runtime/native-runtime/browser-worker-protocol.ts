@@ -544,6 +544,7 @@ export type BrowserFollowerPortEvent =
       error?: BrowserRelayError;
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;
+      peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
