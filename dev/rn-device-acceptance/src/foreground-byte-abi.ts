@@ -73,6 +73,48 @@ export function proveForegroundByteAbi(
   return foreground;
 }
 
+/** Deterministically exercise the JSI allocation/finalizer reentry boundary. */
+export function proveForegroundJsReentry(
+  factory: NativeForegroundRuntimeFactory,
+  capability: Uint8Array,
+  codec: ForegroundByteCodec,
+): void {
+  const foreground = factory.openAttached(capability);
+  try {
+    // Native response construction can run JS (and Hermes GC). Re-enter the
+    // shared lease from Uint8Array construction to prove no lifecycle mutex is
+    // held across that boundary, without depending on GC timing.
+    const sibling = factory.openAttached(capability);
+    const command = codec.encode("probe");
+    const OriginalUint8Array = globalThis.Uint8Array;
+    let reentered = false;
+    let response: Uint8Array;
+    try {
+      globalThis.Uint8Array = new Proxy(OriginalUint8Array, {
+        construct(target, args) {
+          if (!reentered) {
+            reentered = true;
+            if (!sibling.close()) throw new Error("reentrant foreground close failed");
+          }
+          return Reflect.construct(target, args);
+        },
+      });
+      // The bridge validates the command's constructor against the global one.
+      Object.defineProperty(command, "constructor", { value: globalThis.Uint8Array });
+      response = foreground.execute(command);
+    } finally {
+      globalThis.Uint8Array = OriginalUint8Array;
+      sibling.close();
+    }
+    if (!reentered) throw new Error("foreground response did not exercise JS reentry");
+    const probe = codec.decode(response);
+    if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_V1)
+      throw new Error("installed foreground returned an unexpected Probe response");
+  } finally {
+    foreground.close();
+  }
+}
+
 /** A foreground alias left open before native revoke must no longer execute. */
 export function proveForegroundRevoked(
   foreground: NativeForegroundRuntime,

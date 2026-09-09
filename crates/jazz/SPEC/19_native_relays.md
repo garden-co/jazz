@@ -163,6 +163,17 @@ invalidating UI runtime A cannot invalidate a still-live UI runtime B that
 shares the same relay. No platform binding retains a Rust `Db` pointer across
 that lifecycle.
 
+The lifecycle mutex protects native FFI operations against invalidation, but
+MUST NOT be held while accessing JavaScript objects, registering/removing JS
+callbacks, or constructing JS responses or exceptions. Even an ordinary JSI
+allocation can run garbage collection: collecting a foreground HostFunction
+can finalize its retained handle and acquire that same mutex. Bindings copy JS
+arguments before locking and release the lock before constructing results or
+reporting errors. Native response bytes remain independently owned until their
+JS copy is complete. The device acceptance receipt exercises this boundary by
+closing a sibling foreground during response construction, without depending
+on garbage-collection timing.
+
 `Db` and its peer connections are executor-local. A native relay therefore owns
 all core values on one dedicated native owner thread. Host calls are encoded
 commands with responses; JSI/JNI/Swift must never retain or dereference a Rust
