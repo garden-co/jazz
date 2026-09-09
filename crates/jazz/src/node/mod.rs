@@ -30,6 +30,11 @@ use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, S
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
+#[allow(unused_imports)] // Typed receipt integration is implemented in a separate change.
+pub(crate) use query_eval::{
+    LocalAvailabilityWatermark, LocalRowAvailability, local_availability_record_descriptor,
+};
+
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
@@ -325,6 +330,7 @@ mod policy;
 pub(crate) mod query_engine;
 mod query_eval;
 mod recovery;
+mod row_availability;
 mod source_resolution;
 mod views;
 pub(crate) use open_tx::TransactionBranchRowState;
@@ -337,6 +343,7 @@ pub(crate) use query_eval::{
     LocalMaintainedViewSubscriptionUpdate,
 };
 pub(crate) use views::MaintainedViewBundleInputs;
+pub(crate) use views::simple_scalar_exit_query;
 
 use codec::*;
 use database_slot::DatabaseSlot;
@@ -519,6 +526,12 @@ pub struct NodeState<S> {
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
     history_complete: bool,
+    /// Host-declared completeness for eager scalar-exit authorization probes.
+    /// Disabled unless a core serving shell owns the complete policy inputs.
+    /// This is runtime capability, never wire or durable authorization evidence.
+    authoritative_scalar_exit_refresh: bool,
+    /// Host-selected Edge query serving; never inferred from peer declarations.
+    edge_query_serving: bool,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
@@ -826,6 +839,21 @@ struct ScopedPolicyAuthorizationGraphReplacement {
 
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
+    local_availability_records: BTreeMap<
+        (PolicyBindingKey, crate::ids::GlobalPhysicalTableId, RowUuid),
+        query_eval::LocalAvailabilityRecord,
+    >,
+    local_availability_authorities: BTreeMap<PolicyBindingKey, (NodeUuid, u64)>,
+    /// A serving scope remains live while any maintained Edge view uses it.
+    edge_availability_owners:
+        BTreeMap<PolicyBindingKey, std::sync::Weak<query_eval::EdgeAvailabilityOwner>>,
+    edge_availability_retirements: std::sync::Arc<std::sync::Mutex<VecDeque<PolicyBindingKey>>>,
+    /// Runtime-only, exact-context app-read exclusions. These do not change
+    /// stored payloads or serving-side permission proofs.
+    local_unavailable_inputs: BTreeMap<
+        (PolicyBindingKey, crate::ids::GlobalPhysicalTableId),
+        query_eval::LocalUnavailableInput,
+    >,
     /// Prepared query plans keyed by shape, durability tier, and parameter
     /// descriptor signature.
     query_shape_cache:
@@ -994,6 +1022,28 @@ impl RetainedRootWindowSource {
     }
 }
 
+/// Receiver-local replacement key. Content and deletion registers, and
+/// different branches, are independent inputs even when they share a row UUID.
+/// This index is rebuilt from existing facts; it has no storage or wire codec.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CoveredInputCoordinate {
+    source: ProgramSourceId,
+    row: RowUuid,
+    layer: crate::protocol::ResultRowLayer,
+    branch: Vec<u8>,
+}
+
+impl From<&CoveredInputEntry> for CoveredInputCoordinate {
+    fn from(input: &CoveredInputEntry) -> Self {
+        Self {
+            source: input.source.clone(),
+            row: input.source_row,
+            layer: input.version.layer,
+            branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
+        }
+    }
+}
+
 /// One authority-owned result stream, including every receipt that makes its
 /// membership meaningful after a reconnect or durable reopen.  Nothing in
 /// this aggregate is an ordinary local maintained-view cache.
@@ -1031,7 +1081,7 @@ pub(crate) struct AuthorityResultState {
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
     covered_input_sources: BTreeSet<ProgramSourceId>,
-    covered_input_versions: BTreeMap<(ProgramSourceId, RowUuid), CoveredInputEntry>,
+    covered_input_versions: BTreeMap<CoveredInputCoordinate, CoveredInputEntry>,
     compiled_covered_input_sources: Option<BTreeSet<ProgramSourceId>>,
     /// Optional fast cursor and authorization receipt. The cursor is durable
     /// cache metadata; only `live_settled` permits a new known-state claim.
@@ -2509,10 +2559,11 @@ fn version_indirect_descriptors(
 }
 
 pub(crate) struct ViewUpdateParts {
+    pub(crate) wire_rows: Option<Vec<crate::protocol::SupportingRow>>,
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,
-    pub(crate) reset_result_set: bool,
+    pub(crate) reset_input_set: bool,
     pub(crate) version_carriers: Vec<VersionCarrier>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,

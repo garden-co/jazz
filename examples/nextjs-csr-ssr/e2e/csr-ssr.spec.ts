@@ -12,20 +12,30 @@ async function addTodo(section: Locator, title: string) {
   await section.locator('button[type="submit"]').click();
 }
 
-async function reloadUntilSectionContains(page: Page, label: string, title: string) {
-  const deadline = Date.now() + 15_000;
+async function reloadAndWaitForServerRow(page: Page, label: string, title: string) {
+  // Exercise reload persistence once, then leave the foreground alive long
+  // enough to reconnect and upload its durable outbox. Repeated reloads during
+  // "Loading account…" can indefinitely restart that required work.
+  await page.reload();
+  await expect(todoSection(page, "Client-side (React)")).toContainText(title, {
+    timeout: 15_000,
+  });
 
-  while (Date.now() < deadline) {
-    await page.reload();
-
-    if ((await todoSection(page, label).textContent())?.includes(title)) {
-      return;
-    }
-
-    await page.waitForTimeout(250);
-  }
-
-  throw new Error(`Timed out waiting for ${label} to render "${title}" after reload`);
+  // Each request performs a fresh server render without tearing down the
+  // browser that is synchronizing the write. The final reload still verifies
+  // that the visible RSC pane receives the server's persisted row.
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get("/");
+        expect(response.ok()).toBe(true);
+        return (await response.text()).includes(title);
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  await page.reload();
+  await expect(todoSection(page, label)).toContainText(title);
 }
 
 test.describe("Next.js CSR / SSR todos", () => {
@@ -42,14 +52,14 @@ test.describe("Next.js CSR / SSR todos", () => {
     await page.goto("/");
 
     const clientPane = todoSection(page, "Client-side (React)");
-    const serverPane = todoSection(page, "Server-side (RSC)");
 
     await expect(page.getByRole("heading", { name: "jazz — nextjs CSR / SSR" })).toBeVisible();
 
     await addTodo(clientPane, clientTitle);
     await expect(clientPane).toContainText(clientTitle);
+    await expect(clientPane.getByRole("status")).toHaveText("Saved locally");
 
-    await reloadUntilSectionContains(page, "Server-side (RSC)", clientTitle);
+    await reloadAndWaitForServerRow(page, "Server-side (RSC)", clientTitle);
 
     const reloadedClientPane = todoSection(page, "Client-side (React)");
     const reloadedServerPane = todoSection(page, "Server-side (RSC)");

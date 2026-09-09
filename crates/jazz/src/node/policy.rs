@@ -483,6 +483,7 @@ where
             row_uuid,
             self.catalogue.current_schema_version_id,
             identity,
+            false,
         )
         .await
     }
@@ -496,6 +497,7 @@ where
         row_uuid: RowUuid,
         schema_version: SchemaVersionId,
         identity: AuthorSubject,
+        include_deleted: bool,
     ) -> Result<bool, Error> {
         let schema = if schema_version == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
@@ -514,15 +516,29 @@ where
         let shape = crate::query::Query::from(table_name)
             .validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.query_rows_for_link_physical_row(
-            &shape,
-            &binding,
-            DurabilityTier::Local,
-            identity,
-            row_uuid,
-        )
-        .await
-        .map(|rows| rows.into_iter().any(|row| row.row_uuid() == row_uuid))
+        let rows = if include_deleted {
+            // Repair authorizes disclosure, not membership in the default
+            // non-deleted query. The ordinary includeDeleted serving path
+            // still enforces the current row policy against its content.
+            self.query_readable_current_row_including_deleted(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                identity,
+                row_uuid,
+            )
+            .await?
+        } else {
+            self.query_rows_for_link_physical_row(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                identity,
+                row_uuid,
+            )
+            .await?
+        };
+        Ok(rows.into_iter().any(|row| row.row_uuid() == row_uuid))
     }
 
     #[cfg(test)]

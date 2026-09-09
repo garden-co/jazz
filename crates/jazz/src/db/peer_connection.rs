@@ -174,7 +174,6 @@ fn relay_authority_coverage_key(coverage: &CoverageKey) -> CoverageKey {
         coverage.opts.tier,
         coverage.opts.read_view.clone(),
         DurabilityTier::Global,
-        coverage.opts.propagate_upstream,
     );
     upstream.opts.binding_source = BindingSource::RelayAuthoritySession;
     upstream
@@ -618,6 +617,7 @@ where
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
+    pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
@@ -746,7 +746,7 @@ fn queue_direct_control(
     pending.push_back(PendingSubscriberControlResponse::direct(message));
 }
 
-fn queue_sync_context_control(
+pub(super) fn queue_sync_context_control(
     pending: &mut VecDeque<PendingSubscriberControlResponse>,
     message: SyncMessage,
 ) {
@@ -921,11 +921,14 @@ fn commit_unit_large_value_refs(unit: &SyncMessage) -> Vec<groove::large_values:
 }
 
 pub(super) struct SubscriberConnectionState {
+    pub(super) pending_authority_repairs:
+        VecDeque<super::row_version_repairs::PendingAuthorityRepair>,
     pub(super) peer: PeerState,
     pub(super) ingest_context: CommitUnitIngestContext,
     pub(super) session_claims: BTreeMap<String, Value>,
     pub(super) session_claim_revision: u64,
     pub(super) local_receiver: bool,
+    pub(super) partial_edge_query_host: bool,
     pub(super) outbox: Outbox,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) served: BTreeMap<SubscriptionKey, CoverageKey>,
@@ -943,6 +946,13 @@ pub(super) struct SubscriberConnectionState {
     pub(super) serve_dirty: bool,
 }
 
+/// Missing-body repair must not authorize a new payload from stale policy
+/// inputs. Ordinary Edge queries evaluate locally; explicit repair still asks
+/// Core under the admitted reader, including readers on trusted transports.
+pub(super) fn row_repair_requires_core(trust: CommitUnitTrust, subject: AuthorSubject) -> bool {
+    trust == CommitUnitTrust::Session || subject != AuthorSubject::SYSTEM
+}
+
 /// A valid request awaiting activation of its schema, not a rejected query.
 /// Retain the admission snapshot rather than looking up mutable connection
 /// claims again when the catalogue becomes ready.
@@ -953,9 +963,11 @@ pub(super) struct PendingCatalogueSubscription {
 }
 
 pub(super) struct PendingRowVersionRepair {
-    pub(super) requests: Vec<crate::protocol::RowVersionRef>,
     pub(super) update: SyncMessage,
     pub(super) authority_receipt_eligible: bool,
+    /// A later complete set has arrived for this exact usage. Its immutable
+    /// bodies may still be useful, but this older set must never be installed.
+    pub(super) superseded: bool,
 }
 
 /// One repair request remains bound to the exact policy snapshot that made
@@ -963,7 +975,9 @@ pub(super) struct PendingRowVersionRepair {
 /// subscriber's request merely because the row-version references coincide.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PendingRowVersionFetch {
-    pub(super) requests: Vec<crate::protocol::RowVersionRef>,
+    pub(super) requests: VecDeque<crate::protocol::RowVersionRef>,
+    /// Only one bounded batch is outstanding until its payload reply arrives.
+    pub(super) sent_count: usize,
     pub(super) policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
 }
 
@@ -1178,7 +1192,7 @@ where
             // opaque upstream usage below, because that usage *does* name an
             // authority result admitted under the old immutable claims.
             if group.upstream_opts.propagate_upstream
-                && group.upstream_opts.binding_source != BindingSource::RelayAuthoritySession
+                && group.authority_result_subscription != group.upstream_subscription
             {
                 let mut owners = self.relay_upstream_subscription_owners.borrow_mut();
                 if let Some(owner) = owners.get_mut(&(
@@ -1232,7 +1246,7 @@ where
                 // may even be SYSTEM), so identity equality is not provenance.
                 if group.policy_binding_origin == CoveragePolicyBindingOrigin::DirectAdmitted {
                     group.policy_binding = refreshed_direct_binding.clone();
-                    if group.upstream_opts.binding_source == BindingSource::RelayAuthoritySession
+                    if group.authority_result_subscription == group.upstream_subscription
                         && group.upstream_opts.propagate_upstream
                         && let Some(downstream_subscription) = group.subscribers.first().copied()
                     {
@@ -1382,6 +1396,16 @@ where
                     coverage.opts.read_view_key(),
                 ),
                 RelayUpstreamSubscriptionOwner {
+                    request: PendingUpstreamSubscription {
+                        subscription: fresh_upstream_subscription,
+                        shape: shape.clone(),
+                        binding: binding.clone(),
+                        opts: opts.clone(),
+                        identity: refreshed_direct_binding.0,
+                        policy_binding: Some(refreshed_direct_binding.clone()),
+                    },
+                    scalar_authority_revision: 0,
+                    scalar_reconciliation: ScalarReconciliation::default(),
                     downstream_connection_epoch: connection_epoch,
                     coverage,
                     policy_binding: refreshed_direct_binding.clone(),
@@ -1600,6 +1624,26 @@ where
         self.last_resume_bytes
     }
 
+    /// Host-only capability; does not alter write or publication trust.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(crate) fn admit_authority_query_delegate(&mut self) {
+        if let ConnectionLink::Subscriber(state) = &mut self.link {
+            state.peer.authority_query_delegate = state.ingest_context.trust
+                == CommitUnitTrust::TrustedAuthority
+                && state.ingest_context.identity == AuthorSubject::SYSTEM
+                && matches!(state.peer.role(), PeerRole::ClientLink { .. });
+        }
+    }
+
+    /// Set only by the serving shell's host-owned Edge role at admission.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(crate) fn set_partial_edge_query_host(&mut self) {
+        if let ConnectionLink::Subscriber(state) = &mut self.link {
+            state.partial_edge_query_host = true;
+            self.node.borrow_mut().enable_edge_query_serving();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
@@ -1639,11 +1683,13 @@ where
             ingest_context,
             session_claims,
             session_claim_revision,
+            pending_authority_repairs,
             ..
         }) = &mut self.link
         else {
             return None;
         };
+        pending_authority_repairs.clear();
         let replacement = match peer.role() {
             PeerRole::Relay => PeerState::relay(),
             PeerRole::ClientLink { identity } => PeerState::client_link(identity),
@@ -1706,8 +1752,8 @@ where
         ) in groups
         {
             let group_subscription = coverage_group_subscription_key(&coverage);
-            peer.set_subscription_policy_binding(group_subscription, policy_binding);
             let scope_relay = self.node.borrow().client_relay_scope().is_some();
+            peer.set_subscription_policy_binding(group_subscription, policy_binding);
             if awaiting_upstream_settlement {
                 let authority_result_source = self
                     .node
@@ -1879,6 +1925,9 @@ where
         self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
+        self.pump_current_rows()?;
+        self.drive_pending_authority_repairs(progress_waker.as_ref())
+            .await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -1900,17 +1949,23 @@ where
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
-                        if let Some(request) = pending_row_version_fetches.front().cloned() {
+                        if let Some((requests, policy_binding)) = pending_row_version_fetches.front()
+                            .filter(|request| request.sent_count == 0)
+                            .map(|request| (
+                                request.requests.iter().take(crate::protocol_limits::MAX_FETCH_ROW_VERSIONS).cloned().collect::<Vec<_>>(),
+                                request.policy_binding.clone(),
+                            )) {
+                            let sent_count = requests.len();
                             let delegated_session = (permits_delegated_sessions
-                                && request.policy_binding.0 != AuthorSubject::SYSTEM)
+                                && policy_binding.0 != AuthorSubject::SYSTEM)
                                 .then_some(crate::protocol::DelegatedSessionBinding {
-                                    identity: request.policy_binding.0,
-                                    claims: request.policy_binding.1,
+                                    identity: policy_binding.0,
+                                    claims: policy_binding.1,
                                 });
                             if let Err(error) = self
                                 .transport
                                 .send(SyncMessage::FetchRowVersions {
-                                    requests: request.requests,
+                                    requests,
                                     delegated_session,
                                 })
                             {
@@ -1923,7 +1978,7 @@ where
                                 }
                                 return Err(transport_error(error));
                             }
-                            pending_row_version_fetches.pop_front();
+                            pending_row_version_fetches.front_mut().expect("queued fetch").sent_count = sent_count;
                         }
                         if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                             if let Err(error) = self.transport.send(message.clone()) {
@@ -2087,6 +2142,9 @@ where
                                     }
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
+                                        receipts.subscriptions.remove(subscription);
+                                    }
                                     announced_shapes.remove(&(
                                         subscription.shape_id,
                                         subscription.read_view,
@@ -2646,6 +2704,33 @@ where
                                     .await?;
                                 publications.extend(outcome.publications);
                             }
+                            SyncMessage::CurrentRowsReceipt(receipt) => {
+                                if !pending_view_updates.is_empty() {
+                                    apply_pending_authority_view_updates(
+                                        &self.node,
+                                        &self.subscriptions,
+                                        &mut pending_view_updates,
+                                        &self.relay_upstream_subscription_owners,
+                                        &self.pending_relay_subscription_rejections,
+                                        upstream_subscriptions,
+                                        &self.awaiting_initial_authority_coverage,
+                                        &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
+                                        &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
+                                        self.connection_epoch,
+                                    )
+                                    .await?;
+                                }
+                                let expected = *expected_scope_authority;
+                                let selected = *self.admitted_upstream_authority.borrow();
+                                row_availability::receive_current_rows(&self.node, &self.current_rows, selected, expected, authority_receipt_eligible, receipt).await?;
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                applied = true;
+                                continue;
+                            }
                             SyncMessage::RowVersionPayloads { version_bundles } => {
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
@@ -2666,14 +2751,19 @@ where
                                     )
                                     .await?;
                                 }
-                                let Some(repair) = pending_row_version_repairs.pop_front() else {
+                                let Some(repair) = pending_row_version_repairs.front() else {
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
+                                let Some(fetch) = pending_row_version_fetches.front().filter(|fetch| fetch.sent_count > 0) else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let batch = fetch.requests.iter().take(fetch.sent_count).cloned().collect::<Vec<_>>();
                                 {
                                     let mut node = self.node.lock().await;
                                     let applied_bundles = node.apply_row_version_payloads_for_requests(
-                                        &repair.requests,
+                                        &batch,
                                         version_bundles,
                                     )
                                     .await?;
@@ -2686,6 +2776,21 @@ where
                                         repair.authority_receipt_eligible,
                                     )
                                     .await?;
+                                }
+                                let fetch = pending_row_version_fetches.front_mut().expect("active fetch");
+                                fetch.requests.drain(..fetch.sent_count);
+                                fetch.sent_count = 0;
+                                if !fetch.requests.is_empty() && !repair.superseded {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    continue;
+                                }
+                                pending_row_version_fetches.pop_front();
+                                if !pending_row_version_fetches.is_empty() {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                }
+                                let repair = pending_row_version_repairs.pop_front().expect("active repair");
+                                if repair.superseded {
+                                    continue;
                                 }
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -2714,6 +2819,27 @@ where
                                 settled_through,
                                 ..
                             }) => {
+                                if matches!(&message, SyncMessage::ViewUpdate(payload)
+                                    if !payload.peer_payload_inventory.opening_pending)
+                                {
+                                    // Keep the active request until its correlated reply
+                                    // arrives, but discard obsolete work that was never
+                                    // sent. A slow repair must not retain every complete
+                                    // snapshot produced while the connection is waiting.
+                                    debug_assert_eq!(pending_row_version_repairs.len(), pending_row_version_fetches.len());
+                                    for index in (0..pending_row_version_repairs.len()).rev() {
+                                        if matches!(&pending_row_version_repairs[index].update, SyncMessage::ViewUpdate(payload)
+                                            if payload.subscription == subscription)
+                                        {
+                                            if pending_row_version_fetches[index].sent_count == 0 {
+                                                pending_row_version_repairs.remove(index);
+                                                pending_row_version_fetches.remove(index);
+                                            } else {
+                                                pending_row_version_repairs[index].superseded = true;
+                                            }
+                                        }
+                                    }
+                                }
                                 scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
@@ -2751,23 +2877,55 @@ where
                                         .iter()
                                         .find(|((candidate, _, _), _)| *candidate == subscription)
                                         .map(|(_, owner)| owner.policy_binding.clone())
-                                        .ok_or_else(|| Error::new(
-                                            ErrorCode::Protocol,
-                                            "row-version repair lost its subscription policy binding",
-                                        ))?;
+                                        .or_else(|| {
+                                            let registrations = self.query_coverage_registrations.borrow();
+                                            let registration = registrations.get(&subscription)?;
+                                            if registration.ref_count == 0 { return None; }
+                                            let request = &registration.subscription;
+                                            Some(request.policy_binding.clone().unwrap_or_else(|| (
+                                                request.identity,
+                                                self.node.borrow().session_claims_for(request.identity),
+                                            )))
+                                        })
+                                        .or_else(|| {
+                                            self.upstream_subscription_owners.borrow()
+                                                .get(&subscription)?
+                                                .iter()
+                                                .filter_map(Weak::upgrade)
+                                                .find_map(|owner| {
+                                                    let state = owner.borrow();
+                                                    if state.closed.get() { return None; }
+                                                    Some(state.request_identity_claims.clone().unwrap_or_else(|| (
+                                                        state.author,
+                                                        self.node.borrow().session_claims_for(state.author),
+                                                    )))
+                                                })
+                                        });
+                                    let Some(policy_binding) = policy_binding else {
+                                        // A queued complete snapshot may arrive after its
+                                        // last reader has closed. Do not fetch bytes for a
+                                        // retired subscription or borrow another reader's
+                                        // authorization to repair it.
+                                        continue;
+                                    };
                                     pending_row_version_fetches.push_back(PendingRowVersionFetch {
-                                        requests: missing.clone(),
+                                        requests: missing.iter().cloned().collect(),
+                                        sent_count: 0,
                                         policy_binding,
                                     });
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
-                                            requests: missing,
                                             update: message,
                                             authority_receipt_eligible,
+                                            superseded: false,
                                         },
                                     );
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    return Ok(true);
+                                    // Finish this receive batch before yielding for repair.
+                                    // Earlier complete views and admitted publications
+                                    // already left the transport; returning here would
+                                    // discard them instead of applying their receipts.
+                                    break;
                                 }
                             }
                             SyncMessage::SubscribeRejected {
@@ -3509,8 +3667,10 @@ where
                 peer,
                 ingest_context,
                 session_claims: _,
-                session_claim_revision: _,
+                session_claim_revision,
                 local_receiver,
+                partial_edge_query_host,
+                pending_authority_repairs,
                 outbox,
                 upstream_subscriptions,
                 served,
@@ -3737,6 +3897,51 @@ where
                         }
                         SyncMessage::ChunkResponseBatch(_) => {
                             drop_peer_request(&self.node);
+                            continue;
+                        }
+                        SyncMessage::CurrentRowsCancel { request_id } => {
+                            self.current_rows.borrow_mut().cancel_downstream(connection_epoch, request_id);
+                            continue;
+                        }
+                        SyncMessage::CurrentRowsRequest(request) => {
+                            let Some(session) = self.transport.connection_session_context() else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            if !row_availability::valid_request(&request) {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let Some((identity, claims)) = admitted_request_policy_binding(*ingest_context, peer, session_claim_binding.clone(), request.delegated_session.clone()) else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let context = crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims.clone());
+                            if self.node.borrow().can_mint_current_row_receipts() {
+                                let progress = {
+                                    let mut router = self.current_rows.borrow_mut();
+                                    let progress = router.progress.entry(connection_epoch).or_default();
+                                    *progress = progress.checked_add(1).expect("current row progress exhausted");
+                                    *progress
+                                };
+                                let epoch = session.local.epoch;
+                                let receipt = {
+                                    let mut node = self.node.lock().await;
+                                    node.scoped_active_session_claims(identity, claims).evaluate_current_rows(&request, context, epoch, progress).await?
+                                };
+                                queue_sync_context_control(&mut self.pending_control_responses, SyncMessage::CurrentRowsReceipt(receipt));
+                            } else {
+                                let upstream_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                let mut forwarded = request.clone();
+                                forwarded.request_id = upstream_id;
+                                forwarded.delegated_session = None;
+                                let route = row_availability::CurrentRowsRoute { request: forwarded, context: context.clone(), upstream: None, downstream: Some((connection_epoch, request.request_id)), sender: None };
+                                if self.admitted_upstream_authority.borrow().is_none() || !self.current_rows.borrow_mut().admit(route) {
+                                    queue_direct_control(&mut self.pending_control_responses, SyncMessage::CurrentRowsReceipt(row_availability::unknown_receipt(&request, context)));
+                                }
+                            }
+                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                            flush_subscriber_controls_or_stop!(self, peer);
                             continue;
                         }
                         SyncMessage::AuthorizationScopeIntent {
@@ -4293,7 +4498,6 @@ where
                                     opts.tier,
                                     opts.read_view.clone(),
                                     DurabilityTier::Global,
-                                    opts.propagate_upstream,
                                 );
                                 if self.node.borrow().client_relay_scope().is_some() {
                                     opts.binding_source = BindingSource::RelayAuthoritySession;
@@ -4356,16 +4560,12 @@ where
                                 Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
                                     settled_through: self.node.borrow().committed_global_time(),
-                                    reset_result_set: true,
                                     version_carriers: Vec::new(),
                                     peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                                         opening_pending: true,
                                         ..Default::default()
                                     },
-                                    result_member_adds: Vec::new(),
-                                    result_member_removes: Vec::new(),
-                                    program_fact_adds: Vec::new(),
-                                    program_fact_removes: Vec::new(),
+                                    supporting_rows: Vec::new(),
                                 }))
                             } else {
                                 None
@@ -4565,6 +4765,14 @@ where
                             }
                             if group.upstream_opts.propagate_upstream {
                                 let owner = RelayUpstreamSubscriptionOwner {
+                                    request: PendingUpstreamSubscription {
+                                        subscription: group.upstream_subscription,
+                                        shape: shape.clone(), binding: binding.clone(), opts: upstream_opts.clone(),
+                                        identity: group.policy_binding.0,
+                                        policy_binding: Some(group.policy_binding.clone()),
+                                    },
+                                    scalar_authority_revision: 0,
+                                    scalar_reconciliation: ScalarReconciliation::default(),
                                     downstream_connection_epoch: connection_epoch,
                                     coverage: coverage.clone(),
                                     policy_binding: group.policy_binding.clone(),
@@ -4784,6 +4992,20 @@ where
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
                                 drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if *partial_edge_query_host {
+                                let Some(binding) = admitted_request_policy_binding(
+                                    *ingest_context, peer, session_claim_binding.clone(), delegated_session,
+                                ) else {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                };
+                                let requires_core = row_repair_requires_core(ingest_context.trust, binding.0);
+                                super::row_version_repairs::enqueue_authority_repair(
+                                    pending_authority_repairs, requests, binding, *session_claim_revision, requires_core,
+                                )?;
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 continue;
                             }
                             let repair_context = if *local_receiver {
@@ -5013,7 +5235,8 @@ where
                     let now_ms = self.upload_retry_clock.borrow().now_ms();
                     let outcome = {
                         let mut node = self.node.lock().await;
-                        peer.drain_deferred_edge_fates(&mut node, now_ms)
+                        // Deferred admission owns its policy and persistence futures.
+                        Box::pin(peer.drain_deferred_edge_fates(&mut node, now_ms))
                         .await
                         .map_err(Error::from)?
                     };
@@ -5065,6 +5288,8 @@ where
                         }
                     }
                 }
+                // View serving is a separate phase from deferred policy admission.
+                return Box::pin(async {
                 queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
                 if !flush_downstream_fates(
                     &self.node,
@@ -5215,14 +5440,14 @@ where
                                             .1
                                             .clone(),
                                     );
-                                    peer.reconcile_maintained_subscription_for_clone(
+                                    Box::pin(peer.reconcile_maintained_subscription_for_clone(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
                                         &coverage.opts,
                                         progress_waker.as_ref(),
-                                    )
+                                    ))
                                     .await
                                 };
                                 let reconciled = match result {
@@ -5352,14 +5577,14 @@ where
                                         .1
                                         .clone(),
                                 );
-                                peer
+                                Box::pin(peer
                                     .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &group.shape,
                                         reconciled,
-                                    )
+                                    ))
                                 .await
                                 .map(Some)
                             } else {
@@ -5372,14 +5597,14 @@ where
                                             .1
                                             .clone(),
                                 );
-                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                                 .map(|update| {
                                     update.map(|update| retarget_view_update(update, subscription))
@@ -5511,43 +5736,47 @@ where
                                 // successor closure: the exact upstream reset
                                 // has already been installed/forwarded. In
                                 // particular, never relabel an empty local
-                                // terminal tick as `reset_result_set`, because
+                                // terminal tick as `reset_input_set`, because
                                 // a receiver would correctly reject its absent
                                 // ProgramSourceCoverage manifest.
-                                peer.query_update_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                             } else if settled_handoff {
-                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
+                                .map(|update| match update {
+                                    Some(update) => std::task::Poll::Ready(Some(update)),
+                                    None => std::task::Poll::Pending,
+                                })
                             } else {
-                                peer.query_update_for_subscription_with_opts_and_waker(
+                                Box::pin(peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
                                     progress_waker.as_ref(),
-                                )
+                                ))
                                 .await
                             }
                         };
                         let update = match update_result {
-                            Ok(Some(update)) => update,
-                            Ok(None) => {
+                            Ok(std::task::Poll::Ready(update)) => update,
+                            Ok(std::task::Poll::Pending) => {
                                 serve_again = true;
                                 continue;
                             }
@@ -5571,7 +5800,13 @@ where
                                 false,
                             );
                         }
-                        if settled_handoff || !view_update_is_empty(&update) {
+                        let Some(update) = update else {
+                            // A settled unchanged view has no more work. Only an
+                            // unfinished hydration needs another owner turn.
+                            continue;
+                        };
+                        {
+                            // Producer-local change tracking suppresses no-ops; an empty snapshot is meaningful.
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "subscriber generated group delta group={} update={}",
@@ -5659,6 +5894,8 @@ where
                 })
                 .await;
                 })
+                .await;
+                })
                 .await?;
                 if stop {
                     return Ok(stats);
@@ -5732,26 +5969,23 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            supporting_rows: program_fact_adds,
         }) => ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
             subscription,
             settled_through,
             defer_settlement: false,
-            reset_result_set,
+            reset_input_set: true,
             version_carriers,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
             opening_pending: peer_payload_inventory.opening_pending,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         },
         _ => unreachable!("expected view update message"),
     }
@@ -5830,6 +6064,18 @@ where
         .filter(|update| frame_is_selected(update) && !update.parts.opening_pending)
         .map(|update| (update.parts.subscription, update.parts.settled_through))
         .collect::<Vec<_>>();
+    let source_confirmations = pending
+        .iter()
+        .filter(|update| {
+            frame_is_selected(update)
+                && !update.parts.opening_pending
+                && !update.parts.defer_settlement
+                && (update.parts.reset_input_set
+                    || !update.parts.program_fact_adds.is_empty()
+                    || !update.parts.program_fact_removes.is_empty())
+        })
+        .map(|update| update.parts.subscription)
+        .collect::<BTreeSet<_>>();
     let batch_cut = pending
         .iter()
         .map(|update| update.parts.settled_through)
@@ -5971,6 +6217,25 @@ where
             Err(error) => return Err(error.into()),
         }
     }
+    // Per-owner receipt revisions survive replacement of a shared binding slot.
+    // Only successfully applied selected source receipts advance reconciliation.
+    for weak in subscriptions.borrow().iter() {
+        if let Some(state) = weak.upgrade() {
+            let mut state = state.borrow_mut();
+            if state
+                .upstream_subscription_handles
+                .iter()
+                .any(|handle| source_confirmations.contains(&handle.subscription))
+            {
+                state.scalar_authority_revision = state.scalar_authority_revision.wrapping_add(1);
+            }
+        }
+    }
+    for owner in relay_owners.borrow_mut().values_mut() {
+        if source_confirmations.contains(&owner.request.subscription) {
+            owner.scalar_authority_revision = owner.scalar_authority_revision.wrapping_add(1);
+        }
+    }
     if relay_authority_session_owner {
         // A relay authority view is input to every locally served browser
         // Edge child. Advance the shared generation only after the validated
@@ -5983,19 +6248,15 @@ where
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
-        let registrations = query_coverage_registrations.borrow();
         for (subscription, binding_view, settled_through) in confirmed_binding_views {
             if settled_through < receipts.confirmation_floor {
                 continue;
             }
-            // Public streams are not query-coverage attachments, but their
-            // binding view is still the exact receipt required to settle the
-            // receiver-local graph. Coverage registrations retain only their
-            // own ownership accounting below.
+            // Public streams, relay scopes, and auxiliary queries all require
+            // their own accepted usage receipt; equal binding views cannot
+            // substitute for a detached predecessor.
             receipts.binding_views.insert(binding_view);
-            if registrations.contains_key(&subscription) {
-                receipts.subscriptions.insert(subscription);
-            }
+            receipts.subscriptions.insert(subscription);
         }
     }
     if !clears.is_empty() {
@@ -6014,7 +6275,7 @@ where
     Ok(())
 }
 
-fn transport_error(error: TransportError) -> Error {
+pub(super) fn transport_error(error: TransportError) -> Error {
     match error {
         TransportError::Backpressure => {
             Error::new(ErrorCode::Backpressure, "transport backpressure")
@@ -6752,7 +7013,7 @@ where
     node.borrow_mut().record_dropped_peer_request();
 }
 
-fn handle_transport_backpressure<S>(
+pub(super) fn handle_transport_backpressure<S>(
     node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &TransportError,
@@ -6826,26 +7087,18 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
-            reset_result_set,
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            supporting_rows: program_fact_adds,
         }) => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} bundles={} inventory={} supporting_rows={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
-            reset_result_set,
             expand_version_carriers(version_carriers)
                 .map(|bundles| bundles.len())
                 .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
-            result_member_adds.len(),
-            result_member_removes.len(),
-            program_fact_adds.len(),
-            program_fact_removes.len()
+            program_fact_adds.len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
@@ -6902,23 +7155,12 @@ where
     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
-        let coverage = payload
-            .program_fact_adds
-            .iter()
-            .filter(|fact| {
-                matches!(
-                    fact,
-                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
-                )
-            })
-            .collect::<Vec<_>>();
         eprintln!(
-            "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} reset={} pending={} coverage={coverage:?} facts={} carriers={}",
+            "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} pending={} rows={} carriers={}",
             node.borrow().client_relay_scope().is_some(),
             payload.subscription,
-            payload.reset_result_set,
             payload.peer_payload_inventory.opening_pending,
-            payload.program_fact_adds.len(),
+            payload.supporting_rows.len(),
             payload.version_carriers.len()
         );
     }
@@ -6957,7 +7199,6 @@ fn stamp_subscriber_opening_state<S>(
     // A selected upstream source does not itself make this a strict read.
     // Local-first still publishes cached inputs while that source is pending.
     if let SyncMessage::ViewUpdate(payload) = message
-        && node.borrow().client_relay_scope().is_some()
         && peer.subscription_awaits_selected_authority_source(payload.subscription)
     {
         let source = peer
@@ -7105,7 +7346,10 @@ where
                     pending.pop_front();
                     continue;
                 };
-                transport.send(response).map_err(transport_error)
+                // Scope hydration carries native physical row identities just
+                // like ordinary subscriptions. Install the authority catalogue
+                // before delivering those rows to a newly connected client.
+                send_with_sync_context(node, peer, transport, response)
             }
         };
         match send_result {
@@ -7425,30 +7669,4 @@ fn large_value_upload_chunk_context(
 
 fn chunk_locator_fingerprint(locator: groove::large_values::Locator) -> String {
     blake3::hash(locator.as_bytes()).to_hex()[..16].to_owned()
-}
-
-/// A `ViewUpdate` that carries no version, result-set, or program-fact change —
-/// nothing to ship to the subscriber this tick.
-pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
-    match message {
-        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set,
-            version_carriers,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }) => {
-            !reset_result_set
-                && version_carriers.is_empty()
-                && peer_payload_inventory.complete_tx_payloads.is_empty()
-                && result_member_adds.is_empty()
-                && result_member_removes.is_empty()
-                && program_fact_adds.is_empty()
-                && program_fact_removes.is_empty()
-        }
-        _ => false,
-    }
 }

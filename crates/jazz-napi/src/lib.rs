@@ -2524,7 +2524,19 @@ impl NapiDb {
                 let attachment = Rc::new(RefCell::new(None::<CoreQueryAttachment>));
                 let cleanup_attachment = Rc::clone(&attachment);
                 let cleanup_db = Rc::clone(&db);
+                let preceding_writes =
+                    (!synchronous && open_tx.is_none()).then(|| db.queued_mutation_barrier());
                 let future = Box::pin(async move {
+                    if let Some(preceding_writes) = preceding_writes {
+                        preceding_writes
+                            .await
+                            .map_err(|_| {
+                                napi::Error::from_reason(
+                                    "local write ordering barrier was cancelled",
+                                )
+                            })?
+                            .map_err(napi_error)?;
+                    }
                     let requires_coverage = non_durable_client
                         || (opts.tier >= jazz::tx::DurabilityTier::Edge
                             && opts.propagation == CorePropagation::Full);
@@ -2644,6 +2656,30 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => read!(db),
             NapiDbInnerStorage::Persistent(db) => read!(db),
         }
+    }
+
+    /// Bind receipt-correlation claims to this client's own admitted identity.
+    #[napi(js_name = "setSessionClaims")]
+    pub fn set_session_claims(
+        &self,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> napi::Result<()> {
+        let inner = self.inner.borrow();
+        let db = inner
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let author = match db {
+            NapiDbInnerStorage::Memory(db) => db.identity().author,
+            NapiDbInnerStorage::Persistent(db) => db.identity().author,
+        };
+        let claims = core_claims_from_json(author, claims)?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_identity_claims(author, claims),
+            NapiDbInnerStorage::Persistent(db) => db.set_identity_claims(author, claims),
+        }
+        Ok(())
     }
 
     /// Set ambient claims for mutation and other explicitly serialized
@@ -2930,11 +2966,14 @@ impl NapiDb {
                 node: CoreNodeUuid::from_bytes(local_node),
                 epoch: local_epoch,
             },
-            remote: CoreWireAuthorityEndpoint {
+            remote: Some(CoreWireAuthorityEndpoint {
                 node: CoreNodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
+            }),
+            link_identity: match db {
+                NapiDbInnerStorage::Memory(db) => db.identity().author,
+                NapiDbInnerStorage::Persistent(db) => db.identity().author,
             },
-            link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features,
         };
         let transport = Box::new(
@@ -4931,10 +4970,9 @@ mod tests {
         let polls_before = control.total_poll_count();
         core_drive_direct_mutation_once(&db, &first)
             .expect("a yielding local write stays queued for its normal wait path");
-        assert_eq!(
-            control.total_poll_count(),
-            polls_before + 1,
-            "the synchronous NAPI boundary polls its resident write exactly once"
+        assert!(
+            control.total_poll_count() <= polls_before + 1,
+            "one admission poll must not spin on yielding storage; source preparation may yield before storage is reached"
         );
         assert_eq!(
             core_block_on(first.write_state())
@@ -4951,7 +4989,12 @@ mod tests {
             "the later queued write did not leapfrog the pending first write"
         );
 
-        db.drive_queued_mutation_once();
+        for _ in 0..32 {
+            db.drive_queued_mutation_once();
+            if core_block_on(first.write_state()).unwrap().durability == DurabilityTier::Local {
+                break;
+            }
+        }
         assert_eq!(
             core_block_on(first.wait(DurabilityTier::Local)).expect("first wait resolves later"),
             first.mergeable_tx_id(),
@@ -4965,8 +5008,12 @@ mod tests {
             "completing the first operation still leaves the FIFO successor untouched"
         );
 
-        db.drive_queued_mutation_once();
-        db.drive_queued_mutation_once();
+        for _ in 0..32 {
+            db.drive_queued_mutation_once();
+            if core_block_on(second.write_state()).unwrap().durability == DurabilityTier::Local {
+                break;
+            }
+        }
         assert_eq!(
             core_block_on(second.wait(DurabilityTier::Local)).expect("second wait resolves"),
             second.mergeable_tx_id(),

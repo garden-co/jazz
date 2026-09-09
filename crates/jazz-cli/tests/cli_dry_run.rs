@@ -687,7 +687,7 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
 }
 
 #[test]
-fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
+fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     let schema = structured_schema();
     let server = RunningServer::start_schema(&schema);
     let subject = "structured-reconnect-user";
@@ -791,7 +791,7 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
 
     // Replacing the upstream invalidates the old authority receipt before the
     // new link can speak. Preserve the cached structured value, but publish
-    // that it is no longer settled before accepting the reconnect reset.
+    // that it is no longer settled before accepting the new supporting set.
     let reconnect_demoted = block_on(subscription.next()).expect("reconnect authority demotion");
     assert!(matches!(
         reconnect_demoted,
@@ -809,7 +809,7 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
             && terminal_operations.is_empty()
     ));
 
-    let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect reset");
+    let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect delta");
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -819,12 +819,12 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     else {
         panic!("expected reconnect reset delta")
     };
-    assert!(reset);
-    assert!(
-        !added.is_empty(),
-        "a structured reset publishes its authoritative root relation"
-    );
-    assert!(terminal_operations.is_empty());
+    // The local evaluator and its terminal cache survived the socket change.
+    // A complete supporting snapshot produces a local patch against that cache;
+    // no upstream terminal instructions or new root reset are needed.
+    assert!(!reset);
+    assert!(added.is_empty());
+    assert!(!terminal_operations.is_empty());
     while subscription.next().now_or_never().flatten().is_some() {}
 
     block_on(writer.db.insert(

@@ -1642,16 +1642,14 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        program_fact_adds, ..
+        supporting_rows, ..
     }) = update
     {
         // The receiver evaluates its result from covered inputs; authorities
         // no longer send a redundant result-member list. Count the disclosed
         // input closure, including relation support, when checking its cache.
-        for entry in program_fact_adds {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = entry {
-                rows.insert((input.version_table.to_string(), input.source_row));
-            }
+        for input in supporting_rows {
+            rows.insert((input.version_table.to_string(), input.row));
         }
     }
 }
@@ -1659,17 +1657,11 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds, ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
-                    if input.version_table.as_str() == table =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect::<BTreeSet<_>>()
             .len(),
         _ => 0,
@@ -1681,8 +1673,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             let bundle_bytes = version_bundle_refs(version_carriers)
@@ -1690,9 +1680,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>();
             let complete_tx_refs = &peer_payload_inventory.complete_tx_payloads;
-            bundle_bytes
-                + (complete_tx_refs.len() as u64 * 24)
-                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
+            bundle_bytes + (complete_tx_refs.len() as u64 * 24)
         }
         _ => 0,
     }
@@ -2149,7 +2137,10 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).expect("node");
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .expect("node");
     (temp_dir, node)
 }
 

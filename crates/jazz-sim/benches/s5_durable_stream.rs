@@ -1174,7 +1174,10 @@ fn open_node_with_history_class(
     let node = if history_complete {
         block_on(NodeState::new_history_complete(node_uuid, schema, storage)).unwrap()
     } else {
-        block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
+        block_on(NodeState::new_with_shared_test_catalogue(
+            node_uuid, schema, storage,
+        ))
+        .unwrap()
     };
     (dir, node)
 }
@@ -1232,8 +1235,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             version_bundle_refs(version_carriers)
@@ -1241,7 +1242,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
@@ -1250,17 +1250,11 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn result_row_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds, ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .filter_map(|fact| match fact {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
-                    if input.version_table.as_str() == table =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect::<BTreeSet<_>>()
             .len(),
         _ => 0,

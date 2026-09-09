@@ -409,6 +409,19 @@ impl Database {
         self.ensure_not_poisoned()
     }
 
+    /// Arm cancellation/error poisoning before a host-owned durable mutation.
+    /// The host must keep exclusive database ownership and complete the guard
+    /// only after its matching runtime application finishes. Reopen is the
+    /// recovery boundary after abandonment, including an ambiguous storage await.
+    #[doc(hidden)]
+    pub fn guard_host_application(&self) -> Result<HostApplicationGuard, Error> {
+        self.ensure_not_poisoned()?;
+        Ok(HostApplicationGuard {
+            abandoned_application: Rc::clone(&self.abandoned_application),
+            completed: false,
+        })
+    }
+
     /// Return approximate live bytes for one backing class/column family when
     /// the storage backend exposes that optional capability.
     pub async fn approximate_class_bytes(&self, cf: &str) -> Result<Option<u64>, Error> {

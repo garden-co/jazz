@@ -38,7 +38,6 @@ const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-static WS_NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
 /// Jazz WebSocket endpoint.
@@ -219,6 +218,13 @@ fn ws_link_admission(
     admission_epoch: u64,
 ) -> Result<ServerLinkAdmission, WireError> {
     match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession
+            if admission.credential == WebSocketCredential::Admin
+                && admission.identity == AuthorSubject::SYSTEM
+                && admission.trust == CommitUnitTrust::TrustedAuthority =>
+        {
+            Ok(ServerLinkAdmission::AuthorityQueryDelegate)
+        }
         RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
         RequestedWebSocketLink::ScopeIsolatedClientRelay
             if admission.trust == CommitUnitTrust::Session
@@ -706,10 +712,7 @@ async fn handle_ws_connection(
             let _ = socket.close().await;
             return;
         };
-        let server_endpoint = WireAuthorityEndpoint {
-            node: NodeUuid::from_bytes([0x5e; 16]),
-            epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-        };
+        let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
         let hello = match encode_frame(&WireFrame::Hello(
             WireHello::current(WirePeerRole::Core, negotiated.features)
                 .with_authority(server_endpoint.node, server_endpoint.epoch),
@@ -776,23 +779,21 @@ async fn handle_ws_connection(
     // Every admitted server link receives a fresh server endpoint. A browser
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
-    let server_endpoint = WireAuthorityEndpoint {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-    };
+    let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
     let session_context = if negotiated.features
         & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
         != 0
     {
-        remote_hello
-            .authority
-            .map(|remote| ConnectionSessionContext {
-                local: server_endpoint,
-                remote,
-                link_identity: admission.identity,
-                negotiated_features: negotiated.features,
-            })
+        // An authenticated client can request current rows without itself
+        // being an authority. Retain our receipt epoch and its admitted identity
+        // independently of whether it advertises a remote authority endpoint.
+        Some(ConnectionSessionContext {
+            local: server_endpoint,
+            remote: remote_hello.authority,
+            link_identity: admission.identity,
+            negotiated_features: negotiated.features,
+        })
     } else {
         None
     };
@@ -1665,6 +1666,10 @@ mod tests {
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
         assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&relay, 0, 1).unwrap(),
+            ServerLinkAdmission::AuthorityQueryDelegate
+        );
 
         let admin_scope_request = ws_admission(
             WebSocketPrelude {
@@ -1703,6 +1708,10 @@ mod tests {
         .await
         .expect("admit authenticated catalogue bootstrap");
         assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
+        assert_eq!(
+            ws_link_admission(&bootstrap, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let non_system = ws_admission(
             WebSocketPrelude {
@@ -1722,6 +1731,10 @@ mod tests {
         .await
         .expect("admit authentication before protocol bootstrap rejection");
         assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&non_system, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let backend = ws_admission(
             WebSocketPrelude {
@@ -1881,9 +1894,12 @@ mod tests {
             AuthorSubject::for_test_bytes([0x41; 16])
         );
         assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
-        assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
+        assert_eq!(
+            context.remote.unwrap().node,
+            NodeUuid::from_bytes([0x5e; 16])
+        );
         assert_ne!(context.local.epoch, 0);
-        assert_ne!(context.remote.epoch, 0);
+        assert_ne!(context.remote.unwrap().epoch, 0);
 
         let schema = ws_public_schema_convert();
         let column_families = schema.column_families();
@@ -3401,14 +3417,23 @@ mod tests {
             received, 0,
             "the first pump deliberately skips its response"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !client.edge_attachment_is_covered(&attachment),
             "the queued response must not be applied before the idle pump reads it"
         );
 
-        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
-        assert_eq!(sent, 0, "the second pump must have no new client work");
+        // Server scheduling is independent of this client. Retry the idle
+        // receive window until coverage arrives, but never permit new client
+        // work to make the response observable accidentally.
+        let start = tokio::time::Instant::now();
+        let mut received = 0;
+        while !client.edge_attachment_is_covered(&attachment) && start.elapsed() < WS_PUMP_DEADLINE
+        {
+            let (sent, newly_received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+            assert_eq!(sent, 0, "idle pumps must have no new client work");
+            received += newly_received;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             received > 0,
             "the idle pump must consume the queued response"

@@ -122,16 +122,11 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
             .expect("authority must send alice's opening");
         let subscription = update.subscription;
         let duplicate = update
-            .program_fact_adds
-            .iter()
-            .find_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
-                _ => None,
-            })
+            .supporting_rows
+            .first()
+            .cloned()
             .expect("nonempty authority opening has a covered-input witness");
-        update
-            .program_fact_adds
-            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        update.supporting_rows.push(duplicate);
         subscription
     };
     let authority_result = client
@@ -153,7 +148,7 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
         block_on(alice_subscription.next_raw()),
         Some(SubscriptionEvent::Rejected {
             reason: SubscribeRejectReason::InvalidAuthoritySourceClosure {
-                transition: "duplicate source-closure addition".to_owned(),
+                transition: "invalid or duplicate supporting physical row version".to_owned(),
             },
         }),
         "the client receives the exact safe closure-transition error without waiting"
@@ -261,16 +256,11 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
             })
             .expect("authority must send the opening");
         let duplicate = update
-            .program_fact_adds
-            .iter()
-            .find_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.clone()),
-                _ => None,
-            })
+            .supporting_rows
+            .first()
+            .cloned()
             .expect("opening must contain an input witness");
-        update
-            .program_fact_adds
-            .push(crate::protocol::ProgramFactEntry::CoveredInput(duplicate));
+        update.supporting_rows.push(duplicate);
     }
     let error = client
         .tick()
@@ -278,7 +268,7 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
     assert!(
         error
             .to_string()
-            .contains("duplicate source-closure addition"),
+            .contains("invalid or duplicate supporting physical row version"),
         "{error}"
     );
     assert!(!client.query_attachment_is_covered(&attachment));
@@ -1160,4 +1150,313 @@ fn default_current_subscription_reconciles_deletion_witness_without_reset() {
     );
     let fresh = serving_rows_in_read_view(&server, &schema, &query, client_author, &current_view);
     assert_eq!(row_ids(&snapshot.rows), row_ids(&fresh));
+}
+
+#[test]
+fn delayed_row_repair_does_not_replace_a_newer_supporting_snapshot() {
+    // INV-SYNC-46: exercise the complete-snapshot receiver contract.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0xe1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xe2, author, &schema);
+    let old = row(0xe3);
+    let new = row(0xe4);
+    server
+        .insert_with_id("todos", old, cells("live", false, author))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let mut stream = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    client.tick().unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        if responses
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    // Model payload dedup followed by cache eviction: the older snapshot's
+    // reference is valid, but its body must be fetched in another round trip.
+    let mut stripped = false;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message {
+            payload.version_carriers.clear();
+            stripped = true;
+        }
+    }
+    assert!(stripped);
+    server
+        .update(
+            "todos",
+            old,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id("todos", new, cells("live", false, author))
+        .unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..8 {
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        row_ids(&snapshot.rows),
+        vec![new],
+        "the newer complete snapshot is usable before the old repair returns"
+    );
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(
+        row_ids(&snapshot.rows),
+        vec![new],
+        "late immutable bytes must not reinstall an older supporting set"
+    );
+}
+
+/// Alice reopens a scope whose deduplicated bodies were evicted. Bob's serving
+/// node must repair the whole scope using requests within the wire limit.
+/// bob -- complete references, withheld bodies --> alice
+/// bob <-- bounded repair batches -- alice -- complete local result
+/// The transport tap models eviction after the sender chose payload dedup;
+/// it also verifies the actual request boundary before the server consumes it.
+#[test]
+fn known_state_repair_batches_more_than_one_wire_request() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let bob = open_core(0xd2, AuthorSubject::SYSTEM, &schema);
+    let reader = open_db(0xd3, alice, &schema);
+    let count = crate::protocol_limits::MAX_FETCH_ROW_VERSIONS + 1;
+    let expected = (0..count)
+        .map(|index| RowUuid(uuid::Uuid::from_u128(10_000 + index as u128)))
+        .collect::<BTreeSet<_>>();
+    for row in &expected {
+        bob.insert_with_id("todos", *row, cells("repair", false, alice))
+            .unwrap();
+    }
+    let (upstream, downstream, requests, responses) = duplex_with_taps();
+    let _upstream = block_on(reader.connect_upstream(upstream));
+    let subscriber = bob.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&reader, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    reader.tick().unwrap();
+    for _ in 0..16 {
+        subscriber.borrow_mut().tick().unwrap();
+        if responses.borrow().iter().any(|message| {
+            matches!(message, SyncMessage::ViewUpdate(payload)
+                if payload.supporting_rows.len() == count)
+        }) {
+            break;
+        }
+    }
+    let mut stripped = false;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message
+            && payload.supporting_rows.len() == count
+        {
+            payload.version_carriers.clear();
+            stripped = true;
+        }
+    }
+    assert!(stripped, "serving node produced the complete scope");
+    let mut snapshot = RelationSnapshot::default();
+    let mut repair_batches = 0;
+    for _ in 0..32 {
+        reader.tick().unwrap();
+        for message in requests.borrow().iter() {
+            if let SyncMessage::FetchRowVersions { requests, .. } = message {
+                assert!(
+                    requests.len() <= crate::protocol_limits::MAX_FETCH_ROW_VERSIONS,
+                    "repair request exceeds the wire limit: {}",
+                    requests.len()
+                );
+                repair_batches += 1;
+            }
+        }
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if snapshot.rows.len() == count {
+            break;
+        }
+    }
+    assert!(
+        repair_batches >= 2,
+        "the scope needs multiple repair batches"
+    );
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        expected
+    );
+}
+
+/// Alice's receiver keeps only the latest unsent complete snapshot while Core's
+/// first immutable-body repair is delayed. Releasing that response must still
+/// let Alice converge to the newest version, rather than replaying the backlog.
+///
+/// Core ──many complete snapshots──► Alice (one active + one latest repair)
+/// Core ──delayed repair response──► Alice ──latest repair──► Core
+#[test]
+fn newer_supporting_snapshots_coalesce_unsent_repairs() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb2, alice, &schema);
+    let row = RowUuid::from_bytes([0xb3; 16]);
+    server
+        .insert_with_id("todos", row, cells("0", false, alice))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut held = Vec::new();
+    let mut snapshot = RelationSnapshot::default();
+    for revision in 0..16 {
+        if revision > 0 {
+            server
+                .update(
+                    "todos",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Model a deduplicated body missing at this receiver. Hold only
+            // repair replies; complete snapshots keep arriving normally.
+            responses.borrow_mut().retain_mut(|message| {
+                match message {
+                    SyncMessage::ViewUpdate(payload) => payload.version_carriers.clear(),
+                    SyncMessage::RowVersionPayloads { .. } => {
+                        held.push(message.clone());
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+    }
+    let queued = match &upstream.borrow().link {
+        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
+        _ => unreachable!("client upstream"),
+    };
+    assert!(
+        queued <= 2,
+        "obsolete complete snapshots retained {queued} repairs"
+    );
+    assert!(!held.is_empty(), "the first repair was actually delayed");
+    responses.borrow_mut().extend(held);
+    for _ in 0..24 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("15".to_owned()))
+    );
+}
+
+/// Transport control makes the ordering deterministic: a complete update for
+/// one live query is immediately followed by another query's missing-body
+/// snapshot. Public subscription results must survive yielding for that repair.
+#[test]
+fn row_version_repair_preserves_preceding_complete_subscription_updates() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let server = open_core(0xb4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb5, alice, &schema);
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut streams = ["first", "second"].map(|title| {
+        prepared_subscribe(
+            &client,
+            &Query::from("todos").filter(eq(col("title"), lit(title))),
+            global_subscribe_opts(),
+        )
+        .unwrap()
+    });
+    let mut snapshots = [RelationSnapshot::default(), RelationSnapshot::default()];
+    for _ in 0..16 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(snapshot, event);
+            }
+        }
+    }
+    assert!(snapshots.iter().all(|snapshot| snapshot.rows.is_empty()));
+    for (id, title) in [(0xb6, "first"), (0xb7, "second")] {
+        server
+            .insert_with_id("todos", row(id), cells(title, false, alice))
+            .unwrap();
+    }
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let mut views = 0;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message {
+            views += 1;
+            assert!(!payload.supporting_rows.is_empty());
+            if views == 2 {
+                payload.version_carriers.clear();
+            }
+        }
+    }
+    assert_eq!(views, 2, "both query updates must share one receive batch");
+    client.tick().unwrap();
+    for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(snapshot, event);
+        }
+    }
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|snapshot| snapshot.rows.len())
+            .sum::<usize>(),
+        1,
+        "the complete predecessor must publish before the later repair returns"
+    );
+    for _ in 0..16 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(snapshot, event);
+            }
+        }
+    }
+    assert_eq!(row_ids(&snapshots[0].rows), vec![row(0xb6)]);
+    assert_eq!(row_ids(&snapshots[1].rows), vec![row(0xb7)]);
 }

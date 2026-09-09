@@ -160,6 +160,24 @@ pub struct WireAuthorityEndpoint {
     pub epoch: u64,
 }
 
+impl WireAuthorityEndpoint {
+    /// Allocate a nonzero random incarnation, independent of process lifetime.
+    /// Epochs identify connections; their numeric order has no meaning. A
+    /// process-local counter would reuse durable receipt identities on restart.
+    pub fn fresh(node: NodeUuid) -> Self {
+        Self::fresh_with_entropy(node, rand::random::<u64>)
+    }
+
+    fn fresh_with_entropy(node: NodeUuid, mut entropy: impl FnMut() -> u64) -> Self {
+        loop {
+            let epoch = entropy();
+            if epoch != 0 {
+                return Self { node, epoch };
+            }
+        }
+    }
+}
+
 impl WireHello {
     /// Construct a hello frame for the current implementation.
     pub fn current(role: WirePeerRole, features: WireFeatures) -> Self {
@@ -1026,6 +1044,25 @@ pub fn negotiate_wire(
 
 #[cfg(test)]
 mod tests {
+    // The entropy boundary needs a controlled internal test: a real process
+    // restart cannot deterministically assert random allocation or zero retry.
+    #[test]
+    fn authority_incarnations_use_fresh_entropy_across_allocator_restarts() {
+        let node = super::NodeUuid::from_bytes([91; 16]);
+        let mut first_process = [0, 900].into_iter();
+        let old = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            first_process.next().expect("retry zero")
+        });
+        let mut restarted_process = [0, 7].into_iter();
+        let fresh = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            restarted_process.next().expect("retry zero after restart")
+        });
+        assert_eq!(old.epoch, 900);
+        assert_eq!(fresh.epoch, 7);
+        assert_eq!(old.node, fresh.node);
+        assert_ne!(old, fresh);
+    }
+
     use std::collections::BTreeMap;
 
     use groove::schema::ColumnType;
@@ -1625,13 +1662,9 @@ mod tests {
             ViewUpdate {
                 subscription: SubscriptionKey,
                 settled_through: GlobalTime,
-                reset_result_set: bool,
                 version_carriers: Vec<VersionCarrier>,
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
-                result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
-                result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
-                program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
-                program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
+                supporting_rows: Vec<crate::protocol::SupportingRow>,
             },
         }
 
@@ -1641,13 +1674,9 @@ mod tests {
         let flat = FlatSyncMessage::ViewUpdate {
             subscription: payload.subscription,
             settled_through: payload.settled_through,
-            reset_result_set: payload.reset_result_set,
             version_carriers: payload.version_carriers.clone(),
             peer_payload_inventory: payload.peer_payload_inventory.clone(),
-            result_member_adds: payload.result_member_adds.clone(),
-            result_member_removes: payload.result_member_removes.clone(),
-            program_fact_adds: payload.program_fact_adds.clone(),
-            program_fact_removes: payload.program_fact_removes.clone(),
+            supporting_rows: payload.supporting_rows.clone(),
         };
         let current = SyncMessage::ViewUpdate(payload);
 
@@ -1815,13 +1844,9 @@ mod tests {
                 read_view: Default::default(),
             },
             settled_through: GlobalTime(500),
-            reset_result_set: false,
             version_carriers,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         })
     }
 
@@ -2059,11 +2084,8 @@ mod tests {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
-                    reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: Vec::new(),
-                    result_member_removes: Vec::new(),
                     // Exercise the same sized, independently-delivered
                     // control-plane payload without smuggling authority
                     // terminal output across the peer wire.
@@ -2077,7 +2099,6 @@ mod tests {
                             },
                         ),
                     ],
-                    program_fact_removes: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2158,17 +2179,13 @@ mod tests {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
-                reset_result_set: true,
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+                supporting_rows: Vec::new(),
             }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
@@ -2223,34 +2240,30 @@ mod tests {
     }
 
     #[test]
-    fn view_update_rejects_authority_result_entries() {
-        let row = RowUuid::from_bytes([0x22; 16]);
-        let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
-        let entry: crate::protocol::ResultMemberEntry =
-            (groove::Intern::new("todos".to_owned()), row, tx_id).into();
-        let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription: SubscriptionKey {
-                shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
-                binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
-                read_view: Default::default(),
-            },
-            settled_through: GlobalTime(7),
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: vec![tx_id],
-                authorization_progress: None,
-                opening_pending: false,
-            },
-            result_member_adds: vec![entry.into()],
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        });
-
+    fn view_update_rejects_invalid_supporting_row_reference() {
+        let SyncMessage::ViewUpdate(mut payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        payload
+            .supporting_rows
+            .push(crate::protocol::SupportingRow {
+                physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                    [0x21; 16],
+                )),
+                version_table: "todos".to_owned().into(),
+                row: RowUuid::from_bytes([0x22; 16]),
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16])),
+                    schema_version: None,
+                    layer: crate::protocol::ResultRowLayer::ContentOrDeletion,
+                    batch: None,
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            });
         assert!(
-            encode_sync_message(&message).is_err(),
-            "the wire must reject authority terminal membership before receiver ingestion"
+            encode_sync_message(&SyncMessage::ViewUpdate(payload)).is_err(),
+            "an exact snapshot reference must name one native register layer"
         );
     }
 

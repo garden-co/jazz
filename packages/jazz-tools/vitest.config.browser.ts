@@ -1,3 +1,4 @@
+import { testWasmDelivery } from "../../dev/gates/test-wasm-delivery.mjs";
 import { recoverPendingIndexedDbWrites } from "./tests/browser/indexeddb-pending-recovery-node.js";
 import {
   liveEdgeBackendOpen,
@@ -68,7 +69,18 @@ export default defineConfig({
     __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
     __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
   },
-  plugins: [wasm(), topLevelAwait(), svelte()],
+  plugins: [
+    ...(sealedWasmPackage || correctnessSnapshot
+      ? [
+          testWasmDelivery(
+            resolve(sealedWasmPackage ?? correctnessSnapshot!.wasmPackage, "jazz_wasm_bg.wasm"),
+          ),
+        ]
+      : []),
+    wasm(),
+    topLevelAwait(),
+    svelte(),
+  ],
   server: {
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",

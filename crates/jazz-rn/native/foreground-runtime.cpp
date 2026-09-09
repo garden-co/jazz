@@ -65,11 +65,13 @@ class ForegroundWakeRegistration final
       : foreground_(foreground), callInvoker_(std::move(callInvoker)) {}
 
   void installCallback(Runtime &runtime, Function callback) {
+    bool active;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_) {
-        throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
-      }
+      active = active_;
+    }
+    if (!active) {
+      throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
     }
     auto callbacks = runtime.global().getProperty(runtime, kWakeCallbacksGlobal);
     if (!callbacks.isObject()) {
@@ -490,6 +492,7 @@ class ForegroundHandle final : public HostObject,
             jazz_native_relay_bytes response{};
             const auto status = jazz_native_relay_host_lease_execute_foreground(
                 self->lease_->nativeLease(), self->handle_, &probe, 1, &response);
+            lease_lock.unlock();
             jazz_native_relay_bytes_free(&response);
             if (status == JAZZ_NATIVE_RELAY_INVALID_HANDLE) return Value(true);
             if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "isClosed");
@@ -509,6 +512,7 @@ class ForegroundHandle final : public HostObject,
             }
             const auto status = jazz_native_relay_host_lease_tick_attached_foreground(
                 self->lease_->nativeLease(), self->handle_);
+            lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
               throwStatus(runtime, status, "tick");
             }
@@ -534,13 +538,15 @@ class ForegroundHandle final : public HostObject,
               throw JSError(runtime,
                            "Jazz native foreground tick scheduler requires a function");
             }
-            auto lease_lock = self->lease_->lockIfActive();
-            if (!lease_lock.owns_lock()) {
-              throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
-            }
             auto callback = args[0].asObject(runtime).asFunction(runtime);
             self->wake_->installCallback(runtime, std::move(callback));
+            auto lease_lock = self->lease_->lockIfActive();
+            if (!lease_lock.owns_lock()) {
+              self->wake_->removeCallback(runtime);
+              throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
+            }
             const auto status = self->wake_->activateNative(self->lease_->nativeLease());
+            lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
               self->wake_->removeCallback(runtime);
               throwStatus(runtime, status, "setTickScheduler");
@@ -576,14 +582,15 @@ class ForegroundHandle final : public HostObject,
             if (count != 1) {
               throw JSError(runtime, "Jazz native foreground command requires a Uint8Array");
             }
+            const auto request = copyForegroundCommand(runtime, args[0]);
             auto lease_lock = self->lease_->lockIfActive();
             if (!lease_lock.owns_lock()) {
               throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
             }
-            const auto request = copyForegroundCommand(runtime, args[0]);
             jazz_native_relay_bytes response{};
             const auto status = jazz_native_relay_host_lease_execute_foreground(
                 self->lease_->nativeLease(), self->handle_, request.data(), request.size(), &response);
+            lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
               jazz_native_relay_bytes_free(&response);
               throwStatus(runtime, status, "execute");
@@ -618,17 +625,19 @@ class ForegroundHandle final : public HostObject,
       return false;
     }
     wake_->deactivateAndClear(lease_->nativeLease());
-    wake_->removeCallback(runtime);
     const auto status = jazz_native_relay_host_lease_close_attached_foreground(
         lease_->nativeLease(), handle_, &closed);
+    lease_lock.unlock();
+    if (status == JAZZ_NATIVE_RELAY_OK) closed_ = true;
+    wake_->removeCallback(runtime);
     if (status != JAZZ_NATIVE_RELAY_OK) {
       throwStatus(runtime, status, "close");
     }
-    closed_ = true;
     return closed;
   }
 
   void closeNoThrow() {
+    if (closed_) return;
     auto lease_lock = lease_->lockIfActive();
     if (!closed_ && lease_lock.owns_lock()) {
       wake_->deactivateAndClear(lease_->nativeLease());
@@ -663,41 +672,47 @@ class ForegroundFactory final : public HostObject {
           runtime, PropNameID::forUtf8(runtime, property), arity,
           [lease = lease_, property, arity](Runtime &runtime, const Value &, const Value *args, size_t count) {
             if (count != static_cast<size_t>(arity)) throw JSError(runtime, "Invalid native account arguments");
+            std::string request;
+            std::array<uint8_t, 32> capability{};
+            if (property == "beginAccountSession") {
+              if (!args[0].isString()) throw JSError(runtime, "Native account setup requires logical metadata");
+              request = args[0].asString(runtime).utf8(runtime);
+            } else {
+              capability = copyAdmittedCapability(runtime, args[0]);
+              if (property != "releaseAccountSession") {
+                if (!args[1].isString()) throw JSError(runtime, "Native account metadata must be canonical JSON");
+                request = args[1].asString(runtime).utf8(runtime);
+              }
+            }
             auto lock = lease->lockIfActive();
             if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
             jazz_native_relay_bytes output{nullptr, 0};
             jazz_native_relay_status status;
             if (property == "beginAccountSession") {
-              if (!args[0].isString()) throw JSError(runtime, "Native account setup requires logical metadata");
-              const auto request = args[0].asString(runtime).utf8(runtime);
               const auto &root = lease->storageRoot();
               status = jazz_native_relay_host_lease_begin_account_session_json(
                   lease->nativeLease(), reinterpret_cast<const uint8_t *>(request.data()), request.size(),
                   reinterpret_cast<const uint8_t *>(root.data()), root.size(), &output);
+            } else if (property == "releaseAccountSession") {
+              status = jazz_native_relay_host_lease_release_account_session(
+                  lease->nativeLease(), capability.data(), capability.size());
+            } else if (property == "refreshAccountSession") {
+              status = jazz_native_relay_host_lease_refresh_account_session(
+                  lease->nativeLease(), capability.data(), capability.size(),
+                  reinterpret_cast<const uint8_t *>(request.data()), request.size());
             } else {
-              const auto capability = copyAdmittedCapability(runtime, args[0]);
-              if (property == "releaseAccountSession") {
-                status = jazz_native_relay_host_lease_release_account_session(
-                    lease->nativeLease(), capability.data(), capability.size());
-                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "releaseAccountSession");
-                return Value::undefined();
-              }
-              if (property == "refreshAccountSession") {
-                if (!args[1].isString()) throw JSError(runtime, "Native account refresh requires session JSON");
-                const auto request = args[1].asString(runtime).utf8(runtime);
-                status = jazz_native_relay_host_lease_refresh_account_session(
-                    lease->nativeLease(), capability.data(), capability.size(),
-                    reinterpret_cast<const uint8_t *>(request.data()), request.size());
-                if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "refreshAccountSession");
-                return Value::undefined();
-              }
-              if (!args[1].isString()) throw JSError(runtime, "Native account schema must be canonical JSON");
-              const auto schema = args[1].asString(runtime).utf8(runtime);
               status = jazz_native_relay_host_lease_attach_account_schema_json(
                   lease->nativeLease(), capability.data(), capability.size(),
-                  reinterpret_cast<const uint8_t *>(schema.data()), schema.size(), &output);
+                  reinterpret_cast<const uint8_t *>(request.data()), request.size(), &output);
             }
-            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, property.c_str());
+            lock.unlock();
+            if (status != JAZZ_NATIVE_RELAY_OK) {
+              jazz_native_relay_bytes_free(&output);
+              throwStatus(runtime, status, property.c_str());
+            }
+            if (property == "releaseAccountSession" || property == "refreshAccountSession") {
+              return Value::undefined();
+            }
             return foregroundResponse(runtime, &output);
           });
     }
@@ -731,6 +746,7 @@ class ForegroundFactory final : public HostObject {
             if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
             jazz_native_relay_bytes output{nullptr, 0};
             const auto status = jazz_native_relay_account_secret(&output);
+            lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "accountSecret");
             return foregroundResponse(runtime, &output);
           });
@@ -742,8 +758,6 @@ class ForegroundFactory final : public HostObject {
             if (count != 4 || !args[1].isString() || !args[2].isNumber() || !args[3].isNumber()) {
               throw JSError(runtime, "Jazz local-first mint requires seed, audience, TTL, and timestamp");
             }
-            auto lock = lease->lockIfActive();
-            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
             const auto seed = copyForegroundCommand(runtime, args[0]);
             const auto audience = args[1].asString(runtime).utf8(runtime);
             const auto ttl = args[2].asNumber();
@@ -755,9 +769,12 @@ class ForegroundFactory final : public HostObject {
               throw JSError(runtime, "Jazz local-first mint arguments are invalid");
             }
             jazz_native_relay_bytes output{nullptr, 0};
+            auto lock = lease->lockIfActive();
+            if (!lock.owns_lock()) throw JSError(runtime, "Jazz native runtime is closed");
             const auto status = jazz_native_relay_mint_local_first_token(
                 seed.data(), seed.size(), reinterpret_cast<const uint8_t *>(audience.data()),
                 audience.size(), static_cast<uint64_t>(ttl), static_cast<uint64_t>(now), &output);
+            lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "mintLocalFirstToken");
             NativeResponseOwner ownership(&output);
             const std::string token(reinterpret_cast<const char *>(output.data), output.len);
@@ -772,14 +789,15 @@ class ForegroundFactory final : public HostObject {
               throw JSError(runtime,
                            "Jazz native foreground runtime requires a 32-byte admitted capability");
             }
+            const auto capability = copyAdmittedCapability(runtime, args[0]);
             auto lease_lock = lease->lockIfActive();
             if (!lease_lock.owns_lock()) {
               throw JSError(runtime, "Jazz native foreground runtime is unavailable after teardown");
             }
-            const auto capability = copyAdmittedCapability(runtime, args[0]);
             uint64_t handle = 0;
             const auto status = jazz_native_relay_host_lease_open_attached_foreground(
                 lease->nativeLease(), capability.data(), capability.size(), &handle);
+            lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
               throwStatus(runtime, status, "openAttached");
             }
@@ -788,7 +806,6 @@ class ForegroundFactory final : public HostObject {
             // mutex: registration must serialize with invalidation, but an
             // open that has not installed a Rust scheduler is safe to finish
             // after invalidation (its handle remains unusable).
-            lease_lock.unlock();
             return Object::createFromHostObject(
                 runtime, std::make_shared<ForegroundHandle>(lease, handle));
           });

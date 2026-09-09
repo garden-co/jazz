@@ -228,6 +228,7 @@ declare module "jazz-wasm" {
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     close(): Promise<boolean>;
+    setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;
     connectUpstreamWithSession(
       protocolVersion: number,
@@ -237,12 +238,17 @@ declare module "jazz-wasm" {
       localNode: Uint8Array,
       localEpoch: bigint,
     ): Promise<WasmTransport>;
-    acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): Promise<WasmTransport>;
+    acceptSubscriber(
+      identity: Uint8Array,
+      claims: Record<string, unknown>,
+      localEpoch?: bigint,
+    ): Promise<WasmTransport>;
     acceptSubscriberWithSelfSignedProof(
       claims: Record<string, unknown>,
       token: string,
       appId: string,
       claimedAuthor: string,
+      localEpoch?: bigint,
     ): Promise<WasmTransport>;
   }
 }

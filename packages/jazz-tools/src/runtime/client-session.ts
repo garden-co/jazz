@@ -124,7 +124,7 @@ function isPolicyClaimValue(value: unknown): boolean {
  * transport/security fields are verified identity, not provider policy data;
  * objects are handler metadata, not policy values.
  */
-function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> {
+export function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> {
   const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [name, value] of Object.entries(payload).sort(compareUtf8)) {
     if (!REGISTERED_JWT_POLICY_FIELDS.has(name) && isPolicyClaimValue(value)) {

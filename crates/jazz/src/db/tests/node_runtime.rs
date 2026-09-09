@@ -933,15 +933,15 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
             matches!(
                 message,
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    program_fact_adds,
+                    supporting_rows: program_fact_adds,
                     settled_through,
                     ..
                 }) if *settled_through > GlobalTime(0)
                     && program_fact_adds.iter().any(|fact| {
                         matches!(fact,
-                            crate::protocol::ProgramFactEntry::CoveredInput(input)
+                            input
                                 if input.version_table.as_str() == "todos"
-                                    && input.source_row == row(0xd5)
+                                    && input.row == row(0xd5)
                                     && input.version.tx == write.tx_id
                         )
                     })

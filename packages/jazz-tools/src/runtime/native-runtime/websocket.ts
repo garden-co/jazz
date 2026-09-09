@@ -7,7 +7,7 @@ import {
   isUsableSubject,
   parseCanonicalAuthorSubject,
 } from "../author-id.js";
-import { parseJwtPayload } from "../client-session.js";
+import { parseJwtPayload, policyClaimsFromJwtPayload } from "../client-session.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
@@ -168,9 +168,9 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
   writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
   writer.u64(features);
   writer.u64(0); // WirePeerRole::Client
-  // Browser carriers do not receive the authenticated session context needed
-  // to validate scoped receipts. Do not self-assert an authority endpoint:
-  // preserve ordinary sync and let the server fail closed for scoped features.
+  // A client is not an authority. The server still binds its authenticated
+  // identity and a fresh server epoch, which the client uses to validate
+  // current-row receipts without asserting an authority of its own.
   writer.none(); // WireHello::authority
   return writer.finish();
 }
@@ -485,6 +485,30 @@ export function encodeWebSocketPrelude(
     sub,
     ...(requestedLink ? { requested_link: requestedLink } : {}),
   });
+}
+
+/** Project only policy metadata after the server has admitted this credential.
+ * This does not authenticate a JWT or grant a different native identity.
+ */
+export function policyClaimsForAdmittedWebSocket(authJson: string): Record<string, unknown> {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  if (auth.admin_secret) return {};
+  if (typeof auth.backend_secret === "string") {
+    const session = auth.backend_session;
+    const claims =
+      session && typeof session === "object" ? (session as { claims?: unknown }).claims : undefined;
+    return claims && typeof claims === "object" && !Array.isArray(claims)
+      ? (claims as Record<string, unknown>)
+      : {};
+  }
+  if (typeof auth.jwt_token !== "string") return {};
+  const payload = parseJwtPayload(auth.jwt_token);
+  if (!payload) return {};
+  if (payload.iss === "urn:jazz:local-first" || payload.iss === "urn:jazz:anonymous") {
+    const { jazz_pub_key: _proof, ...claims } = payload;
+    return policyClaimsFromJwtPayload(claims);
+  }
+  return policyClaimsFromJwtPayload(payload);
 }
 
 /**

@@ -568,6 +568,18 @@ where
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
+        // Preflight-only compilation also owns its temporary Edge inputs.
+        // Actual maintained views hold a second owner across their lifetime.
+        let _edge_availability_owner = if request.authorization_mode
+            == QueryAuthorizationMode::EdgeServing
+            || (self.edge_query_serving
+                && request.authorization_mode == QueryAuthorizationMode::ClientLocal)
+        {
+            unavailable_inputs::local_unavailable_policy_binding(&request)
+                .map(|scope| self.pin_edge_availability_scope(scope))
+        } else {
+            None
+        };
         self.restore_expired_policy_compilation_state();
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && !covered_input_sources.is_empty()
@@ -588,6 +600,7 @@ where
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = JazzSourceGraphPreparer {
+            local_unavailable_scope: unavailable_inputs::local_unavailable_policy_binding(&request),
             node: self,
             read_view: &read_view,
             inline_sources,
@@ -639,6 +652,7 @@ where
         let read_view = request.reads.primary.clone();
         let dependencies = {
             let mut preparer = JazzSourceGraphPreparer {
+                local_unavailable_scope: None,
                 node: self,
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),

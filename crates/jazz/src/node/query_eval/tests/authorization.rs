@@ -611,6 +611,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         )
         .expect("the serving maintained view must retain the invite claim route")
         .expect("the invite subscription has an initial update");
+    let SyncMessage::ViewUpdate(initial_payload) = &update else {
+        panic!("expected snapshot");
+    };
+    let initial_supporting_rows = initial_payload.supporting_rows.clone();
     client
         .apply_sync_message_settled(update)
         .expect("the client must materialize the invited chat update");
@@ -640,15 +644,38 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         Some(DurabilityTier::Global),
     )
     .expect("a live invite subscription must tolerate its membership CommitUnit");
-    edge.query_update_for_subscription_with_opts(
-        &mut node,
-        client_subscription,
-        &shape,
-        &server_binding,
-        opts.clone(),
-    )
-    .expect("flushing the live invite subscription after membership must preserve its claim route")
-    .expect("the live invite subscription has an incremental update");
+    let changed = edge
+        .query_update_for_subscription_with_opts(
+            &mut node,
+            client_subscription,
+            &shape,
+            &server_binding,
+            opts.clone(),
+        )
+        .expect(
+            "flushing the live invite subscription after membership must preserve its claim route",
+        );
+    assert!(
+        changed.is_none(),
+        "membership does not change the already readable supporting rows"
+    );
+    let refreshed = edge
+        .rehydrate_query_for_subscription_with_opts(
+            &mut node,
+            client_subscription,
+            &shape,
+            &server_binding,
+            opts.clone(),
+        )
+        .unwrap()
+        .expect("explicit refresh supplies a complete snapshot");
+    let SyncMessage::ViewUpdate(refreshed) = refreshed else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(
+        refreshed.supporting_rows, initial_supporting_rows,
+        "fresh evaluation confirms that suppressing the unchanged snapshot loses no row evidence"
+    );
 
     // The invite has now become ordinary membership. A later normal
     // session must materialize an already-existing private message through
@@ -1270,16 +1297,9 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
             options,
         )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        ..
-    }) = update
-    else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
         panic!("authorization support must return a settled view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert_eq!(
         peer.subscription_policy_binding(subscription),
         Some((writer, BTreeMap::new())),

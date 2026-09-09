@@ -66,3 +66,6 @@ data-multi/
 /bench-out/
 /dev/benchmarks/profiles/
 /dev/benchmarks/realistic/site/history.json
+
+# Lane-local Android SDK, NDK, JDK and emulator cache.
+/.cache/android-device-acceptance/

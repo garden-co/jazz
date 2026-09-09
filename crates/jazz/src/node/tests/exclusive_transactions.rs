@@ -26,14 +26,7 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
     }
 
     let sparse = TxId::new(TxTime::from(200), node(0xf0));
-    ingest_relay_version(
-        &mut core,
-        sparse,
-        200,
-        Vec::new(),
-        row(0xf0),
-        "sparse",
-    );
+    ingest_relay_version(&mut core, sparse, 200, Vec::new(), row(0xf0), "sparse");
     core.apply_fate_update(
         sparse,
         Fate::Accepted,
@@ -47,7 +40,10 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
     reopened.reset_storage_read_metrics();
     let batch = OpenTransactionId::new();
     reopened.open_exclusive(batch).unwrap();
-    assert_eq!(reopened.open_tx(batch).unwrap().base_snapshot.dots, vec![sparse]);
+    assert_eq!(
+        reopened.open_tx(batch).unwrap().base_snapshot.dots,
+        vec![sparse]
+    );
 
     let metrics = reopened.take_storage_read_metrics();
     assert_eq!(metrics.transactions_rows.reads, 1);
@@ -72,15 +68,10 @@ fn open_batch_identity_is_unique_and_terminal() {
     let committed = OpenTransactionId::new();
     let author = user(1);
     node.open_exclusive_for_identity(committed, author).unwrap();
-    node.tx_write(
-        committed,
-        "todos",
-        row(91),
-        title_cells("committed"),
-        None,
-    )
-    .unwrap();
-    node.commit_exclusive_settled(committed, author, 10).unwrap();
+    node.tx_write(committed, "todos", row(91), title_cells("committed"), None)
+        .unwrap();
+    node.commit_exclusive_settled(committed, author, 10)
+        .unwrap();
     assert!(matches!(
         node.open_exclusive(committed).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == committed
@@ -128,8 +119,10 @@ fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
     let tx_id = OpenTransactionId::new();
     node.open_exclusive(tx_id).unwrap();
 
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 11).cells(title_cells("newer")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 11).cells(title_cells("newer")),
+    )
+    .unwrap();
 
     assert_eq!(
         node.tx_read(tx_id, "todos", row).unwrap(),
@@ -149,8 +142,10 @@ fn exclusive_tx_reads_own_pending_writes() {
     let (_temp_dir, mut node) = open_node();
     let existing = row(7);
     let created = row(8);
-    node.commit_mergeable_settled(MergeableCommit::new("todos", existing, 10).cells(title_cells("base")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", existing, 10).cells(title_cells("base")),
+    )
+    .unwrap();
     let tx_id = OpenTransactionId::new();
     node.open_exclusive(tx_id).unwrap();
 
@@ -193,8 +188,10 @@ fn exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads() {
     let (_temp_dir, mut node) = open_node();
     let existing = row(7);
     let created = row(8);
-    node.commit_mergeable_settled(MergeableCommit::new("todos", existing, 10).cells(title_cells("base")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", existing, 10).cells(title_cells("base")),
+    )
+    .unwrap();
     let tx_id = OpenTransactionId::new();
     node.open_exclusive(tx_id).unwrap();
 
@@ -222,7 +219,9 @@ fn tx_read_records_present_and_absent_snapshot_reads() {
     let present = row(7);
     let absent = row(8);
     let version = node
-        .commit_mergeable_settled(MergeableCommit::new("todos", present, 10).cells(title_cells("base")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", present, 10).cells(title_cells("base")),
+        )
         .unwrap();
     let tx_id = OpenTransactionId::new();
     node.open_exclusive(tx_id).unwrap();
@@ -315,16 +314,22 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
 fn exclusive_tx_snapshot_applies_deletion_register() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
+    )
+    .unwrap();
     let deleted = node
-        .commit_mergeable_settled(MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted),
+        )
         .unwrap();
     let tx_id = OpenTransactionId::new();
     node.open_exclusive(tx_id).unwrap();
 
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
 
     assert_eq!(node.tx_read(tx_id, "todos", row).unwrap(), None);
     assert_eq!(
@@ -358,10 +363,11 @@ fn exclusive_tx_open_state_is_invisible_outside_transaction() {
     node.tx_write(tx_id, "todos", row, title_cells("buffered"), None)
         .unwrap();
 
-    assert!(node
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        node.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
     assert!(node.view_update_for_current_rows("todos").is_ok());
     assert!(node.abandon_tx(tx_id).is_ok());
     assert!(matches!(
@@ -531,8 +537,7 @@ fn partial_snapshot_whole_table_validation_accepts_its_sparse_global_dots() {
         .unwrap();
 
     let updates = core.apply_sync_message_settled(unit).unwrap();
-    let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice()
-    else {
+    let [SyncMessage::FateUpdate { fate, .. }] = updates.as_slice() else {
         panic!("expected fate update");
     };
     assert_eq!(*fate, Fate::Accepted);
@@ -598,7 +603,11 @@ fn exclusive_commit_accepts_clean_end_to_end() {
         BTreeMap::from([(row, title_cells("exclusive"))])
     );
 
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate {
         fate: accepted,
         global_time,
@@ -612,7 +621,11 @@ fn exclusive_commit_accepts_clean_end_to_end() {
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
         client.transaction_state_settled(tx_id).unwrap(),
-        (Fate::Accepted, Some(GlobalTime::new(11, 0).unwrap()), DurabilityTier::Global)
+        (
+            Fate::Accepted,
+            Some(GlobalTime::new(11, 0).unwrap()),
+            DurabilityTier::Global
+        )
     );
     assert_eq!(
         core.current_rows("todos", DurabilityTier::Global)
@@ -651,7 +664,11 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 13)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate: rejected, .. } = &fate else {
         panic!("expected fate update");
     };
@@ -687,7 +704,10 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
     );
     let open = OpenTransactionId::new();
     client.open_exclusive(open).unwrap();
-    assert_eq!(client.tx_read(open, "todos", row).unwrap(), Some(title_cells("base")));
+    assert_eq!(
+        client.tx_read(open, "todos", row).unwrap(),
+        Some(title_cells("base"))
+    );
 
     // Planted sensitivity: content remains current after this delete, so a
     // content-register-only row-read check would incorrectly accept below.
@@ -702,7 +722,11 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -729,7 +753,10 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
 
     let open = OpenTransactionId::new();
     client.open_exclusive(open).unwrap();
-    assert_eq!(client.tx_read(open, "todos", row).unwrap(), Some(title_cells("base")));
+    assert_eq!(
+        client.tx_read(open, "todos", row).unwrap(),
+        Some(title_cells("base"))
+    );
     client
         .tx_write(
             open,
@@ -748,7 +775,11 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
     assert_eq!(versions.len(), 1);
     assert!(versions[0].parents().is_empty());
 
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -812,7 +843,11 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
     assert_eq!(content.parents(), vec![content_parent]);
     assert_eq!(restore.parents(), vec![deletion_parent]);
 
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(
         matches!(
             fate,
@@ -852,7 +887,11 @@ fn exclusive_predicate_phantom_conflict_rejects() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -863,12 +902,8 @@ fn exclusive_predicate_phantom_conflict_rejects() {
 fn exclusive_whole_table_predicate_ignores_other_table_changes() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
     );
     let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
     let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
@@ -888,7 +923,11 @@ fn exclusive_whole_table_predicate_ignores_other_table_changes() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -924,7 +963,11 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -990,7 +1033,11 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -1031,10 +1078,12 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
 
         let tx_id = OpenTransactionId::new();
         client.open_exclusive_for_identity(tx_id, author_a).unwrap();
-        assert!(client
-            .tx_query(tx_id, &shape, &binding_a)
-            .unwrap()
-            .is_empty());
+        assert!(
+            client
+                .tx_query(tx_id, &shape, &binding_a)
+                .unwrap()
+                .is_empty()
+        );
         commit_mergeable_global(
             &mut other,
             &mut core,
@@ -1051,8 +1100,14 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
                 None,
             )
             .unwrap();
-        let (_tx_id, unit) = client.commit_exclusive_settled(tx_id, author_a, 11).unwrap();
-        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+        let (_tx_id, unit) = client
+            .commit_exclusive_settled(tx_id, author_a, 11)
+            .unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let SyncMessage::FateUpdate { fate, .. } = fate else {
             panic!("expected fate update");
         };
@@ -1084,10 +1139,12 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
 
     let tx_id = OpenTransactionId::new();
     client.open_exclusive_for_identity(tx_id, author_a).unwrap();
-    assert!(client
-        .tx_query(tx_id, &shape, &binding_a)
-        .unwrap()
-        .is_empty());
+    assert!(
+        client
+            .tx_query(tx_id, &shape, &binding_a)
+            .unwrap()
+            .is_empty()
+    );
     commit_mergeable_global(
         &mut other,
         &mut core,
@@ -1098,8 +1155,14 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
     client
         .tx_write(tx_id, "todos", row(2), owner_cells(author_a, "mine"), None)
         .unwrap();
-    let (_tx_id, unit) = client.commit_exclusive_settled(tx_id, author_a, 11).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(tx_id, author_a, 11)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -1108,12 +1171,14 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
 #[test]
 fn district_scoped_predicate_rejects_same_district_phantom_only() {
     fn orders_schema() -> JazzSchema {
-        build_public_test_schema(PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("orders")
-                .column("district", PublicColumnType::Uuid)
-                .column("orderNumber", PublicColumnType::Timestamp)
-                .column("delivered", PublicColumnType::Boolean),
-        ))
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("orders")
+                    .column("district", PublicColumnType::Uuid)
+                    .column("orderNumber", PublicColumnType::Timestamp)
+                    .column("delivered", PublicColumnType::Boolean),
+            ),
+        )
     }
 
     fn order_cells(
@@ -1177,7 +1242,11 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
         let (_tx_id, unit) = client
             .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
             .unwrap();
-        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let SyncMessage::FateUpdate { fate, .. } = fate else {
             panic!("expected fate update");
         };
@@ -1212,8 +1281,16 @@ fn exclusive_write_write_first_committer_wins() {
     let (_b_ref, unit_b) = client_b
         .commit_exclusive_settled(tx_b, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate_a] = core.apply_sync_message_settled(unit_a).unwrap().try_into().unwrap();
-    let [fate_b] = core.apply_sync_message_settled(unit_b).unwrap().try_into().unwrap();
+    let [fate_a] = core
+        .apply_sync_message_settled(unit_a)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let [fate_b] = core
+        .apply_sync_message_settled(unit_b)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate: accepted, .. } = fate_a else {
         panic!("expected fate update");
     };
@@ -1246,7 +1323,11 @@ fn exclusive_absent_read_conflict_rejects() {
     let (_tx_id, unit) = client
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
@@ -1281,20 +1362,23 @@ fn commit_unit_forward_skew_rejects_and_client_cleans_up() {
         core.transaction_state_settled(tx_id).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
-    assert!(core
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
         client.transaction_state_settled(tx_id).unwrap().0,
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
     );
-    assert!(client
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        client
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
@@ -1325,10 +1409,11 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
     let SyncMessage::CommitUnit { tx, versions } = child_unit else {
         panic!("expected commit unit");
     };
-    assert!(core
-        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(core.sync_metrics().parked_orphans, 1);
 
     let SyncMessage::CommitUnit { tx, versions } = exclusive_unit else {
@@ -1430,8 +1515,14 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     writer
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
-    let (_tx_id, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (_tx_id, unit) = writer
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -1450,11 +1541,8 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -1470,40 +1558,48 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     );
     assert_eq!(bundle.versions.len(), 1);
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
-    assert!(program_fact_adds.iter().any(|fact| {
-        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row(1))
-    }));
+    assert!(
+        program_fact_adds
+            .iter()
+            .any(|fact| { matches!(fact, input if input.row == row(1)) })
+    );
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 
     let tx_id = bundle.tx.tx_id;
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through,
-            reset_result_set,
-            version_carriers: vec![VersionCarrier::Bundle(bundle)],
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        }))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through,
+
+                version_carriers: vec![VersionCarrier::Bundle(bundle)],
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                supporting_rows: program_fact_adds,
+            },
+        ))
         .unwrap();
-    assert!(reader
-        .current_rows("todos", DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
-    assert!(reader
-        .subscription_current_rows("todos", DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         reader
-            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
+            .query_rows_for_client(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM
+            )
             .unwrap(),
         vec![(row(1), title_cells("one"))]
     );
@@ -1541,8 +1637,14 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     writer
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
-    let (_tx_id, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (_tx_id, unit) = writer
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -1561,8 +1663,8 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set,
-        program_fact_adds,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -1574,30 +1676,25 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
 
     let mut malformed_facts = program_fact_adds;
     let malformed_input = malformed_facts
-        .iter_mut()
-        .find_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input),
-            _ => None,
-        })
+        .first_mut()
         .expect("rehydration must disclose its root source input");
-    malformed_input.source_row = row(2);
+    malformed_input.row = row(2);
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let err = reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            settled_through,
-            reset_result_set,
-            version_carriers: crate::protocol::build_version_carriers_from_singletons(
-                version_bundles,
-            )
-            .unwrap(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: malformed_facts,
-            program_fact_removes: Vec::new(),
-        }))
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through,
+
+                version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                    version_bundles,
+                )
+                .unwrap(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                supporting_rows: malformed_facts,
+            },
+        ))
         .unwrap_err();
 
     assert!(matches!(
@@ -1606,10 +1703,17 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
             if rejected == subscription
                 && transition == "covered input is not witnessed by admitted payload"
     ));
-    assert!(reader
-            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .query_rows_for_client(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1635,8 +1739,14 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     writer
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
-    let (tx_id, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (tx_id, unit) = writer
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -1651,7 +1761,11 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = first
     else {
@@ -1668,7 +1782,11 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = second
     else {
@@ -1702,8 +1820,14 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     writer
         .tx_write(tx, "todos", row(2), owner_cells(author_b, "b row"), None)
         .unwrap();
-    let (_tx_id, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let (_tx_id, unit) = writer
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
@@ -1716,8 +1840,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &update_a
     else {
@@ -1732,12 +1855,17 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
-    assert!(result_member_adds.is_empty());
-    assert_eq!(program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
-            Some((input.version_table.clone(), input.source_row, input.version.tx)),
-        _ => None,
-    }).collect::<Vec<_>>(), vec![("todos".to_owned().into(), row(1), version_bundles[0].tx.tx_id)]);
+    assert_eq!(
+        program_fact_adds
+            .iter()
+            .map(|input| (input.version_table.clone(), input.row, input.version.tx))
+            .collect::<Vec<_>>(),
+        vec![(
+            "todos".to_owned().into(),
+            row(1),
+            version_bundles[0].tx.tx_id
+        )]
+    );
     assert!(link_a.shipped_complete_tx_payloads().is_empty());
     reader_a.apply_sync_message_settled(update_a).unwrap();
     assert_eq!(
@@ -1749,7 +1877,9 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
 
     let mut link_system = PeerState::new();
     let update_system = link_system.current_rows_update(&mut core, "todos").unwrap();
-    reader_system.apply_sync_message_settled(update_system).unwrap();
+    reader_system
+        .apply_sync_message_settled(update_system)
+        .unwrap();
     assert_eq!(
         reader_system
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -1798,7 +1928,9 @@ fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
             None,
         )
         .unwrap();
-    let (_exclusive_tx, unit) = client.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 20).unwrap();
+    let (_exclusive_tx, unit) = client
+        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 20)
+        .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -1871,7 +2003,11 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     let (rejected, unit) = writer_b
         .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 12)
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1897,16 +2033,20 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         title_cells("retry me")
     );
     assert_eq!(stored.versions()[0].parents().len(), 1);
-    assert!(writer_b
-        .row_history("todos", row)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.tx_id() != rejected));
-    assert!(writer_b
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .iter()
-        .all(|row| row.cell(&schema().tables[0], "title") != Some(v("retry me"))));
+    assert!(
+        writer_b
+            .row_history("todos", row)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.tx_id() != rejected)
+    );
+    assert!(
+        writer_b
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .iter()
+            .all(|row| row.cell(&schema().tables[0], "title") != Some(v("retry me")))
+    );
 
     drop(writer_b);
     let mut reopened = reopen_node_at(&writer_b_dir, node(2), schema());

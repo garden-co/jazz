@@ -157,6 +157,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
             .unwrap(),
     );
     let mut resolver = JazzSourceGraphPreparer {
+        local_unavailable_scope: None,
         node: &mut node,
         read_view: &read_view,
         inline_sources: BTreeMap::new(),

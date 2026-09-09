@@ -348,6 +348,14 @@ policy binding's authoritative membership separate and may not treat possession
 of a cached row as permission to reveal it to another scope (ch. 9,
 `INV-EDGE-21..24`).
 
+A server Edge remains a serving authority: its ordinary query graph composes
+read policies locally. Verified upstream current-unavailable decisions add an
+exclusion for the exact admitted reader and claims. This excludes app/serving
+inputs only; raw policy-proof subplans and fresh permission probes must not
+consume it, or an old denial could prevent its own later readmission. SYSTEM
+and another reader's scope do not inherit the exclusion. Explicit extra-row and
+missing-body repair continue to obtain current Core authorization.
+
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
 to application-owned rows that represent a draft or lifecycle when the schema
@@ -491,6 +499,57 @@ distinguish anonymous/local/authenticated/backend/system admission modes through
 trusted session claims or first-class admission facts. Client-supplied values
 must not widen those facts.
 
+### Local current-row availability record v1
+
+A verified complete current-row evaluation may mark a known cached row
+`CurrentUnavailable` without disclosing absence or the cause of denied access.
+A readable deletion instead carries ordinary native content and deletion evidence;
+it is not converted into an access-loss marker.
+Only `ClientLocal` current/default application sources apply this exclusion,
+before joins, aggregates, windows, and logical limits, including `includeDeleted`.
+The exclusion applies to settled cached inputs before they are combined with
+ordinary optimistic pending versions. A draft created before or after the
+receipt remains visible through that same pending source; applying denial does
+not wait for the draft or start edit-specific retries. The durable denial stays
+in place, so rejecting or removing the draft cannot resurrect the settled row.
+Settled-only reads still exclude the row. Ahead storage can also contain
+Edge-accepted versions; those settled versions are excluded by exact version
+identity while distinct pending versions continue to participate.
+SYSTEM, trusted serving sources, authorization proof evaluation, historical
+snapshots, and non-default branch views do not consume the marker. Stored row
+content remains intact. A fresh verified `Readable` evaluation readmits the row;
+query predicate exclusion and unknown or partial answers do not change it.
+
+`jazz_local_row_availability_v1` is a local native Groove typed record store.
+Its key is `(policy_digest: Bytes[32], global_table: UUID, row: UUID)`. The
+existing collision-checked authority policy directory binds that digest to the
+exact subject and canonical named claims. Its value fields, in order, are
+`format_v1: U8 = 1`, `unavailable: Bool`, `core: UUID`, `core_epoch: U64`,
+`claims_revision: U64`, `policy_epoch: U64`, `settled_through: U64`, and
+`evaluation_seq: U64`. Groove's typed-record v1 codec defines the bytes; there is
+no additional opaque serializer. Unknown versions, malformed directory keys,
+and zero evaluation sequences fail recovery. Global physical table identity
+preserves exclusion across schema projections; changing schema does not clear it.
+
+Both unavailable and readable records persist, retaining ordering after clear
+and reopen. Within the same admitted Core epoch, evaluation sequence, claims
+revision, durable catalogue sequence, and settled cut cannot decrease. Equal
+sequences must identify identical records. A different epoch must be admitted
+explicitly by the current route owner; a receipt cannot activate itself. Across
+Core identities or epochs only durable catalogue sequence and cut are compared. Neither
+claims revisions nor evaluation sequences are comparable across epochs. Recovery
+restores no live route admission. A newly admitted different Core is a route
+owner decision and still cannot regress the app catalogue sequence or settled cut.
+
+Live authority and mutable-input contexts use the existing authorization-scope
+capacity. Admission fails when full and never evicts unavailable records. A
+caller may retire input sources only after stopping every graph using that exact
+context; this releases its route admission and retains durable receipts for lazy
+reinstallation. One verified apply batch is bounded by the existing exact-known
+row limit. Callers must stop or park reconciliation on an apply/admission error;
+they must not report that exclusion succeeded. Native payload ingestion and
+verified route/request correlation precede this internal receipt application.
+
 ## Open Questions
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical session subject/authorship and provenance.
@@ -589,3 +648,65 @@ must not widen those facts.
 - **Per-column encryption and authorization.** If encrypted columns are added,
   policy evaluation must define what can be evaluated server-side, what requires
   client-side keys, and how key loss/revocation interacts with read policy.
+
+### Bounded current-row availability pilot
+
+The current-row availability exchange is a mandatory part of wire protocol v1,
+subject to ordinary authenticated link admission. Its three semantic variants
+(`CurrentRowsRequest`, `CurrentRowsReceipt`, `CurrentRowsCancel`) use the existing
+named postcard semantic codec and native `VersionCarrier` record encoding. The
+wire-v1 corpus pins their bytes. Local persistence uses the native availability
+RecordStore defined above; the wire receipt is not serialized as a durable blob.
+
+A request contains at most 64 distinct known `(current schema, logical table,
+global physical table UUID, row UUID)` coordinates. Only the default root view
+of an unbranched table is supported. Unknown schema, unsupported scope, missing
+Core policy-input capability, and unavailable upstream resolve Unknown, never denial. Physical
+row addressing bypasses the public `id` field. The host-only complete-policy-input
+capability enables Core minting; history completeness and advertised wire roles
+do not enable it.
+
+Core evaluates the exact admitted immutable policy binding and captures its
+history cut, policy epoch, claims revision and connection-local evaluation
+sequence under one node owner lock. Cut and evaluation sequence have independent
+monotonic floors, scoped by Core identity, epoch and exact policy binding. The
+sequence is not a subscription's authorization generation. Generic
+CurrentUnavailable reveals neither existence, deletion, denial cause, nor a
+successor version. Readable includes an authorized deleted-row preimage and its
+ordinary deletion-register witness so includeDeleted retains its semantics.
+Only requested readable physical rows enter native carriers; transaction siblings
+and policy-support rows do not. Receivers validate the complete cardinality,
+coordinates and immutable context before normal ingestion. Every Readable
+coordinate requires a content-layer witness; deletion-only carriers cannot clear
+an unavailable marker. Receivers expose typed
+outcomes only after that ingestion succeeds.
+
+An Edge trusted by its client may proxy the exchange. It retains a bounded
+mapping from downstream nonce/connection to fresh upstream nonce, selected
+admitted upstream link and immutable client policy binding. A delegated client
+binding remains client-scoped over a trusted backend link; SYSTEM is not a
+fallback. Receipts are admitted only against the still-selected live upstream
+mapping. Disconnect, cancellation and authority handoff invalidate requests;
+backpressure preserves unsent ownership. This is a trusted Edge forwarding
+contract, not an end-to-end signature protocol. An Edge's cached policy query
+never mints a definitive outcome.
+
+Raw admitted claims are the wire correlation key. After validation, the owner
+installs that immutable claims snapshot and derives the effective local policy
+key through the normal query policy path before applying durable/source state.
+Default and derived author claims must not be inserted into the raw wire key.
+SYSTEM has no local exclusion key and still ingests readable native versions.
+
+Access can be lost because a row changes, a related grant changes, or policy
+rules change. These causes share one generic unavailable outcome. An empty
+filtered query is not proof of any of them. Offline cached reads remain possible
+before confirmation; applying confirmation suppresses future ordinary current
+results without promising secure deletion of previously disclosed bytes.
+
+The application owner must drive validated durable/source application to
+completion independently of a caller dropping its query/request future, or park
+normal reads until consistent recovery. Runtime errors and cancellation must not
+silently leave a persisted denial paired with still-visible runtime inputs.
+The normative pilot invariants are INV-SYNC-37 through INV-SYNC-43 in chapter 8;
+implementation and acceptance progress are tracked in #2660 and its PR, not
+inferred from the presence of these building blocks.

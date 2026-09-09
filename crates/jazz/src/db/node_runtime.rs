@@ -203,6 +203,7 @@ where
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
+    pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
     pub(super) local_fate_routes: LocalFateRoutes,
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
@@ -223,6 +224,7 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
+    local_availability_dirty: Cell<bool>,
 }
 
 impl<S> Node<S>
@@ -342,6 +344,7 @@ where
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            current_rows: Rc::new(RefCell::new(row_availability::CurrentRowsRouter::default())),
             edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             local_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
@@ -353,6 +356,7 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
+            local_availability_dirty: Cell::new(false),
         }
     }
 
@@ -460,6 +464,27 @@ where
         open_tx_id: OpenTransactionId,
         read: impl Future<Output = Result<T, Error>> + 'static,
     ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        self.enqueue_read_after_mutations(Some(open_tx_id), read)
+    }
+
+    pub(super) fn queued_mutation_barrier(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
+        if self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let _ = sender.send(Ok(()));
+            return receiver;
+        }
+        self.enqueue_read_after_mutations(None, std::future::ready(Ok(())))
+    }
+
+    fn enqueue_read_after_mutations<T: 'static>(
+        &self,
+        open_tx_id: Option<OpenTransactionId>,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
         let (sender, receiver) = futures::channel::oneshot::channel();
         let sender = Rc::new(RefCell::new(Some(sender)));
         let read_sender = Rc::clone(&sender);
@@ -468,7 +493,7 @@ where
             .borrow_mut()
             .push_back(QueuedMutationOperation {
                 tx_id: None,
-                open_tx_id: Some(open_tx_id),
+                open_tx_id,
                 future: Box::pin(async move {
                     let result = read.await;
                     if let Some(sender) = read_sender.borrow_mut().take() {
@@ -661,14 +686,8 @@ where
         &self,
         tier: DurabilityTier,
         read_view: ReadViewSpec,
-        propagate_upstream: bool,
     ) -> RegisterShapeOptions {
-        upstream_register_shape_options(
-            tier,
-            read_view,
-            self.upstream_durability_floor.get(),
-            propagate_upstream,
-        )
+        upstream_register_shape_options(tier, read_view, self.upstream_durability_floor.get())
     }
 
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
@@ -699,6 +718,13 @@ where
         self.browser_relay_recovered_tx_ids
             .borrow()
             .contains(&tx_id)
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+        self.node
+            .borrow_mut()
+            .enable_authoritative_scalar_exit_refresh();
     }
 
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
@@ -1272,6 +1298,7 @@ where
             let (local, upstream, owner) = if let Some(state) = command.state.take() {
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
+                state.scalar_reconciliation = ScalarReconciliation::default();
                 (
                     state.local_subscription_cleanup.take(),
                     std::mem::take(&mut state.upstream_subscription_handles),
@@ -1912,11 +1939,12 @@ where
             let confirmation_floor = node.committed_global_time();
             drop(node);
             let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
-            let upstream_upload_destination =
-                session_context.map(|context| UpstreamUploadDestination {
-                    remote_node: *context.remote.node.as_bytes(),
+            let upstream_upload_destination = session_context.and_then(|context| {
+                context.remote.map(|remote| UpstreamUploadDestination {
+                    remote_node: *remote.node.as_bytes(),
                     link_identity: context.link_identity,
-                });
+                })
+            });
             let transferred_large_value_uploads = upstream_upload_destination
                 .and_then(|destination| {
                     self.detached_large_value_uploads
@@ -1945,15 +1973,17 @@ where
                     context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
                         != 0
                 })
-                .map(|context| AuthorityContext {
-                    authority: *context.remote.node.as_bytes(),
-                    link: context.link_identity,
-                    connection_id: connection_epoch,
-                    connection_epoch: context.remote.epoch,
-                    claims_revision: 0,
-                    policy_epoch: 0,
-                    authorization_progress: 0,
-                    settled_through: 0,
+                .and_then(|context| {
+                    context.remote.map(|remote| AuthorityContext {
+                        authority: *remote.node.as_bytes(),
+                        link: context.link_identity,
+                        connection_id: connection_epoch,
+                        connection_epoch: remote.epoch,
+                        claims_revision: 0,
+                        policy_epoch: 0,
+                        authorization_progress: 0,
+                        settled_through: 0,
+                    })
                 });
             // Keep every admitted link eligible, but bind each downstream route
             // to one stable selected owner. A newly connected parallel upstream
@@ -2018,11 +2048,8 @@ where
                         continue;
                     }
                     let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
-                    let opts = self.upstream_register_shape_options(
-                        state.read_tier,
-                        state.read_view.clone(),
-                        state.remote_propagate_upstream,
-                    );
+                    let opts = self
+                        .upstream_register_shape_options(state.read_tier, state.read_view.clone());
                     let coverage = request_coverage_key(
                         shape,
                         binding,
@@ -2147,6 +2174,7 @@ where
                 ),
                 write_state_waiters: Rc::clone(&self.write_state_waiters),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+                current_rows: Rc::clone(&self.current_rows),
                 edge_fate_routes: Rc::clone(&self.edge_fate_routes),
                 local_fate_routes: Rc::clone(&self.local_fate_routes),
                 admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
@@ -2505,6 +2533,9 @@ where
         downstream_fates: PendingDownstreamFates,
         startup_error: Option<Error>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        if edge_authority {
+            self.node.borrow_mut().enable_edge_query_serving();
+        }
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
             Some(cursor) => {
@@ -2559,6 +2590,7 @@ where
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            current_rows: Rc::clone(&self.current_rows),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
             local_fate_routes: Rc::clone(&self.local_fate_routes),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
@@ -2576,11 +2608,13 @@ where
             pending_chunk_response: None,
             pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
+                pending_authority_repairs: VecDeque::new(),
                 peer,
                 ingest_context,
                 session_claims,
                 session_claim_revision,
                 local_receiver,
+                partial_edge_query_host: edge_authority,
                 outbox: Rc::clone(&self.outbox),
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
@@ -2733,6 +2767,10 @@ where
             return false;
         }
         let connection_epoch = connection_ref.connection_epoch;
+        if let ConnectionLink::Subscriber(state) = &mut connection_ref.link {
+            state.pending_authority_repairs.clear();
+        }
+        self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
         let mut terminal_permission_advice = Vec::new();
@@ -2941,6 +2979,20 @@ where
             // Retire B before staging A's queued frames: otherwise applying a
             // row-changing A update during the handoff could briefly publish
             // it under B's now-dead receipt.
+            let retired_subscriptions = self
+                .active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .map(|receipts| receipts.subscriptions.clone())
+                .unwrap_or_default();
+            {
+                let mut node = self.node.borrow_mut();
+                for subscription in retired_subscriptions {
+                    if let Ok(key) = node.authority_result_key_for_subscription(subscription) {
+                        node.invalidate_authority_result_settlement(&key);
+                    }
+                }
+            }
             *self.active_authority_view_receipts.borrow_mut() = None;
             let fallback_connection =
                 self.connections
@@ -3068,7 +3120,8 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.chunk_resolver.has_pending_local_demand()
+        if self.local_availability_dirty.replace(false)
+            || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
         {
@@ -3134,6 +3187,7 @@ where
                 }
             }
         }
+        Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
             for connection in &connections {
@@ -3149,6 +3203,383 @@ where
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
         Ok(stats)
+    }
+
+    /// Both public local-first queries and relay-owned upstream scopes use
+    /// ordinary policy-bound point queries to refresh extra scalar inputs.
+    async fn reconcile_scalar_query_inputs(&self) -> Result<(), Error> {
+        let live = self.subscriptions.borrow().clone();
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let (request, revision, mut reconciliation) = {
+                let mut state = owner.borrow_mut();
+                if state.closed.get() || !state.scalar_reconciliation_enabled {
+                    continue;
+                }
+                let Some(handle) = state.upstream_subscription_handles.first() else {
+                    continue;
+                };
+                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
+                let request = PendingUpstreamSubscription {
+                    subscription: handle.subscription,
+                    shape: shape.clone(),
+                    binding: binding.clone(),
+                    opts: handle.coverage.opts.clone(),
+                    identity: state.author,
+                    policy_binding: Some(state.request_identity_claims.clone().unwrap_or_else(
+                        || {
+                            (
+                                state.author,
+                                self.node.borrow().session_claims_for(state.author),
+                            )
+                        },
+                    )),
+                };
+                (
+                    request,
+                    state.scalar_authority_revision,
+                    std::mem::take(&mut state.scalar_reconciliation),
+                )
+            };
+            Box::pin(self.advance_scalar_reconciliation(
+                &request,
+                revision,
+                &mut reconciliation,
+                Some(&owner),
+            ))
+            .await?;
+            let mut state = owner.borrow_mut();
+            if !state.closed.get() {
+                state.scalar_reconciliation = reconciliation;
+            }
+        }
+        let owners = self
+            .relay_upstream_subscription_owners
+            .borrow()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in owners {
+            let Some((request, revision, mut reconciliation)) = self
+                .relay_upstream_subscription_owners
+                .borrow_mut()
+                .get_mut(&key)
+                .map(|owner| {
+                    (
+                        owner.request.clone(),
+                        owner.scalar_authority_revision,
+                        std::mem::take(&mut owner.scalar_reconciliation),
+                    )
+                })
+            else {
+                continue;
+            };
+            Box::pin(self.advance_scalar_reconciliation(
+                &request,
+                revision,
+                &mut reconciliation,
+                None,
+            ))
+            .await?;
+            if let Some(owner) = self
+                .relay_upstream_subscription_owners
+                .borrow_mut()
+                .get_mut(&key)
+            {
+                owner.scalar_reconciliation = reconciliation;
+            }
+        }
+        Ok(())
+    }
+
+    async fn advance_scalar_reconciliation(
+        &self,
+        request: &PendingUpstreamSubscription,
+        revision: u64,
+        state: &mut ScalarReconciliation,
+        local_owner: Option<&Rc<RefCell<SubscriptionState>>>,
+    ) -> Result<(), Error> {
+        if !request.opts.propagate_upstream
+            || !request.opts.read_view.is_default()
+            || !crate::node::simple_scalar_exit_query(request.shape.query())
+        {
+            return Ok(());
+        }
+        let generation = self
+            .active_authority_view_receipts
+            .borrow()
+            .as_ref()
+            .filter(|receipt| receipt.subscriptions.contains(&request.subscription))
+            .map(|receipt| (receipt.connection_epoch, request.subscription, revision));
+        let Some(generation) = generation else {
+            *state = ScalarReconciliation::default();
+            return Ok(());
+        };
+        // A new source receipt cannot starve the current bounded batch. It
+        // invalidates queued candidates only after the active ordinary probe
+        // completes. An authority connection replacement cancels immediately.
+        if state
+            .generation
+            .as_ref()
+            .is_some_and(|old| old.0 != generation.0 || old.1 != generation.1)
+        {
+            *state = ScalarReconciliation::default();
+        }
+        if let Some(active) = &mut state.active {
+            let waker = self.query_runtime_waker();
+            let mut cx =
+                std::task::Context::from_waker(waker.as_ref().unwrap_or(std::task::Waker::noop()));
+            let result = match active.future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending if web_time::Instant::now() >= active.deadline => {
+                    row_availability::CurrentRowsResult::Unknown
+                }
+                std::task::Poll::Pending => return Ok(()),
+            };
+            let mut retry_rows = match &result {
+                row_availability::CurrentRowsResult::Unknown => active.rows.clone(),
+                row_availability::CurrentRowsResult::Applied(receipt) => receipt
+                    .rows
+                    .iter()
+                    .zip(&receipt.outcomes)
+                    .filter_map(|(row, outcome)| {
+                        (*outcome == crate::protocol::CurrentRowOutcome::Unknown).then_some(row.row)
+                    })
+                    .collect(),
+            };
+            state.active = None;
+            if let row_availability::CurrentRowsResult::Applied(receipt) = result {
+                // The router has correlated this receipt and ingested native
+                // carriers. This live original owner additionally gates marker
+                // application; raw wire claims are not the derived local key.
+                let (identity, claims) = request
+                    .policy_binding
+                    .clone()
+                    .unwrap_or_else(|| (request.identity, BTreeMap::new()));
+                if receipt.context
+                    != crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims)
+                {
+                    *state = ScalarReconciliation::default();
+                    return Ok(());
+                }
+                let mut owner = self.node.lock().await;
+                if local_owner.is_some_and(|local| {
+                    let local = local.borrow();
+                    local.closed.get()
+                        || !local
+                            .upstream_subscription_handles
+                            .iter()
+                            .any(|handle| handle.subscription == request.subscription)
+                }) || (local_owner.is_none()
+                    && !self
+                        .relay_upstream_subscription_owners
+                        .borrow()
+                        .values()
+                        .any(|owner| {
+                            owner.request.subscription == request.subscription
+                                && owner.request.policy_binding == request.policy_binding
+                        }))
+                    || !self
+                        .active_authority_view_receipts
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|active| {
+                            active.connection_epoch == generation.0
+                                && active.subscriptions.contains(&request.subscription)
+                        })
+                {
+                    *state = ScalarReconciliation::default();
+                    return Ok(());
+                }
+                let mut node = owner.scoped_active_session_claims(
+                    receipt.context.identity,
+                    receipt.context.claims().clone(),
+                );
+                if let Some(scope) = node.local_read_policy_binding(receipt.context.identity) {
+                    let mut outcomes = Vec::new();
+                    for (row, outcome) in receipt.rows.iter().zip(&receipt.outcomes) {
+                        let status = match outcome {
+                            crate::protocol::CurrentRowOutcome::Readable => {
+                                crate::node::LocalRowAvailability::Readable
+                            }
+                            crate::protocol::CurrentRowOutcome::CurrentUnavailable => {
+                                // Availability constrains settled input. The normal
+                                // pending source remains visible without postponing
+                                // this receipt or scheduling edit-specific retries.
+                                crate::node::LocalRowAvailability::CurrentUnavailable
+                            }
+                            crate::protocol::CurrentRowOutcome::Unknown => continue,
+                        };
+                        outcomes.push((row.physical_table, row.row, status));
+                    }
+                    if !outcomes.is_empty() {
+                        node.activate_local_availability_authority(
+                            scope.clone(),
+                            receipt.core,
+                            receipt.core_epoch,
+                        )?;
+                        let changed = node
+                            .apply_verified_local_row_availability(
+                                &scope,
+                                crate::node::LocalAvailabilityWatermark {
+                                    core: receipt.core,
+                                    core_epoch: receipt.core_epoch,
+                                    claims_revision: receipt.claims_revision,
+                                    policy_epoch: receipt.policy_epoch,
+                                    settled_through: receipt.settled_through,
+                                    authorization_progress: receipt.authorization_progress,
+                                },
+                                &outcomes,
+                            )
+                            .await?;
+                        if changed {
+                            drop(node);
+                            drop(owner);
+                            self.subscriber_dirty_epoch
+                                .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
+                            self.local_availability_dirty.set(true);
+                            self.schedule_tick(TickUrgency::Immediate);
+                        }
+                    }
+                }
+            }
+            if retry_rows.is_empty() {
+                if state.pending.is_empty() {
+                    state.retry_delay_ms = 0;
+                }
+            } else {
+                state.pending.extend(retry_rows.drain(..));
+                state.retry_delay_ms = if state.retry_delay_ms == 0 {
+                    100
+                } else {
+                    (state.retry_delay_ms * 2).min(2_000)
+                };
+                state.retry_at = Some(
+                    web_time::Instant::now()
+                        + std::time::Duration::from_millis(state.retry_delay_ms),
+                );
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(state.retry_delay_ms);
+                }
+            }
+        }
+        if let Some(at) = state.retry_at {
+            if web_time::Instant::now() < at {
+                return Ok(());
+            }
+            state.retry_at = None;
+        }
+        if state.generation.as_ref() != Some(&generation) && state.pending.is_empty() {
+            let mut owner = self.node.lock().await;
+            let table = &request.shape.query().table;
+            let key = owner.authority_result_key_for_subscription(request.subscription)?;
+            if !owner.has_settled_authority_result(&key)
+                || owner.opening_pending_for_authority_result(&key)
+                || owner.publication_deferred_for_authority_result(&key)
+                || owner.authority_source_closure_generation(&key).is_none()
+            {
+                return Ok(());
+            }
+            let authoritative = owner.scalar_authority_input_rows(&key, table);
+            let claims = request
+                .policy_binding
+                .as_ref()
+                .map(|(_, claims)| claims.clone());
+            let mut node = owner.scoped_optional_session_claims(request.identity, claims);
+            // Public local-first output is the candidate inventory, even when
+            // cached policy proofs no longer admit those retained inputs.
+            let local = if let Some(local_owner) = local_owner {
+                let local = local_owner.borrow();
+                local
+                    .snapshot
+                    .rows
+                    .iter()
+                    .take(local.snapshot.root_count)
+                    .map(|row| row.row_uuid())
+                    .collect::<Vec<_>>()
+            } else {
+                // This is a local candidate inventory, not a serving answer.
+                // Re-evaluating cached permission rules here can both omit
+                // stale rows needing revalidation and wait on query work that
+                // this same owner pass must drive. Core authorizes the later
+                // CurrentRows request; discovery uses ordinary client-local reads.
+                node.query_rows_for_client(
+                    &request.shape,
+                    &request.binding,
+                    DurabilityTier::Local,
+                    request.identity,
+                )
+                .await?
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>()
+            };
+            let mut candidates = local
+                .into_iter()
+                .filter(|row| !authoritative.contains(row))
+                .collect::<BTreeSet<_>>();
+            if let Some(scope) = node.local_read_policy_binding(request.identity) {
+                if let Ok(table_id) =
+                    node.local_availability_table_id(request.shape.schema_version(), table)
+                {
+                    // A fresh inclusion must revalidate a hidden row as well;
+                    // otherwise the local exclusion would prevent readmission.
+                    candidates.extend(
+                        authoritative
+                            .into_iter()
+                            .filter(|row| node.is_local_row_unavailable(&scope, table_id, *row)),
+                    );
+                }
+            }
+            state.pending = candidates.into_iter().collect();
+            state.generation = Some(generation);
+        }
+        let count = state.pending.len().min(64);
+        let batch = state.pending.drain(..count).collect::<Vec<_>>();
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut node = self.node.lock().await;
+        let table = &request.shape.query().table;
+        let mut candidates = Vec::new();
+        for row in batch {
+            let Some(tx) = node.local_content_winner_tx_id(table, row).await? else {
+                continue;
+            };
+            if node.transaction_record(tx).await.is_some_and(|record| {
+                matches!(record.fate, crate::tx::Fate::Accepted)
+                    && record.durability >= DurabilityTier::Edge
+            }) {
+                if let Ok(coordinate) = node.current_row_coordinate(table, row) {
+                    candidates.push(coordinate);
+                }
+            }
+        }
+        drop(node);
+        if !candidates.is_empty() {
+            let (identity, claims) = request
+                .policy_binding
+                .clone()
+                .unwrap_or_else(|| (request.identity, BTreeMap::new()));
+            let context = crate::protocol::PolicyBindingKey {
+                identity,
+                canonical_claims: crate::protocol::CanonicalPolicyClaims::new(claims),
+            };
+            state.active = Some(ScalarProbe {
+                deadline: web_time::Instant::now() + std::time::Duration::from_secs(5),
+                rows: candidates.iter().map(|row| row.row).collect(),
+                future: Box::pin(self.request_current_rows(candidates, context)),
+            });
+            if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                scheduler.schedule_tick_after(5_000);
+            }
+            self.schedule_tick(TickUrgency::Immediate);
+        } else if !state.pending.is_empty() {
+            self.schedule_tick(TickUrgency::AfterCurrentTurn);
+        }
+        Ok(())
     }
 
     fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
@@ -4613,8 +5044,9 @@ pub trait Transport {
 pub struct ConnectionSessionContext {
     /// This endpoint's authority identity and fresh epoch.
     pub local: WireAuthorityEndpoint,
-    /// Authenticated remote authority identity and fresh epoch.
-    pub remote: WireAuthorityEndpoint,
+    /// Remote authority endpoint, absent for ordinary clients. Its absence
+    /// does not remove the authenticated session or our local receipt epoch.
+    pub remote: Option<WireAuthorityEndpoint>,
     /// Authenticated session identity terminated by this link.
     pub link_identity: AuthorSubject,
     /// Features accepted for this connection.

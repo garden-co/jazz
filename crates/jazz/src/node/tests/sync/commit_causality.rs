@@ -5,7 +5,9 @@ fn observed_global_time_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let fixture_tx = core
-        .commit_mergeable_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("fixture")))
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("fixture")),
+        )
         .unwrap();
     let fixture_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
@@ -17,9 +19,15 @@ fn observed_global_time_advances_authority_allocator() {
     .unwrap();
 
     let (tx_id, unit) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(2), 11).cells(title_cells("new")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(2), 11).cells(title_cells("new")),
+        )
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -33,7 +41,10 @@ fn observed_global_time_advances_authority_allocator() {
         core.clock.committed_global_time,
         GlobalTime::new(11, 0).unwrap()
     );
-    assert_eq!(core.clock.global_time_register, core.clock.committed_global_time);
+    assert_eq!(
+        core.clock.global_time_register,
+        core.clock.committed_global_time
+    );
 }
 #[test]
 fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
@@ -319,7 +330,12 @@ fn client_rejects_deep_local_causal_chain_without_recursing() {
             }
         );
     }
-    assert!(client.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
+    assert!(
+        client
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -332,7 +348,9 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 1).unwrap();
+    let (exclusive, exclusive_unit) = client
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 1)
+        .unwrap();
     let (child, child_unit) = client
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 2)
@@ -452,19 +470,21 @@ fn m2_writer_core_reader_converges_against_oracle() {
             let SyncMessage::ViewUpdate(payload) = &update else {
                 panic!("expected view update");
             };
-            assert!(!payload.reset_result_set);
-            assert!(payload.program_fact_adds.iter().any(|fact| {
+            assert!(!payload.peer_payload_inventory.opening_pending);
+            assert!(payload.supporting_rows.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::protocol::ProgramFactEntry::CoveredInput(input)
-                        if input.source_row == row_a
+                    input
+                        if input.row == row_a
                             && input.version.tx == tx_id
                             && input.version.layer == crate::protocol::ResultRowLayer::Deletion
                 )
             }));
-            assert!(version_bundles_for_update(&update)
-                .iter()
-                .any(|bundle| bundle.tx.tx_id == tx_id));
+            assert!(
+                version_bundles_for_update(&update)
+                    .iter()
+                    .any(|bundle| bundle.tx.tx_id == tx_id)
+            );
         }
         reader.apply_sync_message_settled(update).unwrap();
         assert_current_rows_match_oracle(&mut reader, &oracle);
@@ -475,7 +495,9 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         panic!("expected commit unit");
@@ -542,15 +564,14 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let accepted = core
-            .ingest_commit_unit_settled(
-                tx.clone(),
-                vec![boundary],
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
+            .ingest_commit_unit_settled(tx.clone(), vec![boundary], u64::MAX - SKEW_TOLERANCE_MS)
             .unwrap();
         assert!(matches!(
             accepted.as_slice(),
-            [SyncMessage::FateUpdate { fate: Fate::Accepted, .. }]
+            [SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }]
         ));
 
         let (_bad_tx_id, bad_unit) = writer
@@ -583,11 +604,7 @@ fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() 
         .unwrap()
         .with_authored_columns(original.authored_columns().cloned());
         let rejected = core
-            .ingest_commit_unit_settled(
-                bad_tx.clone(),
-                vec![too_far],
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
+            .ingest_commit_unit_settled(bad_tx.clone(), vec![too_far], u64::MAX - SKEW_TOLERANCE_MS)
             .unwrap();
         assert!(matches!(
             rejected.as_slice(),
@@ -676,7 +693,9 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
     assert!(core.row_history("todos", row(1)).unwrap().is_empty());
 
     let (good_tx, good_unit) = writer
-        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")))
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")),
+        )
         .unwrap();
     let [good_fate] = core
         .apply_sync_message_settled(good_unit)

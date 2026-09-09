@@ -1,16 +1,15 @@
 // Large policy-graph reset-ingest performance receipt and its fixture.
 
 fn policy_graph_perf_schema_fixture() -> JazzSchema {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json");
-    let source: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let source = serde_json::from_value::<std::collections::BTreeMap<_, _>>(
-        source["mergedSchema"].clone(),
-    )
-    .unwrap()
-    .into_iter()
-    .collect();
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema-source.json",
+    );
+    let source: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let source =
+        serde_json::from_value::<std::collections::BTreeMap<_, _>>(source["mergedSchema"].clone())
+            .unwrap()
+            .into_iter()
+            .collect();
     crate::schema::JazzSchema::new(&source).unwrap()
 }
 
@@ -87,10 +86,7 @@ fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<
                 Value::String(format!("option_{idx}_c")),
             ]),
         ),
-        (
-            "c728".to_owned(),
-            nullable(Some(Value::Bool(false))),
-        ),
+        ("c728".to_owned(), nullable(Some(Value::Bool(false)))),
         ("c729".to_owned(), Value::Bool(true)),
         ("c488".to_owned(), nullable(Some(Value::I32(idx as i32)))),
         ("c730".to_owned(), Value::Bool(idx.is_multiple_of(3))),
@@ -119,8 +115,7 @@ fn assert_policy_graph_perf_fixture_matches_schema(schema: &JazzSchema) {
                 panic!("policy-graph performance fixture is missing {table_name}.{column_name}")
             });
         assert_eq!(
-            column.column_type,
-            expected_type,
+            column.column_type, expected_type,
             "policy-graph performance fixture writes {table_name}.{column_name} as Value::I32"
         );
     }
@@ -188,10 +183,18 @@ fn seed_policy_graph_known_global(
     }
 }
 
-fn open_policy_graph_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+fn open_policy_graph_memory_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> NodeState<MemoryStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    NodeState::new(node_uuid, schema, MemoryStorage::new(&refs).expect("valid memory storage families")).unwrap()
+    NodeState::new(
+        node_uuid,
+        schema,
+        MemoryStorage::new(&refs).expect("valid memory storage families"),
+    )
+    .unwrap()
 }
 
 fn apply_policy_graph_reset_receipt<S>(
@@ -337,14 +340,19 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let serve_elapsed = serve_start.elapsed();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        version_carriers,
-        ..
+        version_carriers, ..
     }) = &update
     else {
         panic!("expected view update");
     };
-    let result_member_count = result_member_adds.len();
+    let SyncMessage::ViewUpdate(payload) = &update else {
+        unreachable!()
+    };
+    let result_member_count = payload
+        .supporting_rows
+        .iter()
+        .filter(|input| matches!(input, _))
+        .count();
     let version_bundle_count = crate::protocol::expand_version_carriers(version_carriers)
         .expect("performance receipt carriers should expand")
         .len();

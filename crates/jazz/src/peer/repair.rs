@@ -163,8 +163,6 @@ impl PeerState {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) = update
         else {
@@ -176,8 +174,6 @@ impl PeerState {
         self.metrics.version_bundles_out += singleton_bundles.len() as u64;
         self.metrics.complete_tx_payload_refs_out +=
             peer_payload_inventory.complete_tx_payloads.len() as u64;
-        self.metrics.result_adds_out += result_member_adds.len() as u64;
-        self.metrics.result_removes_out += result_member_removes.len() as u64;
 
         self.metrics.duplicate_version_bundles_out += singleton_bundles
             .iter()
@@ -535,7 +531,12 @@ impl PeerState {
 
     fn record_outgoing_view_update(&mut self, update: &SyncMessage) {
         self.record_outgoing_view_update_metadata(update);
-        self.apply_outgoing_view_update_result_set(update);
+        if let SyncMessage::ViewUpdate(view) = update {
+            let state = self.publication_states.entry(view.subscription).or_default();
+            if let Some(maintained) = &state.maintained_subscription_view {
+                state.program_fact_set = maintained.maintained.active_peer_source_closure_facts();
+            }
+        }
     }
 
     fn refresh_maintained_subscription_view_footprint(&mut self, subscription: SubscriptionKey) {
@@ -548,21 +549,17 @@ impl PeerState {
             .unwrap_or_default();
     }
 
-    fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            subscription,
-            reset_result_set,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }) = update
-        else {
-            return;
-        };
-        let state = self.publication_states.entry(*subscription).or_default();
-        if *reset_result_set {
+    fn apply_outgoing_view_delta(
+        &mut self,
+        subscription: SubscriptionKey,
+        reset_input_set: bool,
+        result_member_adds: &[ResultMemberEntry],
+        result_member_removes: &[ResultMemberEntry],
+        program_fact_adds: &[ProgramFactEntry],
+        program_fact_removes: &[ProgramFactEntry],
+    ) {
+        let state = self.publication_states.entry(subscription).or_default();
+        if reset_input_set {
             state.result_member_set.clear();
             state.program_fact_set.clear();
             state.member_index.clear();

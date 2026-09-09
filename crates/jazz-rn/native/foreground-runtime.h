@@ -33,7 +33,10 @@ class ForegroundRuntimeLease {
   ~ForegroundRuntimeLease();
 
   /** Hold the lifecycle lock through one FFI call. An empty lock means the
-   * platform invalidated this JS runtime first. */
+   * platform invalidated this JS runtime first. Never access JSI or construct
+   * JSError while holding this lock: JS allocation can collect a foreground
+   * HostFunction whose finalizer acquires the same mutex. Copy arguments before
+   * locking; unlock before constructing responses or reporting errors. */
   std::unique_lock<std::mutex> lockIfActive();
   jazz_native_relay_host_lease *nativeLease() const { return lease_; }
   const std::string &storageRoot() const { return storageRoot_; }

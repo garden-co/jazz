@@ -541,7 +541,10 @@ fn open_node_at(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
         .expect("open rocksdb");
-    jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).expect("node")
+    jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .expect("node")
 }
 
 fn cells(title: &str) -> BTreeMap<String, Value> {

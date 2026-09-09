@@ -14,10 +14,7 @@ where
     crate::db::block_on(node.persist_and_settle_transaction(published))
 }
 
-fn settle_outcome<S, T>(
-    node: &mut NodeState<S>,
-    outcome: PublicationOutcome<T>,
-) -> Result<T, Error>
+fn settle_outcome<S, T>(node: &mut NodeState<S>, outcome: PublicationOutcome<T>) -> Result<T, Error>
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
@@ -26,8 +23,7 @@ where
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            version_carriers,
-            ..
+            version_carriers, ..
         }) => crate::protocol::expand_version_carriers(version_carriers)
             .expect("test update carriers should expand"),
         _ => Vec::new(),
@@ -116,8 +112,7 @@ where
 }
 
 fn compile_public_test_schema(source: &PublicSchema) -> JazzSchema {
-    crate::schema::JazzSchema::new(source)
-        .expect("node-test public schema compiles")
+    crate::schema::JazzSchema::new(source).expect("node-test public schema compiles")
 }
 
 fn build_public_test_schema(builder: PublicSchemaBuilder) -> JazzSchema {
@@ -165,10 +160,7 @@ fn public_outer_exists(
 }
 
 fn public_claim_eq(column: &str, claim: &str) -> PublicPolicyExpr {
-    PublicPolicyExpr::eq_session(
-        column,
-        vec!["claims".to_owned(), claim.to_owned()],
-    )
+    PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), claim.to_owned()])
 }
 
 fn public_literal_eq(column: &str, value: PublicValue) -> PublicPolicyExpr {
@@ -176,10 +168,7 @@ fn public_literal_eq(column: &str, value: PublicValue) -> PublicPolicyExpr {
 }
 
 fn public_owner_policies(column: &str) -> PublicTablePolicies {
-    let owner = PublicPolicyExpr::eq_session(
-        column,
-        vec!["claims".to_owned(), "sub".to_owned()],
-    );
+    let owner = PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), "sub".to_owned()]);
     PublicTablePolicies::new()
         .with_select(owner.clone())
         .with_insert(owner.clone())
@@ -189,9 +178,8 @@ fn public_owner_policies(column: &str) -> PublicTablePolicies {
 
 fn schema() -> JazzSchema {
     build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     )
 }
 fn global_winner_tx<S>(
@@ -229,23 +217,25 @@ where
             .len()
 }
 fn owner_policy_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(public_owner_policies("owner")),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_owner_policies("owner")),
+        ),
+    )
 }
 
 fn owner_read_schema(table: &str) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new(table)
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
-            ),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new(table)
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    )
 }
 
 fn todos_member_read_schema() -> JazzSchema {
@@ -277,10 +267,8 @@ fn user(byte: u8) -> AuthorSubject {
 ///
 /// Authorship is deliberately separate: callers opt in at the exact fixture
 /// boundary instead of deriving a provider claim from `AuthorSubject` in core.
-pub(super) fn install_test_uuid_sub_claim<S>(
-    node: &mut NodeState<S>,
-    identity: AuthorSubject,
-) where
+pub(super) fn install_test_uuid_sub_claim<S>(node: &mut NodeState<S>, identity: AuthorSubject)
+where
     S: OrderedKvStorage + ReopenableStorage,
 {
     if identity == AuthorSubject::SYSTEM {
@@ -322,7 +310,10 @@ fn owner_cells(author: AuthorSubject, title: impl Into<String>) -> BTreeMap<Stri
         ("owner".to_owned(), Value::Uuid(author.test_uuid())),
     ])
 }
-fn owner_cells_with_author(owner: AuthorSubject, title: impl Into<String>) -> BTreeMap<String, Value> {
+fn owner_cells_with_author(
+    owner: AuthorSubject,
+    title: impl Into<String>,
+) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
         ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
@@ -454,25 +445,27 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
 }
 fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     let v1 = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let v2 = build_public_test_schema(
         PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
         ),
     );
-    let v2 = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text),
-    ));
     let v3 = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("name", PublicColumnType::Text)),
+    );
+    let v4 = build_public_test_schema(
         PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("name", PublicColumnType::Text),
+            PublicTableSchemaBuilder::new("todos")
+                .column("name", PublicColumnType::Text)
+                .column("search_name", PublicColumnType::Text),
         ),
     );
-    let v4 = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("name", PublicColumnType::Text)
-            .column("search_name", PublicColumnType::Text),
-    ));
     let lenses = vec![
         MigrationLens::new(
             v1.version_id(),
@@ -485,7 +478,8 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     default: v(""),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         MigrationLens::new(
             v2.version_id(),
             v3.version_id(),
@@ -503,7 +497,8 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         MigrationLens::new(
             v3.version_id(),
             v4.version_id(),
@@ -515,16 +510,19 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     to: "search_name".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
     ];
     ([v1, v2, v3, v4], lenses)
 }
 fn catalogue_evolved_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    )
 }
 
 #[derive(Clone)]
@@ -549,11 +547,21 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
         self.inner.get(cf, key)
     }
 
-    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<Vec<u8>>, groove::storage::Error>> {
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<Vec<u8>>, groove::storage::Error>> {
         self.inner.put_if_absent(cf, key, value)
     }
 
-    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
         self.inner.compare_and_delete(cf, key, expected)
     }
 
@@ -574,7 +582,13 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
         self.inner.delete(cf, key)
     }
 
-    fn scan(&self, request: groove::storage::ScanRequest) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+    fn scan(
+        &self,
+        request: groove::storage::ScanRequest,
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<groove::storage::StorageScan<'_>, groove::storage::Error>,
+    > {
         self.inner.scan(request)
     }
 
@@ -582,7 +596,10 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
         &self,
         cf: String,
         prefix: Vec<u8>,
-    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<Option<groove::storage::KeyValue>, groove::storage::Error>,
+    > {
         self.inner.last_with_prefix(cf, prefix)
     }
 
@@ -591,7 +608,10 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
         cf: String,
         prefix: Vec<u8>,
         upper: Vec<u8>,
-    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<Option<groove::storage::KeyValue>, groove::storage::Error>,
+    > {
         self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
     }
 
@@ -627,7 +647,7 @@ fn open_reopen_refusing_node_with_schema(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = ReopenRefusingMemoryStorage::new(&refs);
-    NodeState::new(node_uuid, schema, storage).unwrap()
+    NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap()
 }
 
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
@@ -636,7 +656,7 @@ fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node(1), schema, storage).unwrap();
+    let node = NodeState::new_with_shared_test_catalogue(node(1), schema, storage).unwrap();
     (temp_dir, node)
 }
 fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
@@ -645,14 +665,14 @@ fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<Roc
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
 }
 fn open_node_at(temp_dir: &tempfile::TempDir, schema: JazzSchema) -> NodeState<RocksDbStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    NodeState::new(node(1), schema, storage).unwrap()
+    NodeState::new_with_shared_test_catalogue(node(1), schema, storage).unwrap()
 }
 fn reopen_node_at(
     temp_dir: &tempfile::TempDir,
@@ -662,7 +682,7 @@ fn reopen_node_at(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    NodeState::new(node_uuid, schema, storage).unwrap()
+    NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap()
 }
 fn open_history_complete_node_at(
     temp_dir: &tempfile::TempDir,
@@ -692,7 +712,7 @@ fn open_node_with_schema(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
 }
 fn open_history_complete_node_with_schema(
@@ -707,39 +727,38 @@ fn open_history_complete_node_with_schema(
     (temp_dir, node)
 }
 fn two_column_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    )
 }
 
 fn todos_notes_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
     )
 }
 
 fn renamed_tasks_schema() -> JazzSchema {
     build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text)),
     )
 }
 
 fn evolved_todos_name_body_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("name", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("name", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ),
+    )
 }
 
 fn catalogue_v3_schema() -> JazzSchema {
@@ -762,13 +781,8 @@ fn projected_reachable_schema(
 ) -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("docs")
-                    .column(doc_column, PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("docs").column(doc_column, PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new(edge_table)
                     .fk_column("member", "teams")
@@ -936,43 +950,22 @@ impl PerNodeKnowledge {
 
     fn record_view_delivery(&mut self, message: &SyncMessage) {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            reset_result_set,
-            version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            supporting_rows: program_fact_adds,
             ..
         }) = message
         else {
             return;
         };
         let normalized_bundles = version_bundles_for_update(message);
-        // Keep this condition in sync with NodeState::apply_view_update in
-        // node/views.rs: empty resets against non-empty shared state are
-        // coverage stamps, not replacement snapshots. Sanctioned by reviewer
-        // instruction for the Plan 5 close-out seed 2210401 diagnosis.
-        let empty_reset = *reset_result_set
-            && version_carriers.is_empty()
-            && peer_payload_inventory.complete_tx_payloads.is_empty()
-            && result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty();
-        let preserve_existing_shared_state =
-            empty_reset && !self.subscription_entries.is_empty();
-        if *reset_result_set && !preserve_existing_shared_state {
+        // Every completed frame replaces the whole subscription input set,
+        // including empty snapshots. Pending opening frames do not replace it.
+        if !peer_payload_inventory.opening_pending {
             self.subscription_entries.clear();
         }
         let result_add_keys = program_fact_adds
             .iter()
-            .filter_map(|fact| match fact {
-                crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                    Some((input.version.tx, input.source_row))
-                }
-                _ => None,
-            })
+            .map(|input| (input.version.tx, input.row))
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
         for bundle in &normalized_bundles {
@@ -986,17 +979,8 @@ impl PerNodeKnowledge {
                 }
             }
         }
-        for fact in program_fact_adds {
-            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
-                self.subscription_entries
-                    .insert((input.version.tx, input.source_row));
-            }
-        }
-        for fact in program_fact_removes {
-            if let crate::protocol::ProgramFactEntry::CoveredInput(input) = fact {
-                self.subscription_entries
-                    .remove(&(input.version.tx, input.source_row));
-            }
+        for input in program_fact_adds {
+            self.subscription_entries.insert((input.version.tx, input.row));
         }
         for bundle in &normalized_bundles {
             if usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len()) {
@@ -1061,10 +1045,12 @@ fn assert_global_rows_match_known_oracle(
 fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<RocksDbStorage>) {
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
-        program_fact_adds,
-        result_member_adds,
-        result_member_removes,
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -1074,17 +1060,11 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         complete_tx_payload_refs.is_empty(),
         "full view recomputation should carry bundles for every visible member"
     );
-    assert!(
-        result_member_adds.is_empty() && result_member_removes.is_empty(),
-        "peer current-row updates carry receiver source closure, never authority result members"
-    );
     let result_rows = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
-            {
-                Some(input.source_row)
+            input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
+                Some(input.row)
             }
             _ => None,
         })
@@ -1355,11 +1335,8 @@ where
     register_shape_binding(node, &shape, &binding);
 }
 
-fn register_shape_binding<S>(
-    node: &mut NodeState<S>,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) where
+fn register_shape_binding<S>(node: &mut NodeState<S>, shape: &ValidatedQuery, binding: &Binding)
+where
     S: OrderedKvStorage + ReopenableStorage,
 {
     node.apply_sync_message_settled(SyncMessage::RegisterShape {
@@ -1378,8 +1355,8 @@ fn register_shape_binding<S>(
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-        read_view: Default::default(),
-},
+            read_view: Default::default(),
+        },
         values,
         known_state: None,
         delegated_session: None,
@@ -1443,7 +1420,7 @@ fn commit_core_owner_fixture(
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -1456,10 +1433,7 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     // row may escape merely because it contributed to an authorized result.
     let covered_rows = program_fact_adds
         .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
-            _ => None,
-        })
+        .map(|input| input.row)
         .collect::<BTreeSet<_>>();
     assert_eq!(covered_rows, expected_rows, "covered closure rows differ");
     let shipped_rows = version_bundles
@@ -1469,7 +1443,10 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     assert_eq!(shipped_rows, expected_rows, "covered source bodies differ");
 }
 fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
-    if !matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })) {
+    if !matches!(
+        update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
+    ) {
         panic!("expected view update");
     }
     let version_bundles = version_bundles_for_update(update);
@@ -1488,10 +1465,11 @@ fn assert_policy_subscription_rows(
         .subscription_current_rows("todos", DurabilityTier::Local)
         .unwrap();
     assert!(!rows.is_empty());
-    assert!(rows
-        .iter()
-        .all(|row| row.cell(&owner_policy_schema().tables[0], "owner")
-            == Some(Value::Uuid(identity.test_uuid()))));
+    assert!(
+        rows.iter()
+            .all(|row| row.cell(&owner_policy_schema().tables[0], "owner")
+                == Some(Value::Uuid(identity.test_uuid())))
+    );
 }
 fn enqueue_rehydrate_with_dedup_assertion(
     peer: &mut PeerState,
@@ -1559,12 +1537,7 @@ fn node_summary(node: &mut NodeState<RocksDbStorage>, tx_ids: &BTreeSet<TxId>) -
         global_rows: node.current_rows("todos", DurabilityTier::Global).unwrap(),
         transaction_records: tx_ids
             .iter()
-            .map(|tx_id| {
-                (
-                    *tx_id,
-                    crate::db::block_on(node.transaction_record(*tx_id)),
-                )
-            })
+            .map(|tx_id| (*tx_id, crate::db::block_on(node.transaction_record(*tx_id))))
             .collect(),
         sync_metrics: node.sync_metrics().clone(),
     }
@@ -1863,17 +1836,14 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     .commit_exclusive(tx_id, made_by, 1_200 + rng.choose(12) as u64)
                     .unwrap();
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
-                let child_commit = MergeableCommit::new(
-                    "todos",
-                    parent_row,
-                    1_300 + rng.choose(12) as u64,
-                )
-                .parents(vec![parent_ref])
-                .made_by(made_by)
-                .cells(owner_cells_with_author(
-                    owner,
-                    format!("child-{commits_started}-{}", rng.next_u64() % 1_000),
-                ));
+                let child_commit =
+                    MergeableCommit::new("todos", parent_row, 1_300 + rng.choose(12) as u64)
+                        .parents(vec![parent_ref])
+                        .made_by(made_by)
+                        .cells(owner_cells_with_author(
+                            owner,
+                            format!("child-{commits_started}-{}", rng.next_u64() % 1_000),
+                        ));
                 let (child_publication, child_message) =
                     writer.commit_mergeable_unit(child_commit).unwrap();
                 let child_ref = settle_published(writer, child_publication).unwrap();
@@ -2100,7 +2070,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         author_b,
     );
     for node in [&mut writer_a, &mut writer_b, &mut core] {
-        for table in node.catalogue.schema.tables
+        for table in node
+            .catalogue
+            .schema
+            .tables
             .iter()
             .map(|table| table.name.clone())
             .collect::<Vec<_>>()
@@ -2166,9 +2139,21 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
 }
 
 // Rejection tests must observe active authority receipts, not removed binding-view shadows.
-fn authority_hydration_receipts(node: &NodeState<RocksDbStorage>) -> (BTreeSet<AuthorityResultKey>, BTreeSet<AuthorityResultKey>) {
+fn authority_hydration_receipts(
+    node: &NodeState<RocksDbStorage>,
+) -> (BTreeSet<AuthorityResultKey>, BTreeSet<AuthorityResultKey>) {
     (
-        node.query.authority_results.iter().filter(|(_, state)| state.initial_hydration).map(|(key, _)| key.clone()).collect(),
-        node.query.authority_results.iter().filter(|(_, state)| state.deferred_publication).map(|(key, _)| key.clone()).collect(),
+        node.query
+            .authority_results
+            .iter()
+            .filter(|(_, state)| state.initial_hydration)
+            .map(|(key, _)| key.clone())
+            .collect(),
+        node.query
+            .authority_results
+            .iter()
+            .filter(|(_, state)| state.deferred_publication)
+            .map(|(key, _)| key.clone())
+            .collect(),
     )
 }

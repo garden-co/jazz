@@ -111,7 +111,7 @@ fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_s
         .unwrap();
     let mut peer = PeerState::client_link(author);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     assert_eq!(
         adds.into_iter()
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
@@ -119,7 +119,6 @@ fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_s
         BTreeSet::from([row(0xa0)]),
         "query-engine maintained rows should route by retained query and policy claim params"
     );
-    assert!(removes.is_empty());
 }
 
 #[test]
@@ -206,14 +205,13 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     assert_eq!(
         adds.into_iter()
             .map(|(_table, row_uuid, tx_id)| (row_uuid, tx_id))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(row(0xa0), tx_a), (row(0xa1), tx_b)])
     );
-    assert!(removes.is_empty());
 }
 
 #[test]
@@ -284,7 +282,7 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
         .unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     assert_eq!(
         adds.into_iter()
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
@@ -292,7 +290,6 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
         BTreeSet::from([todo]),
         "the two authorization occurrences materialize as one public todo",
     );
-    assert!(removes.is_empty());
 }
 
 #[test]
@@ -345,14 +342,13 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
     let update = peer
         .rehydrate_query(&mut core, &retained_shape, &retained_binding)
         .unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     assert_eq!(
         adds.into_iter()
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
             .collect::<BTreeSet<_>>(),
         expected_rows
     );
-    assert!(removes.is_empty());
 }
 
 #[test]
@@ -406,14 +402,13 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
     let mut peer = PeerState::client_link(author);
     core.reset_query_engine_read_metrics();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     assert_eq!(
         adds.into_iter()
             .map(|(_table, row_uuid, _tx_id)| row_uuid)
             .collect::<BTreeSet<_>>(),
         full_recompute_rows
     );
-    assert!(removes.is_empty());
     let maintained_metrics = core.query_engine_read_metrics();
     assert!(maintained_metrics.policy_authorization_graphs > 0);
     assert!(maintained_metrics.policy_authorized_source_joins > 0);
@@ -477,7 +472,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows(&initial),
-        (Vec::new(), Vec::new())
+        Vec::<ResultRowEntry>::new()
     );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 1);
 
@@ -493,13 +488,10 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows(&grant),
-        (
-            vec![
+        vec![
                 ("members".to_owned().into(), member_row, visible_member_tx),
                 ("sharedTodos".to_owned().into(), todo_row, todo_tx),
-            ],
-            Vec::new(),
-        )
+            ]
     );
     assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
@@ -516,13 +508,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows(&revoke),
-        (
-            Vec::new(),
-            vec![
-                ("members".to_owned().into(), member_row, visible_member_tx),
-                ("sharedTodos".to_owned().into(), todo_row, todo_tx),
-            ],
-        )
+        Vec::<ResultRowEntry>::new()
     );
     assert_retraction_without_replacement_leak(
         &revoke,
@@ -629,10 +615,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&initial, "entries"),
-        (
-            vec![("entries".to_owned().into(), entry, entry_tx)],
-            Vec::new()
-        )
+        vec![("entries".to_owned().into(), entry, entry_tx)]
     );
     let _stable = peer.query_update(&mut core, &shape, &binding).unwrap();
 
@@ -642,9 +625,9 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             .deletion(DeletionEvent::Deleted),
     );
     let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let (_, first_revoke_entry_removes) =
+    let first_revoke_entries =
         canonical_view_update_rows_for_table(&first_revoke, "entries");
-    assert!(first_revoke_entry_removes.is_empty());
+    assert_eq!(first_revoke_entries, vec![("entries".to_owned().into(), entry, entry_tx)]);
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
             .unwrap()
@@ -660,15 +643,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             .deletion(DeletionEvent::Deleted),
     );
     let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let (_, last_revoke_entry_removes) =
-        canonical_view_update_rows_for_table(&last_revoke, "entries");
-    assert_eq!(
-        last_revoke_entry_removes
-            .iter()
-            .map(|(_, row, _)| *row)
-            .collect::<Vec<_>>(),
-        vec![entry]
-    );
+    assert!(canonical_view_update_rows_for_table(&last_revoke, "entries").is_empty());
     assert!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
             .unwrap()
@@ -683,7 +658,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
         ])),
     );
     let regrant = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let (regrant_entry_adds, _) = canonical_view_update_rows_for_table(&regrant, "entries");
+    let regrant_entry_adds = canonical_view_update_rows_for_table(&regrant, "entries");
     assert_eq!(
         regrant_entry_adds
             .iter()
@@ -748,7 +723,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     let shifted_down = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_view_update_rows(
         shifted_down,
-        [("todos", first, first_tx)],
+        [("todos", first, first_tx), ("todos", second, second_tx)],
         [("todos", third, third_tx)],
     );
 
@@ -760,7 +735,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_view_update_rows(
         shifted_back,
-        [("todos", third, third_tx)],
+        [("todos", second, second_tx), ("todos", third, third_tx)],
         [("todos", first, first_tx)],
     );
 
@@ -772,7 +747,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_view_update_rows(
         fill_from_tail,
-        [("todos", fourth, fourth_tx)],
+        [("todos", third, third_tx), ("todos", fourth, fourth_tx)],
         [("todos", second, second_tx)],
     );
 

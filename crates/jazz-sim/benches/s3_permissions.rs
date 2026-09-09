@@ -435,7 +435,7 @@ struct Client {
     _dir: tempfile::TempDir,
     peer: PeerState,
     registered_subscriptions: BTreeSet<SubscriptionKey>,
-    covered_inputs: BTreeSet<jazz::protocol::CoveredInputEntry>,
+    covered_inputs: BTreeSet<jazz::protocol::SupportingRow>,
     visible_rows: BTreeSet<RowUuid>,
 }
 
@@ -1010,24 +1010,11 @@ fn revoke_phase(
     apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
     let update = block_on(client.peer.query_update(&mut edge.node, shape, binding)).unwrap();
     let query_update_us = query_start.elapsed().as_micros() as u64;
-    let removed = match &update {
-        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_removes,
-            ..
-        }) => program_fact_removes
-            .iter()
-            .filter_map(|fact| match fact {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
-                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
-                {
-                    Some(input.source_row)
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>()
-            .len(),
-        _ => 0,
-    };
+    let next_rows = result_rows(&update, &shape.query().table)
+        .into_iter()
+        .map(|entry| entry.1)
+        .collect::<BTreeSet<_>>();
+    let removed = client.visible_rows.difference(&next_rows).count();
     assert!(
         removed >= hidden,
         "revocation expected at least {hidden} removals, got {removed}: {update:?}"
@@ -1038,7 +1025,7 @@ fn revoke_phase(
     let send_recv_us = send_start.elapsed().as_micros() as u64;
     let apply_start = Instant::now();
     ensure_client_subscription_registered(client, shape, binding);
-    apply_client_update(client, delivered.message);
+    apply_client_update(client, delivered.message, &shape.query().table);
     let apply_us = apply_start.elapsed().as_micros() as u64;
     let mut disappearance = Histogram::new(3).unwrap();
     disappearance
@@ -1091,11 +1078,11 @@ fn forbidden_write_phase(
     apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
     hydrate_edge_policy(ctx, core, edge);
     let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
-    let forbidden = result_rows(&update).len() as u64;
+    let forbidden = result_rows(&update, &shape.query().table).len() as u64;
     ctx.send(&edge.name, &spy.name, update);
     let delivered = ctx.recv(&spy.name);
     ensure_client_subscription_registered(spy, shape, binding);
-    apply_client_update(spy, delivered.message);
+    apply_client_update(spy, delivered.message, &shape.query().table);
     for tick in 0..env_usize("JAZZ_S3_SPY_TICKS", 3) {
         commit_global(
             ctx,
@@ -1119,8 +1106,8 @@ fn forbidden_write_phase(
         apply_sync_message_settled(&mut edge.node, delivered_to_edge.message).unwrap();
         hydrate_edge_policy(ctx, core, edge);
         let update = block_on(spy.peer.query_update(&mut edge.node, shape, binding)).unwrap();
-        if !result_rows(&update).is_empty() {
-            return forbidden + result_rows(&update).len() as u64;
+        if !result_rows(&update, &shape.query().table).is_empty() {
+            return forbidden + result_rows(&update, &shape.query().table).len() as u64;
         }
     }
     forbidden
@@ -1193,13 +1180,16 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
     core.reset_storage_read_metrics();
     let grant_update = block_on(simple.peer.query_update(&mut core, &shape, &binding)).unwrap();
     let grant_view_reads = core.take_storage_read_metrics();
-    let grant_rows = result_rows(&grant_update)
-        .iter()
-        .filter(|entry| entry.0.as_str() == BLOCKS)
-        .count();
+    let granted_snapshot = result_rows(&grant_update, BLOCKS)
+        .into_iter()
+        .map(|entry| entry.1)
+        .collect::<BTreeSet<_>>();
     ctx.send("core", "simple", grant_update);
     let delivered = ctx.recv("simple");
     apply_sync_message_settled(&mut simple.node, delivered.message).unwrap();
+    // This fixture has one BLOCKS root and distinct page support. Count
+    // supporting root-row changes; unscoped cache queries are not this view.
+    let grant_rows = granted_snapshot.difference(&fixture.visible).count();
     let grant_appearance_us = (ctx.now_ms() - grant_start) * 1_000;
     assert_eq!(grant_rows, grant_subtree.len());
 
@@ -1222,13 +1212,14 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
     core.reset_storage_read_metrics();
     let revoke_update = block_on(simple.peer.query_update(&mut core, &shape, &binding)).unwrap();
     let revoke_view_reads = core.take_storage_read_metrics();
-    let revoke_rows = result_rows(&revoke_update)
-        .iter()
-        .filter(|entry| entry.0.as_str() == BLOCKS)
-        .count();
+    let revoked_snapshot = result_rows(&revoke_update, BLOCKS)
+        .into_iter()
+        .map(|entry| entry.1)
+        .collect::<BTreeSet<_>>();
     ctx.send("core", "simple", revoke_update);
     let delivered = ctx.recv("simple");
     apply_sync_message_settled(&mut simple.node, delivered.message).unwrap();
+    let revoke_rows = granted_snapshot.difference(&revoked_snapshot).count();
     let revoke_disappearance_us = (ctx.now_ms() - revoke_start) * 1_000;
     assert_eq!(revoke_rows, revoke_subtree.len());
 
@@ -1978,11 +1969,11 @@ fn hydrate(
     let view_read_metrics = edge.node.take_storage_read_metrics();
     let bytes = view_update_bytes(&update);
     let floor_bytes = bytes_floor(&update);
-    let output_rows = result_rows(&update).len();
+    let output_rows = result_rows(&update, &shape.query().table).len();
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
     ensure_client_subscription_registered(client, shape, binding);
-    apply_client_update(client, delivered.message);
+    apply_client_update(client, delivered.message, &shape.query().table);
     HydrateSummary {
         latency_us: (ctx.now_ms() - start) * 1_000,
         bytes,
@@ -2007,11 +1998,11 @@ fn hydrate_direct(
     let view_read_metrics = core.take_storage_read_metrics();
     let bytes = view_update_bytes(&update);
     let floor_bytes = bytes_floor(&update);
-    let output_rows = result_rows(&update).len();
+    let output_rows = result_rows(&update, &shape.query().table).len();
     ctx.send("core", &client.name, update);
     let delivered = ctx.recv(&client.name);
     ensure_client_subscription_registered(client, shape, binding);
-    apply_client_update(client, delivered.message);
+    apply_client_update(client, delivered.message, &shape.query().table);
     HydrateSummary {
         latency_us: (ctx.now_ms() - start) * 1_000,
         bytes,
@@ -2047,37 +2038,22 @@ fn deliver_update(
     ctx.send(&edge.name, &client.name, update);
     let delivered = ctx.recv(&client.name);
     ensure_client_subscription_registered(client, shape, binding);
-    apply_client_update(client, delivered.message);
+    apply_client_update(client, delivered.message, &shape.query().table);
 }
 
-fn apply_client_update(client: &mut Client, message: SyncMessage) {
+fn apply_client_update(client: &mut Client, message: SyncMessage, table: &str) {
     if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        reset_result_set,
-        program_fact_adds,
-        program_fact_removes,
-        ..
+        supporting_rows, ..
     }) = &message
     {
-        if *reset_result_set {
-            client.covered_inputs.clear();
-        }
-        for fact in program_fact_removes {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
-                client.covered_inputs.remove(input);
-            }
-        }
-        for fact in program_fact_adds {
-            if let jazz::protocol::ProgramFactEntry::CoveredInput(input) = fact {
-                client.covered_inputs.insert(input.clone());
-            }
-        }
-        // Direct-peer receipts inspect authorized root coverage, not a second
-        // result evaluator. The Db scenario below asserts application output.
+        // Each update replaces the full subscription snapshot, even when empty.
+        client.covered_inputs = supporting_rows.iter().cloned().collect();
+        // This fixture knows its query table; wire rows carry no source roles.
         client.visible_rows = client
             .covered_inputs
             .iter()
-            .filter(|input| input.source.path == [jazz::protocol::ProgramSourceRole::Root])
-            .map(|input| input.source_row)
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| input.row)
             .collect();
     }
     apply_sync_message_settled(&mut client.node, message).unwrap();
@@ -2609,7 +2585,7 @@ fn edge_acceptance_phase(
         block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
     let hydration_bytes = view_update_bytes(&scope_update);
     let hydration_floor_bytes = bytes_floor(&scope_update);
-    let hydration_rows = result_rows(&scope_update).len();
+    let hydration_rows = result_rows(&scope_update, &scope_shape.query().table).len();
     ctx.send("core", &edge.name, scope_update);
     let delivered_scope = ctx.recv(&edge.name);
     apply_sync_message_settled(&mut edge.node, delivered_scope.message).unwrap();
@@ -2812,7 +2788,10 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (dir, node)
 }
 
@@ -2968,27 +2947,14 @@ fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
     client.visible_rows.clone()
 }
 
-fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
+fn result_rows(update: &SyncMessage, table: &str) -> Vec<ResultRowEntry> {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .chain(program_fact_removes.iter())
-            .filter_map(|entry| match entry {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
-                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
-                {
-                    Some((
-                        input.version_table.clone(),
-                        input.source_row,
-                        input.version.tx,
-                    ))
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| (input.version_table.clone(), input.row, input.version.tx))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
@@ -2999,10 +2965,7 @@ fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_carriers,
-            result_member_adds,
-            result_member_removes,
-            ..
+            version_carriers, ..
         }) => {
             let bundles = version_bundle_refs(version_carriers)
                 .map(|bundle| {
@@ -3013,7 +2976,7 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                         .sum::<usize>()
                 })
                 .sum::<usize>();
-            (bundles + (result_member_adds.len() + result_member_removes.len()) * 48) as u64
+            bundles as u64
         }
         _ => 0,
     }

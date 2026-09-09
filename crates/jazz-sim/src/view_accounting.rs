@@ -1,8 +1,7 @@
 //! Shared simulation accounting for sync-message row delivery payloads.
 
 use jazz::protocol::{
-    ResultMemberEntry, SyncMessage, VersionBundleRef, VersionCarrier, VersionRecord,
-    ViewUpdatePayload,
+    SyncMessage, VersionBundleRef, VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::tx::Transaction;
 
@@ -12,14 +11,10 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             version_carriers_bytes(version_carriers)
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
-                + result_rows_bytes(result_member_adds)
-                + result_rows_bytes(result_member_removes)
         }
         SyncMessage::CommitUnit { tx, versions } => {
             transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
@@ -35,6 +30,10 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
                     })
                     .sum::<u64>()
         }
+        SyncMessage::CurrentRowsReceipt(receipt) => {
+            version_carriers_bytes(&receipt.version_carriers)
+        }
+        SyncMessage::CurrentRowsRequest(_) | SyncMessage::CurrentRowsCancel { .. } => 0,
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
@@ -82,8 +81,6 @@ pub fn bytes_floor(update: &SyncMessage) -> u64 {
 fn scope_view_update_bytes(view: &ViewUpdatePayload) -> u64 {
     version_carriers_bytes(&view.version_carriers)
         + (view.peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
-        + result_rows_bytes(&view.result_member_adds)
-        + result_rows_bytes(&view.result_member_removes)
 }
 
 fn scope_view_bytes_floor(view: &ViewUpdatePayload) -> u64 {
@@ -137,13 +134,6 @@ fn transaction_wire_bytes(tx: &Transaction) -> u64 {
             .map_or(0, |metadata| metadata.len() as u64)
 }
 
-fn result_rows_bytes(rows: &[ResultMemberEntry]) -> u64 {
-    rows.iter()
-        .filter_map(|entry| entry.as_row())
-        .map(|(table, _, _)| table.len() as u64 + 16 + tx_id_wire_bytes())
-        .sum()
-}
-
 fn tx_id_wire_bytes() -> u64 {
     8 + 16
 }
@@ -195,7 +185,6 @@ mod tests {
                 read_view: ReadViewKey::default(),
             },
             settled_through: GlobalTime::default(),
-            reset_result_set: false,
             version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx: Transaction {
                     tx_id,
@@ -217,10 +206,7 @@ mod tests {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
+            supporting_rows: Vec::new(),
         });
         let nested_bytes = view_update_bytes(&nested);
         let nested_floor = bytes_floor(&nested);

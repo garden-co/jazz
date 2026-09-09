@@ -56,6 +56,13 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// The node and admitted author identity owned by this database handle.
+    /// Transport bindings use the author here, never an identity synthesized
+    /// from the independently allocated node UUID.
+    pub fn identity(&self) -> DbIdentity {
+        self.identity
+    }
+
     /// Test-only simulation of a live catalogue change that invalidates
     /// prepared Groove handles while preserving received authority state.
     #[cfg(any(test, feature = "testing"))]
@@ -83,6 +90,12 @@ where
     #[doc(hidden)]
     pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
+    }
+
+    /// Core-shell capability; partial caches and relays must leave it disabled.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+        self.node.enable_authoritative_scalar_exit_refresh();
     }
 
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
@@ -628,6 +641,16 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Order a binding read after mutations already admitted on this owner.
+    /// This only waits for local command execution, not persistence or sync,
+    /// and later writes cannot extend the wait.
+    #[doc(hidden)]
+    pub fn queued_mutation_barrier(
+        &self,
+    ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
+        self.node.queued_mutation_barrier()
+    }
+
     /// Observe a ready queued staging failure without consuming its transaction
     /// poison. A subsequent commit must report the same rejected transaction.
     #[doc(hidden)]
@@ -991,6 +1014,21 @@ where
             connection_epoch,
             outbound,
         }
+    }
+
+    /// Exact catalogue coordinate for synthetic upstream wire fixtures.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn physical_table_identity_for_test(
+        &self,
+        schema: crate::ids::SchemaVersionId,
+        table: &str,
+    ) -> Result<crate::ids::GlobalPhysicalTableId, String> {
+        self.node
+            .node()
+            .borrow()
+            .local_availability_table_id(schema, table)
+            .map_err(|error| error.to_string())
     }
 
     /// Stage one protocol frame on the exactly selected test upstream.

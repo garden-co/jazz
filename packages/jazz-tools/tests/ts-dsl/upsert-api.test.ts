@@ -125,9 +125,9 @@ describe("TS Upsert API", () => {
 
   it("fails when trying to insert a row with missing required fields", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    expect(() => db.upsert(app.todos, id, { done: true })).toThrow(
-      'Upsert failed: WriteError("encoding error: missing required field `title` on table `todos`")',
-    );
+    const write = db.upsert(app.todos, id, { done: true });
+    await expect(write.wait({ tier: "local" })).rejects.toThrow(/missing required field.*title/);
+    expect(await db.one(app.todos.where({ id: { eq: id } }))).toBeNull();
   });
 
   it("uses default values missing from upsert data when creating a row", async () => {

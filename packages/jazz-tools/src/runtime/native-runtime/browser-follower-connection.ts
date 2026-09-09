@@ -41,6 +41,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly pendingFrames: Uint8Array[][] = [];
   private readonly readyPromise: Promise<void>;
   private inspectorAttachmentPhysicalDbName: string | null = null;
+  private peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
@@ -86,7 +87,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       ...(inspectorBinding ? { inspectorBinding } : {}),
     });
     const connected = (async () => {
-      const transport = await runtime.connectUpstreamPeer();
+      await initialized;
+      const transport = await runtime.connectUpstreamPeer(this.peerAuthority);
       if (this.closed || this.failed) {
         await runtime.retirePeerTransport(transport);
         throw this.failed ?? new Error("Browser follower connection is closed");
@@ -292,7 +294,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
-    if (message.type === "inspector-binding") return;
+    if (message.type === "inspector-binding" || message.type === "inspector-query-result") return;
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
@@ -300,6 +302,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
       this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
+      if (pending.type === "init") this.peerAuthority = message.peerAuthority;
       pending.resolve();
     }
   };

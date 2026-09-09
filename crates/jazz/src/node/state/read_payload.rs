@@ -2,9 +2,11 @@
 /// may disclose only exact row versions in their durable authority ledger;
 /// they never re-evaluate a foreground's read policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RowVersionRepairAuthorization {
+pub(crate) enum RowVersionRepairAuthorization<'a> {
     EnforceReadPolicy(AuthorSubject),
     RetainedScopeLedger,
+    /// Exact references whose current physical rows a selected Core authorized.
+    VerifiedCurrentRows(&'a [(RowVersionRef, crate::protocol::CurrentRowCoordinate)]),
 }
 
 impl<S> NodeState<S>
@@ -251,111 +253,198 @@ where
         VersionRecord::from_stored(version, &table, schema_version, authored_columns)
     }
 
+    /// Resolve a projected repair name to the current name of its exact body
+    /// lineage. Reusing a logical name never grants its older physical table.
+    pub(crate) async fn current_row_coordinate_for_repair(
+        &mut self,
+        request: &RowVersionRef,
+    ) -> Result<crate::protocol::CurrentRowCoordinate, Error> {
+        if let Ok(coordinate) = self.current_row_coordinate(&request.table, request.row_uuid) {
+            return Ok(coordinate);
+        }
+        let candidates = self.catalogue.physical_mappings.values()
+            .filter_map(|mapping| mapping.tables.get(request.table.as_str()).map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        let versions = self.query_versions_for_tx(request.tx_id()).await?;
+        let mut tables = BTreeSet::new();
+        for version in versions {
+            if version.row_uuid() == request.row_uuid {
+                let table = self.physical_table_id_for_version(&version)?;
+                if candidates.contains(&table) { tables.insert(table); }
+            }
+        }
+        let [table] = tables.into_iter().collect::<Vec<_>>()[..] else {
+            return Err(Error::InvalidStoredValue("repair coordinate has no unique current lineage"));
+        };
+        let name = self.catalogue.physical_mappings[&self.catalogue.current_schema_version_id]
+            .tables.iter().find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
+            .ok_or(Error::InvalidStoredValue("repair lineage is not in the current schema"))?;
+        self.current_row_coordinate(&name, request.row_uuid)
+    }
+
     pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
-        authorization: RowVersionRepairAuthorization,
+        authorization: RowVersionRepairAuthorization<'_>,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
+        let mut requests_by_tx = BTreeMap::<TxId, BTreeSet<&RowVersionRef>>::new();
         for request in requests {
-            // A repair request names the receiver's projected table.  The
-            // stored body, however, remains canonically authored under the
-            // table name from its source schema.  Match the two through the
-            // catalogue's durable physical identity, rather than requiring
-            // those logical names to be equal.
-            //
-            // A reused logical name is ambiguous by itself, but the complete
-            // repair reference also names the row and transaction. Resolve
-            // that body first and require it to identify exactly one of the
-            // physical lineages which carried the requested logical name.
-            let candidate_mappings = self
-                .catalogue
-                .physical_mappings
+            requests_by_tx
+                .entry(request.tx_id())
+                .or_default()
+                .insert(request);
+        }
+        for (tx_id, requests) in requests_by_tx {
+            // A transaction may contain hundreds of requested rows. Decode it
+            // once, and index only requested rows, rather than decoding and
+            // scanning the whole transaction once per requested coordinate.
+            // Process one transaction at a time so unrelated siblings are not
+            // retained across the entire repair batch.
+            let requested_rows = requests
                 .iter()
-                .filter_map(|(schema_version, mapping)| {
-                    mapping
-                        .tables
-                        .get(request.table.as_str())
-                        .map(|mapping| (*schema_version, mapping.table_id))
-                })
-                .collect::<Vec<_>>();
-            if candidate_mappings.is_empty() {
-                return Err(Error::TableNotFound(request.table.to_string()));
-            }
-            let tx_id = request.tx_id();
-            let matching_versions = self
-                .query_versions_for_tx(tx_id)
-                .await?
-                .into_iter()
-                .filter_map(|version| {
-                    let table_id = self.physical_table_id_for_version(&version).ok()?;
-                    (version.row_uuid() == request.row_uuid
-                        && version.tx_time() == request.tx_time
-                        && self.node_for_alias(version.tx_node_alias()) == Some(request.tx_node_id)
-                        && candidate_mappings
-                            .iter()
-                            .any(|(_, candidate)| *candidate == table_id))
-                    .then_some((table_id, version))
-                })
-                .collect::<Vec<_>>();
-            let matching_table_ids = matching_versions
-                .iter()
-                .map(|(table_id, _)| *table_id)
+                .map(|request| request.row_uuid)
                 .collect::<BTreeSet<_>>();
-            let [requested_table_id] = matching_table_ids.iter().copied().collect::<Vec<_>>()[..]
-            else {
-                return Err(Error::InvalidStoredValue(
-                    "repair request row maps to zero or multiple physical tables",
-                ));
-            };
-            let request_schema = [
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_schema_version_id,
-            ]
-            .into_iter()
-            .find(|schema_version| {
-                candidate_mappings
-                    .iter()
-                    .any(|(candidate_schema, table_id)| {
-                        candidate_schema == schema_version && *table_id == requested_table_id
-                    })
-            })
-            .or_else(|| {
-                candidate_mappings
-                    .iter()
-                    .find_map(|(schema_version, table_id)| {
-                        (*table_id == requested_table_id).then_some(*schema_version)
-                    })
-            })
-            .ok_or(Error::InvalidStoredValue(
-                "repair request physical table must have a schema mapping",
-            ))?;
-            match authorization {
-                RowVersionRepairAuthorization::EnforceReadPolicy(identity) => {
-                    if !self.dry_run_read_current_allows_in_schema(
-                        &request.table,
-                        request.row_uuid,
-                        request_schema,
-                        identity,
-                    )
-                    .await?
-                    {
-                        continue;
-                    }
-                }
-                RowVersionRepairAuthorization::RetainedScopeLedger => {
-                    if !self
-                        .scope_relay_repair_ledger_contains(requested_table_id, request)
-                        .await?
-                    {
-                        continue;
-                    }
+            let mut versions_by_row =
+                BTreeMap::<RowUuid, Vec<(PhysicalTableId, VersionRow)>>::new();
+            for version in self.query_versions_for_tx(tx_id).await? {
+                if requested_rows.contains(&version.row_uuid())
+                    && let Ok(table_id) = self.physical_table_id_for_version(&version)
+                {
+                    versions_by_row
+                        .entry(version.row_uuid())
+                        .or_default()
+                        .push((table_id, version));
                 }
             }
-            for (table_id, version) in matching_versions {
-                if table_id == requested_table_id {
-                    by_tx.entry(tx_id).or_default().push(version);
-                    break;
+            for request in requests {
+                // A repair request names the receiver's projected table.  The
+                // stored body, however, remains canonically authored under the
+                // table name from its source schema.  Match the two through the
+                // catalogue's durable physical identity, rather than requiring
+                // those logical names to be equal.
+                //
+                // A reused logical name is ambiguous by itself, but the complete
+                // repair reference also names the row and transaction. Resolve
+                // that body first and require it to identify exactly one of the
+                // physical lineages which carried the requested logical name.
+                let candidate_mappings = self
+                    .catalogue
+                    .physical_mappings
+                    .iter()
+                    .filter_map(|(schema_version, mapping)| {
+                        mapping
+                            .tables
+                            .get(request.table.as_str())
+                            .map(|mapping| (*schema_version, mapping.table_id))
+                    })
+                    .collect::<Vec<_>>();
+                if candidate_mappings.is_empty() {
+                    return Err(Error::TableNotFound(request.table.to_string()));
+                }
+                let matching_versions = versions_by_row
+                    .get(&request.row_uuid)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(table_id, version)| {
+                        version.tx_time() == request.tx_time
+                            && self.node_for_alias(version.tx_node_alias())
+                                == Some(request.tx_node_id)
+                            && candidate_mappings
+                                .iter()
+                                .any(|(_, candidate)| candidate == table_id)
+                    })
+                    .map(|(table_id, version)| (*table_id, version.clone()))
+                    .collect::<Vec<_>>();
+                let matching_table_ids = matching_versions
+                    .iter()
+                    .map(|(table_id, _)| *table_id)
+                    .collect::<BTreeSet<_>>();
+                let [requested_table_id] =
+                    matching_table_ids.iter().copied().collect::<Vec<_>>()[..]
+                else {
+                    return Err(Error::InvalidStoredValue(
+                        "repair request row maps to zero or multiple physical tables",
+                    ));
+                };
+                let request_schema = [
+                    self.catalogue.current_write_schema.schema,
+                    self.catalogue.current_schema_version_id,
+                ]
+                .into_iter()
+                .find(|schema_version| {
+                    candidate_mappings
+                        .iter()
+                        .any(|(candidate_schema, table_id)| {
+                            candidate_schema == schema_version && *table_id == requested_table_id
+                        })
+                })
+                .or_else(|| {
+                    candidate_mappings
+                        .iter()
+                        .find_map(|(schema_version, table_id)| {
+                            (*table_id == requested_table_id).then_some(*schema_version)
+                        })
+                })
+                .ok_or(Error::InvalidStoredValue(
+                    "repair request physical table must have a schema mapping",
+                ))?;
+                match authorization {
+                    RowVersionRepairAuthorization::EnforceReadPolicy(identity) => {
+                        if !self
+                            .dry_run_read_current_allows_in_schema(
+                                &request.table,
+                                request.row_uuid,
+                                request_schema,
+                                identity,
+                                true,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
+                    }
+                    RowVersionRepairAuthorization::VerifiedCurrentRows(proofs) => {
+                        let allowed = proofs.iter().any(|(exact_ref, coordinate)| {
+                            exact_ref == request
+                                && coordinate.row == request.row_uuid
+                                && self
+                                    .catalogue
+                                    .physical_mappings
+                                    .get(&coordinate.schema)
+                                    .is_some_and(|mapping| {
+                                        mapping
+                                            .identities
+                                            .tables
+                                            .get(&coordinate.table)
+                                            .is_some_and(|identity| {
+                                                identity.id == coordinate.physical_table
+                                            })
+                                            && mapping.tables.get(&coordinate.table).is_some_and(
+                                                |table| table.table_id == requested_table_id,
+                                            )
+                                    })
+                        });
+                        if !allowed {
+                            continue;
+                        }
+                    }
+                    RowVersionRepairAuthorization::RetainedScopeLedger => {
+                        if !self
+                            .scope_relay_repair_ledger_contains(requested_table_id, request)
+                            .await?
+                        {
+                            continue;
+                        }
+                    }
+                }
+                for (table_id, version) in matching_versions {
+                    if table_id == requested_table_id {
+                        // Content and the deletion register can share a transaction.
+                        // The repair coordinate names the row/transaction, so return
+                        // every matching layer rather than whichever sorts first.
+                        by_tx.entry(tx_id).or_default().push(version);
+                    }
                 }
             }
         }
@@ -468,14 +557,23 @@ where
             // policy capability. Retain a local stored hint for restart; do
             // not import or republish a received one.
             bundle.tx = transaction_without_permission_subject(&bundle.tx);
-            self.ingest_known_transaction(
-                bundle.tx.clone(),
-                bundle.versions.clone(),
-                bundle.fate.clone(),
-                bundle.global_time,
-                bundle.durability,
-            )
-            .await?;
+            match bundle.scope {
+                crate::protocol::VersionBundleScope::ViewScoped => {
+                    // A row repair is still a partial transaction carrier.
+                    // Its visible cardinality cannot certify that a withheld
+                    // sibling/parent coordinate does not exist.
+                    self.ingest_view_scoped_transaction_with_current_indexes(
+                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
+                        bundle.global_time, bundle.durability,
+                    ).await?;
+                }
+                crate::protocol::VersionBundleScope::CompleteTransaction => {
+                    self.ingest_known_transaction(
+                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
+                        bundle.global_time, bundle.durability,
+                    ).await?;
+                }
+            }
             applied_bundles.push(bundle);
         }
         Ok(applied_bundles)
@@ -487,16 +585,24 @@ where
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
         let (subscription, version_carriers, program_fact_adds) = match message {
+            SyncMessage::ViewUpdate(payload) if payload.peer_payload_inventory.opening_pending => {
+                // Pending is not a row snapshot. Let normal admission reject
+                // any attached rows immediately, rather than trying to repair
+                // their bytes and postponing the protocol error indefinitely.
+                return Ok(Vec::new());
+            }
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 version_carriers,
-                program_fact_adds,
+                supporting_rows: program_fact_adds,
                 ..
             }) => (*subscription, version_carriers, program_fact_adds),
             _ => return Ok(Vec::new()),
         };
         let normalized_bundles = expand_version_carriers(version_carriers)
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
+        // Index inline witnesses once. Searching every incoming body for
+        // every supporting row makes initial hydration quadratic.
         let incoming_versions = normalized_bundles
             .iter()
             .flat_map(|bundle| {
@@ -505,7 +611,12 @@ where
                     .iter()
                     .map(move |version| (bundle.tx.tx_id, version))
             })
-            .collect::<Vec<_>>();
+            .filter_map(|(tx, version)| {
+                self.physical_table_id_for_schema(version.schema_version(), version.table())
+                    .ok()
+                    .map(|table| (tx, version.row_uuid(), table, if version.deletion().is_some() { crate::protocol::ResultRowLayer::Deletion } else { crate::protocol::ResultRowLayer::Content }, version.branch_key().canonical_bytes()))
+            })
+            .collect::<BTreeSet<_>>();
         let Some(registered_shape) = self.registered_shape(subscription.shape_id) else {
             // A late update may race a local unsubscribe. There is no live
             // result shape to repair or apply, so preserve the existing
@@ -514,53 +625,31 @@ where
             return Ok(Vec::new());
         };
         let result_schema_version = registered_shape.schema_version();
+        let table_names = self.catalogue.physical_mappings.get(&result_schema_version)
+            .map(|mapping| mapping.identities.tables.iter()
+                .map(|(name, identity)| (identity.id, name.clone())).collect::<BTreeMap<_, _>>())
+            .unwrap_or_default();
         let mut missing = BTreeSet::new();
-        let mut visited_text_ancestors = BTreeSet::new();
-        for bundle in &normalized_bundles {
-            for version in &bundle.versions {
-                self.collect_missing_text_ancestor_refs(
-                    version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
-            }
-        }
-        // Only an added CoveredInput may require a body repair.  A removed
-        // input is self-sufficient: its successor closure retracts the old
-        // receiver record, and its body may now be policy-invisible.  Result
-        // members and relation/contribution facts are authority output or
-        // proof and are intentionally never a repair source under
-        // INV-SYNC-36.
-        for (table, row_uuid, tx_id) in program_fact_adds
-            .iter()
-            .flat_map(|fact| match fact {
-                ProgramFactEntry::CoveredInput(input) => vec![Some((
-                    input.version_table.to_string(),
-                    input.source_row,
-                    input.version.tx,
-                ))],
-                _ => Vec::new(),
-            })
-            .flatten()
-        {
-            let version_ref = RowVersionRef::new(table, row_uuid, tx_id);
+        // Every referenced native body must be available, including retained rows
+        // whose bytes may have been evicted since the previous complete snapshot.
+        for row in program_fact_adds {
+            let tx_id = row.version.tx;
+            let version_ref = RowVersionRef::new(row.version_table.to_string(), row.row, tx_id);
             if self.inline_version_bundle_covers(
                 &version_ref,
                 result_schema_version,
+                &row.version,
                 &incoming_versions,
             )? {
                 continue;
             }
-            let has_body = self.local_version_row_for_ref(&version_ref).await?.is_some()
-                && self.query_transaction(tx_id).await?.is_some();
-            if !has_body {
+            let resident = match table_names.get(&row.physical_table) {
+                Some(table) => self.local_supporting_row_version(row, result_schema_version, table).await?,
+                None => None,
+            };
+            if resident.is_none() || !self.transaction_exists(tx_id).await?
+            {
                 missing.insert(version_ref);
-            } else if let Some(version) = self.local_version_record_for_ref(&version_ref).await? {
-                self.collect_missing_text_ancestor_refs(
-                    &version,
-                    &mut missing,
-                    &mut visited_text_ancestors,
-                )?;
             }
         }
         Ok(missing.into_iter().collect())
@@ -574,7 +663,8 @@ where
         &self,
         request: &RowVersionRef,
         result_schema_version: SchemaVersionId,
-        incoming_versions: &[(TxId, &VersionRecord)],
+        version: &crate::protocol::RowVersionRefEntry,
+        incoming_versions: &BTreeSet<(TxId, RowUuid, PhysicalTableId, crate::protocol::ResultRowLayer, Vec<u8>)>,
     ) -> Result<bool, Error> {
         // Unlike a standalone RowVersionRef repair request, an inline witness
         // is carried by a registered subscription whose schema version makes
@@ -608,55 +698,33 @@ where
                 }
                 Err(error) => return Err(error),
             };
-        Ok(incoming_versions.iter().any(|(incoming_tx, version)| {
-            *incoming_tx == request.tx_id()
-                && version.row_uuid() == request.row_uuid
-                && self
-                    .physical_table_id_for_schema(version.schema_version(), version.table())
-                    .is_ok_and(|table_id| table_id == requested_table_id)
-        }))
+        Ok(incoming_versions.contains(&(
+            request.tx_id(),
+            request.row_uuid,
+            requested_table_id,
+            version.layer,
+            version.branch_or_prefix.clone().unwrap_or_default(),
+        )))
     }
 
-    fn collect_missing_text_ancestor_refs(
+    async fn local_supporting_row_version(
         &mut self,
-        _version: &VersionRecord,
-        _missing: &mut BTreeSet<RowVersionRef>,
-        _visited: &mut BTreeSet<RowVersionRef>,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn local_version_record_for_ref(
-        &mut self,
-        version_ref: &RowVersionRef,
-    ) -> Result<Option<VersionRecord>, Error> {
-        let Some(version) = self.local_version_row_for_ref(version_ref).await? else {
-            return Ok(None);
-        };
-        self.version_record_from_row(&version).map(Some)
-    }
-
-    async fn local_version_row_for_ref(
-        &mut self,
-        version_ref: &RowVersionRef,
+        row: &crate::protocol::SupportingRow,
+        read_schema: SchemaVersionId,
+        table: &str,
     ) -> Result<Option<VersionRow>, Error> {
-        let Some(tx_node_alias) = self.node_aliases.get(&version_ref.tx_node_id).copied() else {
-            return Ok(None);
-        };
-        for layer in [VersionLayer::Content, VersionLayer::Deletion] {
-            if let Some(version) = self.query_version_by_alias(
-                &version_ref.table,
-                version_ref.row_uuid,
-                layer,
-                version_ref.tx_time,
-                tx_node_alias,
-            )
-            .await?
-            {
-                return Ok(Some(version));
-            }
-        }
-        Ok(None)
+        // Reuse admission's exact physical-table, layer and branch lookup.
+        // This local source name is only a lookup coordinate, not a new claim
+        // about which compiled query occurrence the peer supplied.
+        self.covered_input_version(&crate::protocol::CoveredInputEntry {
+            source: crate::protocol::ProgramSourceId {
+                table: table.to_owned().into(),
+                path: vec![crate::protocol::ProgramSourceRole::Root],
+            },
+            version_table: row.version_table.clone(),
+            source_row: row.row,
+            version: row.version.clone(),
+        }, read_schema).await
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {

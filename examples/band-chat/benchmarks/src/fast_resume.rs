@@ -28,22 +28,13 @@ const TABLE: &str = "messages";
 /// The externally observable result of attaching a fully caught-up peer.
 #[derive(Debug, PartialEq, Eq)]
 pub struct FastResumeReceipt {
-    pub reset_result_set: bool,
-    pub result_member_adds: usize,
-    pub result_member_removes: usize,
     pub version_carriers: usize,
     pub covered_inputs: usize,
-    pub source_manifests: usize,
 }
 
 impl FastResumeReceipt {
     pub fn is_body_deduplicated_reset(&self) -> bool {
-        self.reset_result_set
-            && self.result_member_adds == 0
-            && self.result_member_removes == 0
-            && self.version_carriers == 0
-            && self.covered_inputs > 0
-            && self.source_manifests > 0
+        self.version_carriers == 0 && self.covered_inputs > 0
     }
 }
 
@@ -164,25 +155,8 @@ impl FastResumeFixture {
             panic!("caught-up peer must receive a view update");
         };
         FastResumeReceipt {
-            reset_result_set: payload.reset_result_set,
-            result_member_adds: payload.result_member_adds.len(),
-            result_member_removes: payload.result_member_removes.len(),
             version_carriers: payload.version_carriers.len(),
-            covered_inputs: payload
-                .program_fact_adds
-                .iter()
-                .filter(|fact| matches!(fact, jazz::protocol::ProgramFactEntry::CoveredInput(_)))
-                .count(),
-            source_manifests: payload
-                .program_fact_adds
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact,
-                        jazz::protocol::ProgramFactEntry::ProgramSourceCoverage(_)
-                    )
-                })
-                .count(),
+            covered_inputs: payload.supporting_rows.len(),
         }
     }
 }

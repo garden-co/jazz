@@ -134,6 +134,11 @@ const mocks = vi.hoisted(() => {
           retirePeerTransport: vi.fn(async (transport: Transport) => {
             transport.close();
           }),
+          createPeerAuthority: vi.fn(() => ({
+            node: new Uint8Array(16).fill(7),
+            epoch: 1n,
+            features: 2037,
+          })),
           acceptPeer: vi.fn(async () => subscriber),
           connect: vi.fn(),
           disconnect: vi.fn(async () => undefined),
@@ -889,6 +894,19 @@ describe("broker worker context initialization", () => {
       authSessionKey: expected.authSessionKey,
       storageOwner: expected.storageOwner,
     };
+    const cacheRuntime = mocks.runtimes[0]!;
+    cacheRuntime.query = vi.fn(async () => [{ id: "cached-row" }]);
+    cacheRuntime.createSubscription = vi.fn(() => 71);
+    cacheRuntime.executeSubscription = vi.fn();
+    cacheRuntime.unsubscribe = vi.fn();
+    const beforeInit = inspectorPeer.waitForEvent((event) => "id" in event && event.id === -2);
+    inspectorPeer.emitMessage({ type: "inspect-query", id: -2, binding, query: "{}" });
+    await expect(beforeInit).resolves.toMatchObject({
+      error: expect.objectContaining({
+        message: "Inspector cache reads require an active authenticated attachment",
+      }),
+    });
+    expect(cacheRuntime.query).not.toHaveBeenCalled();
     // A genuine inspector port cannot authorize a changed account/author or
     // root. Both preflight and actual init must enforce the worker binding.
     let invalidId = 100;
@@ -966,6 +984,85 @@ describe("broker worker context initialization", () => {
       inspectorAttachmentPhysicalDbName: "inspector-authenticated-root",
     });
 
+    const cached = inspectorPeer.waitForEvent((event) => "id" in event && event.id === -3);
+    inspectorPeer.emitMessage({
+      type: "inspect-query",
+      id: -3,
+      binding,
+      query: "{}",
+      options: '{"propagation":"full"}',
+    });
+    await expect(cached).resolves.toMatchObject({
+      type: "inspector-query-result",
+      value: [{ id: "cached-row" }],
+    });
+    expect(cacheRuntime.query).toHaveBeenCalledWith(
+      "{}",
+      undefined,
+      "local",
+      '{"propagation":"local-only"}',
+    );
+    inspectorPeer.emitMessage({ type: "inspect-subscribe", id: -4, binding, query: "{}" });
+    await nextTask();
+    expect(cacheRuntime.executeSubscription).toHaveBeenCalledWith(71, expect.any(Function));
+    inspectorPeer.emitMessage({ type: "inspect-unsubscribe", id: -4, binding });
+    await nextTask();
+    expect(cacheRuntime.unsubscribe).toHaveBeenCalledWith(71);
+    cacheRuntime.beginTransaction = vi.fn();
+    cacheRuntime.update = vi.fn();
+    cacheRuntime.commitTransaction = vi.fn(() => "inspector-write");
+    cacheRuntime.waitForTransaction = vi.fn(async () => {});
+    const committed = inspectorPeer.waitForEvent((event) => "id" in event && event.id === -6);
+    inspectorPeer.emitMessage({
+      type: "inspect-commit",
+      id: -6,
+      binding,
+      edits: [
+        {
+          operation: "update",
+          table: "todos",
+          rowId: "cached-row",
+          values: { done: { type: "Boolean", value: true } },
+        },
+      ],
+    });
+    await expect(committed).resolves.toMatchObject({
+      type: "inspector-query-result",
+      value: "inspector-write",
+    });
+    const nativeTransaction = cacheRuntime.beginTransaction.mock.calls[0]![1];
+    expect(cacheRuntime.beginTransaction).toHaveBeenCalledWith("mergeable", nativeTransaction);
+    expect(cacheRuntime.update).toHaveBeenCalledWith(
+      "todos",
+      "cached-row",
+      { done: { type: "Boolean", value: true } },
+      JSON.stringify({ transaction_id: nativeTransaction }),
+    );
+    expect(cacheRuntime.commitTransaction).toHaveBeenCalledWith(nativeTransaction);
+    const waited = inspectorPeer.waitForEvent((event) => "id" in event && event.id === -7);
+    inspectorPeer.emitMessage({
+      type: "inspect-wait",
+      id: -7,
+      binding,
+      txId: "inspector-write",
+      tier: "local",
+    });
+    await expect(waited).resolves.toMatchObject({ type: "inspector-query-result", value: null });
+    expect(cacheRuntime.waitForTransaction).toHaveBeenCalledWith("inspector-write", "local");
+    cacheRuntime.waitForTransaction.mockClear();
+    const foreignWrite = inspectorPeer.waitForEvent((event) => "id" in event && event.id === -8);
+    inspectorPeer.emitMessage({
+      type: "inspect-wait",
+      id: -8,
+      binding,
+      txId: "another-tab-write",
+      tier: "local",
+    });
+    await expect(foreignWrite).resolves.toMatchObject({
+      error: expect.objectContaining({ message: "Unknown Inspector write" }),
+    });
+    expect(cacheRuntime.waitForTransaction).not.toHaveBeenCalled();
+
     // A regular worker connection has the same storage coordinate but cannot
     // gain the receipt merely by knowing it.
     const ordinary = await connect(options("inspector-authenticated-root"), "ordinary-tab");
@@ -975,6 +1072,25 @@ describe("broker worker context initialization", () => {
     );
     ordinary.port.emitMessage({ type: "init", id: 5, sessionClaims: {} });
     await expect(ordinaryReceipt).resolves.not.toHaveProperty("inspectorAttachmentPhysicalDbName");
+
+    cacheRuntime.query.mockClear();
+    const ordinaryCache = ordinary.port.waitForEvent((event) => "id" in event && event.id === -5);
+    ordinary.port.emitMessage({ type: "inspect-query", id: -5, binding, query: "{}" });
+    await expect(ordinaryCache).resolves.toMatchObject({
+      error: expect.objectContaining({
+        message: "Inspector attachment does not match the worker account and storage scope",
+      }),
+    });
+    expect(cacheRuntime.query).not.toHaveBeenCalled();
+    cacheRuntime.beginTransaction.mockClear();
+    const ordinaryWrite = ordinary.port.waitForEvent((event) => "id" in event && event.id === -9);
+    ordinary.port.emitMessage({ type: "inspect-commit", id: -9, binding, edits: [] });
+    await expect(ordinaryWrite).resolves.toMatchObject({
+      error: expect.objectContaining({
+        message: "Inspector attachment does not match the worker account and storage scope",
+      }),
+    });
+    expect(cacheRuntime.beginTransaction).not.toHaveBeenCalled();
 
     // A control port remains bound to the session that opened it. Selecting a
     // context from a later/different auth session cannot reuse its authority.

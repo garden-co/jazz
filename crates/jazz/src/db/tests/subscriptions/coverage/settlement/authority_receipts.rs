@@ -1,7 +1,6 @@
 //! Authority selection, receipt freshness, fallback cuts, and reconnect continuity.
 
 use super::*;
-use crate::protocol::ProgramFactEntry;
 
 /// These receipt-ordering controls emulate the authority only for the exact
 /// one-source `todos` program used below. A reset that claims settlement must
@@ -14,21 +13,10 @@ fn settled_todos_source_closure(
     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
-        reset_result_set: true,
+
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![ProgramFactEntry::ProgramSourceCoverage(
-            crate::protocol::ProgramSourceCoverageEntry {
-                source: crate::protocol::ProgramSourceId {
-                    table: "todos".to_owned().into(),
-                    path: vec![crate::protocol::ProgramSourceRole::Root],
-                },
-                complete: true,
-            },
-        )],
-        program_fact_removes: Vec::new(),
+        supporting_rows: Vec::new(),
     })
 }
 
@@ -424,15 +412,27 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     let mut old = old_upstream.borrow_mut();
     let ConnectionLink::Upstream(UpstreamConnectionState {
         pending_row_version_repairs,
+        pending_row_version_fetches,
         ..
     }) = &mut old.link
     else {
         unreachable!("expected old upstream")
     };
     pending_row_version_repairs.push_back(PendingRowVersionRepair {
-        requests: Vec::new(),
+        superseded: false,
         update: view_update(old_subscription, GlobalTime(3)),
         authority_receipt_eligible: true,
+    });
+    // Keep the synthetic old repair reply correlated to an outstanding batch;
+    // an unsolicited reply would be dropped before this receipt check.
+    pending_row_version_fetches.push_back(crate::db::peer_connection::PendingRowVersionFetch {
+        requests: std::collections::VecDeque::from([crate::protocol::RowVersionRef::new(
+            "todos",
+            RowUuid::from_bytes([0xfe; 16]),
+            TxId::new(TxTime::from(1), NodeUuid::from_bytes([0xfe; 16])),
+        )]),
+        sent_count: 1,
+        policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
     });
     drop(old);
 

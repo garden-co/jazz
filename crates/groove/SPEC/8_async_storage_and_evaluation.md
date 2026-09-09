@@ -127,6 +127,12 @@ of one non-suspending step. The step may:
 The driver continues independent runnable nodes before waiting. Equal storage
 requests join one in-flight operation. Completion stores the owned result and
 wakes every dependent evaluation entry.
+The backing I/O's wake must reach every registered consumer directly, without
+first requiring the last consumer that polled it to run again. For example,
+a parked background query and an awaited foreground read can share a cold
+chunk; completion must wake the foreground read even if the background query
+cannot receive another owner turn yet. Re-polling replaces that consumer's
+previous waker rather than retaining obsolete task owners.
 
 Pure operators remain ordinary synchronous transformations over ready inputs.
 Interruptible state is concentrated at table/index sources, persisted
@@ -171,6 +177,13 @@ waiting for ordered storage persistence. Flat resident one-shot reads observe
 the same publication through Groove's resident write overlay. A terminal whose
 new include or join dependency is non-resident may remain blocked without
 delaying unrelated resident terminals.
+
+Installing a host query-progress waker does not weaken this same-turn contract.
+If an overlapping hydration is paused between CPU-only steps, the direct write
+finishes those steps before beginning its publication. It drives only that
+hydration and its temporal predecessors. Once those operations need cold
+storage, the write yields to the host; unrelated runnable queries and eager
+storage wakes do not justify polling that cold request again.
 
 Terminal installation and one-shot reads use the same resident overlay as
 immediate maintained evaluation. A terminal opened after an unpublished local

@@ -862,6 +862,15 @@ where
         true
     }
 
+    /// Retiring an authority connection keeps its input cache but removes the
+    /// live settlement claim. A relay must await a new receipt before serving
+    /// a fresh strict downstream usage from that cached source.
+    pub(crate) fn invalidate_authority_result_settlement(&mut self, key: &AuthorityResultKey) {
+        if let Some(state) = self.query.authority_results.get_mut(key) {
+            state.live_settled = false;
+        }
+    }
+
     /// Exact receipt variant for a usage subscription that carries delegated
     /// policy context. Unlike the binding-only compatibility facade, this
     /// never searches across sessions.
@@ -877,6 +886,52 @@ where
                 .query
                 .retained_root_window_sources
                 .contains_key(authority_result_key)
+    }
+
+    /// Only exact deletion witnesses already admitted on this selected usage.
+    pub(crate) async fn selected_deletion_witnesses(
+        &mut self,
+        key: &AuthorityResultKey,
+        schema: SchemaVersionId,
+    ) -> Result<BTreeMap<ProgramFactEntry, VersionRow>, Error> {
+        let inputs = self
+            .query
+            .authority_results
+            .get(key)
+            .into_iter()
+            .flat_map(|state| state.covered_input_versions.values())
+            .filter(|input| input.version.layer == crate::protocol::ResultRowLayer::Deletion)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut witnesses = BTreeMap::new();
+        for input in inputs {
+            let version = self
+                .covered_input_version(&input, schema)
+                .await?
+                .ok_or(Error::MissingTransaction(input.version.tx))?;
+            witnesses.insert(ProgramFactEntry::CoveredInput(input), version);
+        }
+        Ok(witnesses)
+    }
+
+    /// Root identities suffice only for the unprojected scalar pilot.
+    /// Policy proof sources must never become reconciliation candidates.
+    pub(crate) fn scalar_authority_input_rows(
+        &self,
+        key: &AuthorityResultKey,
+        table: &str,
+    ) -> BTreeSet<RowUuid> {
+        self.query
+            .authority_results
+            .get(key)
+            .into_iter()
+            .flat_map(|state| state.covered_input_versions.values())
+            .filter(|input| {
+                input.source.table.as_str() == table
+                    && input.source.path == [crate::protocol::ProgramSourceRole::Root]
+            })
+            .map(|input| input.source_row)
+            .collect()
     }
 
     pub(crate) fn applied_authority_result_generation(

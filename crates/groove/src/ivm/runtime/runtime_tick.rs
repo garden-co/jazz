@@ -1790,29 +1790,39 @@ impl IvmRuntime {
         // generations before the work queue can attach temporal blockers, so
         // a later hydration install would otherwise roll those mutations back.
         std::future::poll_fn(|cx| {
-            let selected = self
-                .pending_incremental
-                .0
-                .borrow()
-                .hydration_admission_evaluations(&affected_nodes);
-            if selected.is_empty() {
-                return Poll::Ready(Ok(()));
-            }
-            match self.poll_incremental(cx, false, Some(&selected)) {
-                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) | Poll::Pending => {
-                    if self
-                        .pending_incremental
-                        .0
-                        .borrow()
-                        .hydration_admission_evaluations(&affected_nodes)
-                        .is_empty()
-                    {
-                        Poll::Ready(Ok(()))
-                    } else {
-                        Poll::Pending
-                    }
+            let mut resident_only = false;
+            loop {
+                let selected = self
+                    .pending_incremental
+                    .0
+                    .borrow()
+                    .hydration_admission_evaluations(&affected_nodes);
+                if selected.is_empty() {
+                    return Poll::Ready(Ok(()));
                 }
+                if let Poll::Ready(Err(error)) =
+                    self.poll_incremental(cx, resident_only, Some(&selected))
+                {
+                    return Poll::Ready(Err(error));
+                }
+                let pending = self.pending_incremental.0.borrow();
+                let remaining = pending.hydration_admission_evaluations(&affected_nodes);
+                if remaining.is_empty() {
+                    return Poll::Ready(Ok(()));
+                }
+                if !remaining.iter().any(|id| {
+                    pending
+                        .evaluations
+                        .get(id)
+                        .is_some_and(PendingEvaluation::has_resident_continuation)
+                }) {
+                    return Poll::Pending;
+                }
+                // The direct write owns CPU-only continuations needed to
+                // finish an overlapping hydration. A host waker must not
+                // turn resident work into an artificial async write. Never
+                // re-poll cold requests or unrelated graph work here.
+                resident_only = true;
             }
         })
         .await?;

@@ -77,6 +77,7 @@ pub(crate) struct ReconciledMaintainedSubscriptionClone {
 }
 
 struct MaintainedCanonicalUpdate {
+    changed: bool,
     update: SyncMessage,
     allow_storage_witness_fallback: bool,
 }
@@ -715,7 +716,7 @@ impl PeerState {
                     // not a result-member delta.  Its reset bit claims the
                     // exact ProgramSourceCoverage manifest so a client can
                     // atomically install and settle its local source graph.
-                    reset_result_set: true,
+                    reset_input_set: true,
                     result_table_filter: Some(table),
                     tier,
                     read_view: &read_view,
@@ -823,6 +824,10 @@ impl PeerState {
             None,
         )
         .await
+        .map(|progress| match progress {
+            std::task::Poll::Ready(update) => update,
+            std::task::Poll::Pending => None,
+        })
     }
 
     pub(crate) async fn query_update_for_subscription_with_opts_and_waker<S>(
@@ -833,11 +838,11 @@ impl PeerState {
         binding: &Binding,
         opts: RegisterShapeOptions,
         progress_waker: Option<&std::task::Waker>,
-    ) -> Result<Option<SyncMessage>, Error>
+    ) -> Result<std::task::Poll<Option<SyncMessage>>, Error>
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner_for_subscription(
+        self.query_update_inner_for_subscription_with_metadata(
             node,
             subscription,
             shape,
@@ -846,6 +851,10 @@ impl PeerState {
             progress_waker,
         )
         .await
+        .map(|update| match update {
+            Some(update) => std::task::Poll::Ready(update.changed.then_some(update.update)),
+            None => std::task::Poll::Pending,
+        })
     }
 
     async fn query_update_inner<S>(
@@ -964,16 +973,13 @@ impl PeerState {
         )?;
         let Some(_) = self.publication_states.get(&subscription) else {
             return Ok(Some(MaintainedCanonicalUpdate {
+                changed: true,
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
-                    reset_result_set: false,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: Vec::new(),
-                    result_member_removes: Vec::new(),
-                    program_fact_adds: Vec::new(),
-                    program_fact_removes: Vec::new(),
+                    supporting_rows: Vec::new(),
                 }),
                 allow_storage_witness_fallback: false,
             }));
@@ -1034,7 +1040,7 @@ impl PeerState {
                 binding,
                 subscription,
                 previous_member_result_set: &previous_member_result_set,
-                reset_result_set: runtime_was_stale,
+                reset_input_set: runtime_was_stale,
                 result_table_filter: None,
                 tier,
                 read_view: &read_view,
@@ -1045,6 +1051,7 @@ impl PeerState {
         .await
         .map(|update| {
             update.map(|update| MaintainedCanonicalUpdate {
+                changed: true,
                 update,
                 allow_storage_witness_fallback: false,
             })
@@ -1170,7 +1177,7 @@ impl PeerState {
                         binding,
                         subscription,
                         previous_member_result_set: &previous_member_result_set,
-                        reset_result_set: false,
+                        reset_input_set: false,
                         result_table_filter,
                         tier,
                         read_view: &read_view,
@@ -1181,7 +1188,7 @@ impl PeerState {
                 .await
                 .map(|update| {
                     update.map(|update| MaintainedCanonicalUpdate {
-                        update,
+                changed: true,                        update,
                         allow_storage_witness_fallback: false,
                     })
                 });
@@ -1220,7 +1227,7 @@ impl PeerState {
             // call returned, with the previous publication closure retained.
             // Its first drain is a reset, not a delta against that closure:
             // unchanged inputs still belong in the complete reset manifest.
-            (current_program_fact_set.into_iter().collect(), Vec::new())
+            (current_program_fact_set.iter().cloned().collect(), Vec::new())
         } else {
             canonical_set_delta(&previous_program_fact_set, &current_program_fact_set)
         };
@@ -1233,16 +1240,15 @@ impl PeerState {
             &program_fact_removes,
         ) {
             return Ok(Some(MaintainedCanonicalUpdate {
-                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                changed: initial_snapshot_completed,                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
-                    reset_result_set: initial_snapshot_completed,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: Vec::new(),
-                    result_member_removes: Vec::new(),
-                    program_fact_adds: Vec::new(),
-                    program_fact_removes: Vec::new(),
+                    supporting_rows: node.supporting_rows_for_facts(
+                        shape.schema_version(),
+                        current_program_fact_set.clone(),
+                    )?,
                 }),
                 allow_storage_witness_fallback: false,
             }));
@@ -1252,11 +1258,11 @@ impl PeerState {
             .filter_map(ResultMemberEntry::as_row)
             .map(|(_, _, tx_id)| tx_id)
             .collect::<BTreeSet<_>>();
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing prepared state",
             ))?;
@@ -1280,6 +1286,10 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(subscription),
                     subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -1298,10 +1308,7 @@ impl PeerState {
                 },
             ).await
         };
-        let mut update = update?;
-        if initial_snapshot_completed {
-            view_update_reset_result_set(&mut update);
-        }
+        let update = update?;
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -1335,7 +1342,7 @@ impl PeerState {
         self.refresh_maintained_subscription_view_footprint(subscription);
         self.record_outgoing_view_update(&update);
         Ok(Some(MaintainedCanonicalUpdate {
-            update,
+                changed: true,            update,
             allow_storage_witness_fallback,
         }))
     }
@@ -1356,6 +1363,7 @@ impl PeerState {
         // exact selected authority closure. Do not let the generic
         // trusted-serving drain observe an authority output or a stale source
         // frontier.
+        let mut deletion_changes = (Vec::new(), Vec::new());
         let receiver_install = self
             .publication_states
             .get_mut(&subscription)
@@ -1384,6 +1392,13 @@ impl PeerState {
                 // Pending is not an empty strict result. Leave the receiver
                 // attached and wait for the exact claimed source closure.
                 return Ok(ResultTransitions::default());
+            }
+            if due {
+                let witnesses = node.selected_deletion_witnesses(&source, schema_version).await?;
+                if let Some(view) = self.publication_states.get_mut(&subscription)
+                    .and_then(|state| state.maintained_subscription_view.as_mut()) {
+                    deletion_changes = view.maintained.replace_selected_deletion_witnesses(witnesses);
+                }
             }
         }
         node.drive_ready_query_runtime_with_waker(progress_waker)
@@ -1419,8 +1434,7 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
-        let mut program_fact_adds = Vec::new();
-        let mut program_fact_removes = Vec::new();
+        let (mut program_fact_adds, mut program_fact_removes) = deletion_changes;
         let allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
@@ -1586,7 +1600,7 @@ impl PeerState {
             binding,
             subscription,
             previous_member_result_set,
-            reset_result_set,
+            reset_input_set,
             result_table_filter,
             tier,
             read_view,
@@ -1723,19 +1737,21 @@ impl PeerState {
         ) =
             match opened {
             Ok(opened) => opened,
-            Err(Error::AuthorizationSupportMissingClaim(_))
+            Err(error @ Error::AuthorizationSupportMissingClaim(_))
                 if purpose == RehydratePurpose::AuthorizationSupport =>
             {
+                // A missing claim cannot manufacture a valid successor closure.
+                // The former result-member removal frame was rejected by the wire
+                // contract; preserve that failure for an established result set.
+                if !previous_member_result_set.is_empty() {
+                    return Err(error);
+                }
                 let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
-                    reset_result_set,
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    result_member_adds: Vec::new(),
-                    result_member_removes: previous_member_result_set.iter().cloned().collect(),
-                    program_fact_adds: Vec::new(),
-                    program_fact_removes: Vec::new(),
+                    supporting_rows: Vec::new(),
                 });
                 self.record_outgoing_view_update(&update);
                 self.publication_states
@@ -1824,7 +1840,7 @@ impl PeerState {
         // In particular, a deletion witness may force reconciliation alongside
         // an ordinary result delta; do not resend retained window members as
         // additions in that case.
-        if !reset_result_set {
+        if !reset_input_set {
             result_member_adds.retain(|member| !previous_member_result_set.contains(member));
         }
         // The downstream cursor tracks data progress, not authorization. A
@@ -1844,7 +1860,7 @@ impl PeerState {
                     &current_member_result_set,
                 )
             });
-        let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
+        let (program_fact_adds, program_fact_removes, reset_input_set) = if reset_input_set
             && simple_membership_delta
             && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
@@ -1854,7 +1870,7 @@ impl PeerState {
             result_member_adds.clear();
             result_member_removes.clear();
             (Vec::new(), Vec::new(), false)
-        } else if reset_result_set
+        } else if reset_input_set
             && !cursor_membership_mismatch
             && simple_membership_delta
             && let Some(position) = known_membership_position
@@ -1871,7 +1887,7 @@ impl PeerState {
             (
                 transitions.program_fact_adds,
                 transitions.program_fact_removes,
-                reset_result_set,
+                reset_input_set,
             )
         };
         let bundle_known_state = if cursor_membership_mismatch {
@@ -1899,6 +1915,10 @@ impl PeerState {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             scoped.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(subscription),
                 subscription,
                 settled_through: watermark,
                 peer_complete_tx_payloads,
@@ -1917,7 +1937,7 @@ impl PeerState {
             },
             ).await
         };
-        let mut update = match update {
+        let update = match update {
             Ok(update) => update,
             Err(err) => {
                 node.unsubscribe_groove_subscription(receiver.id());
@@ -1926,9 +1946,6 @@ impl PeerState {
         };
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
-        if reset_result_set {
-            view_update_reset_result_set(&mut update);
-        }
         if trace_rehydrate {
             let bundle_count = match &update {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -1944,7 +1961,7 @@ impl PeerState {
             eprintln!(
                 "JAZZ_REHYDRATE_TRACE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} open_read_buckets={} bundle_reads={} bundle_ranges={}",
                 shape.query().table,
-                reset_result_set,
+                reset_input_set,
                 known_state,
                 positioned_members,
                 open_elapsed.as_millis(),
@@ -2196,7 +2213,7 @@ impl PeerState {
                 binding,
                 subscription,
                 previous_member_result_set: &previous_member_result_set,
-                reset_result_set: true,
+                reset_input_set: true,
                 result_table_filter: None,
                 tier,
                 read_view: &read_view,
@@ -2370,18 +2387,11 @@ impl PeerState {
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
-            self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                subscription: maintained_subscription,
-                settled_through: self
-                    .canonical_subscription_settlement_time(node, maintained_subscription),
-                reset_result_set: false,
-                version_carriers: Vec::new(),
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                result_member_adds: source_adds,
-                result_member_removes: source_removes,
-                program_fact_adds: source_program_fact_adds,
-                program_fact_removes: source_program_fact_removes,
-            }));
+            self.apply_outgoing_view_delta(
+                maintained_subscription, false,
+                &source_adds, &source_removes,
+                &source_program_fact_adds, &source_program_fact_removes,
+            );
         }
         let canonical_state = self
             .publication_states
@@ -2408,16 +2418,15 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&maintained_subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing prepared state",
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let mut reset_result_set = true;
         let result_member_adds = if current_program_fact_set.is_empty()
             && !authorization_mismatch
             && let Some(position) = known_membership_position
@@ -2427,7 +2436,6 @@ impl PeerState {
             && position
                 >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
-            reset_result_set = false;
             Vec::new()
         } else if current_program_fact_set.is_empty()
             && !authorization_mismatch
@@ -2436,7 +2444,6 @@ impl PeerState {
                 .iter()
                 .any(|member| member_settle_position(member).is_some())
         {
-            reset_result_set = false;
             current_result_member_set
                 .iter()
                 .filter(|member| {
@@ -2462,6 +2469,10 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(maintained_subscription),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -2488,10 +2499,7 @@ impl PeerState {
                 },
             ).await
         };
-        let mut update = update?;
-        if reset_result_set {
-            view_update_reset_result_set(&mut update);
-        }
+        let update = update?;
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);
@@ -2525,33 +2533,9 @@ impl PeerState {
         else {
             return Ok(None);
         };
-        let (
-            source_removes,
-            source_had_program_fact_transitions,
-            canonical_update_is_empty,
-        ) = match &canonical.update {
-            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-                ..
-            }) => (
-                result_member_removes.clone(),
-                !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
-                maintained_view_update_is_empty(
-                    result_member_adds,
-                    result_member_removes,
-                    program_fact_adds,
-                    program_fact_removes,
-                ),
-            ),
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "coverage group canonical update is not a view update",
-                ));
-            }
-        };
+        let source_removes = Vec::new();
+        let source_had_program_fact_transitions = canonical.changed;
+        let canonical_update_is_empty = !canonical.changed;
         Ok(Some(ReconciledMaintainedSubscriptionClone {
             canonical_update: (!canonical_update_is_empty).then_some(canonical.update),
             source_removes,
@@ -2633,16 +2617,15 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let tier = self
+        let (tier, read_view) = self
             .publication_states
             .get(&maintained_subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::tier)
+            .map(CachedPeerQueryPlan::context)
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing prepared state",
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let mut reset_result_set = true;
         let result_member_adds = if current_program_fact_set.is_empty()
             && !authorization_mismatch
             && let Some(position) = known_membership_position
@@ -2652,7 +2635,6 @@ impl PeerState {
             && position
                 >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
-            reset_result_set = false;
             Vec::new()
         } else if current_program_fact_set.is_empty()
             && !authorization_mismatch
@@ -2661,7 +2643,6 @@ impl PeerState {
                 .iter()
                 .any(|member| member_settle_position(member).is_some())
         {
-            reset_result_set = false;
             current_result_member_set
                 .iter()
                 .filter(|member| {
@@ -2672,9 +2653,11 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
-        let (policy_identity, _) = self.served_subscription_policy_binding(target_subscription)?;
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let target_reset = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
                 .publication_states
                 .get(&maintained_subscription)
@@ -2683,8 +2666,12 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            node.view_update_for_maintained_result_members(
+            scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                    shape,
+                    has_default_read_view: read_view.is_default(),
+                    allow_authoritative_scalar_exit_refresh: !self
+                        .subscription_awaits_selected_authority_source(maintained_subscription),
                     subscription: target_subscription,
                     settled_through,
                     peer_complete_tx_payloads,
@@ -2709,12 +2696,9 @@ impl PeerState {
                     maintained_facts: maintained,
                     allow_storage_witness_fallback,
                 },
-            )
+            ).await
         };
-        let mut target_reset = target_reset.await?;
-        if reset_result_set {
-            view_update_reset_result_set(&mut target_reset);
-        }
+        let target_reset = target_reset?;
         self.record_outgoing_view_update_metadata(&target_reset);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);

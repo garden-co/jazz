@@ -33,7 +33,8 @@ function TodoForm() {
     "use server";
     const title = formData.get("titleField");
     if (typeof title !== "string" || !title.trim()) return;
-    (await getBackendDb()).insert(app.todos, { title: title.trim(), done: false });
+    const db = await getBackendDb();
+    await db.insert(app.todos, { title: title.trim(), done: false }).wait({ tier: "edge" });
     revalidatePath("/");
   }
 

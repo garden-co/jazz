@@ -4,6 +4,7 @@ use super::*;
 use crate::db::peer_connection::{
     ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
     coverage_group_subscription_key, dispatch_admitted_subscriber_message,
+    row_repair_requires_core,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -748,7 +749,8 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         state
             .pending_row_version_fetches
             .push_back(PendingRowVersionFetch {
-                requests: vec![request.clone()],
+                requests: VecDeque::from([request.clone()]),
+                sent_count: 0,
                 policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
             });
     }
@@ -765,7 +767,8 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         assert_eq!(
             state.pending_row_version_fetches.front(),
             Some(&PendingRowVersionFetch {
-                requests: vec![request.clone()],
+                requests: VecDeque::from([request.clone()]),
+                sent_count: 0,
                 policy_binding: (AuthorSubject::SYSTEM, BTreeMap::new()),
             }),
             "a rejected byte admission retains the exact upstream repair request"
@@ -782,7 +785,15 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
         let ConnectionLink::Upstream(state) = &connection.link else {
             panic!("client connection must be upstream");
         };
-        assert!(state.pending_row_version_fetches.is_empty());
+        assert_eq!(
+            state
+                .pending_row_version_fetches
+                .front()
+                .unwrap()
+                .sent_count,
+            1,
+            "the accepted batch remains owned until its reply arrives"
+        );
     }
     assert_eq!(
         outbound.borrow_mut().pop_front(),
@@ -1619,7 +1630,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
     let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(0),
-        reset_result_set: false,
+
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             tx,
             versions: Vec::new(),
@@ -1629,10 +1640,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
             durability: DurabilityTier::Local,
         })],
         peer_payload_inventory: PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+        supporting_rows: Vec::new(),
     });
 
     send_subscriber_with_sync_context(
@@ -1987,6 +1995,7 @@ fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
 
 #[test]
 fn permission_advice_uses_authenticated_link_identity_without_mutating() {
+    // INV-SYNC-45: exercise the complete-snapshot receiver contract.
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let mallory = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -2467,11 +2476,8 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     );
     for update in refreshed {
         assert_eq!(update.subscription, attachment.subscription());
-        assert!(update.reset_result_set);
         assert!(update.version_carriers.is_empty());
-        assert!(update.result_member_adds.is_empty());
-        assert!(update.result_member_removes.is_empty());
-        assert!(update.program_fact_removes.is_empty());
+
         assert!(
             update
                 .peer_payload_inventory
@@ -2480,15 +2486,7 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
                 && !update.peer_payload_inventory.opening_pending,
             "the empty reset must carry its settled authorization receipt"
         );
-        assert_eq!(
-            update.program_fact_adds.len(),
-            1,
-            "the empty reset must carry exactly its complete source manifest"
-        );
-        assert!(matches!(
-            update.program_fact_adds.as_slice(),
-            [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
-        ));
+        assert!(update.supporting_rows.is_empty());
     }
     drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
@@ -2651,15 +2649,11 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
         progress_by_subscription[&second_subscription][0],
         "the newer claim revision reaches every current member"
     );
-    assert!(refreshed.iter().all(|update| {
-        update.reset_result_set
-            && update.result_member_adds.is_empty()
-            && update.result_member_removes.is_empty()
-            && matches!(
-                update.program_fact_adds.as_slice(),
-                [crate::protocol::ProgramFactEntry::ProgramSourceCoverage(coverage)] if coverage.complete
-            )
-    }));
+    assert!(
+        refreshed
+            .iter()
+            .all(|update| { update.supporting_rows.is_empty() })
+    );
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
     };
@@ -3062,8 +3056,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
                 message,
                 SyncMessage::ViewUpdate(update)
                     if update.subscription == downstream_subscription
-                        && update.reset_result_set
-                        && update.result_member_adds.is_empty()
+
             )
         });
         client.tick().unwrap();
@@ -5731,5 +5724,343 @@ fn delegated_request_binding_requires_backend_client_link() {
             state.served.is_empty(),
             "{trust:?} must not admit delegated queries"
         );
+    }
+}
+
+// Internal: this matrix pins host admission independently of wire declarations;
+// the reconnect test exercises its observable confidentiality consequence.
+#[test]
+fn partial_edge_row_repair_uses_effective_scope_not_transport_trust() {
+    let alice = AuthorSubject::for_test_bytes([0x71; 16]);
+    for trust in [
+        CommitUnitTrust::Session,
+        CommitUnitTrust::TrustedBackend,
+        CommitUnitTrust::TrustedAuthority,
+    ] {
+        assert!(row_repair_requires_core(trust, alice));
+        assert_eq!(
+            row_repair_requires_core(trust, AuthorSubject::SYSTEM),
+            trust == CommitUnitTrust::Session
+        );
+    }
+}
+
+// Internal: the capability is a host-only admission event, never a wire field.
+#[test]
+fn authority_query_delegation_requires_explicit_host_admission() {
+    for trust in [
+        CommitUnitTrust::TrustedAuthority,
+        CommitUnitTrust::TrustedAdmin,
+    ] {
+        let schema = owner_read_schema();
+        let server = open_core(0x6e, AuthorSubject::SYSTEM, &schema);
+        let (_, transport) = duplex();
+        let subscriber =
+            server.accept_subscriber_with_trust(transport, AuthorSubject::SYSTEM, trust);
+        subscriber.borrow_mut().admit_authority_query_delegate();
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        let binding = admitted_request_policy_binding(
+            state.ingest_context,
+            &state.peer,
+            None,
+            Some(crate::protocol::DelegatedSessionBinding {
+                identity: AuthorSubject::for_test_bytes([0x73; 16]),
+                claims: BTreeMap::new(),
+            }),
+        );
+        assert_eq!(
+            binding.is_some(),
+            trust == CommitUnitTrust::TrustedAuthority
+        );
+    }
+}
+
+// Internal transport fixture: only host admission can mark a partial Edge.
+// Observe raw native delivery/rejection because a client facade cannot express
+// the unsupported remote propagation option or delegated transport scope.
+#[derive(Clone, Copy, Debug)]
+enum QueryTestHost {
+    Core,
+    PartialEdge,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QueryTestClient {
+    Session,
+    System,
+    Delegated,
+}
+
+fn remote_query_delivery(
+    propagate_upstream: bool,
+    tier: DurabilityTier,
+    host: QueryTestHost,
+    client_scope: QueryTestClient,
+) -> (bool, bool) {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0x75; 16]);
+    let edge = open_core(0x76, AuthorSubject::SYSTEM, &schema);
+    let target = row(0x77);
+    edge.insert_with_id(
+        "todos",
+        target,
+        cells("unverified shared bytes", false, alice),
+    )
+    .unwrap();
+    let forbidden = row(0x78);
+    edge.insert_with_id(
+        "todos",
+        forbidden,
+        cells(
+            "another reader",
+            false,
+            AuthorSubject::for_test_bytes([0x79; 16]),
+        ),
+    )
+    .unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier,
+        propagate_upstream,
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    let (mut client, transport) = duplex();
+    let delegated = matches!(client_scope, QueryTestClient::Delegated);
+    let subscriber = if delegated {
+        let subscriber = edge.accept_subscriber_with_trust(
+            transport,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedAuthority,
+        );
+        subscriber.borrow_mut().admit_authority_query_delegate();
+        subscriber
+    } else if matches!(client_scope, QueryTestClient::System) {
+        edge.accept_subscriber_with_trust(
+            transport,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        )
+    } else {
+        edge.accept_subscriber(transport, alice)
+    };
+    if matches!(host, QueryTestHost::PartialEdge) {
+        subscriber.borrow_mut().set_partial_edge_query_host();
+    }
+    client
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .unwrap();
+    let delegated_session = delegated.then(|| crate::protocol::DelegatedSessionBinding {
+        identity: alice,
+        claims: test_provider_claims(alice),
+    });
+    let request = SyncMessage::Subscribe(Subscribe {
+        shape_id: shape.shape_id(),
+        subscription,
+        values: Vec::new(),
+        known_state: None,
+        delegated_session,
+    });
+    if !propagate_upstream {
+        client.send(request.clone()).unwrap();
+    }
+    client.send(request).unwrap();
+    let mut emitted = false;
+    let mut rejected = false;
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(message) = client.try_recv() {
+            rejected |= matches!(message, SyncMessage::SubscribeRejected { .. });
+            if let SyncMessage::ViewUpdate(view) = message {
+                for carrier in view.version_carriers {
+                    for bundle in carrier.bundle_refs().unwrap() {
+                        if !matches!(client_scope, QueryTestClient::System) {
+                            assert!(
+                                !bundle
+                                    .versions
+                                    .iter()
+                                    .any(|version| version.row_uuid() == forbidden),
+                                "local Edge evaluation must narrow payloads under the admitted reader"
+                            );
+                        }
+                        emitted |= bundle
+                            .versions
+                            .iter()
+                            .any(|version| version.row_uuid() == target);
+                    }
+                }
+            }
+        }
+    }
+    if rejected {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!()
+        };
+        assert!(state.served.is_empty());
+        assert!(state.coverage_groups.is_empty());
+    }
+    (emitted, rejected)
+}
+
+#[test]
+fn remote_queries_cannot_disable_upstream_propagation() {
+    for host in [QueryTestHost::Core, QueryTestHost::PartialEdge] {
+        for client in [
+            QueryTestClient::Session,
+            QueryTestClient::System,
+            QueryTestClient::Delegated,
+        ] {
+            assert_eq!(
+                remote_query_delivery(false, DurabilityTier::Global, host, client),
+                (false, true),
+                "{host:?} {client:?}"
+            );
+        }
+    }
+}
+
+// Internal transport fixture isolates local serving from upstream hydration:
+// no Core is connected. The Edge must evaluate cached data under the admitted
+// reader instead of waiting for a selected Core result for this exact query.
+#[test]
+fn partial_edge_evaluates_cached_queries_without_selected_core_source() {
+    for client in [
+        QueryTestClient::Session,
+        QueryTestClient::Delegated,
+        QueryTestClient::System,
+    ] {
+        assert_eq!(
+            remote_query_delivery(
+                true,
+                DurabilityTier::Global,
+                QueryTestHost::PartialEdge,
+                client,
+            ),
+            (true, false),
+            "{client:?}"
+        );
+    }
+}
+
+// Rust equivalent of a memory-only browser foreground: LocalOnly can read its
+// own pending data but may not ask the worker (or any node) for a local view.
+#[test]
+fn foreground_local_only_reads_never_emit_remote_query_requests() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0x78; 16]);
+    let foreground = open_db(0x79, alice, &schema);
+    foreground.set_non_durable_client();
+    let target = row(0x7a);
+    foreground
+        .insert(
+            "todos",
+            cells("foreground pending", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(target),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (transport, mut remote) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(transport));
+    let query = Query::from("todos");
+    let prepared = foreground.prepare_query(&query).unwrap();
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let attachment = foreground
+        .attach_query_with_opts(&prepared, opts.clone())
+        .unwrap();
+    let second = foreground
+        .attach_query_with_opts_for_identity(&prepared, opts.clone(), alice)
+        .unwrap();
+    let third =
+        block_on(foreground.attach_query_with_opts_async(&prepared, opts.clone(), None, None))
+            .unwrap();
+    assert_ne!(attachment.subscription(), second.subscription());
+    assert_ne!(second.subscription(), third.subscription());
+    assert!(foreground.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        prepared_all(&foreground, &query, opts.clone())
+            .iter()
+            .map(|r| r.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![target]
+    );
+    let mut stream = prepared_subscribe(&foreground, &query, opts).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..16 {
+        foreground.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        while let Some(message) = remote.try_recv() {
+            assert!(
+                !matches!(
+                    message,
+                    SyncMessage::RegisterShape { .. } | SyncMessage::Subscribe(_)
+                ),
+                "LocalOnly emitted a remote query"
+            );
+        }
+    }
+    assert_eq!(snapshot.root_count, 1);
+    foreground.detach_query(attachment);
+    foreground.detach_query(second);
+    foreground.detach_query(third);
+}
+
+// A worker's local_receiver role is still a node boundary, not an in-process
+// read API. Even a trusted foreground cannot send the local-only wire option.
+#[test]
+fn scope_relay_remote_registration_cannot_disable_propagation() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0x7b; 16]);
+    let worker = open_db(0x7c, alice, &schema);
+    worker.set_relay_authority_session_owner_for_test();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    for (identity, trust) in [
+        (alice, CommitUnitTrust::Session),
+        (AuthorSubject::SYSTEM, CommitUnitTrust::TrustedBackend),
+    ] {
+        let (mut client, transport) = duplex();
+        let subscriber = worker
+            .node
+            .accept_subscriber_with_trust(transport, identity, trust);
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: ShapeAst::from_validated(&shape),
+                opts: RegisterShapeOptions {
+                    tier: DurabilityTier::Local,
+                    propagate_upstream: false,
+                    ..RegisterShapeOptions::default()
+                },
+            })
+            .unwrap();
+        let mut rejected = false;
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            while let Some(message) = client.try_recv() {
+                rejected |= matches!(message, SyncMessage::SubscribeRejected { .. });
+            }
+        }
+        assert!(rejected);
     }
 }

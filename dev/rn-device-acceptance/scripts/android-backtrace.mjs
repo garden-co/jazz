@@ -5,6 +5,8 @@ const THREADS = new Set([
   "JazzCoreObserva",
   "JazzCoreObservation",
   "mqt_js",
+  "mqt_v_js",
+  "mqt_v_native",
   "js",
   "mqt_native_modu",
   "mqt_native_modules",

@@ -66,6 +66,8 @@ pub struct PeerState {
     /// Server/host-issued link capability.  This deliberately is not derived
     /// from `PeerRole`, a wire hello, or a semantic sync message.
     transport_capability: RelayTransportCapability,
+    /// Explicit host admission for SYSTEM authority query delegation only.
+    pub(crate) authority_query_delegate: bool,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical
@@ -100,6 +102,7 @@ impl Default for PeerState {
             },
             permission_identity: None,
             transport_capability: RelayTransportCapability::OrdinarySession,
+            authority_query_delegate: false,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
             publication_states: BTreeMap::new(),

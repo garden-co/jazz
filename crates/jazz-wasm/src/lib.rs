@@ -1982,7 +1982,16 @@ impl WasmDb {
             .map_err(to_js_error)?;
             return bytes_to_js(encode_synchronous_rows(&rows)?);
         }
+        let preceding_writes = open_tx
+            .is_none()
+            .then(|| with_wasm_db!(&inner, |db| db.queued_mutation_barrier()));
         let future = Box::pin(async move {
+            if let Some(preceding_writes) = preceding_writes {
+                preceding_writes
+                    .await
+                    .map_err(|_| JsValue::from_str("local write ordering barrier was cancelled"))?
+                    .map_err(to_js_error)?;
+            }
             let requires_coverage = tier_is_explicit
                 && (non_durable_client
                     || (opts.tier >= DurabilityTier::Edge
@@ -2144,6 +2153,38 @@ impl WasmDb {
             encode_rows(&rows).map_err(to_js_error)
         });
         wasm_read_or_pending(future)
+    }
+
+    /// Bind correlation claims to this already-open client's own identity.
+    /// This does not grant a different author or enable serving reads.
+    #[wasm_bindgen(js_name = setSessionClaims)]
+    pub fn set_session_claims(&self, claims: JsValue) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let identity = match &inner {
+            WasmDbInner::Memory(db) => db.identity().author,
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.identity().author,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        };
+        let claims = claims_from_js(identity, claims)?;
+        let mut future = Box::pin(async move {
+            match inner {
+                WasmDbInner::Memory(db) => db.set_identity_claims_async(identity, claims).await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.set_identity_claims_async(identity, claims).await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            Ok(JsValue::UNDEFINED)
+        });
+        // Preserve immediate subscription delivery when idle, but yield to the
+        // storage owner instead of blocking the host thread when it is busy.
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result,
+            Poll::Pending => Ok(future_to_promise(future).into()),
+        }
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -2601,11 +2642,16 @@ impl WasmDb {
                 node: NodeUuid::from_bytes(local_node),
                 epoch: local_epoch,
             },
-            remote: WireAuthorityEndpoint {
+            remote: Some(WireAuthorityEndpoint {
                 node: NodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
+            }),
+            link_identity: match &db_inner {
+                WasmDbInner::Memory(db) => db.identity().author,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.identity().author,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             },
-            link_identity: AuthorSubject::for_test_bytes(local_node),
             negotiated_features: features as u64,
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
@@ -2650,12 +2696,13 @@ impl WasmDb {
         &self,
         identity: Vec<u8>,
         claims: JsValue,
+        local_epoch: Option<u64>,
     ) -> Result<js_sys::Promise, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
         let claims = claims_from_js(identity, claims)?;
         let db_inner = self.open_inner()?;
         Ok(future_to_promise(async move {
-            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims)
+            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims, local_epoch)
                 .await
                 .map(JsValue::from)
         }))
@@ -2674,12 +2721,13 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        local_epoch: Option<u64>,
     ) -> Result<js_sys::Promise, JsValue> {
         let identity = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let claims = claims_from_js(identity, claims)?;
         let db_inner = self.open_inner()?;
         Ok(future_to_promise(async move {
-            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims)
+            Self::accept_subscriber_with_admitted_identity(db_inner, identity, claims, local_epoch)
                 .await
                 .map(JsValue::from)
         }))
@@ -2689,19 +2737,39 @@ impl WasmDb {
         db_inner: WasmDbInner,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        local_epoch: Option<u64>,
     ) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
-        // Like the JS-owned upstream carrier, this binding-local transport has
-        // no authenticated endpoint context for scoped receipt/view frames.
-        let transport = Box::new(WireTransportAdapter::new(
+        let owner = match &db_inner {
+            WasmDbInner::Memory(db) => db.identity(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.identity(),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        };
+        let context = local_epoch.map(|epoch| ConnectionSessionContext {
+            local: WireAuthorityEndpoint {
+                node: owner.node,
+                epoch,
+            },
+            remote: None,
+            link_identity: identity,
+            negotiated_features: jazz::wire::current_wire_features(),
+        });
+        let features = if context.is_some() {
+            jazz::wire::current_wire_features()
+        } else {
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+        };
+        let transport = Box::new(WireTransportAdapter::new_with_session_context(
             WasmWireTransport {
                 queues: queues.clone(),
             },
             jazz::wire::WIRE_PROTOCOL_VERSION,
-            jazz::wire::current_wire_features()
-                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            features,
             None,
+            context,
         ));
         let inner = match &db_inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
@@ -3995,7 +4063,13 @@ mod dynamic_schema_view_tests {
             #[cfg(target_arch = "wasm32")]
             WasmWriteInner::BrowserTx { .. } => panic!("memory write retained wrong backend"),
         }
-        block_on(db.tick()).expect("scheduled WASM wait receives no-op completion");
+        for _ in 0..32 {
+            block_on(db.tick()).expect("scheduled WASM wait advances no-op completion");
+            if waited.borrow().is_some() {
+                break;
+            }
+        }
+        assert!(waited.borrow().is_some(), "scheduled WASM wait completes");
 
         match wasm_write.inner.as_ref().expect("WASM write remains live") {
             WasmWriteInner::MemoryTx { write, .. } => assert_eq!(
@@ -4351,6 +4425,7 @@ mod dynamic_schema_view_tests {
             binding.open_inner().expect("binding remains open"),
             subscriber,
             claims_from_js(subscriber, JsValue::NULL).expect("admit subscriber claims"),
+            None,
         )
         .await
         .expect("accept a real wasm subscriber transport");

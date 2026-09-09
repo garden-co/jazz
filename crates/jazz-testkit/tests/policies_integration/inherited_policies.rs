@@ -821,9 +821,11 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
         query.clone(),
         "charlie sees standalone and folder doc as direct owner",
         |rows| {
-            rows.iter()
-                .any(|(id, _)| *id == standalone_id)
-                .then_some(rows)
+            // The inserts are queued independently; observing the first does
+            // not establish that the second has reached this reader yet.
+            (rows.iter().any(|(id, _)| *id == standalone_id)
+                && rows.iter().any(|(id, _)| *id == folder_doc_id))
+            .then_some(rows)
         },
     )
     .await;

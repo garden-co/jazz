@@ -19,3 +19,17 @@ export function runtimeRandomBytes(length: 16 | 32): Uint8Array {
   }
   throw new Error("Jazz requires a cryptographically secure runtime entropy source");
 }
+
+/** Nonzero wire incarnation; independent of process lifetime and numeric order. */
+export function runtimeConnectionIncarnation(
+  entropy: () => Uint8Array = () => runtimeRandomBytes(16),
+): bigint {
+  for (;;) {
+    const bytes = entropy();
+    const epoch = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(
+      0,
+      true,
+    );
+    if (epoch !== 0n) return epoch;
+  }
+}
