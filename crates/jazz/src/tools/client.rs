@@ -1905,7 +1905,6 @@ impl ClientDbInner {
                 _ = &mut state_changed => {}
             }
         }
-
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {
@@ -4274,6 +4273,7 @@ mod tests {
 
     struct DriverWireTransport {
         state: Arc<DriverConnectorState>,
+        _terminal_lifetime: tokio::sync::oneshot::Sender<()>,
     }
 
     struct DriverConnectAttempt {
@@ -4352,15 +4352,21 @@ mod tests {
                     std::future::pending::<()>().await;
                 }
                 attempt.completed = true;
+                let (terminal_lifetime, terminal_dropped) = tokio::sync::oneshot::channel();
                 Ok(
                     crate::tools::native_transport_connector::ConnectedNativeTransport {
                         transport: Box::new(DriverWireTransport {
                             state: Arc::clone(&state),
+                            _terminal_lifetime: terminal_lifetime,
                         }),
                         protocol_version: 1,
                         features: 0,
                         session_context: None,
-                        terminal: Box::pin(std::future::pending()),
+                        permits_delegated_sessions: false,
+                        terminal: Box::pin(async move {
+                            let _ = terminal_dropped.await;
+                            NativeTransportTerminal::OwnerDropped
+                        }),
                     },
                 )
             })
@@ -4372,7 +4378,7 @@ mod tests {
         ) -> crate::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
             Box::pin(async {
                 Err(
-                    crate::tools::native_transport_connector::NativeTransportError(
+                    crate::tools::native_transport_connector::NativeTransportError::Terminal(
                         "catalogue bootstrap is not used by client lifecycle tests".to_owned(),
                     ),
                 )
@@ -4385,7 +4391,8 @@ mod tests {
         data_dir: std::path::PathBuf,
         schema: Schema,
     ) -> AppContext {
-        let mut context = make_offline_context(app_id, data_dir, schema);
+        let mut context =
+            with_synthetic_admitted_account(make_offline_context(app_id, data_dir, schema));
         context.server_url = "https://example.invalid".to_owned();
         context.jwt_token = Some(make_test_jwt("driver-user", json!({})));
         context
