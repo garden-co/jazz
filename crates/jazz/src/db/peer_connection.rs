@@ -946,17 +946,11 @@ pub(super) struct SubscriberConnectionState {
     pub(super) serve_dirty: bool,
 }
 
-/// Host topology and the admitted logical scope select query authority.
-/// Trusted transport does not turn a delegated user's scope into SYSTEM.
-pub(super) fn selects_authority_query_source(
-    client_scope_relay: bool,
-    partial_edge_query_host: bool,
-    trust: CommitUnitTrust,
-    subject: AuthorSubject,
-) -> bool {
-    client_scope_relay
-        || (partial_edge_query_host
-            && (trust == CommitUnitTrust::Session || subject != AuthorSubject::SYSTEM))
+/// Missing-body repair must not authorize a new payload from stale policy
+/// inputs. Ordinary Edge queries evaluate locally; explicit repair still asks
+/// Core under the admitted reader, including readers on trusted transports.
+pub(super) fn row_repair_requires_core(trust: CommitUnitTrust, subject: AuthorSubject) -> bool {
+    trust == CommitUnitTrust::Session || subject != AuthorSubject::SYSTEM
 }
 
 /// A valid request awaiting activation of its schema, not a rejected query.
@@ -1646,6 +1640,7 @@ where
     pub(crate) fn set_partial_edge_query_host(&mut self) {
         if let ConnectionLink::Subscriber(state) = &mut self.link {
             state.partial_edge_query_host = true;
+            self.node.borrow_mut().enable_edge_query_serving();
         }
     }
 
@@ -1723,7 +1718,6 @@ where
             peer,
             coverage_groups,
             ingest_context,
-            partial_edge_query_host,
             scope_purposes,
             scope_aggregates,
             serve_dirty,
@@ -1758,12 +1752,7 @@ where
         ) in groups
         {
             let group_subscription = coverage_group_subscription_key(&coverage);
-            let scope_relay = selects_authority_query_source(
-                self.node.borrow().client_relay_scope().is_some(),
-                *partial_edge_query_host,
-                ingest_context.trust,
-                policy_binding.0,
-            );
+            let scope_relay = self.node.borrow().client_relay_scope().is_some();
             peer.set_subscription_policy_binding(group_subscription, policy_binding);
             if awaiting_upstream_settlement {
                 let authority_result_source = self
@@ -4503,9 +4492,7 @@ where
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
-                            let scope_relay = selects_authority_query_source(
-                                self.node.borrow().client_relay_scope().is_some(), *partial_edge_query_host,
-                                ingest_context.trust, subscription_policy_binding.0);
+                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
                             let upstream_opts = if local_subscriber || scope_relay {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
@@ -5014,7 +5001,7 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
-                                let requires_core = selects_authority_query_source(false, true, ingest_context.trust, binding.0);
+                                let requires_core = row_repair_requires_core(ingest_context.trust, binding.0);
                                 super::row_version_repairs::enqueue_authority_repair(
                                     pending_authority_repairs, requests, binding, *session_claim_revision, requires_core,
                                 )?;

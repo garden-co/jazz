@@ -2533,6 +2533,9 @@ where
         downstream_fates: PendingDownstreamFates,
         startup_error: Option<Error>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        if edge_authority {
+            self.node.borrow_mut().enable_edge_query_serving();
+        }
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
             Some(cursor) => {

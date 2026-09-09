@@ -25,7 +25,7 @@ fn descriptor() -> RecordDescriptor {
 pub(super) fn local_unavailable_policy_binding(
     request: &QueryProgramRequest,
 ) -> Option<PolicyBindingKey> {
-    if request.authorization_mode != QueryAuthorizationMode::ClientLocal {
+    if request.authorization_mode == QueryAuthorizationMode::TrustedServing {
         return None;
     }
     policy_binding(&request.policy)

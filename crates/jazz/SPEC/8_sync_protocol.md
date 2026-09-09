@@ -1004,8 +1004,9 @@ client identity and immutable claims.
 
 On an untrusted client-to-Edge path, shared cache possession is never evidence
 of permission to disclose. A partial Edge may hold a fresh task fetched for
-SYSTEM and an obsolete grant permitting Alice. Neither ordinary query delivery
-nor FetchRowVersions may use that cached grant to authorize fresh bytes for Alice.
+SYSTEM and an obsolete grant permitting Alice. An explicit repair must not use that cached grant to authorize fresh bytes for
+Alice. Ordinary Edge evaluation uses its maintained local policy inputs and also
+honors verified Core access-loss decisions for the admitted reader.
 Exact-version repair is subject to the same current read authorization contract
 as ordinary repair at Core. Knowing a row/transaction coordinate is not a grant.
 
@@ -1026,13 +1027,30 @@ per-request query policy bindings on trusted Edge-to-Core links. Bare
 not grant this capability. Existing admission APIs default to no capability;
 write authorization and publication trust are unchanged.
 
-At a partial Edge, every admitted non-SYSTEM query scope (including delegated
-users over trusted links), and every untrusted session, consumes its exact
-Core-authorized source versions. Those sources compile in ClientLocal mode:
-missing policy-proof rows must not cause cached-policy re-evaluation or authorize
-fresh shared-cache bytes. The Edge's own SYSTEM scope retains local evaluation
-and ordinary query-driven reconciliation. Host topology selects this boundary,
-not a wire role or a cache history-completeness claim.
+A server Edge evaluates ordinary admitted queries and their read policies over
+its local data. It forwards the subscription to keep inputs synchronized, but
+opening the local evaluator does not require the exact Core-selected result for
+that new query. A scope-isolated browser/native client relay has a different
+role: it still consumes the selected authority's exact inputs and does not
+re-evaluate permissions from an incomplete client cache.
+
+Extra-row and missing-body repairs remain Core-authorized under the admitted
+reader in this implementation. A verified current-unavailable decision excludes
+that physical row from the Edge's ordinary serving graph for that exact reader
+and claims, as well as from client-local reads in that context. It does not
+remove shared storage, constrain SYSTEM, or become an input to permission-proof
+evaluation. A later verified readable decision clears the exclusion. Unknown,
+connection replacement and stale replies retain the existing retry/cancellation
+rules. These are delegated reader decisions on a trusted transport, not a claim
+that the Edge's own SYSTEM identity lost access.
+
+For example, Alice can read task T through grant G. Core revokes G while updating
+T, but T still matches Alice's task filter. Repair must not fetch just T as
+SYSTEM and then apply an old cached G: that could disclose T's new content.
+The admitted Alice repair returns current-unavailable without that content;
+the Edge's serving graph excludes T for Alice. Other readers and SYSTEM retain
+their independent access. Fully local repair requires maintained coverage of
+all authorization inputs and is outside this bounded restoration.
 
 Strict receivers retain the selected usage's deletion-layer CoveredInput facts
 and exact version bodies beside the content graph, since a tombstone contributes

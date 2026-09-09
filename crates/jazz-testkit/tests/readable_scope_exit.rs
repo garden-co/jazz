@@ -299,6 +299,19 @@ fn revocation_schema(dependency: bool) -> Schema {
 }
 
 async fn run_revoked_exit(dependency: bool, relayed: bool) {
+    run_revoked_exit_case(dependency, relayed, true).await;
+}
+
+async fn run_revoked_exit_case(dependency: bool, relayed: bool, changes_filter: bool) {
+    run_revoked_exit_shared_case(dependency, relayed, changes_filter, false).await;
+}
+
+async fn run_revoked_exit_shared_case(
+    dependency: bool,
+    relayed: bool,
+    changes_filter: bool,
+    shared_cache: bool,
+) {
     let schema = revocation_schema(dependency);
     let authority = JazzServer::start_with_schema(schema.clone()).await;
     let relay = if relayed {
@@ -340,6 +353,38 @@ async fn run_revoked_exit(dependency: bool, relayed: bool) {
     }
     let (task, _, tx) = bob.insert("tasks", input).unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+    // A different reader can populate this same Edge's cache with a newer
+    // task. Alice's narrowed scope must not leak that shared-cache successor.
+    let shared_reader = if shared_cache {
+        Some(
+            TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("shared-backend")
+                .as_admin()
+                .connect()
+                .await,
+        )
+    } else {
+        None
+    };
+    let _shared_subscription = if let Some(reader) = &shared_reader {
+        let mut subscription = reader
+            .subscribe_with_read_tier(Query::from("tasks"), ReadTier::Remote)
+            .await
+            .unwrap();
+        wait_for_subscription_update(
+            &mut subscription,
+            &mut Vec::new(),
+            TIMEOUT,
+            "shared Edge cache receives task",
+            |log| has_added_id(log, task),
+        )
+        .await;
+        Some(subscription)
+    } else {
+        None
+    };
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
@@ -369,7 +414,7 @@ async fn run_revoked_exit(dependency: bool, relayed: bool) {
     let tx = bob.begin_transaction().unwrap().transaction_id();
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     let mut changes = vec![
-        ("done".into(), Value::Boolean(true)),
+        ("done".into(), Value::Boolean(changes_filter)),
         ("title".into(), Value::Text("new forbidden title".into())),
     ];
     if let Some(grant) = grant {
@@ -401,7 +446,39 @@ async fn run_revoked_exit(dependency: bool, relayed: bool) {
             "revocation must withhold the new content, not merely hide membership"
         );
     }
+    // Restoring access must clear the exact reader's denial, without requiring
+    // a new client or discarding the Edge's shared cache.
+    let start = log.len();
+    let tx = bob.begin_transaction().unwrap().transaction_id();
+    let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
+    staged
+        .update(
+            task,
+            vec![
+                ("done".into(), Value::Boolean(false)),
+                ("owner".into(), Value::Text("alice".into())),
+                ("title".into(), Value::Text("readmitted".into())),
+            ],
+        )
+        .unwrap();
+    if let Some(grant) = grant {
+        staged
+            .update(grant, vec![("owner".into(), Value::Text("alice".into()))])
+            .unwrap();
+    }
+    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    wait_for_subscription_update(
+        &mut remote,
+        &mut log,
+        TIMEOUT,
+        "same Edge readmits task",
+        |log| has_added_id(&log[start..], task),
+    )
+    .await;
     alice.shutdown().await.unwrap();
+    if let Some(reader) = shared_reader {
+        reader.shutdown().await.unwrap();
+    }
     bob.shutdown().await.unwrap();
     if let Some(relay) = relay {
         relay.shutdown().await;
@@ -988,5 +1065,32 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
             relay.shutdown().await;
             authority.shutdown().await;
         })
+        .await;
+}
+
+/// Access alone removes the row; a scalar-filter change cannot hide a stale
+/// Edge authorization decision while trusted repair refreshes the task.
+#[tokio::test]
+async fn edge_direct_access_loss_without_filter_change_withholds_successor() {
+    tokio::task::LocalSet::new()
+        .run_until(run_revoked_exit_case(false, true, false))
+        .await;
+}
+
+/// A changed task must not pass an old cached grant while the Edge repairs
+/// inputs on its trusted Core connection.
+#[tokio::test]
+async fn edge_dependency_access_loss_without_filter_change_withholds_successor() {
+    tokio::task::LocalSet::new()
+        .run_until(run_revoked_exit_case(true, true, false))
+        .await;
+}
+
+/// Another reader fills the Edge cache with a successor which Alice cannot
+/// read. A task-only shared scope deliberately does not hydrate its grant.
+#[tokio::test]
+async fn edge_shared_cache_dependency_revocation_withholds_successor() {
+    tokio::task::LocalSet::new()
+        .run_until(run_revoked_exit_shared_case(true, true, false, true))
         .await;
 }

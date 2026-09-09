@@ -530,6 +530,8 @@ pub struct NodeState<S> {
     /// Disabled unless a core serving shell owns the complete policy inputs.
     /// This is runtime capability, never wire or durable authorization evidence.
     authoritative_scalar_exit_refresh: bool,
+    /// Host-selected Edge query serving; never inferred from peer declarations.
+    edge_query_serving: bool,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread

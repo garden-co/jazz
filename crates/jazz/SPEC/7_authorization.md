@@ -348,6 +348,14 @@ policy binding's authoritative membership separate and may not treat possession
 of a cached row as permission to reveal it to another scope (ch. 9,
 `INV-EDGE-21..24`).
 
+A server Edge remains a serving authority: its ordinary query graph composes
+read policies locally. Verified upstream current-unavailable decisions add an
+exclusion for the exact admitted reader and claims. This excludes app/serving
+inputs only; raw policy-proof subplans and fresh permission probes must not
+consume it, or an old denial could prevent its own later readmission. SYSTEM
+and another reader's scope do not inherit the exclusion. Explicit extra-row and
+missing-body repair continue to obtain current Core authorization.
+
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
 to application-owned rows that represent a draft or lifecycle when the schema

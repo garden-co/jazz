@@ -897,8 +897,7 @@ where
         // local execution must lower concrete bindings into its locally
         // available (already upstream-scoped at Edge/Global) data, rather
         // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode
-            == QueryAuthorizationMode::TrustedServing
+        let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1375,7 +1374,7 @@ where
             // A serving node evaluates its complete authority program. A
             // `SettledBindingView` is a receiver-local CoveredInput source,
             // not a server-side cache or an alternate trusted read path.
-            QueryAuthorizationMode::TrustedServing => None,
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => None,
         };
         // Ordinary Edge/Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
@@ -2486,7 +2485,7 @@ where
                 self.prepare_client_subscription_binding(shape, binding, tier, identity)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing => {
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                 self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
                     .await
             }
@@ -2895,7 +2894,7 @@ where
                     self.query_rows_for_client(shape, binding, tier, identity)
                         .await?
                 }
-                QueryAuthorizationMode::TrustedServing => {
+                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                     self.query_rows_with_prepared_plan_for_identity(
                         shape, binding, tier, None, identity,
                     )
@@ -2913,7 +2912,7 @@ where
                 self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing => {
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                 self.query_relation_snapshot_for_serving_in_read_view(
                     shape, binding, tier, identity, read_view,
                 )
@@ -3192,7 +3191,7 @@ where
                 permission_subject: bound_identity,
                 ..
             } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                if authorization_mode != QueryAuthorizationMode::ClientLocal
                     && identity != bound_identity
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
@@ -3205,7 +3204,7 @@ where
                 permission_subject: Some(bound_identity),
                 ..
             } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                if authorization_mode != QueryAuthorizationMode::ClientLocal
                     && identity != bound_identity
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
@@ -3403,9 +3402,15 @@ where
         )
     }
 
+    pub(crate) fn enable_edge_query_serving(&mut self) {
+        self.edge_query_serving = true;
+    }
+
     pub(crate) fn peer_query_authorization_mode(&self) -> QueryAuthorizationMode {
         if self.client_relay_scope().is_some() {
             QueryAuthorizationMode::ClientLocal
+        } else if self.edge_query_serving {
+            QueryAuthorizationMode::EdgeServing
         } else {
             QueryAuthorizationMode::TrustedServing
         }

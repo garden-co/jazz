@@ -662,6 +662,7 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
+            edge_query_serving: false,
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),

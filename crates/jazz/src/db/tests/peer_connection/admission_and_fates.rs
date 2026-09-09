@@ -4,7 +4,7 @@ use super::*;
 use crate::db::peer_connection::{
     ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
     coverage_group_subscription_key, dispatch_admitted_subscriber_message,
-    selects_authority_query_source,
+    row_repair_requires_core,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -5730,17 +5730,16 @@ fn delegated_request_binding_requires_backend_client_link() {
 // Internal: this matrix pins host admission independently of wire declarations;
 // the reconnect test exercises its observable confidentiality consequence.
 #[test]
-fn partial_edge_query_source_uses_effective_scope_not_transport_trust() {
+fn partial_edge_row_repair_uses_effective_scope_not_transport_trust() {
     let alice = AuthorSubject::for_test_bytes([0x71; 16]);
     for trust in [
         CommitUnitTrust::Session,
         CommitUnitTrust::TrustedBackend,
         CommitUnitTrust::TrustedAuthority,
     ] {
-        assert!(selects_authority_query_source(false, true, trust, alice));
-        assert!(!selects_authority_query_source(false, false, trust, alice));
+        assert!(row_repair_requires_core(trust, alice));
         assert_eq!(
-            selects_authority_query_source(false, true, trust, AuthorSubject::SYSTEM),
+            row_repair_requires_core(trust, AuthorSubject::SYSTEM),
             trust == CommitUnitTrust::Session
         );
     }
@@ -5811,6 +5810,17 @@ fn remote_query_delivery(
         cells("unverified shared bytes", false, alice),
     )
     .unwrap();
+    let forbidden = row(0x78);
+    edge.insert_with_id(
+        "todos",
+        forbidden,
+        cells(
+            "another reader",
+            false,
+            AuthorSubject::for_test_bytes([0x79; 16]),
+        ),
+    )
+    .unwrap();
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let opts = RegisterShapeOptions {
@@ -5854,7 +5864,7 @@ fn remote_query_delivery(
         .unwrap();
     let delegated_session = delegated.then(|| crate::protocol::DelegatedSessionBinding {
         identity: alice,
-        claims: BTreeMap::new(),
+        claims: test_provider_claims(alice),
     });
     let request = SyncMessage::Subscribe(Subscribe {
         shape_id: shape.shape_id(),
@@ -5876,6 +5886,15 @@ fn remote_query_delivery(
             if let SyncMessage::ViewUpdate(view) = message {
                 for carrier in view.version_carriers {
                     for bundle in carrier.bundle_refs().unwrap() {
+                        if !matches!(client_scope, QueryTestClient::System) {
+                            assert!(
+                                !bundle
+                                    .versions
+                                    .iter()
+                                    .any(|version| version.row_uuid() == forbidden),
+                                "local Edge evaluation must narrow payloads under the admitted reader"
+                            );
+                        }
                         emitted |= bundle
                             .versions
                             .iter()
@@ -5913,39 +5932,27 @@ fn remote_queries_cannot_disable_upstream_propagation() {
     }
 }
 
+// Internal transport fixture isolates local serving from upstream hydration:
+// no Core is connected. The Edge must evaluate cached data under the admitted
+// reader instead of waiting for a selected Core result for this exact query.
 #[test]
-fn partial_edge_lower_tier_still_requires_selected_authority_source() {
-    assert!(
-        !remote_query_delivery(
-            true,
-            DurabilityTier::Local,
-            QueryTestHost::PartialEdge,
-            QueryTestClient::Session
-        )
-        .0
-    );
-}
-
-#[test]
-fn partial_edge_default_waits_for_core_and_system_keeps_cache() {
-    assert_eq!(
-        remote_query_delivery(
-            true,
-            DurabilityTier::Global,
-            QueryTestHost::PartialEdge,
-            QueryTestClient::Session
-        ),
-        (false, false)
-    );
-    assert_eq!(
-        remote_query_delivery(
-            true,
-            DurabilityTier::Global,
-            QueryTestHost::PartialEdge,
-            QueryTestClient::System
-        ),
-        (true, false)
-    );
+fn partial_edge_evaluates_cached_queries_without_selected_core_source() {
+    for client in [
+        QueryTestClient::Session,
+        QueryTestClient::Delegated,
+        QueryTestClient::System,
+    ] {
+        assert_eq!(
+            remote_query_delivery(
+                true,
+                DurabilityTier::Global,
+                QueryTestHost::PartialEdge,
+                client,
+            ),
+            (true, false),
+            "{client:?}"
+        );
+    }
 }
 
 // Rust equivalent of a memory-only browser foreground: LocalOnly can read its
