@@ -2635,6 +2635,23 @@ where
         }
     }
 
+    /// Attach claims without synchronously reentering a suspended storage operation.
+    pub async fn set_identity_claims_async(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        let changed = {
+            let mut node = self.node.node.lock().await;
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_session_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_test_provider_claims(
         &self,

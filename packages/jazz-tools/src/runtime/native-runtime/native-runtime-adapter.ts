@@ -226,7 +226,7 @@ type NativeDb = {
     author?: Uint8Array,
   ): NativeReadResult | Promise<NativeReadResult>;
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
-  setSessionClaims?(claims: Record<string, unknown> | undefined | null): void;
+  setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -2125,7 +2125,9 @@ export class NativeRuntimeAdapter implements Runtime {
           await this.runWhenCoreIdle(() => {
             if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier)
               return;
-            this.installClientSessionClaims(policyClaimsForAdmittedWebSocket(normalizedAuthJson));
+            return this.installClientSessionClaims(
+              policyClaimsForAdmittedWebSocket(normalizedAuthJson),
+            );
           });
           if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
             carrier.close();
@@ -2728,10 +2730,14 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private clientSessionClaimsKey: string | undefined;
 
-  private installClientSessionClaims(claims: Record<string, unknown>): void {
+  private installClientSessionClaims(claims: Record<string, unknown>): void | Promise<void> {
     const key = canonicalJson(claims);
     if (key === this.clientSessionClaimsKey) return;
-    this.db.setSessionClaims?.(claims);
+    const installed = this.db.setSessionClaims?.(claims);
+    if (installed instanceof Promise)
+      return installed.then(() => {
+        this.clientSessionClaimsKey = key;
+      });
     this.clientSessionClaimsKey = key;
   }
 
@@ -2746,7 +2752,11 @@ export class NativeRuntimeAdapter implements Runtime {
         // Claim installation mutates native state. Wait for any storage-backed
         // tick to release it, and avoid serializing unchanged claims per read.
         const prepare = () => {
-          this.installClientSessionClaims(session.claims);
+          const installed = this.installClientSessionClaims(session.claims);
+          if (installed instanceof Promise)
+            return installed.then(() =>
+              this.prepareQueryForReadWithClaims(queryJson, session, signal),
+            );
           return this.prepareQueryForReadWithClaims(queryJson, session, signal);
         };
         return this.ownerRuntime.coreOperation ? this.runWhenCoreIdle(prepare) : prepare();

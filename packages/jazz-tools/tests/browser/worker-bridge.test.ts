@@ -3045,10 +3045,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "local subscription did not publish its opening snapshot",
     );
 
+    // Exercise loss of an established connection, not a race with its first Hello.
+    await db.all(allTodos, { tier: "edge" });
     await stopJazzServer(syncServer.serverUrl);
     const edgeError = await withTimeout(
       db.all(allTodos, { tier: "edge" }),
-      5000,
+      // The ten bounded reconnect attempts wait 7.5s in total before reporting
+      // terminal loss. Leave room for the handshakes and worker delivery too.
+      15000,
       "edge read did not observe the stopped server",
     ).then(
       () => null,

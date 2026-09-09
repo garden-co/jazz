@@ -228,7 +228,7 @@ declare module "jazz-wasm" {
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     close(): Promise<boolean>;
-    setSessionClaims(claims: Record<string, unknown> | null): void;
+    setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;
     connectUpstreamWithSession(
       protocolVersion: number,

@@ -2158,7 +2158,7 @@ impl WasmDb {
     /// Bind correlation claims to this already-open client's own identity.
     /// This does not grant a different author or enable serving reads.
     #[wasm_bindgen(js_name = setSessionClaims)]
-    pub fn set_session_claims(&self, claims: JsValue) -> Result<(), JsValue> {
+    pub fn set_session_claims(&self, claims: JsValue) -> Result<JsValue, JsValue> {
         let inner = self.open_inner()?;
         let identity = match &inner {
             WasmDbInner::Memory(db) => db.identity().author,
@@ -2166,8 +2166,25 @@ impl WasmDb {
             WasmDbInner::Browser(db) => db.identity().author,
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        inner.set_identity_claims(identity, claims_from_js(identity, claims)?);
-        Ok(())
+        let claims = claims_from_js(identity, claims)?;
+        let mut future = Box::pin(async move {
+            match inner {
+                WasmDbInner::Memory(db) => db.set_identity_claims_async(identity, claims).await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.set_identity_claims_async(identity, claims).await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            Ok(JsValue::UNDEFINED)
+        });
+        // Preserve immediate subscription delivery when idle, but yield to the
+        // storage owner instead of blocking the host thread when it is busy.
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result,
+            Poll::Pending => Ok(future_to_promise(future).into()),
+        }
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
