@@ -149,3 +149,21 @@ Cmd line: hidden-app-path secret
   ]);
   assert.doesNotMatch(JSON.stringify(summary), /hidden|secret/);
 });
+
+test("bridgeless React Native JS and native queues retain their frame offsets", () => {
+  for (const thread of ["mqt_v_js", "mqt_v_native"]) {
+    const summary = summarizeAndroidBacktrace(`"${thread}" sysTid=43
+ #00 pc 123 /private/libreactnative.so (RuntimeScheduler::runEventLoop+8)
+ #01 pc 456 /private/libhermes.so (drainMicrotasks+8)`);
+    assert.deepEqual(summary, [
+      {
+        thread,
+        frames: [
+          { library: "libreactnative.so", pc: "123", symbol: "RuntimeScheduler" },
+          { library: "libhermes.so", pc: "456", symbol: "drainMicrotasks" },
+        ],
+      },
+    ]);
+    assert.doesNotMatch(JSON.stringify(summary), /private/);
+  }
+});
