@@ -2932,7 +2932,11 @@ where
                                         },
                                     );
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                                    return Ok(true);
+                                    // Finish this receive batch before yielding for repair.
+                                    // Earlier complete views and admitted publications
+                                    // already left the transport; returning here would
+                                    // discard them instead of applying their receipts.
+                                    break;
                                 }
                             }
                             SyncMessage::SubscribeRejected {

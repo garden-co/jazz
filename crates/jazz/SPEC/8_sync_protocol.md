@@ -60,7 +60,7 @@ Invariant digest:
 - `INV-SYNC-44`: Every non-pending query update MUST describe one complete supporting physical row/version set, including the empty set. The wire MUST NOT assign query-input roles or carry separate source-completeness facts. Receivers MUST validate and install the set atomically before deriving results locally. Encoding, validating and comparing a complete set may scale with its size, including ordered-index lookup costs. Local query maintenance after comparison MUST still apply only the changed inputs; receiving a complete set does not authorize rebuilding every local result.
 - `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Repair MUST check exact content/deletion layers and branches and use the live usage’s admitted policy binding. Authorized deletion witnesses remain repairable under includeDeleted semantics; retired usages MUST NOT initiate repair.
 
-- `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field.
+- `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field. A receiver yielding to fetch missing bodies MUST first finish applying complete updates already consumed in that receive batch; a later repair must never discard another subscription’s received update or an admitted publication.
 
 ## Details
 

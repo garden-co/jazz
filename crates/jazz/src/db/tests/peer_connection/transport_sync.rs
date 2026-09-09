@@ -1383,3 +1383,80 @@ fn newer_supporting_snapshots_coalesce_unsent_repairs() {
         Some(Value::String("15".to_owned()))
     );
 }
+
+/// Transport control makes the ordering deterministic: a complete update for
+/// one live query is immediately followed by another query's missing-body
+/// snapshot. Public subscription results must survive yielding for that repair.
+#[test]
+fn row_version_repair_preserves_preceding_complete_subscription_updates() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let server = open_core(0xb4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb5, alice, &schema);
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut streams = ["first", "second"].map(|title| {
+        prepared_subscribe(
+            &client,
+            &Query::from("todos").filter(eq(col("title"), lit(title))),
+            global_subscribe_opts(),
+        )
+        .unwrap()
+    });
+    let mut snapshots = [RelationSnapshot::default(), RelationSnapshot::default()];
+    for _ in 0..16 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(snapshot, event);
+            }
+        }
+    }
+    assert!(snapshots.iter().all(|snapshot| snapshot.rows.is_empty()));
+    for (id, title) in [(0xb6, "first"), (0xb7, "second")] {
+        server
+            .insert_with_id("todos", row(id), cells(title, false, alice))
+            .unwrap();
+    }
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let mut views = 0;
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message {
+            views += 1;
+            assert!(!payload.supporting_rows.is_empty());
+            if views == 2 {
+                payload.version_carriers.clear();
+            }
+        }
+    }
+    assert_eq!(views, 2, "both query updates must share one receive batch");
+    client.tick().unwrap();
+    for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(snapshot, event);
+        }
+    }
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|snapshot| snapshot.rows.len())
+            .sum::<usize>(),
+        1,
+        "the complete predecessor must publish before the later repair returns"
+    );
+    for _ in 0..16 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+        for (stream, snapshot) in streams.iter_mut().zip(&mut snapshots) {
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(snapshot, event);
+            }
+        }
+    }
+    assert_eq!(row_ids(&snapshots[0].rows), vec![row(0xb6)]);
+    assert_eq!(row_ids(&snapshots[1].rows), vec![row(0xb7)]);
+}
