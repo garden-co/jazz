@@ -1398,16 +1398,13 @@ describe("NativeRuntimeAdapter server transport", () => {
               if (!ticked || subscriptionDrained) return [];
               subscriptionDrained = true;
               return [
-                {
-                  type: "snapshot",
-                  rows: encodeRelationSnapshot([
-                    {
-                      table: "todos",
-                      rowId,
-                      title: "visible after scheduled tick",
-                    },
-                  ]),
-                },
+                subscriptionReset([
+                  {
+                    table: "todos",
+                    rowId,
+                    title: "visible after scheduled tick",
+                  },
+                ]),
               ];
             },
           }),
@@ -2389,7 +2386,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
-  it("trusts native subscription snapshots for simple equality relation filters", async () => {
+  it("trusts native reset deltas for simple equality relation filters", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -2438,9 +2435,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       deltas.push(delta);
     });
 
-    controller!.enqueue({
-      type: "snapshot",
-      rows: encodeRelationSnapshot([
+    controller!.enqueue(
+      subscriptionReset([
         {
           table: "todos",
           rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -2452,7 +2448,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           title: "drop",
         },
       ]),
-    });
+    );
     await Promise.resolve();
 
     expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
@@ -2841,7 +2837,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("materializes array subquery relation snapshots for subscriptions", async () => {
+  it("materializes array subquery reset deltas for subscriptions", async () => {
     const calls: string[] = [];
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     const relationSchema = {
@@ -2897,8 +2893,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       deltas.push(delta);
     });
     controller!.enqueue({
-      type: "snapshot",
-      rows: encodeTerminalRelationSnapshot(relationSchema),
+      type: "delta",
+      reset: true,
+      delta: encodeTerminalSubscriptionDelta(relationSchema),
     });
     await Promise.resolve();
 
@@ -3065,16 +3062,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       deltas.push(delta);
     });
 
-    controller!.enqueue({
-      type: "snapshot",
-      rows: encodeRelationSnapshot([
+    controller!.enqueue(
+      subscriptionReset([
         {
           table: "todos",
           rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
           title: "native",
         },
       ]),
-    });
+    );
     await Promise.resolve();
 
     expect(calls).toEqual(["subscribe"]);
@@ -4106,9 +4102,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       deltas.push(delta);
     });
 
-    controller!.enqueue({
-      type: "snapshot",
-      rows: encodeRelationSnapshot([
+    controller!.enqueue(
+      subscriptionReset([
         {
           table: "todos",
           rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -4120,7 +4115,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           title: "second",
         },
       ]),
-    });
+    );
     await Promise.resolve();
 
     controller!.enqueue({
@@ -4154,10 +4149,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    controller!.enqueue({
-      type: "snapshot",
-      rows: encodeRelationSnapshot([]),
-    });
+    controller!.enqueue(subscriptionReset([]));
     await Promise.resolve();
 
     expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
@@ -4207,20 +4199,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     ]);
-    expect(decodeTestDeltas(deltas.slice(2))).toEqual([
-      [
-        {
-          kind: 1,
-          id: "00000000-0000-0000-0000-000000000002",
-          index: 0,
-        },
-        {
-          kind: 1,
-          id: "00000000-0000-0000-0000-000000000003",
-          index: 1,
-        },
-      ],
-    ]);
+    expect(deltas.at(-1)).toMatchObject({ reset: true, added: [], updated: [], removed: [] });
   });
 
   it("encodes public id equality relation filters into prepared native queries", async () => {
@@ -4637,7 +4616,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expectPreparedRelationEnvelope(preparedBytes!, "metrics");
   });
 
-  it("does not filter native subscription snapshots by public id in JS", async () => {
+  it("does not filter native subscription reset deltas by public id in JS", async () => {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -4688,9 +4667,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       deltas.push(delta);
     });
 
-    controller!.enqueue({
-      type: "snapshot",
-      rows: encodeRelationSnapshot([
+    controller!.enqueue(
+      subscriptionReset([
         {
           table: "todos",
           rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
@@ -4702,7 +4680,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           title: "extra from native",
         },
       ]),
-    });
+    );
     await Promise.resolve();
 
     expect(decodeTestDeltas(deltas)[0]).toHaveLength(2);
@@ -6841,6 +6819,14 @@ function encodeRelationSnapshot(rows: EncodedTestRow[], rootCount = rows.length)
   return writer.finish();
 }
 
+function subscriptionReset(rows: EncodedTestRow[]) {
+  return {
+    type: "delta",
+    reset: true,
+    delta: encodeSubscriptionDelta({ added: rows, updated: [], removed: [] }),
+  };
+}
+
 function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   const childColumns = schema.todos!.columns;
   const rootColumns: ColumnDescriptor[] = [
@@ -6881,6 +6867,23 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
     }, 1);
   }, 1);
   return writer.finish();
+}
+
+function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
+  const rowBatches = encodeTerminalRelationSnapshot(schema).subarray(1);
+  const suffix = new PostcardWriter();
+  suffix.vec(() => {}, 0); // updated rows
+  suffix.vec(() => {}, 0); // removed rows
+  const rowId = uuidBytes("00000000-0000-0000-0000-000000000001");
+  const resultKey = Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
+  suffix.vec((key) => key.bytes(resultKey), 1); // added occurrence keys
+  suffix.vec(() => {}, 0); // updated occurrence keys
+  suffix.vec(() => {}, 0); // removed occurrence keys
+  suffix.vec((index) => index.u64(0), 1); // added indices
+  suffix.vec(() => {}, 0); // updated previous indices
+  suffix.vec(() => {}, 0); // updated indices
+  suffix.vec(() => {}, 0); // removed indices
+  return concatBytes([rowBatches, suffix.finish()]);
 }
 
 function writeRowBatches(

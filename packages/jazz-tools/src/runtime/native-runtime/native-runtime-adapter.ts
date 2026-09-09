@@ -506,16 +506,12 @@ type SubscriptionState = {
   openingAbort?: AbortController;
   terminalError?: Error;
   terminalErrorDelivered?: boolean;
-  sources: SubscriptionSourceState[];
-  queryJson: string;
-  identity?: Uint8Array;
+  source?: SubscriptionSource;
+  reading: boolean;
   rows: RowState[];
-  rowIndexByKey: Map<string, number>;
   visibleRows: RowState[];
   outputColumns: SubscriptionOutputColumns | null;
-  session: RuntimeSession | null;
-  opts: unknown;
-  opened: boolean;
+  tier: string;
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
@@ -532,10 +528,7 @@ type SubscriptionOutputColumns = {
   rootColumns: readonly ColumnDescriptor[];
 };
 
-type SubscriptionSourceState = {
-  source: ReadableStreamDefaultReader<unknown> | Subscription;
-  reading: boolean;
-};
+type SubscriptionSource = ReadableStreamDefaultReader<unknown> | Subscription;
 
 export type RowState = {
   table: string;
@@ -1135,9 +1128,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const subscription of this.subscriptions.values()) {
       subscription.openingAbort?.abort();
-      for (const source of subscription.sources) {
-        closeSubscriptionSource(source.source);
-      }
+      if (subscription.source) closeSubscriptionSource(subscription.source);
     }
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
@@ -1878,19 +1869,13 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
-    const identity = session?.identity;
     this.subscriptions.set(handle, {
-      sources: [],
       openingAbort: new AbortController(),
-      queryJson,
-      identity,
+      reading: false,
       rows: [],
-      rowIndexByKey: new Map(),
       visibleRows: [],
       outputColumns: subscriptionOutputColumns(queryJson, this.schema),
-      session,
-      opts,
-      opened: false,
+      tier: tier ?? "local",
       visibleOpened: false,
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
@@ -1903,7 +1888,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle)!;
     const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
-      subscription.sources = [{ source: subscriptionSource(native), reading: false }];
+      subscription.source = subscriptionSource(native);
       if (subscription.cancelled || this.closed) {
         closeSubscriptionSourceState(subscription);
         return;
@@ -2329,18 +2314,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private resultForRow(
-    table: string,
-    rowId: Uint8Array,
-    receipt:
-      | { kind: "committed"; txId: TxId }
-      | { kind: "staged"; openTransactionId: OpenTransactionId },
-    identity?: Uint8Array,
-  ): InsertResult {
-    const row = this.readRow(table, rowId, identity);
-    return { id: formatUuid(rowId), values: row?.values ?? [], ...receipt };
-  }
-
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
@@ -2598,13 +2571,6 @@ export class NativeRuntimeAdapter implements Runtime {
       return write.deleted ? undefined : write.row;
     }
     return undefined;
-  }
-
-  private warnedOnce = new Set<string>();
-  private warnOnce(key: string, message: string): void {
-    if (this.warnedOnce.has(key)) return;
-    this.warnedOnce.add(key);
-    console.warn(`[jazz native-runtime] ${message}`);
   }
 
   private awaitNativeOperation<T>(
@@ -3032,29 +2998,25 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
-    if (subscription.cancelled) return;
-    for (const source of subscription.sources) {
-      if (!isReadableSubscriptionReader(source.source)) {
-        if (source.reading) continue;
-        source.reading = true;
-        void this.drainNativeSubscription(handle, subscription, source);
-        continue;
-      }
-      if (source.reading) continue;
-      source.reading = true;
+    const source = subscription.source;
+    if (subscription.cancelled || subscription.reading || !source) return;
+    subscription.reading = true;
+    if (isReadableSubscriptionReader(source)) {
       void this.readSubscription(handle, subscription, source);
+    } else {
+      void this.drainNativeSubscription(handle, subscription, source);
     }
   }
 
   private async readSubscription(
     handle: number,
     subscription: SubscriptionState,
-    source: SubscriptionSourceState,
+    source: SubscriptionSource,
   ): Promise<void> {
-    if (!isReadableSubscriptionReader(source.source)) return;
+    if (!isReadableSubscriptionReader(source)) return;
     try {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const next = await source.source.read();
+        const next = await source.read();
         if (next.done || subscription.cancelled) return;
         try {
           this.applySubscriptionChunk(subscription, next.value);
@@ -3077,19 +3039,19 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
     } finally {
-      source.reading = false;
+      subscription.reading = false;
     }
   }
 
   private async drainNativeSubscription(
     handle: number,
     subscription: SubscriptionState,
-    source: SubscriptionSourceState,
+    source: SubscriptionSource,
   ): Promise<void> {
-    if (isReadableSubscriptionReader(source.source)) return;
+    if (isReadableSubscriptionReader(source)) return;
     try {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const batch = source.source.readAll();
+        const batch = source.readAll();
         if (!Array.isArray(batch)) {
           await this.pumpServerTransport();
           const retryAfterMs = batch.retryAfterMs?.() ?? 0;
@@ -3121,7 +3083,7 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
     } finally {
-      source.reading = false;
+      subscription.reading = false;
     }
   }
 
@@ -3140,80 +3102,51 @@ export class NativeRuntimeAdapter implements Runtime {
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
-    if (chunk.type === "delta" && chunk.publishable === false) return;
-    if (chunk.type === "snapshot") {
-      const previousRows = subscription.rows;
-      const wasOpened = subscription.opened;
-      subscription.rows = rowsFromRelationSnapshot(
-        chunk.snapshot,
-        this.schema,
-        subscription.outputColumns?.rootColumns,
-        "full-record",
-      );
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      subscription.opened = true;
-      this.publishSubscriptionRows(
-        subscription,
-        wasOpened
-          ? runtimeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            )
-          : runtimeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
-        chunk.settled,
-        !wasOpened,
-      );
-    } else {
-      if (chunk.reset) {
-        subscription.rows = [];
-        subscription.rowIndexByKey = new Map();
-        clearDeferredPlaceholderBuffer(subscription);
-      }
-      const applied = applySubscriptionDeltaWithRootDelta(
-        subscription.rows,
-        chunk.delta,
-        this.schema,
-        chunk.reset === true,
-        subscription.outputColumns,
-      );
-      subscription.rows = applied.rows;
-      subscription.rowIndexByKey = applied.rowIndexByKey;
-      subscription.opened = true;
-      const terminalOperations = decodeRuntimeTerminalOperations(
-        chunk.terminalOperations,
-        subscription.outputColumns?.rootColumns,
-      );
-      const unresolvedPlaceholder = unresolvedSubscriptionPlaceholder(
-        subscription.rows,
-        this.schema,
-        subscription.outputColumns,
-      );
-      if (unresolvedPlaceholder) {
-        if (chunk.settled === true) {
-          throw new Error(
-            "settled relation subscription chunk retained unresolved placeholder rows " +
-              `(${unresolvedPlaceholder.table}.${unresolvedPlaceholder.column} on ${unresolvedPlaceholder.id})`,
-          );
-        }
-        this.deferSubscriptionRows(
-          subscription,
-          terminalOperations,
-          chunk.terminalOperations,
-          chunk.reset === true,
-          chunk.delta,
-        );
-        return;
-      }
-      applied.rootDelta.terminalOperations = terminalOperations;
-      this.publishSubscriptionRows(
-        subscription,
-        applied.rootDelta,
-        chunk.settled,
-        chunk.reset === true,
-      );
+    if (chunk.publishable === false) return;
+    if (chunk.reset) {
+      subscription.rows = [];
+      clearDeferredPlaceholderBuffer(subscription);
     }
+    const applied = applySubscriptionDeltaWithRootDelta(
+      subscription.rows,
+      chunk.delta,
+      this.schema,
+      chunk.reset === true,
+      subscription.outputColumns,
+    );
+    subscription.rows = applied.rows;
+    const terminalOperations = decodeRuntimeTerminalOperations(
+      chunk.terminalOperations,
+      subscription.outputColumns?.rootColumns,
+    );
+    const unresolvedPlaceholder = unresolvedSubscriptionPlaceholder(
+      subscription.rows,
+      this.schema,
+      subscription.outputColumns,
+    );
+    if (unresolvedPlaceholder) {
+      if (chunk.settled === true) {
+        throw new Error(
+          "settled relation subscription chunk retained unresolved placeholder rows " +
+            `(${unresolvedPlaceholder.table}.${unresolvedPlaceholder.column} on ${unresolvedPlaceholder.id})`,
+        );
+      }
+      this.deferSubscriptionRows(
+        subscription,
+        terminalOperations,
+        chunk.terminalOperations,
+        chunk.reset === true,
+        chunk.delta,
+      );
+      return;
+    }
+    applied.rootDelta.terminalOperations = terminalOperations;
+    this.publishSubscriptionRows(
+      subscription,
+      applied.rootDelta,
+      chunk.settled,
+      chunk.reset === true,
+    );
   }
 
   private publishSubscriptionRows(
@@ -3274,8 +3207,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
-    const tier = (subscription.opts as { tier?: unknown }).tier;
-    return tier === "global" || (this.nonDurableClient && tier === "edge");
+    return (
+      subscription.tier === "global" || (this.nonDurableClient && subscription.tier === "edge")
+    );
   }
 
   private deferSubscriptionRows(
@@ -3658,8 +3592,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      const tier = (subscription.opts as { tier?: unknown }).tier ?? "local";
-      if (tier !== "edge" && tier !== "global") continue;
+      if (subscription.tier !== "edge" && subscription.tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -3670,9 +3603,9 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.openingAbort?.abort();
     subscription.terminalError = error;
     clearDeferredPlaceholderBuffer(subscription);
-    for (const source of subscription.sources) {
+    if (subscription.source) {
       try {
-        closeSubscriptionSource(source.source);
+        closeSubscriptionSource(subscription.source);
       } catch (cleanupError) {
         // Resource retirement must not replace the causal subscription error
         // or prevent its once-only delivery to the application.
@@ -3792,9 +3725,7 @@ export class NativeRuntimeAdapter implements Runtime {
 }
 
 function closeSubscriptionSourceState(subscription: SubscriptionState): void {
-  for (const source of subscription.sources) {
-    closeSubscriptionSource(source.source);
-  }
+  if (subscription.source) closeSubscriptionSource(subscription.source);
 }
 
 function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
@@ -4188,7 +4119,7 @@ function sessionClaims(
   };
 }
 
-function closeSubscriptionSource(source: SubscriptionSourceState["source"]): void {
+function closeSubscriptionSource(source: SubscriptionSource): void {
   if ("close" in source && typeof source.close === "function") {
     source.close();
     return;
@@ -5710,11 +5641,15 @@ export function applySubscriptionDeltaWithRootDelta(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): {
   rows: RowState[];
-  rowIndexByKey: Map<string, number>;
   rootDelta: RuntimeSubscriptionDelta;
 } {
-  const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
-    applySubscriptionDeltaToState(currentRows, delta, schema, reset, outputColumns);
+  const { addedRows, updatedRows, removedEntries, rows } = applySubscriptionDeltaToState(
+    currentRows,
+    delta,
+    schema,
+    reset,
+    outputColumns,
+  );
   const rootIndexByKey = new Map<string, number>();
   addedRows.forEach((row, index) =>
     rootIndexByKey.set(rowStateKey(row), delta.addedIndices[index]!),
@@ -5724,7 +5659,6 @@ export function applySubscriptionDeltaWithRootDelta(
   );
   return {
     rows,
-    rowIndexByKey,
     rootDelta: {
       ...runtimeDeltaFromChanges(
         subscriptionOutputRows(addedRows, outputColumns),
@@ -5764,7 +5698,6 @@ function applySubscriptionDeltaToState(
   updatedRows: RowState[];
   removedEntries: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>;
   rows: RowState[];
-  rowIndexByKey: Map<string, number>;
 } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
@@ -5818,13 +5751,11 @@ function applySubscriptionDeltaToState(
   for (const placement of placements) {
     rows.splice(Math.max(0, Math.min(placement.index, rows.length)), 0, placement.row);
   }
-  const rowIndexByKey = indexRowsByKey(rows);
   return {
     addedRows,
     updatedRows,
     removedEntries,
     rows,
-    rowIndexByKey,
   };
 }
 
@@ -6162,7 +6093,6 @@ function decodeArrayBytes(
 }
 
 function normalizeSubscriptionChunk(chunk: unknown):
-  | { type: "snapshot"; snapshot: NativeRelationSubscriptionSnapshot; settled?: boolean }
   | {
       type: "delta";
       reset?: boolean;
@@ -6183,7 +6113,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
   const record = chunk as {
     type?: unknown;
-    rows?: unknown;
     delta?: unknown;
     reason?: unknown;
     reset?: unknown;
@@ -6193,13 +6122,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
-  }
-  if (record.type === "snapshot" || record.type === "Snapshot") {
-    return {
-      type: "snapshot",
-      snapshot: readRelationSnapshot(assertBytes(record.rows, "subscription rows")),
-      settled: typeof record.settled === "boolean" ? record.settled : undefined,
-    };
   }
   if (record.type === "delta" || record.type === "Delta") {
     return {
@@ -6611,22 +6533,6 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
     (bytes[offset + 2]! << 16) |
     (bytes[offset + 3]! << 24)
   );
-}
-
-/** Deterministic cache-key encoding for JSON-derived session claims. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
