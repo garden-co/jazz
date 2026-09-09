@@ -183,6 +183,9 @@ export const LegacyJazzProvider = defineComponent({
         })
         .catch((reason) => {
           if (activeRunId === runId) {
+            // Failed requests may be retried with an equivalent config. Stale
+            // failures must preserve the identity of a newer pending request.
+            lastRequestedConfigKey = noConfigKey;
             errorRef.value = reason instanceof Error ? reason : new Error(String(reason));
           }
         });
