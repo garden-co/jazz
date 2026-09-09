@@ -930,7 +930,7 @@ async fn handle_ws_connection(
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_still_admitted(&state, account_identity).await {
                         send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
+                        let _ = socket.close().await;
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
@@ -979,7 +979,7 @@ async fn handle_ws_connection(
                         };
                         if let Err(error) = account_still_admitted(&state, account_identity).await {
                             send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
+                        let _ = socket.close().await;
                             break 'connection;
                         }
                         if !outbound.is_empty()
