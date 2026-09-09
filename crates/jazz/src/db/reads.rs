@@ -248,45 +248,93 @@ where
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
         };
-        // Output-changing relation plans are maintained by the subscription
-        // compiler. Wait for its first settled reset so a one-shot host read
-        // uses the same complete coverage boundary without requiring bindings
-        // to carry a separate query kind.
-        let relation_subscription_covered = if require_coverage && is_relation {
+        // Read the maintained result itself, not just its coverage signal.
+        // Dropping the subscription and re-evaluating below would retire its
+        // exact request-scoped inputs before the one-shot consumes them.
+        // Remote publication waits for settlement. A local foreground also
+        // needs a fresh delivery from its durable owner, while the maintained
+        // subscription drives the complete multi-hop input closure.
+        if require_coverage && is_relation {
+            let local_coverage = if effective_read_tier(&opts) == DurabilityTier::Local {
+                Some(SerializedReadCoverage {
+                    attachment: Some(
+                        self.attach_query_with_opts_async(&prepared, opts.clone(), None, author)
+                            .await?,
+                    ),
+                    release: Some(release_coverage),
+                })
+            } else {
+                None
+            };
             let mut stream = match author {
                 Some(author) => {
-                    self.subscribe_for_identity(&prepared, opts.clone(), author)
+                    self.subscribe_client_for_identity(&prepared, opts.clone(), author)
                         .await?
                 }
                 None => self.subscribe(&prepared, opts.clone()).await?,
             };
-            loop {
-                match stream.next_event().await {
-                    Some(SubscriptionEvent::Delta {
-                        reset: true,
-                        publishable: true,
-                        settled: true,
-                        ..
-                    }) => break true,
-                    Some(SubscriptionEvent::Rejected { reason }) => {
-                        return Err(Error::new(
-                            ErrorCode::Query,
-                            format!("query subscription rejected: {reason:?}"),
-                        ));
-                    }
-                    Some(SubscriptionEvent::Closed) | None => {
-                        return Err(Error::new(
+            let outcome = async {
+                let mut next = Box::pin(stream.next_event());
+                let event = std::future::poll_fn(|cx| {
+                    if coverage_expired() {
+                        return Poll::Ready(Err(Error::new(
                             ErrorCode::NotObserved,
-                            "query subscription ended before its settled result",
-                        ));
+                            "Timed out waiting for query coverage",
+                        )));
                     }
-                    Some(SubscriptionEvent::Delta { .. }) => {}
+                    if local_coverage.as_ref().is_some_and(|coverage| {
+                        !self.query_attachment_is_covered(
+                            coverage
+                                .attachment
+                                .as_ref()
+                                .expect("live local read coverage"),
+                        )
+                    }) {
+                        return Poll::Pending;
+                    }
+                    std::future::Future::poll(next.as_mut(), cx).map(Ok)
+                })
+                .await?;
+                drop(next);
+                match event {
+                    Some(SubscriptionEvent::Delta { reset: true, .. }) => {
+                        let mut snapshot = stream.settled_receiver_local_snapshot()?;
+                        self.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                            .await?;
+                        if prepared.shape().query().array_subqueries.is_empty() {
+                            Ok(SerializedReadResult::Rows(
+                                snapshot
+                                    .rows
+                                    .into_iter()
+                                    .take(snapshot.root_count)
+                                    .collect(),
+                            ))
+                        } else {
+                            Ok(SerializedReadResult::Relation(snapshot))
+                        }
+                    }
+                    Some(SubscriptionEvent::Rejected { reason }) => Err(Error::new(
+                        ErrorCode::Query,
+                        format!("query subscription rejected: {reason:?}"),
+                    )),
+                    Some(SubscriptionEvent::Closed) | None => Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "query subscription ended before its published result",
+                    )),
+                    Some(SubscriptionEvent::Delta { .. }) => Err(Error::new(
+                        ErrorCode::Protocol,
+                        "query subscription did not open with a reset",
+                    )),
                 }
             }
-        } else {
-            false
-        };
-        let coverage = if require_coverage && !relation_subscription_covered {
+            .await;
+            let finalization = stream.close().await;
+            return match (outcome, finalization) {
+                (Ok(result), Ok(())) => Ok(result),
+                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            };
+        }
+        let coverage = if require_coverage {
             let attachment = self
                 .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
                 .await?;

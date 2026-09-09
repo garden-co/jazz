@@ -176,8 +176,8 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
   });
 
   test("noncanonical Rust request encodings fail closed", () => {
-    expect(() => decodeCommandInRust(Uint8Array.of(33, 4))).toThrow();
-    expect(() => decodeNativeForegroundResponse(Uint8Array.of(25, 3))).toThrow();
+    expect(() => decodeCommandInRust(Uint8Array.of(32, 4))).toThrow();
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(24, 3))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(128, 0))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(255))).toThrow();
     expect(() => decodeCommandInRust(Uint8Array.of(18, 1, 0, 2))).toThrow();
@@ -194,16 +194,16 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       .entries()) {
       expect([
         ...encodeNativeForegroundCommand(command as NativeForegroundCommand).subarray(0, 2),
-      ]).toEqual([33, index]);
+      ]).toEqual([32, index]);
     }
     expect(
       rustResponseCorpus()
         .slice(0, 3)
         .map((bytes) => [...bytes]),
     ).toEqual([
-      [25, 0],
-      [25, 1],
-      [25, 2],
+      [24, 0],
+      [24, 1],
+      [24, 2],
     ]);
   });
 });
