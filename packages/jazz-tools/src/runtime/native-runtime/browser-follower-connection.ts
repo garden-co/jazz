@@ -407,7 +407,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         type: "storage-reset-observed",
         resetId: message.resetId,
       } satisfies BrowserFollowerPortRequest);
-      this.callbacks.onStorageReset?.();
+      this.callbacks.onStorageReset?.(message.resetId);
       return;
     }
     if (message.type === "storage-invalidated") {

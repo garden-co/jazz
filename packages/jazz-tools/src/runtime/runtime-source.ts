@@ -35,6 +35,8 @@ export interface ForegroundNodeLease {
 export interface BrowserForegroundNodeLease extends ForegroundNodeLease {
   /** The caller must first disable the foreground lifetime that can mint this node's TxIds. */
   abandonAfterWorkerFailure(error: Error): void;
+  /** Locally releases an erased epoch after its worker-authored reset receipt; never writes a handoff. */
+  releaseAfterStorageReset(reason: Error): void;
 }
 
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -79,7 +81,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
-  onStorageReset?: () => void;
+  onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
 }
 
@@ -92,7 +94,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
-  onStorageReset?: () => void;
+  onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
 }
 

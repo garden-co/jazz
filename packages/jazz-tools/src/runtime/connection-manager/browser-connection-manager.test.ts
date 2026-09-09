@@ -14,7 +14,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function leasedManagerFixture(admissionError?: Error) {
+async function foregroundLeaseFixture() {
   const messages: string[] = [];
   const leaseEvents = new EventTarget();
   const emit = (data: unknown) => leaseEvents.dispatchEvent(new MessageEvent("message", { data }));
@@ -47,6 +47,25 @@ async function leasedManagerFixture(admissionError?: Error) {
     port as unknown as MessagePort,
     { dbName: "terminal-lease-controls", storageOwner: "owner" },
   );
+  return {
+    lease,
+    port,
+    messages,
+    finishStarted,
+    acknowledge: () => emit({ type: "foreground-node-lease-result" }),
+    allowFinish: () => {
+      acknowledgeFinish = true;
+    },
+    setClientLive: (live: boolean) => {
+      clientLive = live;
+    },
+    liveClientAtRetirement: () => liveClientAtRetirement,
+  };
+}
+
+async function leasedManagerFixture(admissionError?: Error, inspectorAttachment = false) {
+  const leaseFixture = await foregroundLeaseFixture();
+  const { lease } = leaseFixture;
   const connection: BrowserWorkerConnection = {
     ready: vi.fn(async () => {
       if (admissionError) throw admissionError;
@@ -65,16 +84,18 @@ async function leasedManagerFixture(admissionError?: Error) {
     onMutationError: vi.fn(),
     getRuntime: () => undefined,
     discard: vi.fn(() => {
-      clientLive = false;
+      leaseFixture.setClientLive(false);
     }),
   } as unknown as JazzClient;
   let onFailure!: BrowserWorkerConnectionContext["onFailure"];
+  const contexts: BrowserWorkerConnectionContext[] = [];
   const disposeTelemetry = vi.fn();
   const createClient = vi.fn(() => {
-    clientLive = true;
+    leaseFixture.setClientLive(true);
     return client;
   });
   const createConnection = vi.fn((context: BrowserWorkerConnectionContext) => {
+    contexts.push(context);
     onFailure = context.onFailure;
     return { ...connection };
   });
@@ -82,10 +103,20 @@ async function leasedManagerFixture(admissionError?: Error) {
     config: {
       serverUrl: "https://example.test",
       telemetryCollectorUrl: "https://example.test/telemetry",
+      runtimeSources: inspectorAttachment
+        ? {
+            inspectorBinding: {
+              appId: "app",
+              physicalDbName: "root",
+              authSessionKey: "session",
+              storageOwner: "owner",
+            },
+          }
+        : undefined,
     },
     isShuttingDown: false,
     runtimeSource: {
-      acquireBrowserForegroundNodeLease: async () => lease,
+      acquireBrowserForegroundNodeLease: vi.fn(async () => lease),
       createClient,
       installTelemetry: () => disposeTelemetry,
       createBrowserWorkerConnection: createConnection,
@@ -102,23 +133,153 @@ async function leasedManagerFixture(admissionError?: Error) {
   return {
     manager,
     host,
-    lease,
-    port,
-    messages,
+    ...leaseFixture,
+    contexts,
     connection,
     client,
     disposeTelemetry,
     createClient,
     createConnection,
-    finishStarted,
     fail: (error: Error) => onFailure(error),
-    acknowledge: () => emit({ type: "foreground-node-lease-result" }),
-    allowFinish: () => {
-      acknowledgeFinish = true;
-    },
-    liveClientAtRetirement: () => liveClientAtRetirement,
   };
 }
+
+describe("BrowserConnectionManager acknowledged storage reset", () => {
+  it.each([false, true])(
+    "cancels an obsolete pending lease finish without losing an earlier flush error (%s)",
+    async (flushFailed) => {
+      vi.useFakeTimers();
+      const fixture = await leasedManagerFixture();
+      const flushError = new Error("independent flush failure");
+      if (flushFailed) vi.mocked(fixture.connection.flushLocal).mockRejectedValue(flushError);
+      fixture.host.isShuttingDown = true;
+      let outcome: unknown = "pending";
+      const shutdown = fixture.manager.shutdown().then(
+        () => {
+          outcome = "fulfilled";
+        },
+        (error) => {
+          outcome = error;
+        },
+      );
+      try {
+        await fixture.finishStarted.promise;
+        const terminalMessages = fixture.messages.slice();
+        fixture.contexts[0]!.onStorageReset?.(1);
+        fixture.contexts[0]!.onStorageReset?.(1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(outcome).toBe(flushFailed ? flushError : "fulfilled");
+        expect(fixture.port.close).toHaveBeenCalledOnce();
+        expect(fixture.messages).toEqual(terminalMessages);
+        fixture.acknowledge();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(outcome).toBe(flushFailed ? flushError : "fulfilled");
+        await expect(fixture.lease.retire()).rejects.toThrow(/reset/i);
+        expect(fixture.port.close).toHaveBeenCalledOnce();
+      } finally {
+        fixture.acknowledge();
+        await shutdown;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("waits for a new lease before same-Db reuse and ignores an old reset callback", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    const successor = await foregroundLeaseFixture();
+    successor.allowFinish();
+    const acquire = deferred();
+    fixture.host.runtimeSource.acquireBrowserForegroundNodeLease.mockImplementation(async () => {
+      await acquire.promise;
+      return successor.lease;
+    });
+    fixture.contexts[0]!.onStorageReset?.(1);
+    let resetFinished = false;
+    const reset = fixture.manager.deleteClientStorage().then(() => {
+      resetFinished = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resetFinished).toBe(false);
+      expect(() => fixture.manager.getClient({})).toThrow(/reset/i);
+      acquire.resolve();
+      await reset;
+      fixture.manager.getClient({});
+      await fixture.manager.ensureReady("local");
+      const discards = vi.mocked(fixture.client.discard).mock.calls.length;
+      fixture.contexts[0]!.onStorageReset?.(2);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.client.discard).toHaveBeenCalledTimes(discards);
+      await fixture.manager.shutdown();
+      expect(fixture.messages).not.toContain("return-foreground-node-lease");
+      expect(successor.messages).toContain("return-foreground-node-lease");
+      expect(successor.port.close).toHaveBeenCalledOnce();
+    } finally {
+      acquire.resolve();
+      fixture.allowFinish();
+      fixture.acknowledge();
+      successor.acknowledge();
+      await reset;
+      await fixture.manager.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retires an acquired but unpublished successor when shutdown wins", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    const successor = await foregroundLeaseFixture();
+    successor.allowFinish();
+    const acquire = deferred();
+    fixture.host.runtimeSource.acquireBrowserForegroundNodeLease.mockImplementation(async () => {
+      await acquire.promise;
+      return successor.lease;
+    });
+    fixture.contexts[0]!.onStorageReset?.(1);
+    await vi.advanceTimersByTimeAsync(0);
+    let outcome = "pending";
+    const shutdown = fixture.manager.shutdown().then(() => {
+      outcome = "fulfilled";
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe("pending");
+      acquire.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe("fulfilled");
+      expect(successor.messages).toContain("retire-foreground-node-lease");
+      expect(successor.messages).not.toContain("return-foreground-node-lease");
+      expect(successor.port.close).toHaveBeenCalledOnce();
+      expect(fixture.messages).not.toContain("return-foreground-node-lease");
+      expect(() => fixture.manager.getClient({})).toThrow("shut down");
+    } finally {
+      acquire.resolve();
+      fixture.acknowledge();
+      successor.acknowledge();
+      await shutdown;
+      vi.useRealTimers();
+    }
+  });
+  it("requires a fresh Inspector attachment after an acknowledged reset", async () => {
+    const fixture = await leasedManagerFixture(undefined, true);
+    fixture.contexts[0]!.onStorageReset?.(1);
+    await fixture.manager.deleteClientStorage();
+    let resetError: unknown;
+    try {
+      fixture.manager.getClient({});
+    } catch (error) {
+      resetError = error;
+    }
+    expect(resetError).toBeInstanceOf(Error);
+    await expect(fixture.manager.ensureReady("local")).rejects.toBe(resetError);
+    expect(fixture.host.runtimeSource.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
+    expect(fixture.port.close).toHaveBeenCalledOnce();
+    fixture.host.isShuttingDown = true;
+    await fixture.manager.shutdown();
+    expect(fixture.messages).not.toContain("return-foreground-node-lease");
+  });
+});
 
 function admissionManager(retryable = true) {
   let pinned = true;
@@ -666,7 +827,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(() => "authenticated-root"),
     } as unknown as BrowserWorkerConnection;
-    let onStorageReset: (() => void) | undefined;
+    let onStorageReset: BrowserWorkerConnectionContext["onStorageReset"];
     const host = {
       config: { serverUrl: "https://example.test" },
       isShuttingDown: false,
@@ -695,7 +856,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledOnce(),
     );
 
-    onStorageReset?.();
+    onStorageReset?.(1);
     await vi.waitFor(() =>
       expect(host.clearAuthenticatedInspectorLocalReads).toHaveBeenCalledTimes(2),
     );

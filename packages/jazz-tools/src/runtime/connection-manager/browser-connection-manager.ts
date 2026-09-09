@@ -18,6 +18,13 @@ import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/bro
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 
+interface BrowserConnectionScope {
+  readonly connection: BrowserWorkerConnection;
+  readonly lease: BrowserForegroundNodeLease | undefined;
+  readonly inspectorAttachment: boolean;
+  resetReason: Error | null;
+}
+
 /**
  * Every persistent browser tab is an in-memory client of one SharedWorker
  * runtime. There are no tab roles, elections, or follower handoffs. SharedWorker
@@ -33,6 +40,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private readonly reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
+  private storageResetError: Error | null = null;
+  private connectionScope: BrowserConnectionScope | null = null;
   private unregisterInspectorControl: (() => void) | null = null;
   private browserConnectionInput: ConnectionManagerClientInput | null = null;
   /** A failed follower owns no recoverable port; reconnect must mint a new one. */
@@ -44,6 +53,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private shutdownStarted = false;
   private shutdownFailure: {
     connection: BrowserWorkerConnection | null;
+    scope: BrowserConnectionScope | null;
+    reset: () => void;
     abandon: (error: Error) => void;
   } | null = null;
 
@@ -62,6 +73,8 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   override getClient(schema: WasmSchema): JazzClient {
     if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
+    if (this.storageResetError) throw this.storageResetError;
+    if (this.storageReset) throw new Error("Browser storage reset is still in progress");
     return super.getClient(schema);
   }
 
@@ -81,6 +94,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const workerConfig = { ...this.host.config };
     copyAccountConfigAdmission(this.host.config, workerConfig);
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
+    let scope: BrowserConnectionScope;
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
       config: workerConfig,
       schema: input.schema,
@@ -89,9 +103,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onFailure: (error) => this.observeConnectionFailure(connection, asError(error)),
-      onStorageReset: () => this.beginStorageReset(connection),
+      onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
+    scope = {
+      connection,
+      lease: this.foregroundNodeLease,
+      inspectorAttachment: workerConfig.runtimeSources?.inspectorBinding !== undefined,
+      resetReason: null,
+    };
+    this.connectionScope = scope;
     this.connection = connection;
     this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
@@ -154,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     let connection = reset ? null : this.connection;
     const retry = connection !== null && this.observedConfigurationAdmissionFailure === connection;
     await reset;
+    if (this.storageResetError) throw this.storageResetError;
     if (this.host.isShuttingDown || signal?.aborted) return;
     connection ??= this.connection;
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
@@ -303,21 +325,53 @@ export class BrowserConnectionManager extends ConnectionManager {
     return this.connection.openInspectorControlPort(signal);
   }
 
-  private beginStorageReset(connection: BrowserWorkerConnection): void {
-    if (this.connection !== connection || this.storageReset) return;
+  private beginStorageReset(scope: BrowserConnectionScope, resetId: number): void {
+    if (
+      scope.resetReason ||
+      (this.connectionScope !== scope && this.shutdownFailure?.scope !== scope)
+    )
+      return;
+    scope.resetReason = new Error(
+      `Browser foreground lease released after storage reset ${resetId}`,
+    );
     this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
+    this.foregroundNodeLease = undefined;
     this.initialExplicitOfflineStateKnown = false;
     const client = this.detachClient();
-    client?.discard();
-    this.storageReset = connection
-      .shutdown()
-      .then(() => undefined)
-      .finally(() => {
-        this.connectionError = null;
-        this.storageReset = null;
-      });
+    const reset = runCleanupSteps([
+      () => client?.discard(),
+      () => scope.lease?.releaseAfterStorageReset(scope.resetReason!),
+      () => {
+        if (this.shutdownFailure?.scope === scope) this.shutdownFailure.reset();
+      },
+      () => scope.connection.shutdown(),
+      async () => {
+        if (this.shutdownStarted || this.connectionScope !== scope) return;
+        if (scope.inspectorAttachment) {
+          this.storageResetError = new Error(
+            "Inspector storage was reset; a new attachment is required",
+          );
+          return;
+        }
+        const successor = await this.host.runtimeSource.acquireBrowserForegroundNodeLease(
+          this.host.config,
+        );
+        if (this.shutdownStarted || this.connectionScope !== scope) await successor.retire();
+        else this.foregroundNodeLease = successor;
+      },
+    ]).finally(() => {
+      if (this.storageReset !== reset) return;
+      this.storageReset = null;
+      if (this.connectionScope === scope) this.connectionScope = null;
+    });
+    this.storageReset = reset;
+    // A reset received by another tab has no direct promise consumer yet.
+    // Retain its failure for subsequent synchronous client access/readiness.
+    void reset.catch((error: unknown) => {
+      this.storageResetError ??= asError(error);
+    });
   }
 
   /**
@@ -350,6 +404,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
     const connection = this.connection;
+    const scope = this.connectionScope;
     const admissionError = this.connectionError;
     this.connection = null;
     this.connectionReady = null;
@@ -382,7 +437,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         notifyAbandoned();
       }
     };
-    this.shutdownFailure = { connection, abandon };
+    this.shutdownFailure = { connection, scope, abandon, reset: notifyAbandoned };
     if (admissionError instanceof BrowserWorkerUnresponsiveError) abandon(admissionError);
 
     try {
@@ -391,13 +446,20 @@ export class BrowserConnectionManager extends ConnectionManager {
           if (workerFailure) throw workerFailure;
         },
         () => unregisterInspectorControl?.(),
+        () => this.storageReset ?? undefined,
         async () => {
           if (workerFailure) throw workerFailure;
+          if (scope?.resetReason) return;
           // Configuration rejection is not a dead realm: skip the absent follower
           // flush, but retain the lease's ordinary clean-return semantics.
           if (admissionError) return;
           try {
-            await connection?.flushLocal();
+            await Promise.race([
+              connection?.flushLocal(),
+              abandoned.then(() => {
+                if (workerFailure) throw workerFailure;
+              }),
+            ]);
           } catch (error) {
             flushFailed = true;
             if (workerFailure) throw workerFailure;
@@ -407,6 +469,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         },
         async () => {
           if (workerFailure) throw workerFailure;
+          if (scope?.resetReason) return;
           if (!lease) return;
           let finishFailed = false;
           let finishError: unknown;
@@ -423,10 +486,12 @@ export class BrowserConnectionManager extends ConnectionManager {
                 // and drain started writes before releasing this identity. A
                 // failed flush cannot establish a clean durable handoff.
                 const highWater = await runtime.quiesceForegroundTxTimeHighWater();
+                if (scope?.resetReason) return;
                 if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(highWater);
               }
             } catch (error) {
+              if (error === scope?.resetReason) return;
               finishFailed = true;
               finishError = workerFailure ?? error;
               // Abandonment rejects this fallback too; never replace the first
@@ -440,7 +505,8 @@ export class BrowserConnectionManager extends ConnectionManager {
           await Promise.race([
             finish(),
             abandoned.then(() => {
-              throw finishFailed ? finishError : workerFailure;
+              if (finishFailed) throw finishError;
+              if (workerFailure) throw workerFailure;
             }),
           ]);
         },
@@ -449,13 +515,15 @@ export class BrowserConnectionManager extends ConnectionManager {
           this.detachClient()?.discard();
         },
         () => super.shutdown(),
-        () => connection?.shutdown(),
+        () => (scope?.resetReason ? undefined : connection?.shutdown()),
+        () => this.storageReset ?? undefined,
         () => {
           if (workerFailure) throw workerFailure;
         },
       ]);
     } finally {
       this.shutdownFailure = null;
+      if (this.connectionScope === scope) this.connectionScope = null;
     }
   }
 

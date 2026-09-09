@@ -88,7 +88,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   private worker: Pick<SharedWorker, "port"> | null = null;
   private port: MessagePort | null = null;
   private closed = false;
-  private abandonedError: Error | null = null;
+  private terminalError: Error | null = null;
   private finishPromise: Promise<void> | null = null;
   private finishWaiter: { resolve: () => void; reject: (error: Error) => void } | null = null;
   private listeningForFinish = false;
@@ -322,7 +322,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   async returnWithHighWater(highWater: bigint): Promise<void> {
-    if (this.abandonedError) throw this.abandonedError;
+    if (this.terminalError) throw this.terminalError;
     if (highWater < 0n) throw new Error("Invalid foreground transaction high-water");
     await this.finish({
       type: "return-foreground-node-lease",
@@ -331,14 +331,14 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   async retire(): Promise<void> {
-    if (this.abandonedError) throw this.abandonedError;
+    if (this.terminalError) throw this.terminalError;
     if (this.closed) return;
     await this.finish({ type: "retire-foreground-node-lease" });
   }
 
   abandonAfterWorkerFailure(error: Error): void {
-    if (this.abandonedError) return;
-    this.abandonedError = error;
+    if (this.terminalError) return;
+    this.terminalError = error;
     this.finishWaiter?.reject(error);
     this.finishWaiter = null;
     if (this.closed || !this.port) return;
@@ -356,8 +356,18 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     // The late result only releases this background witness, not durable success.
   }
 
+  releaseAfterStorageReset(reason: Error): void {
+    this.failFinish(reason);
+  }
+
+  private failFinish(error: Error): void {
+    this.terminalError ??= error;
+    this.finishWaiter?.reject(this.terminalError);
+    this.closeFinishPort();
+  }
+
   private finish(message: BrowserForegroundNodeLeasePortRequest): Promise<void> {
-    if (this.abandonedError) return Promise.reject(this.abandonedError);
+    if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.closed)
       return Promise.reject(new Error("Shared browser foreground lease is already closed"));
     if (this.finishPromise) return this.finishPromise;
@@ -372,8 +382,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     try {
       port.postMessage(message);
     } catch (error) {
-      this.finishWaiter?.reject(error instanceof Error ? error : new Error(String(error)));
-      this.closeFinishPort();
+      this.failFinish(error instanceof Error ? error : new Error(String(error)));
     }
     return this.finishPromise;
   }
@@ -388,14 +397,15 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   private readonly onFinishResult = (event: MessageEvent<BrowserForegroundNodeLeasePortEvent>) => {
     const result = event.data;
     if (result?.type !== "foreground-node-lease-result") return;
-    if (result.error) this.finishWaiter?.reject(deserializeBrowserRelayError(result.error));
-    else this.finishWaiter?.resolve();
-    this.closeFinishPort();
+    if (result.error) this.failFinish(deserializeBrowserRelayError(result.error));
+    else {
+      this.finishWaiter?.resolve();
+      this.closeFinishPort();
+    }
   };
 
   private readonly onFinishError = () => {
-    this.finishWaiter?.reject(new Error("Shared browser foreground lease port message error"));
-    this.closeFinishPort();
+    this.failFinish(new Error("Shared browser foreground lease port message error"));
   };
 
   private closeFinishPort(): void {
