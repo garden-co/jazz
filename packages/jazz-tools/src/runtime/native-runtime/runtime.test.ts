@@ -2945,7 +2945,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("rejects malformed, noncanonical, oversized, and out-of-range BigInt strings", () => {
+  it("rejects malformed, noncanonical, oversized, and out-of-range BigInt strings", async () => {
     const invalidValues = [
       "",
       " 1",
@@ -2959,21 +2959,43 @@ describe("NativeRuntimeAdapter server transport", () => {
       "-9223372036854775809",
     ];
 
-    for (const value of invalidValues) {
-      expect(() =>
-        prepareNativeQuery(bigintQuerySchema, {
-          table: "metrics",
-          conditions: [
-            {
-              Cmp: {
-                left: { column: "largeCount" },
-                op: "Eq",
-                right: { Literal: { type: "BigInt", value } },
-              },
-            },
-          ],
-        }),
-      ).toThrow("Native runtime cannot encode this query shape");
+    const prepareQuery = vi.fn(() => ({}));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ prepareQuery, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      bigintQuerySchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    try {
+      for (const value of invalidValues) {
+        await expect(
+          runtime.query(
+            JSON.stringify({
+              table: "metrics",
+              conditions: [
+                {
+                  Cmp: {
+                    left: { column: "largeCount" },
+                    op: "Eq",
+                    right: { Literal: { type: "BigInt", value } },
+                  },
+                },
+              ],
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(prepareQuery).not.toHaveBeenCalled();
+      }
+    } finally {
+      await runtime.close();
     }
   });
 
@@ -6894,7 +6916,7 @@ const bigintQuerySchema = s.defineApp({
   }),
 }).wasmSchema;
 
-// Exercise the serialized adapter interface, including deliberately invalid literals.
+// Capture native bytes for valid queries through the serialized adapter interface.
 function prepareNativeQuery(schema: WasmSchema, query: object): Uint8Array {
   let preparedBytes: Uint8Array | undefined;
   const runtime = new NativeRuntimeAdapter(
