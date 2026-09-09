@@ -3417,14 +3417,23 @@ mod tests {
             received, 0,
             "the first pump deliberately skips its response"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !client.edge_attachment_is_covered(&attachment),
             "the queued response must not be applied before the idle pump reads it"
         );
 
-        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
-        assert_eq!(sent, 0, "the second pump must have no new client work");
+        // Server scheduling is independent of this client. Retry the idle
+        // receive window until coverage arrives, but never permit new client
+        // work to make the response observable accidentally.
+        let start = tokio::time::Instant::now();
+        let mut received = 0;
+        while !client.edge_attachment_is_covered(&attachment) && start.elapsed() < WS_PUMP_DEADLINE
+        {
+            let (sent, newly_received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+            assert_eq!(sent, 0, "idle pumps must have no new client work");
+            received += newly_received;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             received > 0,
             "the idle pump must consume the queued response"
