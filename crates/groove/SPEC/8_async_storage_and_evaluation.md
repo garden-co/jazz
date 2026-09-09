@@ -178,6 +178,13 @@ the same publication through Groove's resident write overlay. A terminal whose
 new include or join dependency is non-resident may remain blocked without
 delaying unrelated resident terminals.
 
+Installing a host query-progress waker does not weaken this same-turn contract.
+If an overlapping hydration is paused between CPU-only steps, the direct write
+finishes those steps before beginning its publication. It drives only that
+hydration and its temporal predecessors. Once those operations need cold
+storage, the write yields to the host; unrelated runnable queries and eager
+storage wakes do not justify polling that cold request again.
+
 Terminal installation and one-shot reads use the same resident overlay as
 immediate maintained evaluation. A terminal opened after an unpublished local
 write therefore includes that resident write in its initial value. Hydration

@@ -3985,3 +3985,65 @@ fn deferred_write_still_refreshes_resident_subscriptions_before_returning() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row.row_uuid(), write.row_uuid());
 }
+
+/// Internal binding-contract regression: an async client helper would drive
+/// extra owner turns and hide whether one resident admission poll publishes.
+#[test]
+fn queued_resident_insert_publishes_subscription_in_one_admission_turn() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean),
+        ),
+    );
+    let owner = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        crate::groove::storage::MemoryStorage::new(
+            &schema
+                .column_families()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb4; 16]),
+            author: owner,
+        },
+    )))
+    .unwrap();
+    struct HostScheduler;
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _: TickUrgency) {}
+        fn schedule_tick_after(&self, _: u64) {}
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(Waker::noop().clone())
+        }
+    }
+    db.set_tick_scheduler(Some(Rc::new(HostScheduler)));
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+    let write = db
+        .enqueue_insert(
+            "todos".to_owned(),
+            [
+                ("title".into(), Value::String("resident queued row".into())),
+                ("done".into(), Value::Bool(false)),
+            ]
+            .into(),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+    let event = subscription
+        .try_next_event()
+        .expect("resident insertion must publish in its admission turn");
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("expected a row delta")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), write.row_uuid());
+}
