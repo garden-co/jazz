@@ -127,7 +127,7 @@ const expectedAffectedTasks = new Map([
   ["jazz", new Set(tasks)],
   ["groove", new Set(tasks)],
   ["jazz-native-transport", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
-  ["benchmark-guard", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+  ["benchmark-guard", new Set()],
 ]);
 const closures = [...expectedAffectedTasks].map(([name, affected]) => ({
   name,
