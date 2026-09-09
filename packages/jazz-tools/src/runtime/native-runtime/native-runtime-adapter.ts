@@ -509,16 +509,9 @@ type SubscriptionState = {
   source?: SubscriptionSource;
   reading: boolean;
   rows: RowState[];
-  visibleRows: RowState[];
   outputColumns: SubscriptionOutputColumns | null;
   tier: string;
-  visibleOpened: boolean;
-  deferredVisiblePublication: boolean;
-  deferredVisibleReset: boolean;
-  deferredTerminalOperations: RuntimeTerminalOperation[];
-  deferredPlaceholderChunks: number;
-  deferredPlaceholderRows: number;
-  deferredPlaceholderBytes: number;
+  opened: boolean;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
 };
@@ -528,7 +521,18 @@ type SubscriptionOutputColumns = {
   rootColumns: readonly ColumnDescriptor[];
 };
 
-type SubscriptionSource = ReadableStreamDefaultReader<unknown> | Subscription;
+type SubscriptionSourceRead =
+  | { type: "batch"; events: unknown[] }
+  | { type: "pending"; retryAfterMs: number }
+  | { type: "closed" };
+
+type SubscriptionSource = {
+  pull(
+    ready: (read: SubscriptionSourceRead) => void,
+    failed: (error: unknown) => void,
+  ): SubscriptionSourceRead | undefined;
+  close(): void;
+};
 
 export type RowState = {
   table: string;
@@ -550,9 +554,6 @@ type NativeRowFieldPlan = {
 const textDecoder = new Utf8Decoder({ fatal: true });
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
-const MAX_DEFERRED_PLACEHOLDER_CHUNKS = 16;
-const MAX_DEFERRED_PLACEHOLDER_ROWS = 4_096;
-const MAX_DEFERRED_PLACEHOLDER_BYTES = 4 * 1024 * 1024;
 
 function openPersistentDb(
   Runtime: NativeDbConstructor,
@@ -1873,16 +1874,9 @@ export class NativeRuntimeAdapter implements Runtime {
       openingAbort: new AbortController(),
       reading: false,
       rows: [],
-      visibleRows: [],
       outputColumns: subscriptionOutputColumns(queryJson, this.schema),
       tier: tier ?? "local",
-      visibleOpened: false,
-      deferredVisiblePublication: false,
-      deferredVisibleReset: false,
-      deferredTerminalOperations: [],
-      deferredPlaceholderChunks: 0,
-      deferredPlaceholderRows: 0,
-      deferredPlaceholderBytes: 0,
+      opened: false,
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
@@ -1932,13 +1926,9 @@ export class NativeRuntimeAdapter implements Runtime {
       this.deliverSubscriptionFailure(subscription);
       return;
     }
-    if (subscription.visibleOpened) {
+    if (subscription.opened) {
       subscription.callback(
-        runtimeResetDeltaFromRows(
-          subscription.visibleRows,
-          this.schema,
-          subscription.outputColumns,
-        ),
+        runtimeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
       );
     }
     this.startSubscriptionReader(handle, subscription);
@@ -1949,7 +1939,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!subscription) return;
     subscription.cancelled = true;
     subscription.openingAbort?.abort();
-    clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
     this.subscriptions.delete(handle);
   }
@@ -3001,25 +2990,47 @@ export class NativeRuntimeAdapter implements Runtime {
     const source = subscription.source;
     if (subscription.cancelled || subscription.reading || !source) return;
     subscription.reading = true;
-    if (isReadableSubscriptionReader(source)) {
-      void this.readSubscription(handle, subscription, source);
-    } else {
-      void this.drainNativeSubscription(handle, subscription, source);
-    }
+    this.readSubscription(handle, subscription, source);
   }
 
-  private async readSubscription(
+  private readSubscription(
     handle: number,
     subscription: SubscriptionState,
     source: SubscriptionSource,
-  ): Promise<void> {
-    if (!isReadableSubscriptionReader(source)) return;
-    try {
-      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const next = await source.read();
-        if (next.done || subscription.cancelled) return;
+  ): void {
+    const isActive = () =>
+      !subscription.cancelled && this.subscriptions.get(handle) === subscription;
+    const finish = () => {
+      subscription.reading = false;
+    };
+    const fail = (error: unknown) => {
+      if (!this.closed && isActive()) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+      finish();
+    };
+    const consume = (next: SubscriptionSourceRead): boolean => {
+      if (next.type === "closed" || !isActive()) {
+        finish();
+        return false;
+      }
+      if (next.type === "pending") {
+        void this.pumpServerTransport()
+          .then(() => sleep(Math.max(0, next.retryAfterMs)))
+          .then(advance)
+          .catch(fail);
+        return false;
+      }
+      for (const event of next.events) {
+        if (!isActive()) {
+          finish();
+          return false;
+        }
         try {
-          this.applySubscriptionChunk(subscription, next.value);
+          this.applySubscriptionChunk(subscription, event);
         } catch (error) {
           this.failSubscription(
             subscription,
@@ -3027,86 +3038,46 @@ export class NativeRuntimeAdapter implements Runtime {
           );
         }
       }
-    } catch (error) {
-      if (
-        !this.closed &&
-        !subscription.cancelled &&
-        this.subscriptions.get(handle) === subscription
-      ) {
-        this.failSubscription(
-          subscription,
-          error instanceof Error ? error : new Error(String(error)),
-        );
+      // Native pull sources use an empty batch to yield until the next core
+      // wake. Web streams remain suspended inside their next `read()`.
+      if (next.events.length === 0 || !isActive()) {
+        finish();
+        return false;
       }
-    } finally {
-      subscription.reading = false;
-    }
-  }
-
-  private async drainNativeSubscription(
-    handle: number,
-    subscription: SubscriptionState,
-    source: SubscriptionSource,
-  ): Promise<void> {
-    if (isReadableSubscriptionReader(source)) return;
-    try {
-      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
-        const batch = source.readAll();
-        if (!Array.isArray(batch)) {
-          await this.pumpServerTransport();
-          const retryAfterMs = batch.retryAfterMs?.() ?? 0;
-          await sleep(Math.max(0, retryAfterMs));
-          continue;
+      return true;
+    };
+    const advance = () => {
+      while (isActive()) {
+        let next: SubscriptionSourceRead | undefined;
+        try {
+          next = source.pull((resolved) => {
+            if (consume(resolved)) advance();
+          }, fail);
+        } catch (error) {
+          fail(error);
+          return;
         }
-        for (const event of batch) {
-          if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-          try {
-            this.applySubscriptionChunk(subscription, event);
-          } catch (error) {
-            this.failSubscription(
-              subscription,
-              error instanceof Error ? error : new Error(String(error)),
-            );
-          }
-        }
-        if (batch.length === 0) return;
+        if (next === undefined) return;
+        if (!consume(next)) return;
       }
-    } catch (error) {
-      if (
-        !this.closed &&
-        !subscription.cancelled &&
-        this.subscriptions.get(handle) === subscription
-      ) {
-        this.failSubscription(
-          subscription,
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      }
-    } finally {
-      subscription.reading = false;
-    }
+      finish();
+    };
+    advance();
   }
 
   private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
-      clearDeferredPlaceholderBuffer(subscription);
       closeSubscriptionSourceState(subscription);
       subscription.cancelled = true;
       return;
     }
     if (chunk.type === "rejected") {
-      if (chunk.reason.type === "ShapeRegistrationPendingCatalogueAdmission") {
-        return;
-      }
+      if (chunk.reason.type === "ShapeRegistrationPendingCatalogueAdmission") return;
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
-    if (chunk.publishable === false) return;
-    if (chunk.reset) {
-      subscription.rows = [];
-      clearDeferredPlaceholderBuffer(subscription);
-    }
+    if (chunk.reset) subscription.rows = [];
     const applied = applySubscriptionDeltaWithRootDelta(
       subscription.rows,
       chunk.delta,
@@ -3115,128 +3086,12 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.outputColumns,
     );
     subscription.rows = applied.rows;
-    const terminalOperations = decodeRuntimeTerminalOperations(
+    applied.rootDelta.terminalOperations = decodeRuntimeTerminalOperations(
       chunk.terminalOperations,
       subscription.outputColumns?.rootColumns,
     );
-    const unresolvedPlaceholder = unresolvedSubscriptionPlaceholder(
-      subscription.rows,
-      this.schema,
-      subscription.outputColumns,
-    );
-    if (unresolvedPlaceholder) {
-      if (chunk.settled === true) {
-        throw new Error(
-          "settled relation subscription chunk retained unresolved placeholder rows " +
-            `(${unresolvedPlaceholder.table}.${unresolvedPlaceholder.column} on ${unresolvedPlaceholder.id})`,
-        );
-      }
-      this.deferSubscriptionRows(
-        subscription,
-        terminalOperations,
-        chunk.terminalOperations,
-        chunk.reset === true,
-        chunk.delta,
-      );
-      return;
-    }
-    applied.rootDelta.terminalOperations = terminalOperations;
-    this.publishSubscriptionRows(
-      subscription,
-      applied.rootDelta,
-      chunk.settled,
-      chunk.reset === true,
-    );
-  }
-
-  private publishSubscriptionRows(
-    subscription: SubscriptionState,
-    rootDelta: RuntimeSubscriptionDelta,
-    settled: boolean | undefined,
-    reset: boolean,
-  ): void {
-    if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
-      subscription.deferredVisiblePublication = true;
-      subscription.deferredVisibleReset ||= reset;
-      subscription.deferredTerminalOperations.push(...(rootDelta.terminalOperations ?? []));
-      return;
-    }
-
-    let visibleDelta = rootDelta;
-    if (
-      subscription.deferredVisiblePublication ||
-      subscription.deferredVisibleReset ||
-      !subscription.visibleOpened
-    ) {
-      const publishReset = subscription.deferredVisibleReset || !subscription.visibleOpened;
-      if (publishReset) {
-        visibleDelta = runtimeResetDeltaFromRows(
-          subscription.rows,
-          this.schema,
-          subscription.outputColumns,
-        );
-      } else {
-        visibleDelta = runtimeDeltaFromRows(
-          subscription.rows,
-          subscription.visibleRows,
-          this.schema,
-          subscription.outputColumns,
-        );
-      }
-    }
-
-    // A canonical delta rebuilt from `subscription.rows` already contains the
-    // full present-state terminal values. Replaying producer operations that
-    // led to that state on top of it can address occurrence lifecycles that no
-    // longer exist (for example, a deferred Move after a synthesized reset).
-    // Producer terminal history belongs only to a forwarded producer delta.
-    if (visibleDelta === rootDelta) {
-      const terminalOperations = [
-        ...subscription.deferredTerminalOperations,
-        ...(rootDelta.terminalOperations ?? []),
-      ];
-      if (terminalOperations.length > 0) {
-        visibleDelta.terminalOperations = terminalOperations;
-      }
-    }
-
-    subscription.callback?.(visibleDelta);
-    subscription.visibleRows = [...subscription.rows];
-    subscription.visibleOpened = true;
-    clearDeferredPlaceholderBuffer(subscription);
-  }
-
-  private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
-    return (
-      subscription.tier === "global" || (this.nonDurableClient && subscription.tier === "edge")
-    );
-  }
-
-  private deferSubscriptionRows(
-    subscription: SubscriptionState,
-    terminalOperations: RuntimeTerminalOperation[] | undefined,
-    nativeTerminalOperations: NativeTerminalOperation[] | undefined,
-    reset: boolean,
-    delta: NativeSubscriptionDelta,
-  ): void {
-    subscription.deferredVisiblePublication = true;
-    subscription.deferredVisibleReset ||= reset;
-    subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
-    subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
-    subscription.deferredPlaceholderRows = subscription.rows.length;
-    subscription.deferredPlaceholderBytes = reset
-      ? subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations)
-      : subscription.deferredPlaceholderBytes +
-        subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations);
-    if (
-      subscription.deferredPlaceholderChunks > MAX_DEFERRED_PLACEHOLDER_CHUNKS ||
-      subscription.deferredPlaceholderRows > MAX_DEFERRED_PLACEHOLDER_ROWS ||
-      subscription.deferredPlaceholderBytes > MAX_DEFERRED_PLACEHOLDER_BYTES
-    ) {
-      throw new Error(
-        "relation subscription buffered unresolved placeholder rows beyond bounded limits",
-      );
-    }
+    subscription.callback?.(applied.rootDelta);
+    subscription.opened = true;
   }
 
   private scheduleServerPump(): void {
@@ -3602,7 +3457,6 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.cancelled = true;
     subscription.openingAbort?.abort();
     subscription.terminalError = error;
-    clearDeferredPlaceholderBuffer(subscription);
     if (subscription.source) {
       try {
         closeSubscriptionSource(subscription.source);
@@ -3726,15 +3580,6 @@ export class NativeRuntimeAdapter implements Runtime {
 
 function closeSubscriptionSourceState(subscription: SubscriptionState): void {
   if (subscription.source) closeSubscriptionSource(subscription.source);
-}
-
-function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
-  subscription.deferredVisiblePublication = false;
-  subscription.deferredVisibleReset = false;
-  subscription.deferredTerminalOperations = [];
-  subscription.deferredPlaceholderChunks = 0;
-  subscription.deferredPlaceholderRows = 0;
-  subscription.deferredPlaceholderBytes = 0;
 }
 
 function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
@@ -4120,13 +3965,7 @@ function sessionClaims(
 }
 
 function closeSubscriptionSource(source: SubscriptionSource): void {
-  if ("close" in source && typeof source.close === "function") {
-    source.close();
-    return;
-  }
-  if ("cancel" in source && typeof source.cancel === "function") {
-    void source.cancel().catch(() => {});
-  }
+  source.close();
 }
 
 function readSupportedReadOptions(optionsJson: string): void {
@@ -6098,8 +5937,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
-      settled?: boolean;
-      publishable?: boolean;
     }
   | {
       type: "rejected";
@@ -6116,8 +5953,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     reason?: unknown;
     reset?: unknown;
-    settled?: unknown;
-    publishable?: unknown;
     terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
@@ -6133,8 +5968,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
-      settled: typeof record.settled === "boolean" ? record.settled : undefined,
-      publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {
@@ -6197,55 +6030,38 @@ function subscriptionRejectionError(
 
 function subscriptionSource(
   subscription: ReadableStream<unknown> | Subscription,
-): ReadableStreamDefaultReader<unknown> | Subscription {
+): SubscriptionSource {
   const maybeReadable = subscription as Partial<ReadableStream<unknown>>;
   if (typeof maybeReadable.getReader === "function") {
-    return maybeReadable.getReader();
+    const reader = maybeReadable.getReader();
+    return {
+      pull(ready, failed) {
+        void reader
+          .read()
+          .then(
+            (next) =>
+              ready(next.done ? { type: "closed" } : { type: "batch", events: [next.value] }),
+            failed,
+          );
+        return undefined;
+      },
+      close() {
+        void reader.cancel().catch(() => {});
+      },
+    };
   }
-  return subscription as Subscription;
-}
-
-function isReadableSubscriptionReader(
-  source: ReadableStreamDefaultReader<unknown> | Subscription,
-): source is ReadableStreamDefaultReader<unknown> {
-  return "read" in source && typeof source.read === "function";
-}
-
-function runtimeDeltaFromRows(
-  rows: RowState[],
-  previousRows: RowState[] = [],
-  schema?: WasmSchema,
-  outputColumns: SubscriptionOutputColumns | null = null,
-): RuntimeSubscriptionDelta {
-  const previousByKey = new Map(
-    previousRows.map((row, index) => [rowStateKey(row), { row, index }]),
-  );
-  const nextKeys = new Set<string>();
-  const added: RowState[] = [];
-  const updated: RowState[] = [];
-  const removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
-  const rowIndexByKey = indexRowsByKey(rows);
-
-  rows.forEach((row, index) => {
-    const key = rowStateKey(row);
-    nextKeys.add(key);
-    const previous = previousByKey.get(key);
-    if (!previous) {
-      added.push(row);
-      return;
-    }
-    if (previous.index !== index || !rowValuesEqual(previous.row.values, row.values)) {
-      updated.push(row);
-    }
-  });
-
-  previousRows.forEach((row, index) => {
-    if (!nextKeys.has(rowStateKey(row))) {
-      removed.push({ id: row.id, index, resultKeyBytes: row.resultKeyBytes });
-    }
-  });
-
-  return runtimeDeltaFromChanges(added, updated, removed, rowIndexByKey, schema, outputColumns);
+  const native = subscription as Subscription;
+  return {
+    pull() {
+      const batch = native.readAll();
+      return Array.isArray(batch)
+        ? { type: "batch", events: batch }
+        : { type: "pending", retryAfterMs: batch.retryAfterMs?.() ?? 0 };
+    },
+    close() {
+      native.close?.();
+    },
+  };
 }
 
 function runtimeResetDeltaFromRows(
@@ -6257,52 +6073,6 @@ function runtimeResetDeltaFromRows(
     ...runtimeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
     reset: true,
   };
-}
-
-function subscriptionDeltaPayloadBytes(
-  delta: NativeSubscriptionDelta,
-  terminalOperations?: NativeTerminalOperation[],
-): number {
-  const rowBytes = delta.added
-    .concat(delta.updated)
-    .reduce(
-      (sum, batch) =>
-        sum +
-        batch.rows.reduce((rowSum, row) => rowSum + row.raw.byteLength + row.rowId.byteLength, 0),
-      0,
-    );
-  const occurrenceBytes = delta.addedOccurrenceKeys
-    .concat(delta.updatedOccurrenceKeys, delta.removedOccurrenceKeys)
-    .reduce((sum, key) => sum + key.byteLength, 0);
-  const terminalBytes =
-    terminalOperations?.reduce(
-      (sum, operation) => sum + nativeTerminalOperationBytes(operation),
-      0,
-    ) ?? 0;
-  return rowBytes + occurrenceBytes + terminalBytes;
-}
-
-function nativeTerminalOperationBytes(operation: NativeTerminalOperation): number {
-  const rootKeyBytes = operation.root_key.length;
-  const pathBytes = operation.path.reduce((sum, segment) => {
-    if ("Collection" in segment) {
-      return sum + utf8ByteLength(segment.Collection);
-    }
-    return sum + segment.Key.length;
-  }, 0);
-  const editBytes =
-    "Insert" in operation.edit
-      ? operation.edit.Insert.key.length + operation.edit.Insert.value.length
-      : "Update" in operation.edit
-        ? operation.edit.Update.key.length + operation.edit.Update.value.length
-        : "Remove" in operation.edit
-          ? operation.edit.Remove.key.length
-          : operation.edit.Move.key.length;
-  return rootKeyBytes + pathBytes + editBytes;
-}
-
-function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }
 
 function runtimeDeltaFromChanges(
@@ -6421,69 +6191,8 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
   return values;
 }
 
-function unresolvedSubscriptionPlaceholder(
-  rows: RowState[],
-  schema: WasmSchema,
-  outputColumns: SubscriptionOutputColumns | null,
-): { table: string; id: string; column: string } | undefined {
-  for (const row of rows) {
-    const columns =
-      outputColumns && row.table === outputColumns.rootTable
-        ? outputColumns.rootColumns
-        : schema[row.table]?.columns;
-    if (!columns) continue;
-    const logicalColumns = logicalStorageColumns(columns);
-    const values = valuesForNativeFrame(row, logicalColumns);
-    const missing = logicalColumns.find(
-      (column, index) =>
-        values[index]?.type === "Null" &&
-        column.nullable === false &&
-        column.column_type.type !== "Array",
-    );
-    if (missing) return { table: row.table, id: row.id, column: missing.name };
-  }
-  return undefined;
-}
-
 function ordinaryResultKey(id: string): Uint8Array {
   return Uint8Array.from([1, ...parseUuid(id), 0, 0, 0, 0, 0, 0, 0, 0]);
-}
-
-function rowValuesEqual(left: Value[], right: Value[]): boolean {
-  if (left.length !== right.length) return false;
-  return left.every((value, index) => valueEqual(value, right[index]));
-}
-
-function valueEqual(left: Value, right: Value | undefined): boolean {
-  if (!right || left.type !== right.type) return false;
-  switch (left.type) {
-    case "Bytea":
-      return right.type === "Bytea" && bytesEqual(left.value, right.value);
-    case "Array":
-      return right.type === "Array" && rowValuesEqual(left.value, right.value);
-    case "Enum":
-      return (
-        right.type === "Enum" &&
-        left.value.case === right.value.case &&
-        rowValuesEqual(left.value.values, right.value.values)
-      );
-    case "Null":
-      return right.type === "Null";
-    case "Boolean":
-    case "Text":
-    case "Uuid":
-    case "Integer":
-    case "BigInt":
-    case "Double":
-    case "Timestamp":
-      return "value" in right && left.value === right.value;
-    case "Row":
-      return (
-        right.type === "Row" &&
-        left.value.id === right.value.id &&
-        rowValuesEqual(left.value.values, right.value.values)
-      );
-  }
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

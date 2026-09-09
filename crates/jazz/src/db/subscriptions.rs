@@ -910,6 +910,11 @@ where
             && snapshot.root_count == 0
             && snapshot.edges.is_empty();
         let (sender, receiver) = unbounded();
+        let sender = SubscriptionSender {
+            sender,
+            publication: Rc::new(RefCell::new(SubscriptionPublication::default())),
+            requested_tier: read_tier,
+        };
         let mut root_occurrence_ids = snapshot_index
             .roots
             .iter()
@@ -963,10 +968,10 @@ where
             cold_runtime_replacement: false,
             sender,
         }));
-        state
-            .borrow()
-            .sender
-            .unbounded_send(SubscriptionEvent::Delta {
+        {
+            let node = self.node.node.lock().await;
+            let state = state.borrow();
+            let event = SubscriptionEvent::Delta {
                 reset: true,
                 publishable: !suppress_provisional_opening,
                 added: initial_outputs,
@@ -975,8 +980,18 @@ where
                 terminal_operations: Vec::new(),
                 settled,
                 tier: read_tier,
-            })
-            .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
+            };
+            let materialized = state
+                .sender
+                .materialized(&node, prepared.shape.query(), &event)?;
+            state.sender.publish(
+                event,
+                None,
+                &state.snapshot,
+                &state.snapshot_index,
+                materialized,
+            )?;
+        }
         self.node
             .subscriptions
             .borrow_mut()

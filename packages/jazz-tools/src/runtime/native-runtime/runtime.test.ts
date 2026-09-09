@@ -986,109 +986,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]).toHaveLength(1);
   });
 
-  it("settle-gates global native subscription chunks before app callbacks", () => {
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
-    const events = [
-      {
-        type: "delta",
-        reset: true,
-        settled: false,
-        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
-      },
-      {
-        type: "delta",
-        reset: false,
-        settled: true,
-        delta: encodeSubscriptionDelta({
-          added: [{ table: "todos", rowId, title: "settled row" }],
-          updated: [],
-          removed: [],
-        }),
-      },
-    ];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            subscribe: () => ({
-              readAll: () => events.splice(0),
-              close: () => true,
+  it.each(["local", "edge", "global"] as const)(
+    "forwards the core's ready %s subscription reset directly",
+    (tier) => {
+      const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
+      const events = [
+        {
+          type: "delta",
+          reset: true,
+          settled: true,
+          delta: encodeSubscriptionDelta({
+            added: [{ table: "todos", rowId, title: "settled row" }],
+            updated: [],
+            removed: [],
+          }),
+        },
+      ];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              subscribe: () => ({
+                readAll: () => events.splice(0),
+                close: () => true,
+              }),
+              tick: () => undefined,
             }),
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
 
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
-    const updates = vi.fn();
-    runtime.executeSubscription(handle, updates);
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, tier);
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
 
-    expect(updates).toHaveBeenCalledTimes(1);
-    const decoded = decodeTestDeltas([updates.mock.calls[0]![0]]);
-    expect(decoded).toHaveLength(1);
-    expect(decoded[0]).toHaveLength(1);
-    const firstDelta = decoded[0]![0]!;
-    expect(firstDelta).toMatchObject({
-      kind: 0,
-      id: "00000000-0000-0000-0000-000000000123",
-      index: 0,
-    });
-    if (firstDelta.kind !== 0) {
-      throw new Error(`expected added delta, got kind ${firstDelta.kind}`);
-    }
-    expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
-  });
-
-  it("does not replay deferred terminal history over a settle-gated canonical rebuild", () => {
-    const key = [10, ...uuidBytes("00000000-0000-0000-0000-000000000123")];
-    const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
-    const events = [
-      {
-        type: "delta",
-        reset: false,
-        settled: false,
-        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
-        terminalOperations,
-      },
-      {
-        type: "delta",
-        reset: false,
-        settled: true,
-        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
-      },
-    ];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            subscribe: () => ({ readAll: () => events.splice(0), close: () => true }),
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
-    const updates = vi.fn();
-    runtime.executeSubscription(handle, updates);
-
-    expect(updates).toHaveBeenCalledTimes(1);
-    expect(updates.mock.calls[0]![0].terminalOperations).toBeUndefined();
-  });
+      expect(updates).toHaveBeenCalledTimes(1);
+      const decoded = decodeTestDeltas([updates.mock.calls[0]![0]]);
+      expect(decoded).toHaveLength(1);
+      expect(decoded[0]).toHaveLength(1);
+      const firstDelta = decoded[0]![0]!;
+      expect(firstDelta).toMatchObject({
+        kind: 0,
+        id: "00000000-0000-0000-0000-000000000123",
+        index: 0,
+      });
+      if (firstDelta.kind !== 0) {
+        throw new Error(`expected added delta, got kind ${firstDelta.kind}`);
+      }
+      expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
+    },
+  );
 
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
@@ -4840,261 +4794,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       { kind: 0, id: formatUuid(first), row: { values: [{ value: "ordinary" }] } },
     ]);
     ordinary.close();
-  });
-
-  it("publishes one canonical reset instead of replaying settle-gated packed Gather history", () => {
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000501");
-    const key = [10, ...rowId];
-    const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
-    const runtime = runtimeWithNativeRelationSubscriptionChunks([
-      {
-        ...relationSubscriptionChunk({
-          reset: true,
-          settled: false,
-          rootAdded: [{ table: "todos", rowId, title: "packed gather root" }],
-        }),
-        terminalOperations,
-      },
-      relationSubscriptionChunk({ settled: true }),
-    ]);
-    const deltas: RuntimeSubscriptionDelta[] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
-      null,
-      "global",
-      null,
-    );
-
-    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
-
-    expect(deltas).toHaveLength(1);
-    expect(deltas[0]!.reset).toBe(true);
-    expect(deltas[0]!.terminalOperations).toBeUndefined();
-    runtime.close();
-  });
-
-  it("buffers non-packed unsettled Gather resets until a settled row is public-shape compatible", () => {
-    const teamsSchema = {
-      teams: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
-          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
-        ],
-      },
-    } satisfies WasmSchema;
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000551");
-    const resultKey = typedOccurrenceKey("gather-root");
-    const runtime = runtimeWithNativeRelationSubscriptionChunks(
-      [
-        {
-          type: "delta",
-          reset: true,
-          settled: false,
-          delta: encodeTeamGatherSubscriptionDelta({
-            added: [{ rowId, name: null }],
-            addedOccurrenceKeys: [resultKey],
-          }),
-        },
-        {
-          type: "delta",
-          settled: true,
-          delta: encodeTeamGatherSubscriptionDelta({
-            updated: [{ rowId, name: "leaf" }],
-            updatedOccurrenceKeys: [resultKey],
-          }),
-        },
-      ],
-      teamsSchema,
-    );
-    const deltas: RuntimeSubscriptionDelta[] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
-      null,
-      null,
-      null,
-    );
-
-    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
-
-    expect(deltas).toHaveLength(1);
-    expect(deltas[0]!.reset).toBe(true);
-    expect(runtimeDeltaChanges(deltas[0]!)).toEqual([
-      {
-        kind: 0,
-        id: `result:${Array.from(resultKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
-        index: 0,
-        row: {
-          id: formatUuid(rowId),
-          values: [{ type: "Text", value: "leaf" }, { type: "Null" }, { type: "Null" }],
-        },
-      },
-    ]);
-    runtime.close();
-  });
-
-  it("fails loudly when a settled Gather chunk still carries unresolved placeholder rows", async () => {
-    const teamsSchema = {
-      teams: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
-          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
-        ],
-      },
-    } satisfies WasmSchema;
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000552");
-    const runtime = runtimeWithNativeRelationSubscriptionChunks(
-      [
-        {
-          type: "delta",
-          reset: true,
-          settled: true,
-          delta: encodeTeamGatherSubscriptionDelta({
-            added: [{ rowId, name: null }],
-            addedOccurrenceKeys: [typedOccurrenceKey("settled-unresolved")],
-          }),
-        },
-      ],
-      teamsSchema,
-    );
-    const callbacks: unknown[][] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
-      null,
-      null,
-      null,
-    );
-
-    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(callbacks).toHaveLength(1);
-    const error = callbacks[0]![0];
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(
-      "settled relation subscription chunk retained unresolved placeholder rows",
-    );
-    runtime.close();
-  });
-
-  it("silently closes unresolved Gather placeholder buffers before first visible delivery", async () => {
-    const teamsSchema = {
-      teams: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
-          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
-        ],
-      },
-    } satisfies WasmSchema;
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000553");
-    const runtime = runtimeWithNativeRelationSubscriptionChunks(
-      [
-        {
-          type: "delta",
-          reset: true,
-          settled: false,
-          delta: encodeTeamGatherSubscriptionDelta({
-            added: [{ rowId, name: null }],
-            addedOccurrenceKeys: [typedOccurrenceKey("close-before-visible")],
-          }),
-        },
-        { type: "closed" },
-      ],
-      teamsSchema,
-    );
-    const callbacks: unknown[][] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
-      null,
-      null,
-      null,
-    );
-
-    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(callbacks).toEqual([]);
-    const subscription = (
-      runtime as unknown as {
-        subscriptions: Map<
-          number,
-          {
-            cancelled: boolean;
-            deferredVisiblePublication: boolean;
-            deferredVisibleReset: boolean;
-            deferredTerminalOperations: unknown[];
-            deferredPlaceholderChunks: number;
-            deferredPlaceholderRows: number;
-            deferredPlaceholderBytes: number;
-          }
-        >;
-      }
-    ).subscriptions.get(handle);
-    expect(subscription?.cancelled).toBe(true);
-    expect(subscription?.deferredVisiblePublication).toBe(false);
-    expect(subscription?.deferredVisibleReset).toBe(false);
-    expect(subscription?.deferredTerminalOperations).toEqual([]);
-    expect(subscription?.deferredPlaceholderChunks).toBe(0);
-    expect(subscription?.deferredPlaceholderRows).toBe(0);
-    expect(subscription?.deferredPlaceholderBytes).toBe(0);
-    runtime.close();
-  });
-
-  it("fails loudly when unresolved Gather placeholder buffering exceeds explicit bounds", async () => {
-    const teamsSchema = {
-      teams: {
-        columns: [
-          { name: "name", column_type: { type: "Text" }, nullable: false },
-          { name: "org_id", column_type: { type: "Uuid" }, nullable: true },
-          { name: "parent_id", column_type: { type: "Uuid" }, nullable: true },
-        ],
-      },
-    } satisfies WasmSchema;
-    const rowId = uuidBytes("00000000-0000-0000-0000-000000000554");
-    const resultKey = typedOccurrenceKey("buffer-limit");
-    const chunks = [
-      {
-        type: "delta" as const,
-        reset: true,
-        settled: false,
-        delta: encodeTeamGatherSubscriptionDelta({
-          added: [{ rowId, name: null }],
-          addedOccurrenceKeys: [resultKey],
-        }),
-      },
-      ...Array.from({ length: 16 }, () => ({
-        type: "delta" as const,
-        settled: false,
-        delta: encodeTeamGatherSubscriptionDelta({
-          updated: [{ rowId, name: null }],
-          updatedOccurrenceKeys: [resultKey],
-        }),
-      })),
-    ];
-    const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks, teamsSchema);
-    const callbacks: unknown[][] = [];
-    const handle = runtime.createSubscription(
-      JSON.stringify({ table: "teams", relation_ir: supportedGatherRelationIr("teams") }),
-      null,
-      null,
-      null,
-    );
-
-    runtime.executeSubscription(handle, (...args: unknown[]) => callbacks.push(args));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(callbacks).toHaveLength(1);
-    const error = callbacks[0]![0];
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(
-      "relation subscription buffered unresolved placeholder rows beyond bounded limits",
-    );
-    runtime.close();
   });
 
   it("rewraps user field option bytes when packed reset frames filter engine records", () => {
